@@ -1,0 +1,3 @@
+# Preserve upstream libyaml source verbatim; its historical whitespace is not
+# a Hamn formatting violation.
+vendor/libyaml/** -whitespace

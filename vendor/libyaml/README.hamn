@@ -1,0 +1,8 @@
+Hamn vendors libyaml 0.2.5 from https://github.com/yaml/libyaml.
+
+Source tag: 0.2.5
+Source commit: 2c891fc7a770e8ba2fec34fc6b545c672beb37e6
+License: MIT (see LICENSE)
+
+Only the public header and parser source files required for a static host
+build are retained. include/config.h is Hamn's static-build version header.

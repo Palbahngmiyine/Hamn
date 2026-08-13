@@ -1,0 +1,33 @@
+# 빌드 산출물
+build/
+dist/
+*.o
+*.dSYM/
+
+# Claude Code 하니스 로컬 상태 (세션 lock 등)
+.claude/
+
+# OS/에디터 잡파일
+.DS_Store
+*.swp
+*~
+*.xcuserstate
+xcuserdata/
+
+# 로컬 로그·디스크 이미지류 (런타임 데이터는 ~/.hamn에 있지만 안전망)
+*.log
+*.raw
+*.qcow2
+*.efivars
+
+# Private credentials and signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+*.key
+id_rsa
+id_ecdsa
+id_ed25519

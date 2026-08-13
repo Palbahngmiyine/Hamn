@@ -1,0 +1,7 @@
+#ifndef HAMND_VERSION_H
+#define HAMND_VERSION_H
+
+#define HAMND_VERSION "0.0.1"
+#define HAMND_STATUS_PROTOCOL_VERSION 3
+
+#endif

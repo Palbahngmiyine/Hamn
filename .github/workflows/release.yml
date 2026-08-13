@@ -1,0 +1,396 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v0.0.1-rc.*'
+  workflow_dispatch:
+    inputs:
+      stable_tag:
+        description: Stable tag to create or verify at the exact validated RC commit
+        required: false
+        type: string
+      rc_tag:
+        description: Exact validated RC tag to promote without rebuilding
+        required: false
+        type: string
+      rc_run_id:
+        description: Exact successful RC tag-push release workflow run ID
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: hamn-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.event_name == 'push'
+    name: Build release candidate
+    runs-on: macos-14
+    timeout-minutes: 45
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out exact RC tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Assert hosted Apple Silicon arm64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || {
+            echo "release candidate must run on a GitHub-hosted runner" >&2
+            exit 2
+          }
+          [ "$RUNNER_OS" = macOS ] || {
+            echo "release candidate must run on macOS" >&2
+            exit 2
+          }
+          [ "$RUNNER_ARCH" = ARM64 ] || {
+            echo "release candidate must run on ARM64" >&2
+            exit 2
+          }
+          [ "$(uname -m)" = arm64 ] || {
+            echo "release candidate must run on Apple Silicon arm64" >&2
+            exit 2
+          }
+      - name: Install source gate dependencies
+        shell: bash
+        run: bash scripts/ci/setup-test-dependencies.sh
+      - name: Build candidate
+        shell: bash
+        env:
+          HAMN_GUEST_IMAGE_URL: ${{ vars.HAMN_GUEST_IMAGE_URL }}
+          HAMN_GUEST_IMAGE_SHA256: ${{ vars.HAMN_GUEST_IMAGE_SHA256 }}
+          HAMN_RELEASE_PUBLIC_KEY_TEXT: ${{ vars.HAMN_RELEASE_PUBLIC_KEY }}
+        run: |
+          set -euo pipefail
+          make -j1 test-workflows
+          make -j1 test-portable
+          make -j1 test-core-quality
+          make -j1 test-port-forwarding
+          make -j1 test-profile-state
+          make -j1 test-guest-deployment
+          make -j1 test-diagnostics
+          make -j1 test-install
+          make -j1 test-uninstall
+          make -j1 test-update
+          make -j1 test-kubernetes-cli
+          make -j1 test-release-artifacts
+          make -j1 test-release-gate
+          make -j1 test-release-publish
+          make -j1 test-public-export
+          make -j1 test-release-repository-preflight
+          test -n "$HAMN_GUEST_IMAGE_URL"
+          test "$HAMN_GUEST_IMAGE_SHA256" != ""
+          test "$HAMN_GUEST_IMAGE_SHA256" = "$(printf '%s' "$HAMN_GUEST_IMAGE_SHA256" | tr -d '\n' | grep -E '^[0-9a-f]{64}$')"
+          case "$HAMN_GUEST_IMAGE_URL" in https://*) ;; *) exit 2 ;; esac
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
+            -o "$RUNNER_TEMP/hamn-guest.img" "$HAMN_GUEST_IMAGE_URL"
+          test "$HAMN_GUEST_IMAGE_SHA256" = "$(shasum -a 256 "$RUNNER_TEMP/hamn-guest.img" | awk '{print $1}')"
+          umask 077
+          printf '%s\n' "$HAMN_RELEASE_PUBLIC_KEY_TEXT" > "$RUNNER_TEMP/hamn-release.pub"
+          make release-candidate \
+            RELEASE_REF="$GITHUB_SHA" \
+            RELEASE_TAG="$GITHUB_REF_NAME" \
+            OUTPUT_DIR="$RUNNER_TEMP/hamn-candidate" \
+            HAMN_GUEST_IMAGE="$RUNNER_TEMP/hamn-guest.img" \
+            HAMN_RELEASE_PUBLIC_KEY="$RUNNER_TEMP/hamn-release.pub"
+      - name: Attest exact candidate artifact provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-checksums: ${{ runner.temp }}/hamn-candidate/SHA256SUMS
+      - name: Upload exact candidate bytes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hamn-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/hamn-candidate
+          if-no-files-found: error
+          retention-days: 14
+
+  validate:
+    if: github.event_name == 'push'
+    name: Validate exact candidate on physical Apple Silicon
+    needs: candidate
+    runs-on:
+      - self-hosted
+      - macOS
+      - ARM64
+      - hamn-validator
+    environment: hamn-validation
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - name: Check out exact RC tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          fetch-depth: 0
+      - name: Download exact candidate bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: hamn-candidate-${{ github.sha }}
+          path: ${{ runner.temp }}/hamn-candidate
+      - name: Run physical VM, Docker, K3s, and Colima coexistence gate
+        shell: bash
+        env:
+          HAMN_VALIDATOR_SIGNING_KEY_TEXT: ${{ secrets.HAMN_VALIDATOR_SIGNING_KEY }}
+          HAMN_VALIDATOR_IDENTITY: ${{ vars.HAMN_VALIDATOR_IDENTITY }}
+        run: |
+          set -euo pipefail
+          validator_key=
+          cleanup_validator_key() {
+            local status=$?
+            trap - EXIT HUP INT TERM
+            if [ -n "${validator_key:-}" ] && { [ -e "$validator_key" ] || [ -L "$validator_key" ]; }; then
+              rm -f -- "$validator_key" || {
+                echo "cannot remove validator signing key from runner temporary storage" >&2
+                [ "$status" -ne 0 ] || status=1
+              }
+            fi
+            unset HAMN_VALIDATOR_SIGNING_KEY_TEXT HAMN_VALIDATOR_SIGNING_KEY
+            exit "$status"
+          }
+          trap cleanup_validator_key EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          test -n "$HAMN_VALIDATOR_SIGNING_KEY_TEXT"
+          umask 077
+          validator_key="$RUNNER_TEMP/hamn-validator-signing-key"
+          printf '%s\n' "$HAMN_VALIDATOR_SIGNING_KEY_TEXT" > "$validator_key"
+          chmod 0600 "$validator_key"
+          unset HAMN_VALIDATOR_SIGNING_KEY_TEXT
+          HAMN_VALIDATOR_SIGNING_KEY="$validator_key" make release-gate \
+            RELEASE_REF="$GITHUB_SHA" \
+            RELEASE_TAG="$GITHUB_REF_NAME" \
+            CANDIDATE_DIR="$RUNNER_TEMP/hamn-candidate" \
+            OUTPUT_DIR="$RUNNER_TEMP/hamn-evidence"
+      - name: Upload signed validation evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: hamn-evidence-${{ github.sha }}
+          path: ${{ runner.temp }}/hamn-evidence
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' && inputs.stable_tag != '' && inputs.rc_tag != '' && inputs.rc_run_id != ''
+    name: Promote validated RC without rebuilding
+    runs-on: macos-14
+    environment: hamn-promotion
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out requested RC tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: refs/tags/${{ inputs.rc_tag }}
+          fetch-depth: 0
+      - name: Resolve exact validated RC commit
+        id: rc
+        shell: bash
+        env:
+          RC_TAG: ${{ inputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RC_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]
+          echo "commit=$(git rev-parse --verify \"refs/tags/${RC_TAG}^{commit}\")" >> "$GITHUB_OUTPUT"
+      - name: Verify exact successful RC validation run
+        id: rc_run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_RUN_ID: ${{ inputs.rc_run_id }}
+          RC_TAG: ${{ inputs.rc_tag }}
+          RC_COMMIT: ${{ steps.rc.outputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$RC_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+            echo "RC workflow run ID must be a positive decimal integer" >&2
+            exit 2
+          }
+          [[ "$RC_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] || {
+            echo "RC tag is invalid" >&2
+            exit 2
+          }
+          [[ "$RC_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "RC tag did not resolve to a commit" >&2
+            exit 2
+          }
+          run_json="$RUNNER_TEMP/hamn-rc-workflow-run.json"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RC_RUN_ID}" > "$run_json"
+          python3 - "$run_json" "$RC_RUN_ID" "$RC_TAG" "$RC_COMMIT" \
+            "$GITHUB_REPOSITORY" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+
+          path, run_id, tag, commit, repository, output_path = sys.argv[1:]
+          with open(path, encoding="utf-8") as source:
+              value = json.load(source)
+          expected = {
+              "id": int(run_id),
+              "event": "push",
+              "head_branch": tag,
+              "head_sha": commit,
+              "status": "completed",
+              "conclusion": "success",
+          }
+          for key, wanted in expected.items():
+              if value.get(key) != wanted:
+                  raise SystemExit("RC workflow run has unexpected " + key)
+          workflow_path = value.get("path")
+          allowed_workflow_paths = {
+              ".github/workflows/release.yml@" + tag,
+              ".github/workflows/release.yml@refs/tags/" + tag,
+          }
+          if workflow_path not in allowed_workflow_paths:
+              raise SystemExit("RC workflow run is not the release workflow")
+          run_repository = value.get("repository")
+          if not isinstance(run_repository, dict) or \
+                  run_repository.get("full_name") != repository:
+              raise SystemExit("RC workflow run belongs to a different repository")
+          run_attempt = value.get("run_attempt")
+          if not isinstance(run_attempt, int) or run_attempt < 1:
+              raise SystemExit("RC workflow run has an invalid attempt")
+          with open(output_path, "a", encoding="utf-8", newline="\n") as output:
+              output.write("run_id=" + run_id + "\n")
+              output.write("run_attempt=" + str(run_attempt) + "\n")
+          PY
+      - name: Download exact candidate and validation evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: hamn-candidate-${{ steps.rc.outputs.commit }}
+          path: ${{ runner.temp }}/hamn-release-input/hamn-candidate
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.rc_run.outputs.run_id }}
+      - name: Download signed validation evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: hamn-evidence-${{ steps.rc.outputs.commit }}
+          path: ${{ runner.temp }}/hamn-release-input/hamn-evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.rc_run.outputs.run_id }}
+      - name: Verify evidence and generate canonical manifest
+        shell: bash
+        env:
+          HAMN_VALIDATOR_PUBLIC_KEY_TEXT: ${{ vars.HAMN_VALIDATOR_PUBLIC_KEY }}
+          HAMN_RELEASE_SIGNING_KEY_TEXT: ${{ secrets.HAMN_RELEASE_SIGNING_KEY }}
+          HAMN_RELEASE_REPOSITORY: ${{ github.repository }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+          RC_TAG: ${{ inputs.rc_tag }}
+          RC_COMMIT: ${{ steps.rc.outputs.commit }}
+          RC_RUN_ID: ${{ steps.rc_run.outputs.run_id }}
+          RC_RUN_ATTEMPT: ${{ steps.rc_run.outputs.run_attempt }}
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/hamn-publish"
+          validator_public_key=
+          release_key=
+          cleanup_publish_keys() {
+            local status=$?
+            trap - EXIT HUP INT TERM
+            if ! rm -f -- "$validator_public_key" "$release_key"; then
+              echo "cannot remove release signing material from runner temporary storage" >&2
+              [ "$status" -ne 0 ] || status=1
+            fi
+            unset HAMN_VALIDATOR_PUBLIC_KEY_TEXT HAMN_RELEASE_SIGNING_KEY_TEXT \
+                HAMN_VALIDATOR_PUBLIC_KEY HAMN_RELEASE_SIGNING_KEY
+            exit "$status"
+          }
+          trap cleanup_publish_keys EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          umask 077
+          validator_public_key="$RUNNER_TEMP/hamn-validator.pub"
+          release_key="$RUNNER_TEMP/hamn-release"
+          printf '%s\n' "$HAMN_VALIDATOR_PUBLIC_KEY_TEXT" > "$validator_public_key"
+          printf '%s\n' "$HAMN_RELEASE_SIGNING_KEY_TEXT" > "$release_key"
+          chmod 0600 "$validator_public_key" "$release_key"
+          unset HAMN_VALIDATOR_PUBLIC_KEY_TEXT HAMN_RELEASE_SIGNING_KEY_TEXT
+          HAMN_VALIDATOR_PUBLIC_KEY="$validator_public_key" \
+          HAMN_RELEASE_SIGNING_KEY="$release_key" \
+          HAMN_EXPECTED_WORKFLOW_RUN="$RC_RUN_ID" \
+          HAMN_EXPECTED_WORKFLOW_ATTEMPT="$RC_RUN_ATTEMPT" \
+          bash packaging/release/publish-release.sh \
+            "$STABLE_TAG" "$RC_TAG" "$RC_COMMIT" \
+            "$RUNNER_TEMP/hamn-release-input" "$RUNNER_TEMP/hamn-publish"
+      - name: Create or verify exact stable tag
+        shell: bash
+        env:
+          STABLE_TAG: ${{ inputs.stable_tag }}
+          RC_COMMIT: ${{ steps.rc.outputs.commit }}
+        run: |
+          set -euo pipefail
+          [[ "$STABLE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "stable tag is invalid" >&2
+            exit 2
+          }
+          [[ "$RC_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "validated RC commit is invalid" >&2
+            exit 2
+          }
+          stable_ref="refs/tags/$STABLE_TAG"
+          stable_probe="refs/hamn-release/stable-$GITHUB_RUN_ID"
+          if git ls-remote --exit-code --refs origin "$stable_ref" >/dev/null; then
+            :
+          else
+            ls_remote_status=$?
+            [ "$ls_remote_status" -eq 2 ] || {
+              echo "cannot determine whether the stable tag exists remotely" >&2
+              exit 2
+            }
+            if git show-ref --verify --quiet "$stable_ref"; then
+              local_commit=$(git rev-parse --verify "${stable_ref}^{commit}")
+              [ "$local_commit" = "$RC_COMMIT" ] || {
+                echo "local stable tag does not resolve to the validated RC commit" >&2
+                exit 2
+              }
+            else
+              git -c tag.gpgSign=false tag "$STABLE_TAG" "$RC_COMMIT"
+            fi
+            if ! git push origin "$stable_ref"; then
+              echo "stable tag creation raced or failed; resolving its remote target" >&2
+            fi
+          fi
+          git fetch --no-tags origin "+${stable_ref}:${stable_probe}"
+          stable_commit=$(git rev-parse --verify "${stable_probe}^{commit}")
+          [ "$stable_commit" = "$RC_COMMIT" ] || {
+            echo "stable tag does not resolve to the validated RC commit" >&2
+            exit 2
+          }
+      - name: Publish exact validated bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_TAG: ${{ inputs.stable_tag }}
+          RC_TAG: ${{ inputs.rc_tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$STABLE_TAG" \
+            "$RUNNER_TEMP/hamn-release-input/hamn-candidate/hamn-${STABLE_TAG}-darwin-arm64.tar.gz" \
+            "$RUNNER_TEMP/hamn-release-input/hamn-candidate/hamn-${STABLE_TAG}-ubuntu-24.04-arm64.img" \
+            "$RUNNER_TEMP/hamn-release-input/hamn-candidate/hamn-${STABLE_TAG}.spdx.json" \
+            "$RUNNER_TEMP/hamn-release-input/hamn-candidate/install.sh" \
+            "$RUNNER_TEMP/hamn-publish/hamn-update-manifest.json" \
+            "$RUNNER_TEMP/hamn-publish/hamn-update-manifest.json.sig" \
+            "$RUNNER_TEMP/hamn-publish/validation-evidence.json" \
+            "$RUNNER_TEMP/hamn-publish/validation-evidence.json.sig" \
+            "$RUNNER_TEMP/hamn-publish/e2e.json" \
+            --verify-tag \
+            --title "Hamn $STABLE_TAG" \
+            --notes "Promoted from exact validated RC $RC_TAG without rebuilding."

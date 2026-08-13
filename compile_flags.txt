@@ -1,0 +1,5 @@
+-Ihost
+-Ivendor
+-std=c11
+-Wall
+-Wextra

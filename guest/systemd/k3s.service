@@ -1,0 +1,28 @@
+[Unit]
+Description=hamn single-node k3s with external containerd
+Documentation=https://docs.k3s.io/
+Wants=network-online.target
+After=network-online.target containerd.service
+Requires=containerd.service
+
+[Service]
+Type=notify
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+Restart=always
+RestartSec=5s
+ExecStart=/usr/local/bin/k3s server \
+    --container-runtime-endpoint=unix:///run/containerd/containerd.sock \
+    --image-service-endpoint=unix:///run/containerd/containerd.sock \
+    --write-kubeconfig-mode=0600 \
+    --disable=traefik \
+    --cluster-cidr=10.42.0.0/16 \
+    --service-cidr=10.43.0.0/16 \
+    --kubelet-arg=cgroup-driver=systemd
+
+[Install]
+WantedBy=multi-user.target
