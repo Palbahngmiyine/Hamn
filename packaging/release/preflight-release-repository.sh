@@ -1,8 +1,6 @@
 #!/bin/bash
-# Validate the GitHub configuration required before a Hamn 0.0.1 RC tag can
-# create and physically validate a candidate. This is read-only: it does not
-# create repositories, environments, runners, variables, secrets, tags, or
-# releases.
+# Verify the fail-closed GitHub state required before a solo local 0.0.1 RC.
+# This check is read-only and requires private signing keys to stay off GitHub.
 set -euo pipefail
 export LC_ALL=C
 
@@ -29,149 +27,197 @@ cleanup() {
 }
 trap cleanup EXIT
 
-gh api "repos/$REPOSITORY" >"$WORK/repository.json" ||
-    fail "cannot read repository metadata"
-gh api "repos/$REPOSITORY/actions/workflows" >"$WORK/workflows.json" ||
-    fail "cannot read repository workflows"
-gh api "repos/$REPOSITORY/actions/permissions" >"$WORK/actions-permissions.json" ||
-    fail "cannot read repository Actions permissions"
-gh api "repos/$REPOSITORY/actions/permissions/selected-actions" \
-    >"$WORK/selected-actions.json" ||
-    fail "cannot read the repository allowed Actions policy"
-gh api "repos/$REPOSITORY/actions/permissions/workflow" \
-    >"$WORK/workflow-permissions.json" ||
-    fail "cannot read the default workflow token permissions"
-gh api "repos/$REPOSITORY/environments" >"$WORK/environments.json" ||
-    fail "cannot read repository environments"
-gh api "repos/$REPOSITORY/environments/hamn-validation" \
-    >"$WORK/validation-environment.json" ||
-    fail "cannot read the protected validation environment"
-gh api "repos/$REPOSITORY/environments/hamn-promotion" \
-    >"$WORK/promotion-environment.json" ||
-    fail "cannot read the protected promotion environment"
-gh api "repos/$REPOSITORY/actions/runners" >"$WORK/runners.json" ||
-    fail "cannot read repository runners"
-gh api "repos/$REPOSITORY/actions/variables" >"$WORK/variables.json" ||
-    fail "cannot read repository variables"
-gh api "repos/$REPOSITORY/environments/hamn-validation/secrets" \
-    >"$WORK/validation-secrets.json" ||
-    fail "cannot read validation environment secret names"
-gh api "repos/$REPOSITORY/environments/hamn-promotion/secrets" \
-    >"$WORK/promotion-secrets.json" ||
-    fail "cannot read promotion environment secret names"
+fetch() {
+    local endpoint=$1
+    local output=$2
+    local description=$3
+    gh api "$endpoint" >"$WORK/$output.json" || fail "cannot read $description"
+}
+
+fetch "repos/$REPOSITORY" repository "repository metadata"
+fetch "repos/$REPOSITORY/actions/workflows" workflows "repository workflows"
+fetch "repos/$REPOSITORY/actions/permissions" actions-permissions "Actions permissions"
+fetch "repos/$REPOSITORY/actions/permissions/workflow" workflow-permissions \
+    "default workflow token permissions"
+fetch "repos/$REPOSITORY/actions/permissions/fork-pr-contributor-approval" \
+    fork-approval "fork workflow approval policy"
+fetch "repos/$REPOSITORY/actions/runs" runs "Actions runs"
+fetch "repos/$REPOSITORY/actions/runners" runners "repository runners"
+fetch "repos/$REPOSITORY/actions/variables" variables "repository variables"
+fetch "repos/$REPOSITORY/actions/secrets" repository-secrets "repository secrets"
+fetch "repos/$REPOSITORY/environments" environments "repository environments"
+fetch "repos/$REPOSITORY/environments/hamn-validation/secrets" validation-secrets \
+    "validation environment secret names"
+fetch "repos/$REPOSITORY/environments/hamn-promotion/secrets" promotion-secrets \
+    "promotion environment secret names"
+fetch "repos/$REPOSITORY/rulesets" rulesets "repository rulesets"
+fetch "repos/$REPOSITORY/immutable-releases" immutable-releases \
+    "immutable release policy"
+fetch "repos/$REPOSITORY/private-vulnerability-reporting" \
+    private-vulnerability-reporting "private vulnerability reporting policy"
+fetch "repos/$REPOSITORY/commits/main" main-commit "main commit verification"
+fetch "repos/$REPOSITORY/tags" tags "repository tags"
+fetch "repos/$REPOSITORY/releases" releases "repository releases"
+
+python3 - "$WORK/rulesets.json" "$WORK/ruleset-ids" <<'PY'
+import json
+import sys
+
+source_path, output_path = sys.argv[1:]
+expected = {
+    "protect-main-and-release-workflow": "main",
+    "immutable-v0.0.1-release-candidates": "rc-immutable",
+    "immutable-stable-v0.0.1": "stable-immutable",
+    "v0.0.1-release-candidates-owner-created-only": "rc-owner",
+    "stable-v0.0.1-owner-created-only": "stable-owner",
+}
+with open(source_path, encoding="utf-8") as source:
+    rulesets = json.load(source)
+if not isinstance(rulesets, list):
+    raise SystemExit("repository ruleset response is invalid")
+found = {}
+for ruleset in rulesets:
+    if not isinstance(ruleset, dict) or not isinstance(ruleset.get("name"), str):
+        raise SystemExit("repository ruleset entry is invalid")
+    name = ruleset["name"]
+    if name in found:
+        raise SystemExit("repository contains duplicate release rulesets")
+    found[name] = ruleset
+if set(found) != set(expected):
+    raise SystemExit("repository release ruleset set is invalid")
+with open(output_path, "w", encoding="utf-8", newline="\n") as output:
+    for name, label in expected.items():
+        ruleset = found[name]
+        if ruleset.get("enforcement") != "active" or \
+                not isinstance(ruleset.get("id"), int):
+            raise SystemExit(name + " must be active")
+        output.write(label + "\t" + str(ruleset["id"]) + "\n")
+PY
+
+while IFS=$'\t' read -r label ruleset_id; do
+    [[ "$label" =~ ^[a-z-]+$ ]] && [[ "$ruleset_id" =~ ^[1-9][0-9]*$ ]] ||
+        fail "repository ruleset identity is invalid"
+    fetch "repos/$REPOSITORY/rulesets/$ruleset_id" "ruleset-$label" \
+        "$label ruleset"
+done <"$WORK/ruleset-ids"
 
 python3 - "$REPOSITORY" "$WORK" <<'PY'
 import json
 import os
-import re
 import sys
 
 repository, directory = sys.argv[1:]
 
 def read(name):
-    path = os.path.join(directory, name + ".json")
-    with open(path, encoding="utf-8") as source:
+    with open(os.path.join(directory, name + ".json"), encoding="utf-8") as source:
         return json.load(source)
 
 def require(condition, message):
     if not condition:
         raise SystemExit(message)
 
+def entries(name, key):
+    value = read(name)
+    items = value.get(key) if isinstance(value, dict) else None
+    require(isinstance(items, list), name + " response is invalid")
+    return items
+
+def check_ruleset(name, target, includes, rule_types, bypass_actors):
+    value = read("ruleset-" + name)
+    require(isinstance(value, dict) and value.get("target") == target and
+            value.get("enforcement") == "active", name + " ruleset is invalid")
+    conditions = value.get("conditions")
+    refs = conditions.get("ref_name") if isinstance(conditions, dict) else None
+    require(isinstance(refs, dict) and refs.get("include") == includes and
+            refs.get("exclude") == [], name + " ruleset target is invalid")
+    rules = value.get("rules")
+    require(isinstance(rules, list) and
+            {rule.get("type") for rule in rules if isinstance(rule, dict)} == rule_types,
+            name + " ruleset rules are invalid")
+    require(value.get("bypass_actors") == bypass_actors,
+            name + " ruleset bypass actors are invalid")
+    return rules
+
 repo = read("repository")
 require(isinstance(repo, dict) and repo.get("full_name") == repository,
         "repository identity is invalid")
-require(repo.get("private") is False and repo.get("visibility") == "public",
-        "repository must be public before release")
-require(repo.get("archived") is False,
-        "repository must not be archived")
+require(repo.get("private") is False and repo.get("visibility") == "public" and
+        repo.get("archived") is False, "repository must be active and public")
+owner = repo.get("owner")
+require(isinstance(owner, dict) and isinstance(owner.get("id"), int),
+        "repository owner identity is invalid")
+security = repo.get("security_and_analysis")
+require(isinstance(security, dict) and
+        security.get("secret_scanning", {}).get("status") == "enabled" and
+        security.get("secret_scanning_push_protection", {}).get("status") == "enabled",
+        "secret scanning and push protection must be enabled")
 
-workflows = read("workflows")
-items = workflows.get("workflows") if isinstance(workflows, dict) else None
-require(isinstance(items, list), "workflow response is invalid")
-paths = {}
-for workflow in items:
-    require(isinstance(workflow, dict) and isinstance(workflow.get("path"), str) and
-            isinstance(workflow.get("state"), str), "workflow entry is invalid")
-    paths[workflow["path"]] = workflow["state"]
-require(paths == {".github/workflows/release.yml": "active"},
-        "release repository must expose only an active release workflow")
-
-actions_permissions = read("actions-permissions")
-require(isinstance(actions_permissions, dict) and
-        actions_permissions.get("enabled") is True and
-        actions_permissions.get("allowed_actions") == "selected" and
-        actions_permissions.get("sha_pinning_required") is True,
-        "Actions must be enabled, limited to selected actions, and require SHA pins")
-selected_actions = read("selected-actions")
-require(isinstance(selected_actions, dict) and
-        selected_actions.get("github_owned_allowed") is True and
-        selected_actions.get("verified_allowed") is False and
-        selected_actions.get("patterns_allowed") == [],
-        "only GitHub-owned actions may be allowed")
-workflow_permissions = read("workflow-permissions")
-require(isinstance(workflow_permissions, dict) and
-        workflow_permissions.get("default_workflow_permissions") == "read" and
-        workflow_permissions.get("can_approve_pull_request_reviews") is False,
+workflows = entries("workflows", "workflows")
+require([(item.get("path"), item.get("state")) for item in workflows
+         if isinstance(item, dict)] ==
+        [(".github/workflows/release.yml", "disabled_manually")],
+        "the sole release workflow must be manually disabled")
+actions = read("actions-permissions")
+require(isinstance(actions, dict) and actions.get("enabled") is False,
+        "GitHub Actions must remain disabled for solo local release")
+workflow = read("workflow-permissions")
+require(isinstance(workflow, dict) and
+        workflow.get("default_workflow_permissions") == "read" and
+        workflow.get("can_approve_pull_request_reviews") is False,
         "default GITHUB_TOKEN permissions must be read-only")
+require(read("fork-approval") == {"approval_policy": "all_external_contributors"},
+        "all external fork workflows must require approval")
+require(read("runs").get("total_count") == 0,
+        "repository must not contain a prior Actions run before the first RC")
+require(entries("runners", "runners") == [], "repository runners must remain empty")
+require(entries("variables", "variables") == [], "repository variables must remain empty")
+require(entries("repository-secrets", "secrets") == [],
+        "repository Actions secrets must remain empty")
 
-environments = read("environments")
-items = environments.get("environments") if isinstance(environments, dict) else None
-require(isinstance(items, list), "environment response is invalid")
-names = {item.get("name") for item in items if isinstance(item, dict)}
-require({"hamn-validation", "hamn-promotion"} <= names,
-        "hamn-validation and hamn-promotion environments are required")
-for name in ("hamn-validation", "hamn-promotion"):
-    environment = read(name.split("-", 1)[1] + "-environment")
-    require(isinstance(environment, dict) and environment.get("name") == name,
-            name + " environment identity is invalid")
-    protection_rules = environment.get("protection_rules")
-    require(isinstance(protection_rules, list) and any(
-            isinstance(rule, dict) and rule.get("type") == "required_reviewers"
-            for rule in protection_rules),
-            name + " must require manual reviewer approval")
+environment_names = {item.get("name") for item in entries("environments", "environments")
+                     if isinstance(item, dict)}
+require({"hamn-validation", "hamn-promotion"} <= environment_names,
+        "locked release environments are missing")
+require(entries("validation-secrets", "secrets") == [],
+        "validation environment secrets must remain empty")
+require(entries("promotion-secrets", "secrets") == [],
+        "promotion environment secrets must remain empty")
 
-runners = read("runners")
-items = runners.get("runners") if isinstance(runners, dict) else None
-require(isinstance(items, list), "runner response is invalid")
-validator = False
-for runner in items:
-    if not isinstance(runner, dict):
-        continue
-    labels = runner.get("labels")
-    label_names = {label.get("name") for label in labels if isinstance(label, dict)} \
-        if isinstance(labels, list) else set()
-    if (runner.get("os") == "macOS" and runner.get("architecture") == "ARM64" and
-            runner.get("status") == "online" and "self-hosted" in label_names and
-            "hamn-validator" in label_names):
-        validator = True
-        break
-require(validator, "an online macOS ARM64 hamn-validator runner is required")
+main_rules = check_ruleset("main", "branch", ["~DEFAULT_BRANCH"],
+                           {"deletion", "non_fast_forward", "required_linear_history",
+                            "pull_request"}, [])
+pull = next(rule for rule in main_rules if rule.get("type") == "pull_request")
+parameters = pull.get("parameters")
+require(isinstance(parameters, dict) and parameters == {
+            "required_approving_review_count": 0,
+            "dismiss_stale_reviews_on_push": False,
+            "required_reviewers": [],
+            "require_code_owner_review": False,
+            "require_last_push_approval": False,
+            "required_review_thread_resolution": True,
+            "allowed_merge_methods": ["squash", "rebase"],
+        }, "main pull request rules are not solo-maintainer safe")
 
-variables = read("variables")
-items = variables.get("variables") if isinstance(variables, dict) else None
-require(isinstance(items, list), "variable response is invalid")
-names = {item.get("name") for item in items if isinstance(item, dict)}
-required_variables = {
-    "HAMN_GUEST_IMAGE_URL",
-    "HAMN_GUEST_IMAGE_SHA256",
-    "HAMN_VALIDATOR_IDENTITY",
-    "HAMN_RELEASE_PUBLIC_KEY",
-    "HAMN_VALIDATOR_PUBLIC_KEY",
-}
-require(required_variables <= names,
-        "required release variables are missing: " +
-        ", ".join(sorted(required_variables - names)))
+owner_bypass = [{"actor_id": owner["id"], "actor_type": "User",
+                 "bypass_mode": "always"}]
+check_ruleset("rc-owner", "tag", ["refs/tags/v0.0.1-rc.*"],
+              {"creation"}, owner_bypass)
+check_ruleset("stable-owner", "tag", ["refs/tags/v0.0.1"],
+              {"creation"}, owner_bypass)
+check_ruleset("rc-immutable", "tag", ["refs/tags/v0.0.1-rc.*"],
+              {"deletion", "non_fast_forward"}, [])
+check_ruleset("stable-immutable", "tag", ["refs/tags/v0.0.1"],
+              {"deletion", "non_fast_forward"}, [])
 
-def secret_names(label):
-    value = read(label + "-secrets")
-    items = value.get("secrets") if isinstance(value, dict) else None
-    require(isinstance(items, list), label + " environment secret response is invalid")
-    return {item.get("name") for item in items if isinstance(item, dict)}
+require(read("immutable-releases").get("enabled") is True,
+        "immutable releases must be enabled")
+require(read("private-vulnerability-reporting") == {"enabled": True},
+        "private vulnerability reporting must be enabled")
+commit = read("main-commit")
+require(isinstance(commit, dict) and commit.get("commit", {}).get("verification", {}).get(
+        "verified") is True, "main must resolve to a verified signed commit")
+require(read("tags") == [], "repository tags must be empty before the first RC")
+require(read("releases") == [], "repository releases must be empty before the first RC")
 
-require({"HAMN_VALIDATOR_SIGNING_KEY"} <= secret_names("validation"),
-        "hamn-validation is missing HAMN_VALIDATOR_SIGNING_KEY")
-require({"HAMN_RELEASE_SIGNING_KEY"} <= secret_names("promotion"),
-        "hamn-promotion is missing HAMN_RELEASE_SIGNING_KEY")
-
-print("release repository preflight passed for " + repository)
+print("solo local release repository preflight passed for " + repository)
 PY

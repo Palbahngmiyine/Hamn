@@ -92,6 +92,66 @@ candidate_host=$INPUT/hamn-candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 [ "$(sha256 "$PUBLISH/e2e.json")" = \
   "$(sha256 "$INPUT/hamn-evidence/e2e.json")" ]
 
+LOCAL_INPUT=$WORK/local-input
+mkdir -p "$LOCAL_INPUT"
+cp -R "$INPUT/hamn-candidate" "$LOCAL_INPUT/hamn-candidate"
+mkdir "$LOCAL_INPUT/hamn-evidence"
+RELEASE_REF="$RELEASE_REF" \
+RELEASE_TAG=v0.0.1-rc.1 \
+CANDIDATE_DIR="$LOCAL_INPUT/hamn-candidate" \
+OUTPUT_DIR="$LOCAL_INPUT/hamn-evidence" \
+HAMN_VALIDATOR_SIGNING_KEY="$WORK/validator-key" \
+HAMN_VALIDATOR_IDENTITY=test-validator \
+HAMN_GUEST_E2E_COMMAND="$HARNESS/e2e" \
+HAMN_RELEASE_ALLOW_DIRTY=1 \
+HAMN_RELEASE_TEST_FIXTURES=1 \
+    bash "$ROOT/packaging/release/release-gate.sh" >"$WORK/local-gate.out"
+grep -Fq '"workflow":{"attempt":"local","run":"local"}' \
+    "$LOCAL_INPUT/hamn-evidence/validation-evidence.json"
+
+LOCAL_PUBLISH=$WORK/local-publish
+mkdir "$LOCAL_PUBLISH"
+HAMN_VALIDATOR_PUBLIC_KEY="$WORK/validator-key.pub" \
+HAMN_RELEASE_SIGNING_KEY="$WORK/release-key" \
+HAMN_RELEASE_REPOSITORY="$RELEASE_REPOSITORY" \
+HAMN_RELEASE_PROVENANCE=solo-local \
+    bash "$ROOT/packaging/release/publish-release.sh" \
+    v0.0.1 v0.0.1-rc.1 "$RELEASE_REF" "$LOCAL_INPUT" "$LOCAL_PUBLISH" \
+    >"$WORK/local-publish.out"
+grep -Fq '"version":"v0.0.1"' "$LOCAL_PUBLISH/hamn-update-manifest.json"
+
+LOCAL_WITH_RUN=$WORK/local-with-run
+mkdir "$LOCAL_WITH_RUN"
+if HAMN_VALIDATOR_PUBLIC_KEY="$WORK/validator-key.pub" \
+HAMN_RELEASE_SIGNING_KEY="$WORK/release-key" \
+HAMN_RELEASE_REPOSITORY="$RELEASE_REPOSITORY" \
+HAMN_RELEASE_PROVENANCE=solo-local \
+HAMN_EXPECTED_WORKFLOW_RUN=417123456 \
+    bash "$ROOT/packaging/release/publish-release.sh" \
+    v0.0.1 v0.0.1-rc.1 "$RELEASE_REF" "$LOCAL_INPUT" "$LOCAL_WITH_RUN" \
+    >"$WORK/local-with-run.out" 2>"$WORK/local-with-run.err"; then
+    echo "FAIL: solo-local publish accepted a workflow run input" >&2
+    exit 1
+fi
+grep -Fq 'solo-local provenance must not accept workflow run inputs' \
+    "$WORK/local-with-run.err"
+
+LOCAL_IN_ACTIONS=$WORK/local-in-actions
+mkdir "$LOCAL_IN_ACTIONS"
+if GITHUB_ACTIONS=true \
+HAMN_VALIDATOR_PUBLIC_KEY="$WORK/validator-key.pub" \
+HAMN_RELEASE_SIGNING_KEY="$WORK/release-key" \
+HAMN_RELEASE_REPOSITORY="$RELEASE_REPOSITORY" \
+HAMN_RELEASE_PROVENANCE=solo-local \
+    bash "$ROOT/packaging/release/publish-release.sh" \
+    v0.0.1 v0.0.1-rc.1 "$RELEASE_REF" "$LOCAL_INPUT" "$LOCAL_IN_ACTIONS" \
+    >"$WORK/local-in-actions.out" 2>"$WORK/local-in-actions.err"; then
+    echo "FAIL: solo-local publish ran inside GitHub Actions" >&2
+    exit 1
+fi
+grep -Fq 'solo-local provenance is unavailable inside GitHub Actions' \
+    "$WORK/local-in-actions.err"
+
 PUBLISH_MISMATCH=$WORK/publish-mismatch
 mkdir "$PUBLISH_MISMATCH"
 if HAMN_VALIDATOR_PUBLIC_KEY="$WORK/validator-key.pub" \
