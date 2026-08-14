@@ -55,11 +55,24 @@ EOF
 done
 chmod 0755 "$PREFLIGHT_BIN"/*
 
-env -i HOME="$PREFLIGHT_HOME" PATH=/usr/bin:/bin /bin/bash "$ROOT/packaging/release/physical-e2e.sh" --preflight >"$WORK/preflight-external.out"
+env -i HOME="$PREFLIGHT_HOME" PATH=/usr/bin:/bin \
+    HAMN_RELEASE_TEST_FIXTURES=1 \
+    HAMN_TEST_VALIDATOR_PATH="$PREFLIGHT_BIN:/usr/bin:/bin" \
+    /bin/bash "$ROOT/packaging/release/physical-e2e.sh" --preflight \
+    >"$WORK/preflight-external.out"
 grep -Fxq 'physical validator preflight passed without installing or starting Hamn' "$WORK/preflight-external.out" || {
     echo "FAIL: physical preflight rejected a non-Hamn Docker CLI" >&2
     exit 1
 }
+if env -i HOME="$PREFLIGHT_HOME" PATH=/usr/bin:/bin \
+    HAMN_TEST_VALIDATOR_PATH="$PREFLIGHT_BIN:/usr/bin:/bin" \
+    /bin/bash "$ROOT/packaging/release/physical-e2e.sh" --preflight \
+    >"$WORK/preflight-path.out" 2>"$WORK/preflight-path.err"; then
+    echo "FAIL: physical preflight accepted a production validator PATH override" >&2
+    exit 1
+fi
+grep -Fq 'HAMN_TEST_VALIDATOR_PATH is allowed only for test fixtures' \
+    "$WORK/preflight-path.err"
 
 cat >"$PREFLIGHT_BIN/hamn" <<'EOF'
 #!/bin/bash
@@ -68,7 +81,11 @@ EOF
 chmod 0755 "$PREFLIGHT_BIN/hamn"
 rm "$PREFLIGHT_BIN/docker"
 ln -s hamn "$PREFLIGHT_BIN/docker"
-if env -i HOME="$PREFLIGHT_HOME" PATH=/usr/bin:/bin /bin/bash "$ROOT/packaging/release/physical-e2e.sh" --preflight >"$WORK/preflight-shim.out" 2>"$WORK/preflight-shim.err"; then
+if env -i HOME="$PREFLIGHT_HOME" PATH=/usr/bin:/bin \
+    HAMN_RELEASE_TEST_FIXTURES=1 \
+    HAMN_TEST_VALIDATOR_PATH="$PREFLIGHT_BIN:/usr/bin:/bin" \
+    /bin/bash "$ROOT/packaging/release/physical-e2e.sh" --preflight \
+    >"$WORK/preflight-shim.out" 2>"$WORK/preflight-shim.err"; then
     echo "FAIL: physical preflight accepted a docker -> hamn shim" >&2
     exit 1
 fi
@@ -122,6 +139,44 @@ tar -xzf "$CANDIDATE_HOST_ARCHIVE" -C "$CANDIDATE_HARNESS_DIR"
 PHYSICAL_LIBRARY=$WORK/candidate-physical-e2e-library.sh
 awk '/^# physical-e2e main entry point$/ { exit } { print }' \
     "$CANDIDATE_HOST_ROOT/packaging/release/physical-e2e.sh" >"$PHYSICAL_LIBRARY"
+DOCKER_CONFIG_WORK=$WORK/docker-config
+mkdir -m 0700 "$DOCKER_CONFIG_WORK" "$DOCKER_CONFIG_WORK/validator" \
+    "$DOCKER_CONFIG_WORK/validator/.docker" "$DOCKER_CONFIG_WORK/plugins"
+cat >"$DOCKER_CONFIG_WORK/validator/.docker/config.json" <<EOF
+{"auths":{"registry.example.invalid":{"auth":"must-not-copy"}},"credsStore":"desktop","cliPluginsExtraDirs":["$DOCKER_CONFIG_WORK/plugins"]}
+EOF
+cat >"$DOCKER_CONFIG_WORK/docker" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+case "${1:-}:${2:-}" in
+compose:version|buildx:version) exit 0 ;;
+*) exit 64 ;;
+esac
+EOF
+chmod 0755 "$DOCKER_CONFIG_WORK/docker"
+if ! (
+    source "$PHYSICAL_LIBRARY"
+    VALIDATOR_HOME=$DOCKER_CONFIG_WORK/validator
+    TEST_HOME=$DOCKER_CONFIG_WORK/test-home
+    VALIDATOR_PATH=/usr/bin:/bin
+    PYTHON3=$REAL_PYTHON3
+    DOCKER=$DOCKER_CONFIG_WORK/docker
+    mkdir -m 0700 "$TEST_HOME"
+    prepare_docker_cli_config
+    "$PYTHON3" - "$TEST_HOME/.docker/config.json" \
+        "$DOCKER_CONFIG_WORK/plugins" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as source:
+    value = json.load(source)
+if value != {"cliPluginsExtraDirs": [sys.argv[2]]}:
+    raise SystemExit("isolated Docker config retained credentials or lost plugins")
+PY
+); then
+    echo "FAIL: isolated Docker CLI configuration was not sanitized" >&2
+    exit 1
+fi
 COLIMA_INVENTORY_WORK=$WORK/colima-instance-inventory
 mkdir -m 0700 "$COLIMA_INVENTORY_WORK"
 cat >"$COLIMA_INVENTORY_WORK/colima" <<'EOF'

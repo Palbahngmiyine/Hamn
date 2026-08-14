@@ -1,6 +1,6 @@
 BUILD      := build
 HOST_BIN   := $(BUILD)/hamn
-VERSION    ?= 0.0.1-dev
+VERSION    ?= 0.0.1
 VERSION_STAMP := $(BUILD)/.hamn-version
 PREFIX     ?= $(HOME)/.local
 BINDIR     ?= $(PREFIX)/bin
