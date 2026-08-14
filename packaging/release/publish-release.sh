@@ -27,9 +27,6 @@ INPUT_DIR=${4:-}
 OUTPUT_DIR=${5:-}
 VALIDATOR_KEY=${HAMN_VALIDATOR_PUBLIC_KEY:-}
 RELEASE_KEY=${HAMN_RELEASE_SIGNING_KEY:-}
-EXPECTED_WORKFLOW_RUN=${HAMN_EXPECTED_WORKFLOW_RUN:-}
-EXPECTED_WORKFLOW_ATTEMPT=${HAMN_EXPECTED_WORKFLOW_ATTEMPT:-}
-PROVENANCE=${HAMN_RELEASE_PROVENANCE:-workflow}
 RELEASE_REPOSITORY=${HAMN_RELEASE_REPOSITORY:-}
 RELEASE_BASE_URL=${HAMN_RELEASE_BASE_URL:-}
 
@@ -40,23 +37,13 @@ RELEASE_BASE_URL=${HAMN_RELEASE_BASE_URL:-}
     fail "stable tag is invalid"
 [[ "$RC_TAG" =~ ^${STABLE_TAG}-rc\.[0-9]+$ ]] ||
     fail "RC tag does not correspond to the stable tag"
-case "$PROVENANCE" in
-workflow)
-    [[ "$EXPECTED_WORKFLOW_RUN" =~ ^[1-9][0-9]*$ ]] ||
-        fail "HAMN_EXPECTED_WORKFLOW_RUN must be a positive decimal run ID"
-    [[ "$EXPECTED_WORKFLOW_ATTEMPT" =~ ^[1-9][0-9]*$ ]] ||
-        fail "HAMN_EXPECTED_WORKFLOW_ATTEMPT must be a positive decimal attempt"
-    ;;
-solo-local)
-    [ "${GITHUB_ACTIONS:-}" != true ] ||
-        fail "solo-local provenance is unavailable inside GitHub Actions"
-    [ -z "$EXPECTED_WORKFLOW_RUN" ] && [ -z "$EXPECTED_WORKFLOW_ATTEMPT" ] ||
-        fail "solo-local provenance must not accept workflow run inputs"
-    EXPECTED_WORKFLOW_RUN=local
-    EXPECTED_WORKFLOW_ATTEMPT=local
-    ;;
-*) fail "HAMN_RELEASE_PROVENANCE must be workflow or solo-local" ;;
-esac
+[ "${GITHUB_ACTIONS:-}" != true ] ||
+    fail "release promotion is unavailable inside GitHub Actions"
+[ -z "${HAMN_EXPECTED_WORKFLOW_RUN:-}" ] &&
+    [ -z "${HAMN_EXPECTED_WORKFLOW_ATTEMPT:-}" ] ||
+    fail "release promotion must not accept workflow run inputs"
+[ -z "${HAMN_RELEASE_PROVENANCE:-}" ] ||
+    fail "HAMN_RELEASE_PROVENANCE must not be set; release promotion is local only"
 if [ -n "$RELEASE_REPOSITORY" ]; then
     [[ "$RELEASE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
         fail "HAMN_RELEASE_REPOSITORY is invalid"
@@ -158,14 +145,13 @@ safe_regular "$E2E" || fail "E2E evidence is unavailable"
 E2E_HASH=$(sha256_file "$E2E")
 
 python3 - "$candidate" "$checksums" "$evidence" "$STABLE_TAG" "$RC_TAG" "$COMMIT" "$SOURCE_TREE" \
-    "$CANDIDATE_HASH" "$CHECKSUMS_HASH" "$E2E_HASH" "$EXPECTED_WORKFLOW_RUN" \
-    "$EXPECTED_WORKFLOW_ATTEMPT" <<'PY'
+    "$CANDIDATE_HASH" "$CHECKSUMS_HASH" "$E2E_HASH" <<'PY'
 import json
 import re
 import sys
 
 (candidate_path, checksums_path, evidence_path, stable_tag, tag, commit, tree,
- candidate_hash, checksums_hash, e2e_hash, expected_run, expected_attempt) = sys.argv[1:]
+ candidate_hash, checksums_hash, e2e_hash) = sys.argv[1:]
 with open(candidate_path, encoding="utf-8") as source:
     candidate = json.load(source)
 with open(checksums_path, encoding="utf-8") as source:
@@ -215,8 +201,8 @@ if set(evidence) != {"schemaVersion", "kind", "tag", "commit", "sourceTree",
 workflow = evidence["workflow"]
 validator = evidence["validator"]
 if not isinstance(workflow, dict) or set(workflow) != {"run", "attempt"} or \
-        workflow != {"run": expected_run, "attempt": expected_attempt}:
-    raise SystemExit("validation workflow provenance does not match verified RC run and attempt")
+        workflow != {"run": "local", "attempt": "local"}:
+    raise SystemExit("validation evidence is not from the local release gate")
 if not isinstance(validator, dict) or set(validator) != {"identity", "harnesses"} or \
         not isinstance(validator["identity"], str) or not validator["identity"] or \
         not isinstance(validator["harnesses"], dict) or \
