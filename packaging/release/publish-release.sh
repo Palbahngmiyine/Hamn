@@ -29,6 +29,7 @@ VALIDATOR_KEY=${HAMN_VALIDATOR_PUBLIC_KEY:-}
 RELEASE_KEY=${HAMN_RELEASE_SIGNING_KEY:-}
 EXPECTED_WORKFLOW_RUN=${HAMN_EXPECTED_WORKFLOW_RUN:-}
 EXPECTED_WORKFLOW_ATTEMPT=${HAMN_EXPECTED_WORKFLOW_ATTEMPT:-}
+PROVENANCE=${HAMN_RELEASE_PROVENANCE:-workflow}
 RELEASE_REPOSITORY=${HAMN_RELEASE_REPOSITORY:-}
 RELEASE_BASE_URL=${HAMN_RELEASE_BASE_URL:-}
 
@@ -39,10 +40,23 @@ RELEASE_BASE_URL=${HAMN_RELEASE_BASE_URL:-}
     fail "stable tag is invalid"
 [[ "$RC_TAG" =~ ^${STABLE_TAG}-rc\.[0-9]+$ ]] ||
     fail "RC tag does not correspond to the stable tag"
-[[ "$EXPECTED_WORKFLOW_RUN" =~ ^[1-9][0-9]*$ ]] ||
-    fail "HAMN_EXPECTED_WORKFLOW_RUN must be a positive decimal run ID"
-[[ "$EXPECTED_WORKFLOW_ATTEMPT" =~ ^[1-9][0-9]*$ ]] ||
-    fail "HAMN_EXPECTED_WORKFLOW_ATTEMPT must be a positive decimal attempt"
+case "$PROVENANCE" in
+workflow)
+    [[ "$EXPECTED_WORKFLOW_RUN" =~ ^[1-9][0-9]*$ ]] ||
+        fail "HAMN_EXPECTED_WORKFLOW_RUN must be a positive decimal run ID"
+    [[ "$EXPECTED_WORKFLOW_ATTEMPT" =~ ^[1-9][0-9]*$ ]] ||
+        fail "HAMN_EXPECTED_WORKFLOW_ATTEMPT must be a positive decimal attempt"
+    ;;
+solo-local)
+    [ "${GITHUB_ACTIONS:-}" != true ] ||
+        fail "solo-local provenance is unavailable inside GitHub Actions"
+    [ -z "$EXPECTED_WORKFLOW_RUN" ] && [ -z "$EXPECTED_WORKFLOW_ATTEMPT" ] ||
+        fail "solo-local provenance must not accept workflow run inputs"
+    EXPECTED_WORKFLOW_RUN=local
+    EXPECTED_WORKFLOW_ATTEMPT=local
+    ;;
+*) fail "HAMN_RELEASE_PROVENANCE must be workflow or solo-local" ;;
+esac
 if [ -n "$RELEASE_REPOSITORY" ]; then
     [[ "$RELEASE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
         fail "HAMN_RELEASE_REPOSITORY is invalid"
