@@ -138,7 +138,13 @@ require_validator_environment() {
     [ -n "${HOME:-}" ] && [ "${HOME#/}" != "$HOME" ] ||
         fail "validator HOME must be an absolute path"
     VALIDATOR_HOME=$HOME
-    VALIDATOR_PATH="/opt/homebrew/bin:/usr/local/bin:$VALIDATOR_HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    if [ -n "${HAMN_TEST_VALIDATOR_PATH:-}" ]; then
+        [ "${HAMN_RELEASE_TEST_FIXTURES:-0}" = 1 ] ||
+            fail "HAMN_TEST_VALIDATOR_PATH is allowed only for test fixtures"
+        VALIDATOR_PATH=$HAMN_TEST_VALIDATOR_PATH
+    else
+        VALIDATOR_PATH="/opt/homebrew/bin:/usr/local/bin:$VALIDATOR_HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    fi
     export PATH=$VALIDATOR_PATH
     [ "$(uname -m)" = arm64 ] || fail "validator must be Apple Silicon"
     PYTHON3=$(require_tool python3)
@@ -163,6 +169,48 @@ require_validator_environment() {
     COLIMA_ROOT=$VALIDATOR_HOME/.colima
     [ -d "$COLIMA_ROOT" ] && [ ! -L "$COLIMA_ROOT" ] ||
         fail "an existing non-symlink Colima state directory is required: $COLIMA_ROOT"
+}
+
+prepare_docker_cli_config() {
+    local source=$VALIDATOR_HOME/.docker/config.json
+    local destination=$TEST_HOME/.docker/config.json
+
+    mkdir -m 0700 "$TEST_HOME/.docker"
+    "$PYTHON3" - "$source" "$destination" <<'PY'
+import json
+import os
+import stat
+import sys
+
+source, destination = sys.argv[1:]
+directories = []
+if os.path.lexists(source):
+    info = os.lstat(source)
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit("validator Docker configuration is not a regular file")
+    with open(source, encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict):
+        raise SystemExit("validator Docker configuration is invalid")
+    directories = value.get("cliPluginsExtraDirs", [])
+    if not isinstance(directories, list) or len(directories) > 16:
+        raise SystemExit("validator Docker CLI plugin directories are invalid")
+    for directory in directories:
+        if not isinstance(directory, str) or not os.path.isabs(directory) or \
+                not os.path.isdir(directory):
+            raise SystemExit("validator Docker CLI plugin directory is unsafe")
+with open(destination, "x", encoding="utf-8", newline="\n") as stream:
+    json.dump({"cliPluginsExtraDirs": directories}, stream, sort_keys=True,
+              separators=(",", ":"))
+    stream.write("\n")
+PY
+    chmod 0600 "$destination"
+    env -i HOME="$TEST_HOME" PATH="$VALIDATOR_PATH" \
+        DOCKER_CONFIG="$TEST_HOME/.docker" "$DOCKER" compose version >/dev/null ||
+        fail "isolated Docker Compose v2 is unavailable"
+    env -i HOME="$TEST_HOME" PATH="$VALIDATOR_PATH" \
+        DOCKER_CONFIG="$TEST_HOME/.docker" "$DOCKER" buildx version >/dev/null ||
+        fail "isolated Docker buildx is unavailable"
 }
 
 require_candidate_environment() {
@@ -404,6 +452,7 @@ prepare_workspace() {
     chmod 0700 "$WORK"
     TEST_HOME=$WORK/home
     mkdir -m 0700 "$TEST_HOME"
+    prepare_docker_cli_config
 }
 
 extract_candidate() {
