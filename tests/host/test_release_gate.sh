@@ -111,6 +111,36 @@ ssh-keygen -q -t ed25519 -N '' -f "$WORK/release-key"
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/validator-key"
 printf 'guest image fixture\n' >"$WORK/guest.img"
 RELEASE_REF=$(git -C "$ROOT" rev-parse HEAD)
+if GITHUB_ACTIONS=true \
+RELEASE_REF="$RELEASE_REF" \
+RELEASE_TAG=v0.0.1-rc.1 \
+CANDIDATE_DIR="$WORK/action-candidate" \
+OUTPUT_DIR="$WORK/action-evidence" \
+HAMN_VALIDATOR_SIGNING_KEY="$WORK/validator-key" \
+HAMN_VALIDATOR_IDENTITY=test-validator \
+    bash "$ROOT/packaging/release/release-gate.sh" \
+    >"$WORK/action.out" 2>"$WORK/action.err"; then
+    echo "FAIL: release gate ran inside GitHub Actions" >&2
+    exit 1
+fi
+grep -Fq 'release validation is unavailable inside GitHub Actions' \
+    "$WORK/action.err"
+
+if GITHUB_RUN_ID=1 \
+RELEASE_REF="$RELEASE_REF" \
+RELEASE_TAG=v0.0.1-rc.1 \
+CANDIDATE_DIR="$WORK/workflow-candidate" \
+OUTPUT_DIR="$WORK/workflow-evidence" \
+HAMN_VALIDATOR_SIGNING_KEY="$WORK/validator-key" \
+HAMN_VALIDATOR_IDENTITY=test-validator \
+    bash "$ROOT/packaging/release/release-gate.sh" \
+    >"$WORK/workflow.out" 2>"$WORK/workflow.err"; then
+    echo "FAIL: release gate accepted a workflow run input" >&2
+    exit 1
+fi
+grep -Fq 'release validation must not accept workflow run inputs' \
+    "$WORK/workflow.err"
+
 RELEASE_REF="$RELEASE_REF" \
 RELEASE_TAG=v0.0.1-rc.1 \
 OUTPUT_DIR="$WORK/candidate" \
