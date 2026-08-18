@@ -349,12 +349,14 @@ for requirement in \
     '      attestations: write' \
     '      contents: read' \
     '      id-token: write' \
-    '            ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
+    '            acl ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
     '          sudo chmod a+r /boot/vmlinuz-*' \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
     '            libguestfs-test-tool' \
     '          LIBGUESTFS_DEBUG=1 \' \
     '          LIBGUESTFS_TRACE=1 \' \
+    '          setfacl -m u:nobody:rwx,d:u:nobody:rwx "$guestfs_runtime"' \
+    '          XDG_RUNTIME_DIR="$guestfs_runtime" \' \
     '            bash guest/image/build-ubuntu-24.04-arm64.sh' \
     '      - name: Attest completed guest image'; do
     printf '%s\n' "$guest_job" | grep -Fqx "$requirement" ||
