@@ -349,7 +349,7 @@ for requirement in \
     '      attestations: write' \
     '      contents: read' \
     '      id-token: write' \
-    '            ipxe-qemu jq libguestfs-tools linux-image-virtual' \
+    '            ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
     '          sudo chmod a+r /boot/vmlinuz-*' \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
     '            libguestfs-test-tool' \
