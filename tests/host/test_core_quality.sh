@@ -216,12 +216,31 @@ for requirement in \
         fail "Nix flake is missing required integration: $requirement"
 done
 
+jq -e '
+    .["."] == "0.0.0"
+' "$ROOT/.release-please-manifest.json" >/dev/null ||
+    fail "Release Please bootstrap manifest is invalid"
+jq -e '
+    .["release-type"] == "simple" and
+    .["skip-github-release"] == true and
+    .["bump-patch-for-minor-pre-major"] == true and
+    .packages["."]["package-name"] == "hamn"
+' "$ROOT/release-please-config.json" >/dev/null ||
+    fail "Release Please configuration is invalid"
+grep -Fxq '0.0.1' "$ROOT/version.txt" ||
+    fail "initial release version is not 0.0.1"
+grep -Fq 'x-release-please-start-version' "$ROOT/Makefile" ||
+    fail "Release Please does not update the Makefile version"
+grep -Fq 'x-release-please-version' "$ROOT/flake.nix" ||
+    fail "Release Please does not update the Nix package version"
+
 workflow_files=$(cd "$ROOT" && find .github/workflows -type f -name '*.yml' | LC_ALL=C sort)
 expected_workflows=$(printf '%s\n' \
     .github/workflows/ci.yml \
+    .github/workflows/release-please.yml \
     .github/workflows/release.yml)
 [ "$workflow_files" = "$expected_workflows" ] ||
-    fail "workflow set must contain only CI and release"
+    fail "workflow set must contain only CI, Release Please, and release"
 
 while IFS= read -r action; do
     [[ "$action" =~ ^[^@]+@[0-9a-f]{40}$ ]] ||
@@ -241,6 +260,16 @@ for requirement in \
     '        run: nix develop .#ci --command make -j1 test-local-macos'; do
     grep -Fqx "$requirement" "$ci_workflow" ||
         fail "Nix CI workflow is incomplete: $requirement"
+done
+
+release_please_workflow=$ROOT/.github/workflows/release-please.yml
+for requirement in \
+    '  contents: read' \
+    '        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0' \
+    '          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}' \
+    '          skip-github-release: true'; do
+    grep -Fqx "$requirement" "$release_please_workflow" ||
+        fail "Release Please workflow is incomplete: $requirement"
 done
 
 release_workflow=$ROOT/.github/workflows/release.yml
