@@ -211,6 +211,8 @@ for requirement in \
     '              kubectl' \
     'packages = forAllSystems' \
     'checks = forAllSystems' \
+    '      actionlintVersion = "1.7.12";' \
+    '            buildInputs = [ pkgs.zlib ];' \
     'actionlint -config-file'; do
     grep -Fq "$requirement" "$ROOT/flake.nix" ||
         fail "Nix flake is missing required integration: $requirement"
