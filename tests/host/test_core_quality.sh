@@ -357,10 +357,12 @@ for requirement in \
     '          LIBGUESTFS_TRACE=1 \' \
     '          sudo -u nobody /usr/bin/env -i \' \
     '          builder=$(mktemp -d /tmp/hamn-guest-builder.XXXXXX)' \
+    '          git clone --quiet --no-hardlinks --no-checkout \' \
+    '          GIT_CONFIG_VALUE_0="$builder/source" \' \
     '          HAMN_GUEST_BASE_IMAGE="$builder/input/base.img" \' \
     '          XDG_RUNTIME_DIR="$builder/runtime" \' \
     '          GIT_CONFIG_KEY_0=safe.directory \' \
-    '            /bin/bash guest/image/build-ubuntu-24.04-arm64.sh' \
+    '            /bin/bash "$builder/source/guest/image/build-ubuntu-24.04-arm64.sh"' \
     '          install -m 0644 "$guest_output" "$RUNNER_TEMP/hamn-guest.img"' \
     '      - name: Attest completed guest image'; do
     printf '%s\n' "$guest_job" | grep -Fqx "$requirement" ||
