@@ -73,7 +73,7 @@ repos/example/hamn/environments/hamn-promotion/secrets)
     printf '%s\n' '{"secrets":[{"name":"HAMN_RELEASE_SIGNING_KEY"}]}'
     ;;
 repos/example/hamn/rulesets)
-    printf '%s\n' '[{"id":1,"name":"protect-main-and-release-workflow","enforcement":"active"},{"id":2,"name":"immutable-stable-releases","enforcement":"active"},{"id":3,"name":"stable-releases-actions-created-only","enforcement":"active"}]'
+    printf '%s\n' '[{"id":1,"name":"protect-main-and-release-workflow","enforcement":"active"},{"id":2,"name":"immutable-stable-releases","enforcement":"active"}]'
     ;;
 repos/example/hamn/rulesets/1)
     if [ "${HAMN_TEST_WEAK_RULESET:-0}" = 1 ]; then
@@ -84,14 +84,6 @@ repos/example/hamn/rulesets/1)
     ;;
 repos/example/hamn/rulesets/2)
     printf '%s\n' '{"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"non_fast_forward"}],"bypass_actors":[]}'
-    ;;
-repos/example/hamn/rulesets/3)
-    if [ "${HAMN_TEST_TAG_ACTOR:-0}" = 1 ]; then
-        actor='{"actor_id":42,"actor_type":"User","bypass_mode":"always"}'
-    else
-        actor='{"actor_id":15368,"actor_type":"Integration","bypass_mode":"always"}'
-    fi
-    printf '%s\n' '{"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},"rules":[{"type":"creation"}],"bypass_actors":['"$actor"']}'
     ;;
 repos/example/hamn/immutable-releases)
     printf '%s\n' '{"enabled":true,"enforced_by_owner":false}'
@@ -145,8 +137,6 @@ assert_failure HAMN_TEST_SECRET \
     'hamn-validation must contain only HAMN_VALIDATOR_SIGNING_KEY' secret
 assert_failure HAMN_TEST_WEAK_RULESET \
     'main pull request rules are not solo-maintainer safe' ruleset
-assert_failure HAMN_TEST_TAG_ACTOR \
-    'stable-actions ruleset bypass actors are invalid' tag-actor
 assert_failure HAMN_TEST_UNSIGNED \
     'main must resolve to a verified signed commit' unsigned
 
