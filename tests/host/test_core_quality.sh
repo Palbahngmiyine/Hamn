@@ -464,21 +464,22 @@ for artifact in hamn-candidate hamn-evidence; do
     printf '%s\n' "$block" | grep -Fqx '          run-id: ${{ steps.rc_run.outputs.run_id }}' ||
         fail "cross-run $artifact artifact download lacks the verified run ID"
 done
-grep -Fqx '      - name: Create or verify exact stable tag' "$release_workflow" ||
-    fail "stable promotion does not create or verify the stable tag first"
+grep -Fqx '      - name: Verify pre-existing signed stable tag' "$release_workflow" ||
+    fail "stable promotion does not verify the signed stable tag first"
 for requirement in \
+    '          GH_TOKEN: ${{ github.token }}' \
     '          stable_ref="refs/tags/$STABLE_TAG"' \
-    '          if git ls-remote --exit-code --refs origin "$stable_ref" >/dev/null; then' \
-    '            ls_remote_status=$?' \
-    '            [ "$ls_remote_status" -eq 2 ] || {' \
-    '              echo "cannot determine whether the stable tag exists remotely" >&2' \
-    '              git -c tag.gpgSign=false tag "$STABLE_TAG" "$RC_COMMIT"' \
-    '            if ! git push origin "$stable_ref"; then' \
+    '          gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${STABLE_TAG}" > "$ref_json"' \
+    '          gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" > "$tag_json"' \
+    '              raise SystemExit("stable tag signature is not GitHub Verified")' \
     '          git fetch --no-tags origin "+${stable_ref}:${stable_probe}"' \
     '          [ "$stable_commit" = "$RC_COMMIT" ] || {'; do
     grep -Fqx "$requirement" "$release_workflow" ||
         fail "stable tag promotion safety check is incomplete: $requirement"
 done
+if rg -n 'git .* tag |git push origin.*stable_ref' "$release_workflow" >/dev/null; then
+    fail "release automation must not create the maintainer-authorized stable tag"
+fi
 grep -Fq -- '--verify-tag' "$release_workflow" ||
     fail "stable release does not require a pre-existing verified tag"
 if grep -Fq -- '--target ' "$release_workflow"; then
