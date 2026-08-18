@@ -63,7 +63,7 @@
         pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
           hamn = pkgs.stdenv.mkDerivation {
             pname = "hamn";
-            version = "0.0.1";
+            version = "0.0.1"; # x-release-please-version
             src = source;
             nativeBuildInputs = [ pkgs.gnumake ];
             dontConfigure = true;
