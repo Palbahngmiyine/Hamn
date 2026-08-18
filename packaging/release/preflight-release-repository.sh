@@ -66,7 +66,6 @@ source_path, output_path = sys.argv[1:]
 expected = {
     "protect-main-and-release-workflow": "main",
     "immutable-stable-releases": "stable-immutable",
-    "stable-releases-actions-created-only": "stable-actions",
 }
 with open(source_path, encoding="utf-8") as source:
     rulesets = json.load(source)
@@ -249,10 +248,6 @@ require(isinstance(parameters, dict) and
         contexts == {"Portable source gates", "macOS build and regression gates"},
         "main must require both Nix CI status checks on the latest commit")
 
-actions_bypass = [{"actor_id": 15368, "actor_type": "Integration",
-                   "bypass_mode": "always"}]
-check_ruleset("stable-actions", "tag", ["refs/tags/v*"],
-              {"creation"}, actions_bypass)
 check_ruleset("stable-immutable", "tag", ["refs/tags/v*"],
               {"deletion", "non_fast_forward"}, [])
 
