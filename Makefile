@@ -16,9 +16,13 @@ CFLAGS     := -std=c11 -Wall -Wextra -O2 -g \
               -DHAVE_CONFIG_H \
               -DHAMN_VERSION=\"$(VERSION)\" \
               -Ihost -Ivendor -Ivendor/libyaml/include
-OBJCFLAGS  := $(filter-out -std=c11,$(CFLAGS)) -fobjc-arc
 LDFLAGS    := -framework Virtualization -framework Foundation -framework CoreServices -lz \
               -mmacosx-version-min=$(MACOS_MIN)
+ifneq ($(strip $(SDKROOT)),)
+CFLAGS     += -isysroot $(SDKROOT)
+LDFLAGS    += -isysroot $(SDKROOT)
+endif
+OBJCFLAGS  := $(filter-out -std=c11,$(CFLAGS)) -fobjc-arc
 
 HOST_C_SRCS := $(wildcard host/*.c host/cmd/*.c host/core/*.c host/image/*.c \
                           host/seed/*.c host/sshmgr/*.c host/fwd/*.c \

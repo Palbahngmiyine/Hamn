@@ -126,6 +126,10 @@ for requirement in \
     grep -Fq "$requirement" "$ROOT/host/fwd/mount_inotify.c" ||
         fail "mountInotify host bridge is incomplete: $requirement"
 done
+grep -Fq 'CFLAGS     += -isysroot $(SDKROOT)' "$ROOT/Makefile" ||
+    fail "C compilation does not honor the selected system SDK"
+grep -Fq 'LDFLAGS    += -isysroot $(SDKROOT)' "$ROOT/Makefile" ||
+    fail "linking does not honor the selected system SDK"
 for requirement in \
     'mount_inotify_touch(tag->valuestring' \
     'open_existing_regular' \
