@@ -349,15 +349,17 @@ for requirement in \
     '      attestations: write' \
     '      contents: read' \
     '      id-token: write' \
-    '            acl ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
+    '            ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
     '          sudo chmod a+r /boot/vmlinuz-*' \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
     '            libguestfs-test-tool' \
     '          LIBGUESTFS_DEBUG=1 \' \
     '          LIBGUESTFS_TRACE=1 \' \
-    '          setfacl -m u:nobody:rwx,d:u:nobody:rwx "$guestfs_runtime"' \
-    '          XDG_RUNTIME_DIR="$guestfs_runtime" \' \
-    '            bash guest/image/build-ubuntu-24.04-arm64.sh' \
+    '          sudo -u nobody /usr/bin/env -i \' \
+    '          XDG_RUNTIME_DIR="$builder/runtime" \' \
+    '          GIT_CONFIG_KEY_0=safe.directory \' \
+    '            /bin/bash guest/image/build-ubuntu-24.04-arm64.sh' \
+    '          install -m 0644 "$guest_output" "$RUNNER_TEMP/hamn-guest.img"' \
     '      - name: Attest completed guest image'; do
     printf '%s\n' "$guest_job" | grep -Fqx "$requirement" ||
         fail "guest image job is incomplete: $requirement"

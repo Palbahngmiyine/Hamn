@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            acl ipxe-qemu jq libguestfs-tools linux-image-virtual passt
+            ipxe-qemu jq libguestfs-tools linux-image-virtual passt
           sudo chmod a+r /boot/vmlinuz-*
           LIBGUESTFS_BACKEND=direct \
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
@@ -75,13 +75,12 @@ jobs:
           set -euo pipefail
           work="$RUNNER_TEMP/hamn-guest-inputs"
           mkdir "$work"
-          guestfs_runtime="$work/guestfs-runtime"
-          mkdir -m 0700 "$guestfs_runtime"
-          setfacl -m u:nobody:rwx,d:u:nobody:rwx "$guestfs_runtime"
-          mkdir -m 0700 "$guestfs_runtime/acl-probe"
-          sudo -u nobody test -w "$guestfs_runtime/acl-probe"
-          sudo -u nobody test -x "$guestfs_runtime/acl-probe"
-          rmdir "$guestfs_runtime/acl-probe"
+          builder="$work/builder"
+          mkdir -m 0755 "$builder"
+          mkdir -m 0700 "$builder/home" "$builder/runtime" "$builder/tmp"
+          mkdir -m 0755 "$builder/output"
+          guestfs_group=$(id -gn nobody)
+          sudo chown -R "nobody:$guestfs_group" "$builder"
           inputs=guest/image/release-inputs.json
           base_url=$(jq -er '.ubuntu.url' "$inputs")
           base_hash=$(jq -er '.ubuntu.sha256' "$inputs")
@@ -113,18 +112,30 @@ jobs:
           ssh-keygen -q -t ed25519 -N '' -f "$work/k3s-compatibility-key"
           ssh-keygen -Y sign -f "$work/k3s-compatibility-key" \
             -n hamn-k3s-compatibility "$work/k3s-compatibility.json" >/dev/null
+          chmod 0644 "$work/base.img" "$work/k3s-compatibility.json" \
+            "$work/k3s-compatibility.json.sig" "$work/k3s-compatibility-key.pub"
+          guest_output="$builder/output/hamn-guest.img"
+          sudo -u nobody /usr/bin/env -i \
+          HOME="$builder/home" \
+          PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+          TMPDIR="$builder/tmp" \
+          XDG_RUNTIME_DIR="$builder/runtime" \
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=safe.directory \
+          GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
           LIBGUESTFS_BACKEND=direct \
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
           LIBGUESTFS_DEBUG=1 \
           LIBGUESTFS_TRACE=1 \
-          XDG_RUNTIME_DIR="$guestfs_runtime" \
           HAMN_GUEST_BASE_IMAGE="$work/base.img" \
           HAMN_GUEST_BASE_SHA256="$base_hash" \
-          HAMN_GUEST_OUTPUT="$RUNNER_TEMP/hamn-guest.img" \
+          HAMN_GUEST_OUTPUT="$guest_output" \
           HAMN_K3S_COMPATIBILITY_MANIFEST="$work/k3s-compatibility.json" \
           HAMN_K3S_COMPATIBILITY_SIGNATURE="$work/k3s-compatibility.json.sig" \
           HAMN_RELEASE_PUBLIC_KEY="$work/k3s-compatibility-key.pub" \
-            bash guest/image/build-ubuntu-24.04-arm64.sh
+            /bin/bash guest/image/build-ubuntu-24.04-arm64.sh
+          install -m 0644 "$guest_output" "$RUNNER_TEMP/hamn-guest.img"
+          install -m 0644 "$guest_output.sha256" "$RUNNER_TEMP/hamn-guest.img.sha256"
           rm -f "$work/k3s-compatibility-key" "$work/k3s-compatibility-key.pub"
       - name: Attest completed guest image
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
