@@ -63,7 +63,10 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libguestfs-tools jq
+          sudo apt-get install --yes --no-install-recommends \
+            jq libguestfs-tools linux-image-virtual
+          sudo chmod a+r /boot/vmlinuz-*
+          LIBGUESTFS_BACKEND=direct libguestfs-test-tool
       - name: Build completed Ubuntu arm64 guest image
         shell: bash
         run: |
