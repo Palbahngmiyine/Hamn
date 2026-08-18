@@ -356,6 +356,8 @@ for requirement in \
     '          LIBGUESTFS_DEBUG=1 \' \
     '          LIBGUESTFS_TRACE=1 \' \
     '          sudo -u nobody /usr/bin/env -i \' \
+    '          builder=$(mktemp -d /tmp/hamn-guest-builder.XXXXXX)' \
+    '          HAMN_GUEST_BASE_IMAGE="$builder/input/base.img" \' \
     '          XDG_RUNTIME_DIR="$builder/runtime" \' \
     '          GIT_CONFIG_KEY_0=safe.directory \' \
     '            /bin/bash guest/image/build-ubuntu-24.04-arm64.sh' \
