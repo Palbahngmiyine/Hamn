@@ -45,12 +45,16 @@ make test-uninstall
 make test-update
 make test-kubernetes-cli
 make test-release-artifacts
-make test-release-gate
+make test-hosted-validation
 make test-release-publish
 ```
 
 `make test-local-macos` runs the applicable host/source gates serially and
 also requires `actionlint`.
+
+`make test-release-gate` retains the optional physical VM E2E harness for
+maintainer experiments. It is not part of `test-local-macos` or the automated
+release authority.
 
 Do not run source tests concurrently when they rebuild the shared host binary.
 

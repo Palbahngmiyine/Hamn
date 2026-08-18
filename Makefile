@@ -172,7 +172,6 @@ test-local-macos:
 	$(MAKE) test-kubernetes-cli
 	$(MAKE) test-release-artifacts
 	$(MAKE) test-hosted-validation
-	$(MAKE) test-release-gate
 	$(MAKE) test-release-publish
 	$(MAKE) test-release-version
 	$(MAKE) test-release-request

@@ -167,6 +167,10 @@ grep -Fq 'environment: hamn-promotion' "$ROOT/.github/workflows/release.yml" ||
 if grep -Fq 'environment: hamn-validation' "$ROOT/.github/workflows/release.yml"; then
     fail "hosted-only release still references a physical validation environment"
 fi
+if awk '/^test-local-macos:/{capture=1; next} capture && /^[^[:space:]]/{exit} capture' \
+    "$ROOT/Makefile" | grep -Fq 'test-release-gate'; then
+    fail "hosted-only local release gates still require physical VM E2E"
+fi
 grep -Fqx '  contents: read' "$ROOT/.github/workflows/release.yml" ||
     fail "release workflow must default to read-only repository contents"
 grep -Fqx '      contents: write' "$ROOT/.github/workflows/release.yml" ||
