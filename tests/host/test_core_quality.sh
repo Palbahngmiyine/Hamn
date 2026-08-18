@@ -230,18 +230,14 @@ for requirement in \
 done
 
 jq -e '
-    .["."] == "0.0.0"
-' "$ROOT/.release-please-manifest.json" >/dev/null ||
-    fail "Release Please bootstrap manifest is invalid"
-jq -e '
     .["release-type"] == "simple" and
+    .["initial-version"] == "0.0.1" and
     .["skip-github-release"] == true and
+    .["bump-minor-pre-major"] == true and
     .["bump-patch-for-minor-pre-major"] == true and
     .packages["."]["package-name"] == "hamn"
 ' "$ROOT/release-please-config.json" >/dev/null ||
     fail "Release Please configuration is invalid"
-grep -Fxq '0.0.1' "$ROOT/version.txt" ||
-    fail "initial release version is not 0.0.1"
 grep -Fq 'x-release-please-start-version' "$ROOT/Makefile" ||
     fail "Release Please does not update the Makefile version"
 grep -Fq 'x-release-please-version' "$ROOT/flake.nix" ||
