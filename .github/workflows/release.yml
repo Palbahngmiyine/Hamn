@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            ipxe-qemu jq libguestfs-tools linux-image-virtual passt
+            acl ipxe-qemu jq libguestfs-tools linux-image-virtual passt
           sudo chmod a+r /boot/vmlinuz-*
           LIBGUESTFS_BACKEND=direct \
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
@@ -75,6 +75,13 @@ jobs:
           set -euo pipefail
           work="$RUNNER_TEMP/hamn-guest-inputs"
           mkdir "$work"
+          guestfs_runtime="$work/guestfs-runtime"
+          mkdir -m 0700 "$guestfs_runtime"
+          setfacl -m u:nobody:rwx,d:u:nobody:rwx "$guestfs_runtime"
+          mkdir -m 0700 "$guestfs_runtime/acl-probe"
+          sudo -u nobody test -w "$guestfs_runtime/acl-probe"
+          sudo -u nobody test -x "$guestfs_runtime/acl-probe"
+          rmdir "$guestfs_runtime/acl-probe"
           inputs=guest/image/release-inputs.json
           base_url=$(jq -er '.ubuntu.url' "$inputs")
           base_hash=$(jq -er '.ubuntu.sha256' "$inputs")
@@ -110,6 +117,7 @@ jobs:
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
           LIBGUESTFS_DEBUG=1 \
           LIBGUESTFS_TRACE=1 \
+          XDG_RUNTIME_DIR="$guestfs_runtime" \
           HAMN_GUEST_BASE_IMAGE="$work/base.img" \
           HAMN_GUEST_BASE_SHA256="$base_hash" \
           HAMN_GUEST_OUTPUT="$RUNNER_TEMP/hamn-guest.img" \
