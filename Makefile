@@ -46,6 +46,7 @@ START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retr
 .PHONY: FORCE host install clean test-portable test-qcow2 \
 	test-profile-state test-guest-deployment test-diagnostics test-install \
 	test-uninstall test-update test-release-artifacts test-release-gate test-release-publish \
+	test-release-version \
 	test-kubernetes-cli test-core-quality test-public-export test-release-repository-preflight \
 	test-port-forwarding test-workflows test-local-macos \
 	release-candidate release-gate
@@ -166,6 +167,7 @@ test-local-macos:
 	$(MAKE) test-release-artifacts
 	$(MAKE) test-release-gate
 	$(MAKE) test-release-publish
+	$(MAKE) test-release-version
 	$(MAKE) test-public-export
 	$(MAKE) test-release-repository-preflight
 
@@ -225,6 +227,9 @@ test-release-gate: host
 
 test-release-publish: host
 	bash tests/host/test_release_publish.sh
+
+test-release-version:
+	bash tests/host/test_release_version.sh
 
 test-public-export:
 	bash tests/host/test_public_export.sh
