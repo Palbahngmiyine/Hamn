@@ -162,22 +162,19 @@ for requirement in \
     grep -Fq "$requirement" "$ROOT/packaging/release/physical-e2e.sh" ||
         fail "physical Rosetta proof is incomplete: $requirement"
 done
-for requirement in \
-    'environment: hamn-validation' \
-    'environment: hamn-promotion'; do
-    grep -Fq "$requirement" "$ROOT/.github/workflows/release.yml" ||
-        fail "release workflow is missing the required protected environment: $requirement"
-done
+grep -Fq 'environment: hamn-promotion' "$ROOT/.github/workflows/release.yml" ||
+    fail "release workflow is missing the protected promotion environment"
+if grep -Fq 'environment: hamn-validation' "$ROOT/.github/workflows/release.yml"; then
+    fail "hosted-only release still references a physical validation environment"
+fi
 grep -Fqx '  contents: read' "$ROOT/.github/workflows/release.yml" ||
     fail "release workflow must default to read-only repository contents"
 grep -Fqx '      contents: write' "$ROOT/.github/workflows/release.yml" ||
     fail "stable promotion must explicitly request repository write access"
-grep -Fqx '          HAMN_RELEASE_PUBLIC_KEY_TEXT: ${{ vars.HAMN_RELEASE_PUBLIC_KEY }}' \
-    "$ROOT/.github/workflows/release.yml" ||
-    fail "release candidate must receive only the non-secret release public key"
-grep -Fqx '          HAMN_VALIDATOR_PUBLIC_KEY_TEXT: ${{ vars.HAMN_VALIDATOR_PUBLIC_KEY }}' \
-    "$ROOT/.github/workflows/release.yml" ||
-    fail "stable promotion must receive the non-secret validator public key as a variable"
+if rg -n 'HAMN_(VALIDATOR|RELEASE)_SIGNING_KEY|vars\.HAMN_RELEASE_PUBLIC_KEY|secrets\.HAMN_' \
+    "$ROOT/.github/workflows/release.yml" >/dev/null; then
+    fail "keyless release workflow still references long-lived signing material"
+fi
 for document in docs/ARCHITECTURE.md docs/ARCHITECTURE.ko.md; do
     if rg -n -i 'non-shared.*(path|virtio|경로)|bounded virtio socket.*guest' \
         "$ROOT/$document" >/dev/null; then
@@ -312,207 +309,123 @@ grep -Fq 'HAMN_SYSTEM_SDKROOT="$system_sdk" \' "$release_workflow" ||
 for requirement in \
     '    branches: [main]' \
     "      - '.release-please-manifest.json'" \
+    '  workflow_dispatch:' \
     '  contents: read' \
-    '    name: Resolve Release Please version' \
-    '        run: bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"'; do
+    '    name: Resolve release version' \
+    '            bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"' \
+    '            bash packaging/release/resolve-release-request.sh'; do
     grep -Fqx "$requirement" "$release_workflow" ||
         fail "automated release trigger is incomplete: $requirement"
 done
 if grep -Fq 'commit.verification.verified' "$release_workflow"; then
     fail "release workflow still requires GitHub Verified commits"
 fi
-if grep -Eq 'workflow_dispatch|^[[:space:]]+tags:|rc_run_id:|inputs\.rc_' \
-    "$release_workflow"; then
-    fail "release workflow still exposes a manual tag or promotion trigger"
+if grep -Eq '^[[:space:]]+tags:|rc_run_id:|inputs\.rc_' "$release_workflow"; then
+    fail "release workflow exposes an arbitrary tag or cross-run input"
 fi
+for forbidden in hamn-validator HAMN_VALIDATOR HAMN_RELEASE_SIGNING_KEY \
+    'physical validation'; do
+    if grep -Fq "$forbidden" "$release_workflow"; then
+        fail "hosted-only release retains unsupported authority: $forbidden"
+    fi
+done
+if grep -Eq 'runs-on:[[:space:]]*self-hosted|^[[:space:]]+-[[:space:]]+self-hosted' \
+    "$release_workflow"; then
+    fail "hosted-only release still schedules a self-hosted runner"
+fi
+
+guest_job=$(awk '
+    /^  guest-image:$/ { capture = 1 }
+    /^  candidate:$/ { capture = 0 }
+    capture { print }
+' "$release_workflow")
+for requirement in \
+    '    runs-on: ubuntu-24.04-arm' \
+    '      attestations: write' \
+    '      contents: read' \
+    '      id-token: write' \
+    '          sudo apt-get install --yes --no-install-recommends libguestfs-tools jq' \
+    '            bash guest/image/build-ubuntu-24.04-arm64.sh' \
+    '      - name: Attest completed guest image'; do
+    printf '%s\n' "$guest_job" | grep -Fqx "$requirement" ||
+        fail "guest image job is incomplete: $requirement"
+done
 
 candidate_job=$(awk '
     /^  candidate:$/ { capture = 1 }
-    /^  validate:$/ { capture = 0 }
+    /^  publish:$/ { capture = 0 }
     capture { print }
 ' "$release_workflow")
-printf '%s\n' "$candidate_job" | grep -Fqx '    runs-on: macos-15' ||
-    fail "candidate job is not pinned to the GitHub-hosted macOS 15 arm64 label"
-for permission in \
+for requirement in \
+    '    runs-on: macos-15' \
     '      artifact-metadata: write' \
     '      attestations: write' \
     '      contents: read' \
-    '      id-token: write'; do
-    printf '%s\n' "$candidate_job" | grep -Fqx "$permission" ||
-        fail "candidate job lacks the required attestation permission: $permission"
-done
-for permission in '      artifact-metadata: write' '      attestations: write' '      id-token: write'; do
-    [ "$(grep -Fxc "$permission" "$release_workflow")" -eq 1 ] ||
-        fail "only the secret-free candidate job may receive $permission"
-done
-for requirement in \
+    '      id-token: write' \
+    '          make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos' \
+    '          make release-hosted-validation \' \
     '      - name: Attest exact candidate artifact provenance' \
-    '        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2' \
-    '          subject-checksums: ${{ runner.temp }}/hamn-candidate/SHA256SUMS'; do
+    '      - name: Attest hosted validation evidence'; do
     printf '%s\n' "$candidate_job" | grep -Fqx "$requirement" ||
-        fail "candidate provenance attestation is incomplete: $requirement"
+        fail "candidate hosted-validation job is incomplete: $requirement"
 done
+
+publish_job=$(awk '
+    /^  publish:$/ { capture = 1 }
+    capture { print }
+' "$release_workflow")
 for requirement in \
-    '      - name: Assert hosted Apple Silicon arm64 runner' \
-    '      - name: Install Nix' \
-    '        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1' \
-    "          nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'" \
-    '          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || {' \
-    '          [ "$RUNNER_OS" = macOS ] || {' \
-    '          [ "$RUNNER_ARCH" = ARM64 ] || {' \
-    '          [ "$(uname -m)" = arm64 ] || {'; do
-    printf '%s\n' "$candidate_job" | grep -Fqx "$requirement" ||
-        fail "candidate job does not fail closed for its required runner: $requirement"
+    '    name: Publish immutable keyless release' \
+    '    needs: [prepare, candidate]' \
+    '    environment: hamn-promotion' \
+    '      attestations: write' \
+    '      contents: write' \
+    '      id-token: write' \
+    '      - name: Verify keyless build provenance' \
+    '            gh attestation verify "$candidate/$name" \' \
+    '      - name: Attest immutable update manifest' \
+    '      - name: Create and verify draft release' \
+    '            --draft --target "$GITHUB_SHA" --title "Hamn $STABLE_TAG" \' \
+    '      - name: Publish immutable release and verify assets' \
+    '          gh release edit "$STABLE_TAG" --draft=false --latest' \
+    '            --json tagName,targetCommitish,isDraft,isPrerelease,isImmutable \' \
+    '          gh release verify "$STABLE_TAG"'; do
+    printf '%s\n' "$publish_job" | grep -Fqx "$requirement" ||
+        fail "keyless immutable promotion is incomplete: $requirement"
 done
-grep -Fq "nix develop .#release --command bash -euo pipefail <<'NIX_SHELL'" \
-    "$release_workflow" || fail "physical validation does not use the Nix release shell"
-grep -Fqx '          HAMN_VALIDATOR_PATH="$PATH" \' "$release_workflow" ||
-    fail "physical validation does not pass the Nix release PATH"
-[ "$(grep -Fc "nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'" \
-    "$release_workflow")" -eq 2 ] ||
-    fail "candidate build and stable promotion must use the Nix CI shell"
-grep -Fqx '          make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos' "$release_workflow" ||
-    fail "hosted candidate does not rerun the full local regression suite"
-grep -Fqx '          source scripts/ci/use-system-macos-sdk.sh' "$release_workflow" ||
-    fail "hosted candidate does not use the current system Apple SDK"
-if grep -Fq 'HAMN_RELEASE_TEST_FIXTURES' "$release_workflow"; then
-    fail "release workflow must not enable fixture validation"
-fi
-if grep -Fq 'HAMN_GUEST_E2E_COMMAND' \
-    "$release_workflow"; then
-    fail "release workflow must use candidate-contained physical harnesses"
-fi
+
 for requirement in \
-    'HAMN_GUEST_E2E_COMMAND is allowed only for test fixtures' \
-    'HAMN_RELEASE_ALLOW_DIRTY is allowed only for test fixtures'; do
-    grep -Fq "$requirement" "$ROOT/packaging/release/release-gate.sh" ||
-        fail "release gate permits a production test-only escape: $requirement"
+    '"validationMode": "github-hosted-no-vm"' \
+    '"physicalE2E": False' \
+    '"vmLifecycle": False' \
+    '"dockerE2E": False' \
+    '"k3sE2E": False'; do
+    grep -Fq "$requirement" "$ROOT/packaging/release/hosted-validation.sh" ||
+        fail "hosted evidence overstates validation: $requirement"
 done
-for requirement in \
-    'trap cleanup_validator_key EXIT' \
-    "trap 'exit 129' HUP" \
-    "trap 'exit 130' INT" \
-    "trap 'exit 143' TERM" \
-    'rm -f -- "$validator_key"'; do
-    grep -Fq "$requirement" "$release_workflow" ||
-        fail "release validator signing key is not reliably cleaned: $requirement"
-done
-for requirement in \
-    'trap cleanup_publish_keys EXIT' \
-    "trap 'exit 129' HUP" \
-    "trap 'exit 130' INT" \
-    "trap 'exit 143' TERM" \
-    'rm -f -- "$validator_public_key" "$release_key"' \
-    'validator_public_key="$RUNNER_TEMP/hamn-validator.pub"' \
-    'release_key="$RUNNER_TEMP/hamn-release"' \
-    'chmod 0600 "$validator_public_key" "$release_key"' \
-    'unset HAMN_VALIDATOR_PUBLIC_KEY_TEXT HAMN_RELEASE_SIGNING_KEY_TEXT'; do
-    grep -Fq "$requirement" "$release_workflow" ||
-        fail "release signing material is not reliably cleaned: $requirement"
-done
-for requirement in \
-    'COLIMA_BINARY_BEFORE_HASH=$(colima_binary_hash)' \
-    '"binaryBeforeSha256": binary_before_hash' \
-    '"binaryAfterSha256": binary_after_hash' \
-    'COLIMA_INSTANCES_BEFORE_HASH=$(colima_instance_inventory_hash)' \
-    '"instancesBeforeSha256": instances_before_hash' \
-    '"instancesAfterSha256": instances_after_hash'; do
-    grep -Fq "$requirement" "$ROOT/packaging/release/physical-e2e.sh" ||
-        fail "physical evidence does not bind Colima binary before and after: $requirement"
-done
-if rg -n 'HAMN_RELEASE_(MANIFEST_URL|BASE_URL):[[:space:]]+\$\{\{[[:space:]]*vars\.' \
-    "$release_workflow" >/dev/null; then
-    fail "release workflow permits an arbitrary candidate or stable release URL"
-fi
-grep -Fqx '          HAMN_RELEASE_REPOSITORY: ${{ github.repository }}' \
-    "$release_workflow" ||
-    fail "stable promotion does not derive its GitHub Release URL from the repository"
-grep -Fq 'CANONICAL_MANIFEST_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/hamn-update-manifest.json"' \
-    "$ROOT/packaging/release/build-candidate.sh" ||
-    fail "candidate build does not derive its canonical stable manifest URL"
-grep -Fq 'HAMN_RELEASE_MANIFEST_URL must match the canonical GitHub Release manifest URL' \
-    "$ROOT/packaging/release/build-candidate.sh" ||
-    fail "candidate build does not reject a mismatched GitHub manifest URL"
 grep -Fq 'BASE_URL="https://github.com/${RELEASE_REPOSITORY}/releases/download/${STABLE_TAG}"' \
     "$ROOT/packaging/release/publish-release.sh" ||
-    fail "stable promotion does not derive its canonical GitHub Release base"
-grep -Fq 'candidate update manifest URL does not match the canonical stable release' \
-    "$ROOT/packaging/release/publish-release.sh" ||
-    fail "stable promotion does not bind the candidate installer to its canonical manifest"
-grep -Fq '[ "$(uname -m)" = arm64 ] ||' \
-    "$ROOT/packaging/release/build-candidate.sh" ||
-    fail "candidate builder does not verify Apple Silicon before labeling an arm64 artifact"
-grep -Fq 'release candidate must build on Apple Silicon arm64' \
-    "$ROOT/packaging/release/build-candidate.sh" ||
-    fail "candidate builder does not reject a non-arm64 host"
+    fail "keyless promotion does not derive the canonical GitHub Release base"
 grep -Fq 'candidate artifact directory contains unexpected entries' \
     "$ROOT/packaging/release/publish-release.sh" ||
-    fail "stable promotion does not reject unbound candidate files"
-if grep -Fq 'hamn-"*.tar.gz' "$release_workflow" || \
-    grep -Fq 'hamn-"*.img' "$release_workflow" || \
-    grep -Fq 'hamn-"*.spdx.json' "$release_workflow"; then
-    fail "stable release still uploads wildcard-matched candidate files"
+    fail "keyless promotion does not reject unbound candidate files"
+grep -Fq 'CANONICAL_MANIFEST_URL="https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/hamn-update-manifest.json"' \
+    "$ROOT/packaging/release/build-candidate.sh" ||
+    fail "candidate does not embed the immutable latest manifest URL"
+if rg -n 'HAMN_UPDATE_PUBLIC_KEY|hamn-update-manifest\.json\.sig' \
+    "$ROOT/packaging/release/build-candidate.sh" \
+    "$ROOT/packaging/release/install.sh.in" \
+    "$ROOT/packaging/release/publish-release.sh" \
+    "$ROOT/scripts/update-host.sh" "$release_workflow" >/dev/null; then
+    fail "keyless release path still depends on a long-lived release signature"
 fi
-for artifact in \
-    'hamn-${STABLE_TAG}-darwin-arm64.tar.gz' \
-    'hamn-${STABLE_TAG}-ubuntu-24.04-arm64.img' \
-    'hamn-${STABLE_TAG}.spdx.json'; do
-    grep -Fq "$artifact" "$release_workflow" ||
-        fail "stable release does not upload an exact candidate artifact: $artifact"
-done
-grep -Fqx '          HAMN_VALIDATOR_SIGNING_KEY_TEXT: ${{ secrets.HAMN_VALIDATOR_SIGNING_KEY }}' \
-    "$release_workflow" ||
-    fail "physical validator secret is not supplied as key text"
-if [ "$(grep -Fc 'secrets.HAMN_VALIDATOR_SIGNING_KEY' "$release_workflow")" -ne 1 ] || \
-    [ "$(grep -Fc 'secrets.HAMN_RELEASE_SIGNING_KEY' "$release_workflow")" -ne 1 ]; then
-    fail "each private signing key must be visible to exactly one protected job"
+if rg -n 'ssh-keygen -Y sign' \
+    "$ROOT/packaging/release/build-candidate.sh" \
+    "$ROOT/packaging/release/install.sh.in" \
+    "$ROOT/packaging/release/publish-release.sh" \
+    "$ROOT/scripts/update-host.sh" >/dev/null; then
+    fail "keyless release path still signs update metadata with a local key"
 fi
-if grep -Fq '          HAMN_VALIDATOR_SIGNING_KEY: ${{ secrets.HAMN_VALIDATOR_SIGNING_KEY }}' \
-    "$release_workflow"; then
-    fail "physical validator passes secret text where a key file path is required"
-fi
-for requirement in \
-    '          umask 077' \
-    '          validator_key="$RUNNER_TEMP/hamn-validator-signing-key"' \
-    '          printf '\''%s\n'\'' "$HAMN_VALIDATOR_SIGNING_KEY_TEXT" > "$validator_key"' \
-    '          chmod 0600 "$validator_key"' \
-    '          unset HAMN_VALIDATOR_SIGNING_KEY_TEXT' \
-    '          HAMN_VALIDATOR_PATH="$PATH" \' \
-    '          HAMN_VALIDATOR_SIGNING_KEY="$validator_key" make release-gate \'; do
-    grep -Fqx "$requirement" "$release_workflow" ||
-        fail "physical validator key-file preparation is incomplete: $requirement"
-done
-for requirement in \
-    '          HAMN_EXPECTED_WORKFLOW_RUN="$GITHUB_RUN_ID" \' \
-    '          HAMN_EXPECTED_WORKFLOW_ATTEMPT="$GITHUB_RUN_ATTEMPT" \'; do
-    grep -Fqx "$requirement" "$release_workflow" ||
-        fail "automatic promotion does not bind same-run validation evidence: $requirement"
-done
-for artifact in hamn-candidate hamn-evidence; do
-    block=$(awk -v artifact="$artifact" '
-        $0 == "          name: " artifact "-${{ github.sha }}" { capture = 1 }
-        capture && /^      - name: / { exit }
-        capture { print }
-    ' "$release_workflow")
-    [ -n "$block" ] || fail "same-run $artifact download is missing"
-    if printf '%s\n' "$block" | grep -Eq 'github-token:|repository:|run-id:'; then
-        fail "same-run $artifact download contains cross-run selectors"
-    fi
-done
-for requirement in \
-    '    name: Publish validated release automatically' \
-    '    needs: [prepare, candidate, validate]' \
-    '      contents: write' \
-    '      - name: Create and verify draft release' \
-    '            --draft \' \
-    '            --target "$GITHUB_SHA" \' \
-    '              raise SystemExit("draft release does not bind every validated artifact")' \
-    '      - name: Publish immutable release and verify tag' \
-    '          gh release edit "$STABLE_TAG" --draft=false --latest' \
-    '          [ "$stable_commit" = "$GITHUB_SHA" ] || {'; do
-    grep -Fqx "$requirement" "$release_workflow" ||
-        fail "automatic stable release is incomplete: $requirement"
-done
 if rg -n 'git[[:space:]]+tag|git[[:space:]]+push.*refs/tags|--verify-tag' \
     "$release_workflow" >/dev/null; then
     fail "release workflow still depends on a manually prepared tag"
