@@ -23,9 +23,9 @@ RELEASE_REF=${RELEASE_REF:-}
 RELEASE_TAG=${RELEASE_TAG:-}
 OUTPUT_DIR=${OUTPUT_DIR:-}
 GUEST_IMAGE=${HAMN_GUEST_IMAGE:-}
-PUBLIC_KEY=${HAMN_RELEASE_PUBLIC_KEY:-}
 ALLOW_DIRTY=${HAMN_RELEASE_ALLOW_DIRTY:-0}
 ALLOW_LOCAL=${HAMN_RELEASE_ALLOW_LOCAL:-0}
+RELEASE_REPOSITORY=${GITHUB_REPOSITORY:-${HAMN_RELEASE_REPOSITORY:-}}
 
 [ -n "$RELEASE_REF" ] && [ -n "$RELEASE_TAG" ] && [ -n "$OUTPUT_DIR" ] ||
     fail "RELEASE_REF, RELEASE_TAG, and OUTPUT_DIR are required"
@@ -51,16 +51,12 @@ fi
 
 safe_regular "$GUEST_IMAGE" ||
     fail "HAMN_GUEST_IMAGE must name one owned regular guest image"
-safe_regular "$PUBLIC_KEY" ||
-    fail "HAMN_RELEASE_PUBLIC_KEY must name one owned regular public key"
-ssh-keygen -lf "$PUBLIC_KEY" | grep -q 'ED25519' ||
-    fail "HAMN_RELEASE_PUBLIC_KEY is not Ed25519"
 
 MANIFEST_URL=${HAMN_RELEASE_MANIFEST_URL:-}
-if [ -n "${GITHUB_REPOSITORY:-}" ]; then
-    [[ "$GITHUB_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+if [ -n "$RELEASE_REPOSITORY" ]; then
+    [[ "$RELEASE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
         fail "GITHUB_REPOSITORY is invalid"
-    CANONICAL_MANIFEST_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/hamn-update-manifest.json"
+    CANONICAL_MANIFEST_URL="https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/hamn-update-manifest.json"
     if [ -n "$MANIFEST_URL" ] && [ "$MANIFEST_URL" != "$CANONICAL_MANIFEST_URL" ]; then
         fail "HAMN_RELEASE_MANIFEST_URL must match the canonical GitHub Release manifest URL"
     fi
@@ -99,39 +95,9 @@ install -m 0755 "$ROOT/build/hamn" "$ARTIFACT_ROOT/bin/hamn"
 rsync -a --delete --exclude build --exclude '._*' \
     "$ROOT/scripts" "$ROOT/packaging" \
     "$ARTIFACT_ROOT/"
-install -m 0644 "$PUBLIC_KEY" \
-    "$ARTIFACT_ROOT/packaging/release/hamn-release.pub"
 printf '%s\n' "$MANIFEST_URL" \
     >"$ARTIFACT_ROOT/packaging/release/update-manifest-url"
 chmod 0644 "$ARTIFACT_ROOT/packaging/release/update-manifest-url"
-
-python3 - "$ROOT/packaging/release/install.sh.in" \
-    "$ARTIFACT_ROOT/packaging/release/install.sh" "$PUBLIC_KEY" \
-    "$MANIFEST_URL" <<'PY'
-import base64
-import json
-import sys
-
-template_path, output_path, key_path, manifest_url = sys.argv[1:]
-with open(template_path, encoding="utf-8") as source:
-    template = source.read()
-with open(key_path, "rb") as source:
-    key = source.read()
-if not key or not key.endswith(b"\n"):
-    raise SystemExit("release public key is malformed")
-if template.count("__HAMN_RELEASE_PUBLIC_KEY_B64__") != 1 or \
-        template.count("__HAMN_RELEASE_MANIFEST_URL__") != 1:
-    raise SystemExit("installer template placeholders are malformed")
-rendered = template.replace("__HAMN_RELEASE_PUBLIC_KEY_B64__",
-                            base64.b64encode(key).decode("ascii"))
-rendered = rendered.replace("__HAMN_RELEASE_MANIFEST_URL__",
-                            json.dumps(manifest_url))
-if "__HAMN_" in rendered:
-    raise SystemExit("installer template has an unresolved placeholder")
-with open(output_path, "w", encoding="utf-8", newline="\n") as output:
-    output.write(rendered)
-PY
-chmod 0755 "$ARTIFACT_ROOT/packaging/release/install.sh"
 
 HOST_ARTIFACT="$OUTPUT_DIR/hamn-${VERSION}-darwin-arm64.tar.gz"
 COPYFILE_DISABLE=1 tar -C "$WORK" -czf "$HOST_ARTIFACT" \
@@ -140,10 +106,46 @@ GUEST_ARTIFACT="$OUTPUT_DIR/hamn-${VERSION}-ubuntu-24.04-arm64.img"
 cp "$GUEST_IMAGE" "$GUEST_ARTIFACT"
 chmod 0644 "$GUEST_ARTIFACT"
 INSTALLER="$OUTPUT_DIR/install.sh"
-install -m 0755 "$ARTIFACT_ROOT/packaging/release/install.sh" "$INSTALLER"
 
 HOST_HASH=$(sha256_file "$HOST_ARTIFACT")
 GUEST_HASH=$(sha256_file "$GUEST_ARTIFACT")
+if [ -n "$RELEASE_REPOSITORY" ]; then
+    RELEASE_BASE="https://github.com/${RELEASE_REPOSITORY}/releases/download/${VERSION}"
+    HOST_URL="$RELEASE_BASE/$(basename "$HOST_ARTIFACT")"
+    GUEST_URL="$RELEASE_BASE/$(basename "$GUEST_ARTIFACT")"
+else
+    [ "$ALLOW_LOCAL" = 1 ] || fail "HAMN_RELEASE_REPOSITORY is required"
+    HOST_URL="file://$HOST_ARTIFACT"
+    GUEST_URL="file://$GUEST_ARTIFACT"
+fi
+python3 - "$ROOT/packaging/release/install.sh.in" "$INSTALLER" \
+    "$VERSION" "$COMMIT" "$HOST_URL" "$HOST_HASH" "$GUEST_URL" \
+    "$GUEST_HASH" <<'PY'
+import json
+import sys
+
+(template_path, output_path, version, commit, host_url, host_hash,
+ guest_url, guest_hash) = sys.argv[1:]
+with open(template_path, encoding="utf-8") as source:
+    rendered = source.read()
+values = {
+    "__HAMN_VERSION__": version,
+    "__HAMN_COMMIT__": commit,
+    "__HAMN_HOST_URL__": host_url,
+    "__HAMN_HOST_SHA256__": host_hash,
+    "__HAMN_GUEST_URL__": guest_url,
+    "__HAMN_GUEST_SHA256__": guest_hash,
+}
+for placeholder, value in values.items():
+    if rendered.count(placeholder) != 1:
+        raise SystemExit("installer template placeholder is malformed: " + placeholder)
+    rendered = rendered.replace(placeholder, json.dumps(value))
+if "__HAMN_" in rendered:
+    raise SystemExit("installer template has an unresolved placeholder")
+with open(output_path, "w", encoding="utf-8", newline="\n") as output:
+    output.write(rendered)
+PY
+chmod 0755 "$INSTALLER"
 INSTALLER_HASH=$(sha256_file "$INSTALLER")
 SBOM="$OUTPUT_DIR/hamn-${VERSION}.spdx.json"
 python3 - "$SBOM" "$VERSION" "$COMMIT" "$SOURCE_TREE" "$COMMIT_EPOCH" \

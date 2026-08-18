@@ -1,6 +1,6 @@
 #!/bin/bash
-# A fresh curl-style bootstrap must accept only a signed manifest, install the
-# exact candidate bytes, and leave the installed generation intact on failure.
+# A fresh curl-style bootstrap must accept only immutable release metadata,
+# install exact candidate bytes, and preserve the generation on failure.
 set -euo pipefail
 unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
 
@@ -12,16 +12,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-command -v ssh-keygen >/dev/null || {
-    echo "SKIP: ssh-keygen is unavailable" >&2
-    exit 0
-}
-
 sha256() {
     shasum -a 256 "$1" | awk '{print $1}'
 }
 
-ssh-keygen -q -t ed25519 -N '' -f "$WORK/release-key"
 printf 'preconfigured guest image fixture\n' >"$WORK/guest.img"
 RELEASE_REF=$(git -C "$ROOT" rev-parse HEAD)
 FAKE_BIN=$WORK/fake-bin
@@ -37,7 +31,6 @@ RELEASE_REF="$RELEASE_REF" \
 RELEASE_TAG=v0.0.1-rc.1 \
 OUTPUT_DIR="$WORK/non-arm64-candidate" \
 HAMN_GUEST_IMAGE="$WORK/guest.img" \
-HAMN_RELEASE_PUBLIC_KEY="$WORK/release-key.pub" \
 HAMN_RELEASE_ALLOW_DIRTY=1 \
     bash "$ROOT/packaging/release/build-candidate.sh" >"$WORK/non-arm64.out" \
     2>"$WORK/non-arm64.err"; then
@@ -47,13 +40,12 @@ fi
 grep -Fq 'release candidate must build on Apple Silicon arm64' \
     "$WORK/non-arm64.err"
 CANONICAL_REPOSITORY=example/hamn
-CANONICAL_MANIFEST_URL="https://github.com/$CANONICAL_REPOSITORY/releases/download/v0.0.1/hamn-update-manifest.json"
+CANONICAL_MANIFEST_URL="https://github.com/$CANONICAL_REPOSITORY/releases/latest/download/hamn-update-manifest.json"
 GITHUB_REPOSITORY="$CANONICAL_REPOSITORY" \
 RELEASE_REF="$RELEASE_REF" \
 RELEASE_TAG=v0.0.1-rc.1 \
 OUTPUT_DIR="$WORK/canonical-candidate" \
 HAMN_GUEST_IMAGE="$WORK/guest.img" \
-HAMN_RELEASE_PUBLIC_KEY="$WORK/release-key.pub" \
 HAMN_RELEASE_ALLOW_DIRTY=1 \
     bash "$ROOT/packaging/release/build-candidate.sh" >"$WORK/canonical-candidate.out"
 CANONICAL_HOST_ARTIFACT=$WORK/canonical-candidate/hamn-v0.0.1-darwin-arm64.tar.gz
@@ -63,10 +55,9 @@ CANONICAL_HOST_ARTIFACT=$WORK/canonical-candidate/hamn-v0.0.1-darwin-arm64.tar.g
     echo "FAIL: GitHub candidate did not embed the canonical stable manifest URL" >&2
     exit 1
 }
-tar -xOf "$CANONICAL_HOST_ARTIFACT" \
-    hamn-v0.0.1-darwin-arm64/packaging/release/install.sh |
-    grep -Fq "readonly HAMN_RELEASE_MANIFEST_URL=\"$CANONICAL_MANIFEST_URL\"" || {
-    echo "FAIL: GitHub candidate installer did not embed the canonical stable manifest URL" >&2
+grep -Fq "readonly HAMN_VERSION=\"v0.0.1\"" \
+    "$WORK/canonical-candidate/install.sh" || {
+    echo "FAIL: GitHub candidate installer did not embed the release version" >&2
     exit 1
 }
 if GITHUB_REPOSITORY="$CANONICAL_REPOSITORY" \
@@ -74,7 +65,6 @@ RELEASE_REF="$RELEASE_REF" \
 RELEASE_TAG=v0.0.1-rc.1 \
 OUTPUT_DIR="$WORK/rejected-candidate" \
 HAMN_GUEST_IMAGE="$WORK/guest.img" \
-HAMN_RELEASE_PUBLIC_KEY="$WORK/release-key.pub" \
 HAMN_RELEASE_MANIFEST_URL=https://downloads.example.invalid/other/manifest.json \
 HAMN_RELEASE_ALLOW_DIRTY=1 \
     bash "$ROOT/packaging/release/build-candidate.sh" >"$WORK/rejected-candidate.out" \
@@ -88,7 +78,6 @@ RELEASE_REF="$RELEASE_REF" \
 RELEASE_TAG=v0.0.1-rc.1 \
 OUTPUT_DIR="$WORK/candidate" \
 HAMN_GUEST_IMAGE="$WORK/guest.img" \
-HAMN_RELEASE_PUBLIC_KEY="$WORK/release-key.pub" \
 HAMN_RELEASE_MANIFEST_URL="file://$WORK/manifest.json" \
 HAMN_RELEASE_ALLOW_LOCAL=1 \
 HAMN_RELEASE_ALLOW_DIRTY=1 \
@@ -154,13 +143,12 @@ if checksums.get("hamn-v0.0.1-darwin-arm64.tar.gz") != [
     raise SystemExit("SBOM hashes do not bind candidate artifacts")
 PY
 printf '%s' \
-    '{"schemaVersion":1,"channel":"stable","version":"v0.0.1",' \
+    '{"schemaVersion":2,"channel":"stable","version":"v0.0.1",' \
+    '"commit":"'"$RELEASE_REF"'","validationMode":"github-hosted-no-vm",' \
     '"compatibility":{"os":"darwin","architecture":"arm64","minimumMacOS":"13.0"},' \
     '"artifacts":{"host":{"url":"file://'"$HOST_ARTIFACT"'","sha256":"'"$HOST_HASH"'"},' \
     '"guestImage":{"url":"file://'"$GUEST_ARTIFACT"'","sha256":"'"$GUEST_HASH"'"}}}' \
     >"$WORK/manifest.json"
-ssh-keygen -Y sign -f "$WORK/release-key" -n hamn-release \
-    "$WORK/manifest.json" >/dev/null
 
 HOME_DIR=$WORK/home
 mkdir -p "$HOME_DIR"
@@ -182,14 +170,14 @@ grep -Fq "\"sourceTree\":\"$(git -C "$ROOT" rev-parse HEAD^{tree})\"" \
     "$WORK/candidate/candidate.json"
 
 installed_target=$(readlink "$HOME_DIR/.local/bin/hamn")
-printf '\n' >>"$WORK/manifest.json"
+printf 'tampered\n' >>"$HOST_ARTIFACT"
 if HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     bash "$WORK/candidate/install.sh" >"$WORK/tampered.out" \
     2>"$WORK/tampered.err"; then
-    echo "FAIL: bootstrap accepted a modified manifest" >&2
+    echo "FAIL: bootstrap accepted a modified host artifact" >&2
     exit 1
 fi
-grep -Fq 'manifest signature verification failed' "$WORK/tampered.err"
+grep -Fq 'host artifact SHA-256 mismatch' "$WORK/tampered.err"
 [ "$(readlink "$HOME_DIR/.local/bin/hamn")" = "$installed_target" ]
 
-echo "PASS: candidate artifacts bootstrap atomically from a signed manifest"
+echo "PASS: candidate artifacts bootstrap atomically from immutable release metadata"

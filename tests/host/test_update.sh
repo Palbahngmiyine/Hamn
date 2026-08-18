@@ -1,6 +1,6 @@
 #!/bin/bash
-# Signed updates must make binary and guest selection changes recoverable when
-# the installer fails or the updater is interrupted.
+# Immutable-release updates must recover binary and guest selection changes
+# when the installer fails or the updater is interrupted.
 set -euo pipefail
 
 HAMN=${HAMN:-build/hamn}
@@ -11,11 +11,6 @@ cleanup() {
     make host VERSION=0.0.1-dev >/dev/null
 }
 trap cleanup EXIT
-
-command -v ssh-keygen >/dev/null || {
-    echo "SKIP: ssh-keygen is unavailable" >&2
-    exit 0
-}
 
 sha256() {
     shasum -a 256 "$1" | awk '{print $1}'
@@ -44,7 +39,6 @@ assert_active_state() {
 
 run_update() {
     HOME="$HOME_DIR" \
-    HAMN_UPDATE_PUBLIC_KEY="$WORK/release-key.pub" \
     HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
         "$BINDIR/hamn" update --manifest "$1"
 }
@@ -62,8 +56,6 @@ build_release() {
     COPYFILE_DISABLE=1 cp build/hamn "$root/bin/hamn"
     rsync -a --exclude '._*' scripts packaging "$root/"
     mkdir -p "$root/packaging/release"
-    COPYFILE_DISABLE=1 cp "$WORK/release-key.pub" \
-        "$root/packaging/release/hamn-release.pub"
     printf '%s\n' 'https://example.invalid/hamn-update-manifest.json' \
         >"$root/packaging/release/update-manifest-url"
     chmod 0644 "$root/packaging/release/update-manifest-url"
@@ -76,14 +68,13 @@ build_release() {
     host_hash=$(sha256 "$archive")
     guest_hash=$(sha256 "$guest")
     printf '%s' \
-        '{"schemaVersion":1,"channel":"stable","version":"v'"$version"'",' \
+        '{"schemaVersion":2,"channel":"stable","version":"v'"$version"'",' \
+        '"commit":"0123456789abcdef0123456789abcdef01234567",' \
+        '"validationMode":"github-hosted-no-vm",' \
         '"compatibility":{"os":"darwin","architecture":"arm64","minimumMacOS":"13.0"},' \
         '"artifacts":{"host":{"url":"file://'"$archive"'","sha256":"'"$host_hash"'"},' \
         '"guestImage":{"url":"file://'"$guest"'","sha256":"'"$guest_hash"'"}}}' \
         >"$manifest"
-    rm -f "$manifest.sig"
-    ssh-keygen -Y sign -f "$WORK/release-key" -n hamn-release "$manifest" \
-        >/dev/null
     printf '%s\n' "$manifest"
 }
 
@@ -113,8 +104,7 @@ old_target=$(readlink "$BINDIR/hamn")
 MANAGED_BINDIR=$(cd "$BINDIR" && pwd -P)
 MANAGED_DATADIR=$(cd "$DATADIR" && pwd -P)
 
-ssh-keygen -q -t ed25519 -N '' -f "$WORK/release-key"
-MANIFEST_2=$(build_release 0.0.2 'signed guest image v0.0.2' normal)
+MANIFEST_2=$(build_release 0.0.2 'immutable guest image v0.0.2' normal)
 run_update "$MANIFEST_2" >"$WORK/update.out"
 grep -Fq 'selected guest image is used for new profile disks' "$WORK/update.out"
 new_target=$(readlink "$BINDIR/hamn")
@@ -135,17 +125,17 @@ if HOME="$HOME_DIR" "$new_target" update --manifest "$MANIFEST_2" \
 fi
 grep -Fq 'managed hamn command symlink' "$WORK/direct.err"
 cp "$MANIFEST_2" "$WORK/bad-manifest.json"
-printf '\n' >>"$WORK/bad-manifest.json"
+printf '{' >"$WORK/bad-manifest.json"
 if run_update "$WORK/bad-manifest.json" \
     >"$WORK/bad.out" 2>"$WORK/bad.err"; then
     echo "FAIL: modified manifest was accepted" >&2
     exit 1
 fi
-assert_active_state "$new_target" "$selection_2" 'signature rejection'
+assert_active_state "$new_target" "$selection_2" 'manifest rejection'
 
 # An installer failure occurs after both payloads are staged but before either
 # public pointer may change.
-MANIFEST_FAIL=$(build_release 0.0.3 'signed guest image v0.0.3 failed' fail)
+MANIFEST_FAIL=$(build_release 0.0.3 'immutable guest image v0.0.3 failed' fail)
 if run_update "$MANIFEST_FAIL" >"$WORK/fail.out" 2>"$WORK/fail.err"; then
     echo "FAIL: failing host installer was accepted" >&2
     exit 1
@@ -159,13 +149,12 @@ HELPER=$(dirname "$(dirname "$new_target")")/share/hamn/src/scripts/update-host.
     echo "FAIL: cannot locate managed update helper" >&2
     exit 1
 }
-MANIFEST_3=$(build_release 0.0.3 'signed guest image v0.0.3' normal)
+MANIFEST_3=$(build_release 0.0.3 'immutable guest image v0.0.3' normal)
 
 TERM_READY=$WORK/term-ready
 TERM_RELEASE=$WORK/term-release
 mkfifo "$TERM_READY" "$TERM_RELEASE"
 HOME="$HOME_DIR" \
-HAMN_UPDATE_PUBLIC_KEY="$WORK/release-key.pub" \
 HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
 HAMN_TEST_UPDATE_AFTER_HOST_INSTALL_READY_FIFO="$TERM_READY" \
 HAMN_TEST_UPDATE_AFTER_HOST_INSTALL_RELEASE_FIFO="$TERM_RELEASE" \
@@ -184,7 +173,6 @@ KILL_READY=$WORK/kill-ready
 KILL_RELEASE=$WORK/kill-release
 mkfifo "$KILL_READY" "$KILL_RELEASE"
 HOME="$HOME_DIR" \
-HAMN_UPDATE_PUBLIC_KEY="$WORK/release-key.pub" \
 HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
 HAMN_TEST_UPDATE_AFTER_HOST_INSTALL_READY_FIFO="$KILL_READY" \
 HAMN_TEST_UPDATE_AFTER_HOST_INSTALL_RELEASE_FIFO="$KILL_RELEASE" \
@@ -237,4 +225,4 @@ HOME="$HOME_DIR" "$BINDIR/hamn" version | grep -Fxq 'hamn 0.0.3'
 [ ! -e "$HOME_DIR/.hamn/cache/.hamn-update-transaction" ] &&
     [ ! -L "$HOME_DIR/.hamn/cache/.hamn-update-transaction" ]
 
-echo "PASS: signed update rolls back installer failure and interruption safely"
+echo "PASS: immutable update rolls back installer failure and interruption safely"
