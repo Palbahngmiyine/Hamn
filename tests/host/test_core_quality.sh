@@ -353,6 +353,8 @@ for requirement in \
     '          sudo chmod a+r /boot/vmlinuz-*' \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
     '            libguestfs-test-tool' \
+    '          LIBGUESTFS_DEBUG=1 \' \
+    '          LIBGUESTFS_TRACE=1 \' \
     '            bash guest/image/build-ubuntu-24.04-arm64.sh' \
     '      - name: Attest completed guest image'; do
     printf '%s\n' "$guest_job" | grep -Fqx "$requirement" ||

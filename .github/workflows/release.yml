@@ -108,6 +108,8 @@ jobs:
             -n hamn-k3s-compatibility "$work/k3s-compatibility.json" >/dev/null
           LIBGUESTFS_BACKEND=direct \
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
+          LIBGUESTFS_DEBUG=1 \
+          LIBGUESTFS_TRACE=1 \
           HAMN_GUEST_BASE_IMAGE="$work/base.img" \
           HAMN_GUEST_BASE_SHA256="$base_hash" \
           HAMN_GUEST_OUTPUT="$RUNNER_TEMP/hamn-guest.img" \
