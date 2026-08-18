@@ -127,6 +127,12 @@ jobs:
             "$builder/input/k3s-compatibility.json.sig"
           install -m 0644 "$work/k3s-compatibility-key.pub" \
             "$builder/input/k3s-compatibility-key.pub"
+          git clone --quiet --no-hardlinks --no-checkout \
+            "$GITHUB_WORKSPACE" "$builder/source"
+          git -C "$builder/source" checkout --quiet --detach "$GITHUB_SHA"
+          git -C "$builder/source" remote remove origin
+          [ "$(git -C "$builder/source" rev-parse HEAD)" = "$GITHUB_SHA" ]
+          [ -z "$(git -C "$builder/source" status --porcelain)" ]
           guestfs_group=$(id -gn nobody)
           sudo chown -R "nobody:$guestfs_group" "$builder"
           guest_output="$builder/output/hamn-guest.img"
@@ -137,7 +143,7 @@ jobs:
           XDG_RUNTIME_DIR="$builder/runtime" \
           GIT_CONFIG_COUNT=1 \
           GIT_CONFIG_KEY_0=safe.directory \
-          GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE" \
+          GIT_CONFIG_VALUE_0="$builder/source" \
           LIBGUESTFS_BACKEND=direct \
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
           LIBGUESTFS_DEBUG=1 \
@@ -148,7 +154,7 @@ jobs:
           HAMN_K3S_COMPATIBILITY_MANIFEST="$builder/input/k3s-compatibility.json" \
           HAMN_K3S_COMPATIBILITY_SIGNATURE="$builder/input/k3s-compatibility.json.sig" \
           HAMN_RELEASE_PUBLIC_KEY="$builder/input/k3s-compatibility-key.pub" \
-            /bin/bash guest/image/build-ubuntu-24.04-arm64.sh
+            /bin/bash "$builder/source/guest/image/build-ubuntu-24.04-arm64.sh"
           install -m 0644 "$guest_output" "$RUNNER_TEMP/hamn-guest.img"
           install -m 0644 "$guest_output.sha256" "$RUNNER_TEMP/hamn-guest.img.sha256"
       - name: Attest completed guest image
