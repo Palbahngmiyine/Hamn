@@ -207,7 +207,7 @@ for requirement in \
     '"aarch64-linux"' \
     '"x86_64-linux"' \
     'devShells = forAllSystems' \
-    'release = pkgs.mkShell' \
+    'release = pkgs.mkShellNoCC' \
     '              kubectl' \
     'checks = forAllSystems' \
     '      actionlintVersion = "1.7.12";' \
@@ -256,11 +256,21 @@ for requirement in \
     '    runs-on: macos-14' \
     '        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1' \
     '        run: nix flake check --print-build-logs' \
-    '        run: nix develop .#ci --command make -j1 host' \
     '        run: nix develop .#ci --command make -j1 test-portable' \
-    '        run: nix develop .#ci --command make -j1 test-local-macos'; do
+    '      - name: Run macOS regression gates with the system Apple SDK' \
+    '          source scripts/ci/use-system-macos-sdk.sh' \
+    '          make -j1 test-local-macos'; do
     grep -Fqx "$requirement" "$ci_workflow" ||
         fail "Nix CI workflow is incomplete: $requirement"
+done
+
+for requirement in \
+    'SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)' \
+    'export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"' \
+    '[ "$(command -v clang)" = /usr/bin/clang ]' \
+    '[ "$(command -v codesign)" = /usr/bin/codesign ]'; do
+    grep -Fq "$requirement" "$ROOT/scripts/ci/use-system-macos-sdk.sh" ||
+        fail "system macOS SDK boundary is incomplete: $requirement"
 done
 
 release_please_workflow=$ROOT/.github/workflows/release-please.yml
@@ -347,6 +357,8 @@ grep -Fqx '          HAMN_VALIDATOR_PATH="$PATH" \' "$release_workflow" ||
     fail "candidate build and stable promotion must use the Nix CI shell"
 grep -Fqx '          make -j1 test-local-macos' "$release_workflow" ||
     fail "hosted candidate does not rerun the full local regression suite"
+grep -Fqx '          source scripts/ci/use-system-macos-sdk.sh' "$release_workflow" ||
+    fail "hosted candidate does not use the current system Apple SDK"
 if grep -Fq 'HAMN_RELEASE_TEST_FIXTURES' "$release_workflow"; then
     fail "release workflow must not enable fixture validation"
 fi
