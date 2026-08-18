@@ -48,7 +48,7 @@ jobs:
     name: Build completed guest image
     needs: prepare
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 60
+    timeout-minutes: 120
     permissions:
       attestations: write
       contents: read
@@ -66,7 +66,9 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             jq libguestfs-tools linux-image-virtual
           sudo chmod a+r /boot/vmlinuz-*
-          LIBGUESTFS_BACKEND=direct libguestfs-test-tool
+          LIBGUESTFS_BACKEND=direct \
+          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
+            libguestfs-test-tool
       - name: Build completed Ubuntu arm64 guest image
         shell: bash
         run: |
@@ -105,6 +107,7 @@ jobs:
           ssh-keygen -Y sign -f "$work/k3s-compatibility-key" \
             -n hamn-k3s-compatibility "$work/k3s-compatibility.json" >/dev/null
           LIBGUESTFS_BACKEND=direct \
+          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
           HAMN_GUEST_BASE_IMAGE="$work/base.img" \
           HAMN_GUEST_BASE_SHA256="$base_hash" \
           HAMN_GUEST_OUTPUT="$RUNNER_TEMP/hamn-guest.img" \

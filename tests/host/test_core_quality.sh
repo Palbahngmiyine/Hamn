@@ -345,12 +345,14 @@ guest_job=$(awk '
 ' "$release_workflow")
 for requirement in \
     '    runs-on: ubuntu-24.04-arm' \
+    '    timeout-minutes: 120' \
     '      attestations: write' \
     '      contents: read' \
     '      id-token: write' \
     '            jq libguestfs-tools linux-image-virtual' \
     '          sudo chmod a+r /boot/vmlinuz-*' \
-    '          LIBGUESTFS_BACKEND=direct libguestfs-test-tool' \
+    '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
+    '            libguestfs-test-tool' \
     '            bash guest/image/build-ubuntu-24.04-arm64.sh' \
     '      - name: Attest completed guest image'; do
     printf '%s\n' "$guest_job" | grep -Fqx "$requirement" ||
