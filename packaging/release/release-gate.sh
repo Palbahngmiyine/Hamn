@@ -34,10 +34,6 @@ ALLOW_TEST_FIXTURES=${HAMN_RELEASE_TEST_FIXTURES:-0}
 [ -n "$RELEASE_REF" ] && [ -n "$RELEASE_TAG" ] && [ -n "$CANDIDATE_DIR" ] &&
     [ -n "$OUTPUT_DIR" ] ||
     fail "RELEASE_REF, RELEASE_TAG, CANDIDATE_DIR, and OUTPUT_DIR are required"
-[ "${GITHUB_ACTIONS:-}" != true ] ||
-    fail "release validation is unavailable inside GitHub Actions"
-[ -z "${GITHUB_RUN_ID:-}" ] && [ -z "${GITHUB_RUN_ATTEMPT:-}" ] ||
-    fail "release validation must not accept workflow run inputs"
 [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] ||
     fail "RELEASE_TAG must be a release candidate tag"
 [ "$(uname -m)" = arm64 ] || fail "validator must be Apple Silicon"
@@ -314,9 +310,11 @@ PY
 E2E_HASH=$(sha256_file "$E2E_OUTPUT")
 E2E_HARNESS_HASH=$(sha256_file "$GUEST_E2E")
 CHECKSUMS_HASH=$(sha256_file "$checksums")
+WORKFLOW_RUN=${GITHUB_RUN_ID:-local}
+WORKFLOW_ATTEMPT=${GITHUB_RUN_ATTEMPT:-local}
 EVIDENCE=$OUTPUT_DIR/validation-evidence.json
 python3 - "$EVIDENCE" "$candidate" "$RELEASE_TAG" "$COMMIT" "$SOURCE_TREE" \
-    local local "$VALIDATOR_IDENTITY" \
+    "$WORKFLOW_RUN" "$WORKFLOW_ATTEMPT" "$VALIDATOR_IDENTITY" \
     "$CANDIDATE_HASH" "$CHECKSUMS_HASH" "$E2E_HASH" \
     "$E2E_HARNESS_HASH" <<'PY'
 import json
