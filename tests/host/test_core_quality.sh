@@ -190,6 +190,31 @@ if rg -n --glob '!test_core_quality.sh' \
     fail "build or test paths still refer to the removed mutable guest installer"
 fi
 
+for nix_file in flake.nix flake.lock; do
+    [ -f "$ROOT/$nix_file" ] && [ ! -L "$ROOT/$nix_file" ] ||
+        fail "Nix source is missing or unsafe: $nix_file"
+done
+command -v jq >/dev/null 2>&1 || fail "jq is required to validate flake.lock"
+jq -e '
+    .version == 7 and .root == "root" and
+    .nodes.root.inputs.nixpkgs == "nixpkgs" and
+    (.nodes.nixpkgs.locked.rev | test("^[0-9a-f]{40}$")) and
+    (.nodes.nixpkgs.locked.narHash | startswith("sha256-"))
+' "$ROOT/flake.lock" >/dev/null || fail "flake.lock does not pin nixpkgs"
+for requirement in \
+    '"aarch64-darwin"' \
+    '"x86_64-darwin"' \
+    '"aarch64-linux"' \
+    '"x86_64-linux"' \
+    'devShells = forAllSystems' \
+    'release = pkgs.mkShell' \
+    'packages = forAllSystems' \
+    'checks = forAllSystems' \
+    'actionlint -config-file'; do
+    grep -Fq "$requirement" "$ROOT/flake.nix" ||
+        fail "Nix flake is missing required integration: $requirement"
+done
+
 workflow_files=$(git -C "$ROOT" ls-files '.github/workflows/*.yml')
 [ "$workflow_files" = .github/workflows/release.yml ] ||
     fail "only the release workflow may remain"
