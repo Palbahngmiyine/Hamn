@@ -269,7 +269,7 @@ for requirement in \
 done
 
 for requirement in \
-    'SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)' \
+    'SDKROOT=$(env -u SDKROOT -u DEVELOPER_DIR \' \
     'export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"' \
     '[ "$(command -v clang)" = /usr/bin/clang ]' \
     '[ "$(command -v codesign)" = /usr/bin/codesign ]'; do
