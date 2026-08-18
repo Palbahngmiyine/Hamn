@@ -278,7 +278,10 @@ for requirement in \
     "      - '.release-please-manifest.json'" \
     '  contents: read' \
     '    name: Resolve Release Please version' \
-    '        run: bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"'; do
+    '        run: bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"' \
+    '      - name: Require GitHub Verified release commit' \
+    '          [ "$verified" = true ] || {' \
+    '            echo "release commit must be GitHub Verified" >&2'; do
     grep -Fqx "$requirement" "$release_workflow" ||
         fail "automated release trigger is incomplete: $requirement"
 done
