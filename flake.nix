@@ -3,7 +3,7 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/25.05";
 
-  outputs = { self, nixpkgs }:
+  outputs = { nixpkgs, ... }:
     let
       systems = [
         "aarch64-darwin"
@@ -14,6 +14,7 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
       pkgsFor = system: nixpkgs.legacyPackages.${system};
       source = nixpkgs.lib.cleanSource ./.;
+      hamnVersion = "0.0.1"; # x-release-please-version
       actionlintVersion = "1.7.12";
       actionlintArchives = {
         "aarch64-darwin" = {
@@ -76,66 +77,25 @@
             ];
         in
         {
-          default = pkgs.mkShell {
+          default = pkgs.mkShellNoCC {
             packages = ciPackages;
+            HAMN_VERSION = hamnVersion;
           };
 
-          ci = pkgs.mkShell {
+          ci = pkgs.mkShellNoCC {
             packages = ciPackages;
+            HAMN_VERSION = hamnVersion;
           };
 
-          release = pkgs.mkShell {
+          release = pkgs.mkShellNoCC {
             packages = ciPackages ++ (with pkgs; [
               go_1_23
               kubectl
               maven
               nodejs_22
             ]);
+            HAMN_VERSION = hamnVersion;
           };
-        });
-
-      packages = forAllSystems (system:
-        let
-          pkgs = pkgsFor system;
-        in
-        pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-          hamn = pkgs.stdenv.mkDerivation {
-            pname = "hamn";
-            version = "0.0.1"; # x-release-please-version
-            src = source;
-            nativeBuildInputs = [ pkgs.gnumake ];
-            buildInputs = [ pkgs.zlib ];
-            dontConfigure = true;
-
-            buildPhase = ''
-              runHook preBuild
-              make -j$NIX_BUILD_CORES host VERSION=$version
-              runHook postBuild
-            '';
-
-            installPhase = ''
-              runHook preInstall
-              mkdir -p $out/bin
-              install -m 0755 build/hamn $out/bin/hamn
-              runHook postInstall
-            '';
-
-            doInstallCheck = true;
-            installCheckPhase = ''
-              $out/bin/hamn version | grep -Fx "hamn $version"
-              /usr/bin/codesign --verify --strict $out/bin/hamn
-            '';
-
-            meta = {
-              description = "Apple Virtualization container runtime for macOS";
-              homepage = "https://github.com/Palbahngmiyine/Hamn";
-              license = pkgs.lib.licenses.mit;
-              mainProgram = "hamn";
-              platforms = pkgs.lib.platforms.darwin;
-            };
-          };
-
-          default = self.packages.${system}.hamn;
         });
 
       checks = forAllSystems (system:
@@ -150,8 +110,6 @@
               ${source}/.github/workflows/*.yml
             touch $out
           '';
-        } // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
-          package = self.packages.${system}.hamn;
         });
     };
 }

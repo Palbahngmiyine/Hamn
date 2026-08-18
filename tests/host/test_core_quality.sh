@@ -209,10 +209,9 @@ for requirement in \
     'devShells = forAllSystems' \
     'release = pkgs.mkShell' \
     '              kubectl' \
-    'packages = forAllSystems' \
     'checks = forAllSystems' \
     '      actionlintVersion = "1.7.12";' \
-    '            buildInputs = [ pkgs.zlib ];' \
+    '          ci = pkgs.mkShellNoCC {' \
     'actionlint -config-file'; do
     grep -Fq "$requirement" "$ROOT/flake.nix" ||
         fail "Nix flake is missing required integration: $requirement"
@@ -234,7 +233,7 @@ grep -Fxq '0.0.1' "$ROOT/version.txt" ||
 grep -Fq 'x-release-please-start-version' "$ROOT/Makefile" ||
     fail "Release Please does not update the Makefile version"
 grep -Fq 'x-release-please-version' "$ROOT/flake.nix" ||
-    fail "Release Please does not update the Nix package version"
+    fail "Release Please does not update the Nix tooling version"
 
 workflow_files=$(cd "$ROOT" && find .github/workflows -type f -name '*.yml' | LC_ALL=C sort)
 expected_workflows=$(printf '%s\n' \
@@ -257,7 +256,7 @@ for requirement in \
     '    runs-on: macos-14' \
     '        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1' \
     '        run: nix flake check --print-build-logs' \
-    '        run: nix build .#hamn --print-build-logs' \
+    '        run: nix develop .#ci --command make -j1 host' \
     '        run: nix develop .#ci --command make -j1 test-portable' \
     '        run: nix develop .#ci --command make -j1 test-local-macos'; do
     grep -Fqx "$requirement" "$ci_workflow" ||

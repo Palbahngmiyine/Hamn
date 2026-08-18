@@ -21,7 +21,7 @@ write_sources() {
     printf '%s\n' "$version" >"$REPO/version.txt"
     printf '# x-release-please-start-version\nVERSION    ?= %s\n# x-release-please-end\n' \
         "$version" >"$REPO/Makefile"
-    printf '          version = "%s"; # x-release-please-version\n' "$version" \
+    printf '      hamnVersion = "%s"; # x-release-please-version\n' "$version" \
         >"$REPO/flake.nix"
 }
 
