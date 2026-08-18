@@ -67,11 +67,15 @@ repos/example/hamn/actions/runners)
     if [ "${HAMN_TEST_RUNNER:-0}" = 1 ]; then
         printf '%s\n' '{"runners":[{"name":"unsafe-runner"}]}'
     else
-        printf '%s\n' '{"runners":[{"name":"hamn-validator","os":"macOS","architecture":"ARM64","status":"online","labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"hamn-validator"}]}]}'
+        printf '%s\n' '{"runners":[]}'
     fi
     ;;
 repos/example/hamn/actions/variables)
-    printf '%s\n' '{"variables":[{"name":"HAMN_GUEST_IMAGE_URL"},{"name":"HAMN_GUEST_IMAGE_SHA256"},{"name":"HAMN_RELEASE_PUBLIC_KEY"},{"name":"HAMN_VALIDATOR_IDENTITY"},{"name":"HAMN_VALIDATOR_PUBLIC_KEY"}]}'
+    if [ "${HAMN_TEST_VARIABLE:-0}" = 1 ]; then
+        printf '%s\n' '{"variables":[{"name":"UNTRUSTED_RELEASE_INPUT"}]}'
+    else
+        printf '%s\n' '{"variables":[]}'
+    fi
     ;;
 repos/example/hamn/actions/secrets)
     if [ "${HAMN_TEST_RELEASE_PLEASE_SECRET:-0}" = 1 ]; then
@@ -81,17 +85,27 @@ repos/example/hamn/actions/secrets)
     fi
     ;;
 repos/example/hamn/environments)
-    printf '%s\n' '{"environments":[{"name":"hamn-validation"},{"name":"hamn-promotion"}]}'
+    printf '%s\n' '{"environments":[{"name":"hamn-promotion"}]}'
     ;;
-repos/example/hamn/environments/hamn-validation/secrets)
-    if [ "${HAMN_TEST_SECRET:-0}" = 1 ]; then
-        printf '%s\n' '{"secrets":[]}'
-    else
-        printf '%s\n' '{"secrets":[{"name":"HAMN_VALIDATOR_SIGNING_KEY"}]}'
-    fi
+repos/example/hamn/environments/hamn-promotion)
+    printf '%s\n' '{"id":7,"name":"hamn-promotion","can_admins_bypass":false,"protection_rules":[{"id":8,"type":"branch_policy"}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
     ;;
 repos/example/hamn/environments/hamn-promotion/secrets)
-    printf '%s\n' '{"secrets":[{"name":"HAMN_RELEASE_SIGNING_KEY"}]}'
+    if [ "${HAMN_TEST_SECRET:-0}" = 1 ]; then
+        printf '%s\n' '{"secrets":[{"name":"HAMN_RELEASE_SIGNING_KEY"}]}'
+    else
+        printf '%s\n' '{"secrets":[]}'
+    fi
+    ;;
+repos/example/hamn/environments/hamn-promotion/variables)
+    printf '%s\n' '{"variables":[]}'
+    ;;
+repos/example/hamn/environments/hamn-promotion/deployment-branch-policies)
+    if [ "${HAMN_TEST_BRANCH_POLICY:-0}" = 1 ]; then
+        printf '%s\n' '{"branch_policies":[{"name":"release/*","type":"branch"}]}'
+    else
+        printf '%s\n' '{"branch_policies":[{"name":"main","type":"branch"}]}'
+    fi
     ;;
 repos/example/hamn/rulesets)
     printf '%s\n' '[{"id":1,"name":"protect-main-and-release-workflow","enforcement":"active"},{"id":2,"name":"immutable-stable-releases","enforcement":"active"}]'
@@ -146,9 +160,13 @@ assert_failure HAMN_TEST_UNSAFE_ACTION \
 assert_failure HAMN_TEST_RELEASE_PLEASE_SECRET \
     'repository secrets must contain only RELEASE_PLEASE_TOKEN' release-please-secret
 assert_failure HAMN_TEST_RUNNER \
-    'an online macOS ARM64 hamn-validator runner is required' runner
+    'keyless hosted releases must not use repository self-hosted runners' runner
+assert_failure HAMN_TEST_VARIABLE \
+    'keyless hosted releases must not depend on repository variables' variable
 assert_failure HAMN_TEST_SECRET \
-    'hamn-validation must contain only HAMN_VALIDATOR_SIGNING_KEY' secret
+    'hamn-promotion must not contain secrets or variables' secret
+assert_failure HAMN_TEST_BRANCH_POLICY \
+    'hamn-promotion must allow only the main branch' branch-policy
 assert_failure HAMN_TEST_WEAK_RULESET \
     'main pull request rules are not solo-maintainer safe' ruleset
 assert_failure HAMN_TEST_COLLABORATOR \

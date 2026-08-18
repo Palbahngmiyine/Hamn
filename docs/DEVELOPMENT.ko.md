@@ -44,12 +44,15 @@ make test-uninstall
 make test-update
 make test-kubernetes-cli
 make test-release-artifacts
-make test-release-gate
+make test-hosted-validation
 make test-release-publish
 ```
 
 `make test-local-macos`는 적용 가능한 host/source gate를 직렬로 실행하며
 `actionlint`도 필요합니다.
+
+`make test-release-gate`는 maintainer 실험용 선택적 physical VM E2E harness로
+남아 있습니다. `test-local-macos` 또는 자동 release authority에는 포함되지 않습니다.
 
 Shared host binary를 다시 만드는 source test를 동시에 실행하지 마세요.
 

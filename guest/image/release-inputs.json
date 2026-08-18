@@ -1,0 +1,13 @@
+{
+  "ubuntu": {
+    "url": "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img",
+    "sha256": "4a281a921b8d7db952895ab619736f10efe9f63e111fa5b5779ed18f023818aa"
+  },
+  "k3s": {
+    "version": "v1.36.2+k3s1",
+    "binaryUrl": "https://github.com/k3s-io/k3s/releases/download/v1.36.2%2Bk3s1/k3s-arm64",
+    "binarySha256": "1dc5fc17f15c28fa0a3f011cee28ad613f918c3d967a426e5a05d43ddb239817",
+    "airgapUrl": "https://github.com/k3s-io/k3s/releases/download/v1.36.2%2Bk3s1/k3s-airgap-images-arm64.tar.zst",
+    "airgapSha256": "26a5528bb00c7beac8c88399af77c71123e74fedbba5b03c1c5ae003c838880f"
+  }
+}

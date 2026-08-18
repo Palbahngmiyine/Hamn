@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.release-please-manifest.json'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,7 +16,7 @@ concurrency:
 
 jobs:
   prepare:
-    name: Resolve Release Please version
+    name: Resolve release version
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -30,17 +31,103 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Resolve version manifest transition
+      - name: Resolve push or recovery request
         id: release
         shell: bash
         env:
           PREVIOUS_REF: ${{ github.event.before }}
-        run: bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"
+          else
+            bash packaging/release/resolve-release-request.sh
+          fi
+
+  guest-image:
+    if: needs.prepare.outputs.should_release == 'true'
+    name: Build completed guest image
+    needs: prepare
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out exact release commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install immutable image builder
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libguestfs-tools jq
+      - name: Build completed Ubuntu arm64 guest image
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/hamn-guest-inputs"
+          mkdir "$work"
+          inputs=guest/image/release-inputs.json
+          base_url=$(jq -er '.ubuntu.url' "$inputs")
+          base_hash=$(jq -er '.ubuntu.sha256' "$inputs")
+          k3s_version=$(jq -er '.k3s.version' "$inputs")
+          binary_url=$(jq -er '.k3s.binaryUrl' "$inputs")
+          binary_hash=$(jq -er '.k3s.binarySha256' "$inputs")
+          airgap_url=$(jq -er '.k3s.airgapUrl' "$inputs")
+          airgap_hash=$(jq -er '.k3s.airgapSha256' "$inputs")
+          curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --retry 3 --retry-delay 1 -o "$work/base.img" "$base_url"
+          printf '%s  %s\n' "$base_hash" "$work/base.img" | sha256sum -c -
+          python3 - "$work/k3s-compatibility.json" "$k3s_version" \
+            "$binary_url" "$binary_hash" "$airgap_url" "$airgap_hash" <<'PY'
+          import json
+          import sys
+
+          path, version, binary_url, binary_hash, airgap_url, airgap_hash = sys.argv[1:]
+          value = {
+              "schemaVersion": 1,
+              "version": version,
+              "architecture": "arm64",
+              "binary": {"url": binary_url, "sha256": binary_hash},
+              "airgapImages": {"url": airgap_url, "sha256": airgap_hash},
+          }
+          with open(path, "w", encoding="utf-8", newline="\n") as output:
+              json.dump(value, output, sort_keys=True, separators=(",", ":"))
+              output.write("\n")
+          PY
+          ssh-keygen -q -t ed25519 -N '' -f "$work/k3s-compatibility-key"
+          ssh-keygen -Y sign -f "$work/k3s-compatibility-key" \
+            -n hamn-k3s-compatibility "$work/k3s-compatibility.json" >/dev/null
+          LIBGUESTFS_BACKEND=direct \
+          HAMN_GUEST_BASE_IMAGE="$work/base.img" \
+          HAMN_GUEST_BASE_SHA256="$base_hash" \
+          HAMN_GUEST_OUTPUT="$RUNNER_TEMP/hamn-guest.img" \
+          HAMN_K3S_COMPATIBILITY_MANIFEST="$work/k3s-compatibility.json" \
+          HAMN_K3S_COMPATIBILITY_SIGNATURE="$work/k3s-compatibility.json.sig" \
+          HAMN_RELEASE_PUBLIC_KEY="$work/k3s-compatibility-key.pub" \
+            bash guest/image/build-ubuntu-24.04-arm64.sh
+          rm -f "$work/k3s-compatibility-key" "$work/k3s-compatibility-key.pub"
+      - name: Attest completed guest image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/hamn-guest.img
+      - name: Upload completed guest image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hamn-guest-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/hamn-guest.img
+            ${{ runner.temp }}/hamn-guest.img.sha256
+          if-no-files-found: error
+          retention-days: 14
 
   candidate:
     if: needs.prepare.outputs.should_release == 'true'
-    name: Build exact release candidate
-    needs: prepare
+    name: Build and validate exact candidate
+    needs: [prepare, guest-image]
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
@@ -58,60 +145,62 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || {
-            echo "release candidate must run on a GitHub-hosted runner" >&2
-            exit 2
-          }
-          [ "$RUNNER_OS" = macOS ] || {
-            echo "release candidate must run on macOS" >&2
-            exit 2
-          }
-          [ "$RUNNER_ARCH" = ARM64 ] || {
-            echo "release candidate must run on ARM64" >&2
-            exit 2
-          }
-          [ "$(uname -m)" = arm64 ] || {
-            echo "release candidate must run on Apple Silicon arm64" >&2
-            exit 2
-          }
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ]
+          [ "$RUNNER_OS" = macOS ]
+          [ "$RUNNER_ARCH" = ARM64 ]
+          [ "$(uname -m)" = arm64 ]
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Test source and build candidate
+      - name: Download completed guest image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hamn-guest-${{ github.sha }}
+          path: ${{ runner.temp }}/hamn-guest
+      - name: Verify keyless guest-image provenance
         shell: bash
         env:
-          HAMN_GUEST_IMAGE_URL: ${{ vars.HAMN_GUEST_IMAGE_URL }}
-          HAMN_GUEST_IMAGE_SHA256: ${{ vars.HAMN_GUEST_IMAGE_SHA256 }}
-          HAMN_RELEASE_PUBLIC_KEY_TEXT: ${{ vars.HAMN_RELEASE_PUBLIC_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "$RUNNER_TEMP/hamn-guest/hamn-guest.img" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+      - name: Test source, build candidate, and record hosted validation
+        shell: bash
+        env:
           RELEASE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
         run: |
+          set -euo pipefail
+          (cd "$RUNNER_TEMP/hamn-guest" && shasum -a 256 -c hamn-guest.img.sha256)
           system_sdk=$(env -u SDKROOT -u DEVELOPER_DIR \
             /usr/bin/xcrun --sdk macosx --show-sdk-path)
           HAMN_SYSTEM_SDKROOT="$system_sdk" \
           nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
           source scripts/ci/use-system-macos-sdk.sh
           make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos
-          test -n "$HAMN_GUEST_IMAGE_URL"
-          test "$HAMN_GUEST_IMAGE_SHA256" != ""
-          test "$HAMN_GUEST_IMAGE_SHA256" = "$(printf '%s' "$HAMN_GUEST_IMAGE_SHA256" | tr -d '\n' | grep -E '^[0-9a-f]{64}$')"
-          case "$HAMN_GUEST_IMAGE_URL" in https://*) ;; *) exit 2 ;; esac
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
-            -o "$RUNNER_TEMP/hamn-guest.img" "$HAMN_GUEST_IMAGE_URL"
-          test "$HAMN_GUEST_IMAGE_SHA256" = "$(shasum -a 256 "$RUNNER_TEMP/hamn-guest.img" | awk '{print $1}')"
-          umask 077
-          printf '%s\n' "$HAMN_RELEASE_PUBLIC_KEY_TEXT" > "$RUNNER_TEMP/hamn-release.pub"
           make release-candidate \
             RELEASE_REF="$GITHUB_SHA" \
             RELEASE_TAG="$RELEASE_TAG" \
             OUTPUT_DIR="$RUNNER_TEMP/hamn-candidate" \
-            HAMN_GUEST_IMAGE="$RUNNER_TEMP/hamn-guest.img" \
-            HAMN_RELEASE_PUBLIC_KEY="$RUNNER_TEMP/hamn-release.pub"
+            HAMN_GUEST_IMAGE="$RUNNER_TEMP/hamn-guest/hamn-guest.img"
+          make release-hosted-validation \
+            RELEASE_REF="$GITHUB_SHA" \
+            RELEASE_TAG="$RELEASE_TAG" \
+            CANDIDATE_DIR="$RUNNER_TEMP/hamn-candidate" \
+            OUTPUT_DIR="$RUNNER_TEMP/hamn-evidence"
           NIX_SHELL
       - name: Attest exact candidate artifact provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/hamn-candidate/SHA256SUMS
+      - name: Attest hosted validation evidence
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/hamn-evidence/hosted-validation-evidence.json
       - name: Upload exact candidate bytes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -119,74 +208,7 @@ jobs:
           path: ${{ runner.temp }}/hamn-candidate
           if-no-files-found: error
           retention-days: 14
-
-  validate:
-    if: needs.prepare.outputs.should_release == 'true'
-    name: Validate exact candidate on physical Apple Silicon
-    needs: [prepare, candidate]
-    runs-on:
-      - self-hosted
-      - macOS
-      - ARM64
-      - hamn-validator
-    environment: hamn-validation
-    timeout-minutes: 240
-    permissions:
-      contents: read
-    steps:
-      - name: Check out exact release commit
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Download exact candidate bytes
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: hamn-candidate-${{ github.sha }}
-          path: ${{ runner.temp }}/hamn-candidate
-      - name: Run physical VM, Docker, K3s, and Colima coexistence gate
-        shell: bash
-        env:
-          HAMN_VALIDATOR_SIGNING_KEY_TEXT: ${{ secrets.HAMN_VALIDATOR_SIGNING_KEY }}
-          HAMN_VALIDATOR_IDENTITY: ${{ vars.HAMN_VALIDATOR_IDENTITY }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
-        run: |
-          nix develop .#release --command bash -euo pipefail <<'NIX_SHELL'
-          validator_key=
-          cleanup_validator_key() {
-            local status=$?
-            trap - EXIT HUP INT TERM
-            if [ -n "${validator_key:-}" ] && { [ -e "$validator_key" ] || [ -L "$validator_key" ]; }; then
-              rm -f -- "$validator_key" || {
-                echo "cannot remove validator signing key from runner temporary storage" >&2
-                [ "$status" -ne 0 ] || status=1
-              }
-            fi
-            unset HAMN_VALIDATOR_SIGNING_KEY_TEXT HAMN_VALIDATOR_SIGNING_KEY
-            exit "$status"
-          }
-          trap cleanup_validator_key EXIT
-          trap 'exit 129' HUP
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-          test -n "$HAMN_VALIDATOR_SIGNING_KEY_TEXT"
-          umask 077
-          validator_key="$RUNNER_TEMP/hamn-validator-signing-key"
-          printf '%s\n' "$HAMN_VALIDATOR_SIGNING_KEY_TEXT" > "$validator_key"
-          chmod 0600 "$validator_key"
-          unset HAMN_VALIDATOR_SIGNING_KEY_TEXT
-          HAMN_VALIDATOR_PATH="$PATH" \
-          HAMN_VALIDATOR_SIGNING_KEY="$validator_key" make release-gate \
-            RELEASE_REF="$GITHUB_SHA" \
-            RELEASE_TAG="$RELEASE_TAG" \
-            CANDIDATE_DIR="$RUNNER_TEMP/hamn-candidate" \
-            OUTPUT_DIR="$RUNNER_TEMP/hamn-evidence"
-          NIX_SHELL
-      - name: Upload signed validation evidence
+      - name: Upload hosted validation evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hamn-evidence-${{ github.sha }}
@@ -196,76 +218,70 @@ jobs:
 
   publish:
     if: needs.prepare.outputs.should_release == 'true'
-    name: Publish validated release automatically
-    needs: [prepare, candidate, validate]
+    name: Publish immutable keyless release
+    needs: [prepare, candidate]
     runs-on: macos-15
     environment: hamn-promotion
     timeout-minutes: 30
     permissions:
+      attestations: write
       contents: write
+      id-token: write
     steps:
       - name: Check out exact release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install Nix
-        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
-        with:
-          github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Download exact candidate bytes
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: hamn-candidate-${{ github.sha }}
           path: ${{ runner.temp }}/hamn-release-input/hamn-candidate
-      - name: Download signed validation evidence
+      - name: Download hosted validation evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: hamn-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/hamn-release-input/hamn-evidence
-      - name: Verify evidence and generate canonical manifest
+      - name: Verify keyless build provenance
         shell: bash
         env:
-          HAMN_VALIDATOR_PUBLIC_KEY_TEXT: ${{ vars.HAMN_VALIDATOR_PUBLIC_KEY }}
-          HAMN_RELEASE_SIGNING_KEY_TEXT: ${{ secrets.HAMN_RELEASE_SIGNING_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          candidate="$RUNNER_TEMP/hamn-release-input/hamn-candidate"
+          while read -r digest name; do
+            [ -n "$digest" ] && [ -n "$name" ]
+            gh attestation verify "$candidate/$name" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-digest "$GITHUB_SHA" \
+              --deny-self-hosted-runners
+          done < "$candidate/SHA256SUMS"
+          gh attestation verify \
+            "$RUNNER_TEMP/hamn-release-input/hamn-evidence/hosted-validation-evidence.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
+      - name: Verify hosted evidence and generate immutable manifest
+        shell: bash
+        env:
           HAMN_RELEASE_REPOSITORY: ${{ github.repository }}
           STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
           CANDIDATE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
         run: |
-          nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
+          set -euo pipefail
           mkdir "$RUNNER_TEMP/hamn-publish"
-          validator_public_key=
-          release_key=
-          cleanup_publish_keys() {
-            local status=$?
-            trap - EXIT HUP INT TERM
-            if ! rm -f -- "$validator_public_key" "$release_key"; then
-              echo "cannot remove release signing material from runner temporary storage" >&2
-              [ "$status" -ne 0 ] || status=1
-            fi
-            unset HAMN_VALIDATOR_PUBLIC_KEY_TEXT HAMN_RELEASE_SIGNING_KEY_TEXT \
-                HAMN_VALIDATOR_PUBLIC_KEY HAMN_RELEASE_SIGNING_KEY
-            exit "$status"
-          }
-          trap cleanup_publish_keys EXIT
-          trap 'exit 129' HUP
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-          umask 077
-          validator_public_key="$RUNNER_TEMP/hamn-validator.pub"
-          release_key="$RUNNER_TEMP/hamn-release"
-          printf '%s\n' "$HAMN_VALIDATOR_PUBLIC_KEY_TEXT" > "$validator_public_key"
-          printf '%s\n' "$HAMN_RELEASE_SIGNING_KEY_TEXT" > "$release_key"
-          chmod 0600 "$validator_public_key" "$release_key"
-          unset HAMN_VALIDATOR_PUBLIC_KEY_TEXT HAMN_RELEASE_SIGNING_KEY_TEXT
-          HAMN_VALIDATOR_PUBLIC_KEY="$validator_public_key" \
-          HAMN_RELEASE_SIGNING_KEY="$release_key" \
           HAMN_EXPECTED_WORKFLOW_RUN="$GITHUB_RUN_ID" \
           HAMN_EXPECTED_WORKFLOW_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
           bash packaging/release/publish-release.sh \
             "$STABLE_TAG" "$CANDIDATE_TAG" "$GITHUB_SHA" \
             "$RUNNER_TEMP/hamn-release-input" "$RUNNER_TEMP/hamn-publish"
-          NIX_SHELL
+      - name: Attest immutable update manifest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/hamn-publish/hamn-update-manifest.json
       - name: Create and verify draft release
         shell: bash
         env:
@@ -277,30 +293,22 @@ jobs:
             echo "stable release already exists" >&2
             exit 2
           fi
-          if git ls-remote --exit-code --refs origin "refs/tags/$STABLE_TAG" >/dev/null; then
-            echo "stable tag already exists without this release" >&2
-            exit 2
-          else
-            status=$?
-            [ "$status" -eq 2 ] || exit "$status"
-          fi
+          candidate="$RUNNER_TEMP/hamn-release-input/hamn-candidate"
+          publish="$RUNNER_TEMP/hamn-publish"
           gh release create "$STABLE_TAG" \
-            "$RUNNER_TEMP/hamn-release-input/hamn-candidate/hamn-${STABLE_TAG}-darwin-arm64.tar.gz" \
-            "$RUNNER_TEMP/hamn-release-input/hamn-candidate/hamn-${STABLE_TAG}-ubuntu-24.04-arm64.img" \
-            "$RUNNER_TEMP/hamn-release-input/hamn-candidate/hamn-${STABLE_TAG}.spdx.json" \
-            "$RUNNER_TEMP/hamn-release-input/hamn-candidate/install.sh" \
-            "$RUNNER_TEMP/hamn-publish/hamn-update-manifest.json" \
-            "$RUNNER_TEMP/hamn-publish/hamn-update-manifest.json.sig" \
-            "$RUNNER_TEMP/hamn-publish/validation-evidence.json" \
-            "$RUNNER_TEMP/hamn-publish/validation-evidence.json.sig" \
-            "$RUNNER_TEMP/hamn-publish/e2e.json" \
-            --draft \
-            --target "$GITHUB_SHA" \
-            --title "Hamn $STABLE_TAG" \
+            "$candidate/hamn-${STABLE_TAG}-darwin-arm64.tar.gz" \
+            "$candidate/hamn-${STABLE_TAG}-ubuntu-24.04-arm64.img" \
+            "$candidate/hamn-${STABLE_TAG}.spdx.json" \
+            "$candidate/install.sh" \
+            "$publish/hamn-update-manifest.json" \
+            "$publish/hosted-validation-evidence.json" \
+            "$publish/candidate.json" \
+            "$publish/SHA256SUMS" \
+            "$publish/promoted-from-rc" \
+            --draft --target "$GITHUB_SHA" --title "Hamn $STABLE_TAG" \
             --generate-notes \
-            --notes "Created automatically after Release Please versioning and exact-byte physical validation."
-          gh release view "$STABLE_TAG" \
-            --json tagName,targetCommitish,isDraft,isPrerelease,assets \
+            --notes "Built, tested, and attested on GitHub-hosted runners. Live Hamn VM E2E was not run."
+          gh release view "$STABLE_TAG" --json tagName,targetCommitish,isDraft,isPrerelease,assets \
             > "$RUNNER_TEMP/hamn-draft-release.json"
           python3 - "$RUNNER_TEMP/hamn-draft-release.json" "$STABLE_TAG" "$GITHUB_SHA" <<'PY'
           import json
@@ -313,22 +321,17 @@ jobs:
               "hamn-" + tag + "-darwin-arm64.tar.gz",
               "hamn-" + tag + "-ubuntu-24.04-arm64.img",
               "hamn-" + tag + ".spdx.json",
-              "install.sh",
-              "hamn-update-manifest.json",
-              "hamn-update-manifest.json.sig",
-              "validation-evidence.json",
-              "validation-evidence.json.sig",
-              "e2e.json",
+              "install.sh", "hamn-update-manifest.json",
+              "hosted-validation-evidence.json", "candidate.json",
+              "SHA256SUMS", "promoted-from-rc",
           }
-          assets = release.get("assets")
-          names = {asset.get("name") for asset in assets if isinstance(asset, dict)} \
-              if isinstance(assets, list) else set()
+          names = {asset.get("name") for asset in release.get("assets", [])}
           if release.get("tagName") != tag or release.get("targetCommitish") != commit or \
                   release.get("isDraft") is not True or \
                   release.get("isPrerelease") is not False or names != expected:
-              raise SystemExit("draft release does not bind every validated artifact")
+              raise SystemExit("draft release does not bind every keyless artifact")
           PY
-      - name: Publish immutable release and verify tag
+      - name: Publish immutable release and verify assets
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -336,13 +339,14 @@ jobs:
         run: |
           set -euo pipefail
           gh release edit "$STABLE_TAG" --draft=false --latest
-          stable_probe="refs/hamn-release/stable-$GITHUB_RUN_ID"
-          git fetch --no-tags origin "+refs/tags/${STABLE_TAG}:${stable_probe}"
-          stable_commit=$(git rev-parse --verify "${stable_probe}^{commit}")
-          [ "$stable_commit" = "$GITHUB_SHA" ] || {
-            echo "automatic stable tag does not resolve to the validated commit" >&2
-            exit 2
-          }
-          gh release view "$STABLE_TAG" --json tagName,isDraft,isPrerelease \
-            --jq 'select(.tagName == env.STABLE_TAG and .isDraft == false and .isPrerelease == false) | .tagName' \
+          gh release view "$STABLE_TAG" \
+            --json tagName,targetCommitish,isDraft,isPrerelease,isImmutable \
+            --jq 'select(.tagName == env.STABLE_TAG and .targetCommitish == env.GITHUB_SHA and .isDraft == false and .isPrerelease == false and .isImmutable == true) | .tagName' \
             | grep -Fxq "$STABLE_TAG"
+          download="$RUNNER_TEMP/hamn-release-download"
+          mkdir "$download"
+          gh release download "$STABLE_TAG" --dir "$download"
+          for file in "$download"/*; do
+            gh release verify-asset "$STABLE_TAG" "$file"
+          done
+          gh release verify "$STABLE_TAG"

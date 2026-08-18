@@ -1,13 +1,16 @@
 #!/bin/bash
-# Bootstrap a signed Hamn install. This file is rendered with a release public
-# key and a canonical stable manifest URL before publication.
+# Bootstrap one immutable Hamn release selected by GitHub's latest asset URL.
 set -euo pipefail
 export LC_ALL=C
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
-readonly HAMN_RELEASE_PUBLIC_KEY_B64='__HAMN_RELEASE_PUBLIC_KEY_B64__'
-readonly HAMN_RELEASE_MANIFEST_URL=__HAMN_RELEASE_MANIFEST_URL__
+readonly HAMN_VERSION=__HAMN_VERSION__
+readonly HAMN_COMMIT=__HAMN_COMMIT__
+readonly HAMN_HOST_URL=__HAMN_HOST_URL__
+readonly HAMN_HOST_SHA256=__HAMN_HOST_SHA256__
+readonly HAMN_GUEST_URL=__HAMN_GUEST_URL__
+readonly HAMN_GUEST_SHA256=__HAMN_GUEST_SHA256__
 
 fail() {
     echo "hamn install: $*" >&2
@@ -43,14 +46,11 @@ fetch() {
 }
 
 [ -n "${HOME:-}" ] || fail "HOME is not set"
-case "$HAMN_RELEASE_MANIFEST_URL" in
-https://*|file://*|/*) ;;
-*) fail "embedded manifest URL is invalid" ;;
-esac
-if [[ "$HAMN_RELEASE_MANIFEST_URL" != https://* ]] &&
-    [ "${HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS:-0}" != 1 ]; then
-    fail "local artifacts are disabled"
-fi
+[[ "$HAMN_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    fail "embedded release version is invalid"
+[[ "$HAMN_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "embedded release commit is invalid"
+[[ "$HAMN_HOST_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "embedded host digest is invalid"
+[[ "$HAMN_GUEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "embedded guest digest is invalid"
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/hamn-install.XXXXXX") ||
     fail "cannot create installer workspace"
@@ -59,99 +59,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-key=$work/hamn-release.pub
-printf '%s' "$HAMN_RELEASE_PUBLIC_KEY_B64" | base64 -D >"$key" ||
-    fail "cannot decode embedded public key"
-chmod 0600 "$key"
-safe_regular "$key" || fail "embedded public key is unsafe"
-ssh-keygen -lf "$key" | grep -q 'ED25519' ||
-    fail "embedded public key is not Ed25519"
-
-manifest=$work/manifest.json
-signature=$work/manifest.json.sig
-fetch "$HAMN_RELEASE_MANIFEST_URL" "$manifest"
-fetch "${HAMN_RELEASE_MANIFEST_URL}.sig" "$signature"
-allowed=$work/allowed-signers
-printf 'hamn-release ' >"$allowed"
-cat "$key" >>"$allowed"
-ssh-keygen -Y verify -f "$allowed" -I hamn-release -n hamn-release \
-    -s "$signature" <"$manifest" >/dev/null ||
-    fail "manifest signature verification failed"
-
-python3 - "$manifest" "$(sw_vers -productVersion)" "$(uname -m)" <<'PY' \
-    >"$work/host-fields"
-import json
-import re
-import sys
-
-
-def pairs(items):
-    result = {}
-    for key, value in items:
-        if key in result:
-            raise ValueError("duplicate key: " + key)
-        result[key] = value
-    return result
-
-
-def require_keys(value, keys, label):
-    if not isinstance(value, dict) or set(value) != set(keys):
-        raise ValueError(label + " has an invalid schema")
-
-
-def version(value):
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", value):
-        raise ValueError("invalid macOS version")
-    parts = tuple(int(part) for part in value.split("."))
-    return parts + (0,) * (3 - len(parts))
-
-
-def artifact(value, label):
-    require_keys(value, ("url", "sha256"), label)
-    url, digest = value["url"], value["sha256"]
-    if not isinstance(url, str) or not url or any(ord(ch) < 33 or ord(ch) > 126 for ch in url):
-        raise ValueError(label + " URL is invalid")
-    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise ValueError(label + " SHA-256 is invalid")
-    return url, digest
-
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as source:
-        manifest = json.load(source, object_pairs_hook=pairs,
-                             parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-    require_keys(manifest, ("schemaVersion", "channel", "version", "compatibility", "artifacts"), "manifest")
-    if manifest["schemaVersion"] != 1 or manifest["channel"] != "stable":
-        raise ValueError("manifest is not a stable schema v1 release")
-    if not isinstance(manifest["version"], str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", manifest["version"]):
-        raise ValueError("release version is invalid")
-    compatibility = manifest["compatibility"]
-    require_keys(compatibility, ("os", "architecture", "minimumMacOS"), "compatibility")
-    if compatibility["os"] != "darwin" or compatibility["architecture"] != "arm64":
-        raise ValueError("manifest is not compatible with Apple Silicon macOS")
-    if version(sys.argv[2]) < version(compatibility["minimumMacOS"]):
-        raise ValueError("macOS is below the release minimum")
-    if sys.argv[3] not in ("arm64", "arm64e"):
-        raise ValueError("host architecture is not Apple Silicon")
-    artifacts = manifest["artifacts"]
-    require_keys(artifacts, ("host", "guestImage"), "artifacts")
-    host_url, host_hash = artifact(artifacts["host"], "host artifact")
-except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-    raise SystemExit("hamn install: invalid signed manifest: " + str(error))
-
-print(host_url)
-print(host_hash)
-PY
-{
-    IFS= read -r host_url
-    IFS= read -r host_hash
-} <"$work/host-fields"
-[ -n "$host_url" ] && [ -n "$host_hash" ] ||
-    fail "signed manifest host artifact is incomplete"
-
 host_archive=$work/host.tar.gz
-fetch "$host_url" "$host_archive"
-[ "$(sha256_file "$host_archive")" = "$host_hash" ] ||
+fetch "$HAMN_HOST_URL" "$host_archive"
+[ "$(sha256_file "$host_archive")" = "$HAMN_HOST_SHA256" ] ||
     fail "host artifact SHA-256 mismatch"
 
 artifact_root=$(python3 - "$host_archive" "$work/extract" <<'PY'
@@ -183,7 +93,6 @@ with tarfile.open(archive, "r:gz") as bundle:
         root + "/bin/hamn",
         root + "/scripts/install-host.sh",
         root + "/scripts/update-host.sh",
-        root + "/packaging/release/hamn-release.pub",
         root + "/packaging/release/update-manifest-url",
     }
     actual = {member.name.rstrip("/") for member in members}
@@ -199,12 +108,37 @@ artifact=$work/extract/$artifact_root
 [ -x "$artifact/bin/hamn" ] && [ -x "$artifact/scripts/update-host.sh" ] ||
     fail "verified host artifact is incomplete"
 
-local_artifacts=${HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS:-0}
+manifest=$work/manifest.json
+python3 - "$manifest" "$HAMN_VERSION" "$HAMN_COMMIT" "$host_archive" \
+    "$HAMN_HOST_SHA256" "$HAMN_GUEST_URL" "$HAMN_GUEST_SHA256" <<'PY'
+import json
+import sys
+
+path, version, commit, host, host_hash, guest, guest_hash = sys.argv[1:]
+value = {
+    "schemaVersion": 2,
+    "channel": "stable",
+    "version": version,
+    "commit": commit,
+    "validationMode": "github-hosted-no-vm",
+    "compatibility": {
+        "os": "darwin",
+        "architecture": "arm64",
+        "minimumMacOS": "13.0",
+    },
+    "artifacts": {
+        "host": {"url": "file://" + host, "sha256": host_hash},
+        "guestImage": {"url": guest, "sha256": guest_hash},
+    },
+}
+with open(path, "w", encoding="utf-8", newline="\n") as output:
+    json.dump(value, output, sort_keys=True, separators=(",", ":"))
+    output.write("\n")
+PY
 env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
-    HAMN_UPDATE_PUBLIC_KEY="$key" \
-    HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS="$local_artifacts" \
+    HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
     /bin/bash "$artifact/scripts/update-host.sh" --bootstrap \
     --bindir "$HOME/.local/bin" --datadir "$HOME/.local/share/hamn/src" \
-    --manifest "$HAMN_RELEASE_MANIFEST_URL"
+    --manifest "file://$manifest"
 
 echo "installed Hamn; add $HOME/.local/bin to PATH if needed"

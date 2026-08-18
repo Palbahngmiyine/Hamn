@@ -1,5 +1,5 @@
 #!/bin/bash
-# Verify the fail-closed GitHub state required before an automated 0.0.1 RC.
+# Verify the fail-closed GitHub state required before a keyless hosted release.
 # This check is read-only and verifies only secret names, never secret values.
 set -euo pipefail
 export LC_ALL=C
@@ -51,10 +51,14 @@ fetch "repos/$REPOSITORY/actions/runners" runners "repository runners"
 fetch "repos/$REPOSITORY/actions/variables" variables "repository variables"
 fetch "repos/$REPOSITORY/actions/secrets" repository-secrets "repository secrets"
 fetch "repos/$REPOSITORY/environments" environments "repository environments"
-fetch "repos/$REPOSITORY/environments/hamn-validation/secrets" validation-secrets \
-    "validation environment secret names"
+fetch "repos/$REPOSITORY/environments/hamn-promotion" promotion \
+    "promotion environment"
 fetch "repos/$REPOSITORY/environments/hamn-promotion/secrets" promotion-secrets \
     "promotion environment secret names"
+fetch "repos/$REPOSITORY/environments/hamn-promotion/variables" promotion-variables \
+    "promotion environment variables"
+fetch "repos/$REPOSITORY/environments/hamn-promotion/deployment-branch-policies" \
+    promotion-branches "promotion branch policies"
 fetch "repos/$REPOSITORY/rulesets" rulesets "repository rulesets"
 fetch "repos/$REPOSITORY/immutable-releases" immutable-releases \
     "immutable release policy"
@@ -193,32 +197,13 @@ require(isinstance(workflow, dict) and
         "default GITHUB_TOKEN permissions must be read-only")
 require(read("fork-approval") == {"approval_policy": "all_external_contributors"},
         "all external fork workflows must require approval")
-validator = False
-for runner in entries("runners", "runners"):
-    if not isinstance(runner, dict):
-        continue
-    labels = runner.get("labels")
-    label_names = {label.get("name") for label in labels if isinstance(label, dict)} \
-        if isinstance(labels, list) else set()
-    if runner.get("os") == "macOS" and runner.get("architecture") == "ARM64" and \
-            runner.get("status") == "online" and \
-            {"self-hosted", "hamn-validator"} <= label_names:
-        validator = True
-        break
-require(validator, "an online macOS ARM64 hamn-validator runner is required")
+require(entries("runners", "runners") == [],
+        "keyless hosted releases must not use repository self-hosted runners")
 
 variable_names = {item.get("name") for item in entries("variables", "variables")
                   if isinstance(item, dict)}
-required_variables = {
-    "HAMN_GUEST_IMAGE_URL",
-    "HAMN_GUEST_IMAGE_SHA256",
-    "HAMN_RELEASE_PUBLIC_KEY",
-    "HAMN_VALIDATOR_IDENTITY",
-    "HAMN_VALIDATOR_PUBLIC_KEY",
-}
-require(required_variables <= variable_names,
-        "required release variables are missing: " +
-        ", ".join(sorted(required_variables - variable_names)))
+require(variable_names == set(),
+        "keyless hosted releases must not depend on repository variables")
 repository_secret_names = {item.get("name")
                            for item in entries("repository-secrets", "secrets")
                            if isinstance(item, dict)}
@@ -227,18 +212,32 @@ require(repository_secret_names == {"RELEASE_PLEASE_TOKEN"},
 
 environment_names = {item.get("name") for item in entries("environments", "environments")
                      if isinstance(item, dict)}
-require({"hamn-validation", "hamn-promotion"} <= environment_names,
-        "locked release environments are missing")
-validation_secret_names = {item.get("name")
-                           for item in entries("validation-secrets", "secrets")
-                           if isinstance(item, dict)}
+require(environment_names == {"hamn-promotion"},
+        "hamn-promotion must be the only release environment")
+promotion = read("promotion")
+require(isinstance(promotion, dict) and promotion.get("name") == "hamn-promotion" and
+        promotion.get("can_admins_bypass") is False and
+        promotion.get("deployment_branch_policy") == {
+            "protected_branches": False,
+            "custom_branch_policies": True,
+        }, "hamn-promotion must be fail-closed and use custom branch policies")
+protection_rules = promotion.get("protection_rules")
+require(isinstance(protection_rules, list) and len(protection_rules) == 1 and
+        protection_rules[0].get("type") == "branch_policy",
+        "hamn-promotion must enforce its branch policy")
+promotion_branches = entries("promotion-branches", "branch_policies")
+require(len(promotion_branches) == 1 and
+        promotion_branches[0].get("name") == "main" and
+        promotion_branches[0].get("type") == "branch",
+        "hamn-promotion must allow only the main branch")
 promotion_secret_names = {item.get("name")
                           for item in entries("promotion-secrets", "secrets")
                           if isinstance(item, dict)}
-require(validation_secret_names == {"HAMN_VALIDATOR_SIGNING_KEY"},
-        "hamn-validation must contain only HAMN_VALIDATOR_SIGNING_KEY")
-require(promotion_secret_names == {"HAMN_RELEASE_SIGNING_KEY"},
-        "hamn-promotion must contain only HAMN_RELEASE_SIGNING_KEY")
+promotion_variable_names = {item.get("name")
+                            for item in entries("promotion-variables", "variables")
+                            if isinstance(item, dict)}
+require(promotion_secret_names == set() and promotion_variable_names == set(),
+        "hamn-promotion must not contain secrets or variables")
 
 main_rules = check_ruleset("main", "branch", ["~DEFAULT_BRANCH"],
                            {"deletion", "non_fast_forward", "required_linear_history",

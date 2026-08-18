@@ -520,11 +520,6 @@ cleanup_retired_journals ||
 cleanup_deferred_journals ||
     fail "the recovered transaction cleanup is unsafe or could not be cleaned"
 
-key=${HAMN_UPDATE_PUBLIC_KEY:-$source_root/packaging/release/hamn-release.pub}
-safe_regular "$key" || fail "release public key is unavailable"
-ssh-keygen -lf "$key" | grep -q 'ED25519' ||
-    fail "release public key is not Ed25519"
-
 if [ -z "$manifest_ref" ]; then
     manifest_url_file=$source_root/packaging/release/update-manifest-url
     safe_regular "$manifest_url_file" ||
@@ -539,21 +534,7 @@ cleanup() {
 }
 trap cleanup EXIT
 manifest=$work/manifest.json
-signature=$work/manifest.json.sig
 fetch "$manifest_ref" "$manifest"
-case "$manifest_ref" in
-https://*) fetch "$manifest_ref.sig" "$signature" ;;
-file://*) fetch "${manifest_ref}.sig" "$signature" ;;
-/*) fetch "${manifest_ref}.sig" "$signature" ;;
-*) fail "manifest URL must use HTTPS" ;;
-esac
-
-allowed=$work/allowed-signers
-printf 'hamn-release ' >"$allowed"
-cat "$key" >>"$allowed"
-ssh-keygen -Y verify -f "$allowed" -I hamn-release -n hamn-release \
-    -s "$signature" <"$manifest" >/dev/null ||
-    fail "manifest signature verification failed"
 
 python3 - "$manifest" "$(sw_vers -productVersion)" "$(uname -m)" <<'PY' \
     >"$work/manifest-fields"
@@ -597,11 +578,18 @@ try:
     with open(sys.argv[1], encoding="utf-8") as source:
         manifest = json.load(source, object_pairs_hook=pairs,
                              parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-    require_keys(manifest, ("schemaVersion", "channel", "version", "compatibility", "artifacts"), "manifest")
-    if manifest["schemaVersion"] != 1 or manifest["channel"] != "stable":
-        raise ValueError("manifest is not a stable schema v1 release")
+    require_keys(manifest, ("schemaVersion", "channel", "version", "commit",
+                            "validationMode", "compatibility", "artifacts"),
+                 "manifest")
+    if manifest["schemaVersion"] != 2 or manifest["channel"] != "stable":
+        raise ValueError("manifest is not a stable schema v2 release")
     if not isinstance(manifest["version"], str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", manifest["version"]):
         raise ValueError("release version is invalid")
+    if not isinstance(manifest["commit"], str) or \
+            not re.fullmatch(r"[0-9a-f]{40}", manifest["commit"]):
+        raise ValueError("release commit is invalid")
+    if manifest["validationMode"] != "github-hosted-no-vm":
+        raise ValueError("release validation mode is invalid")
     compatibility = manifest["compatibility"]
     require_keys(compatibility, ("os", "architecture", "minimumMacOS"), "compatibility")
     if compatibility["os"] != "darwin" or compatibility["architecture"] != "arm64":
@@ -619,7 +607,7 @@ try:
     host_url, host_hash = artifact(artifacts["host"], "host artifact")
     guest_url, guest_hash = artifact(artifacts["guestImage"], "guest image artifact")
 except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-    raise SystemExit("hamn update: invalid signed manifest: " + str(error))
+    raise SystemExit("hamn update: invalid immutable release manifest: " + str(error))
 
 print(host_url)
 print(host_hash)
@@ -633,7 +621,7 @@ PY
     IFS= read -r guest_hash
 } <"$work/manifest-fields"
 [ -n "$host_url" ] && [ -n "$host_hash" ] && [ -n "$guest_url" ] &&
-    [ -n "$guest_hash" ] || fail "signed manifest fields are incomplete"
+    [ -n "$guest_hash" ] || fail "immutable manifest fields are incomplete"
 
 host_archive=$work/host.tar.gz
 guest_download=$work/guest.img
@@ -673,7 +661,6 @@ with tarfile.open(archive, "r:gz") as bundle:
         root + "/bin/hamn",
         root + "/scripts/install-host.sh",
         root + "/scripts/update-host.sh",
-        root + "/packaging/release/hamn-release.pub",
         root + "/packaging/release/update-manifest-url",
     }
     actual = {member.name.rstrip("/") for member in members}
@@ -761,4 +748,4 @@ if ! cleanup_deferred_journals; then
     echo "hamn update: completed transaction cleanup remains deferred; the committed binary and guest image selection are active" >&2
 fi
 
-echo "updated Hamn with signed manifest: $manifest_ref"
+echo "updated Hamn from immutable release manifest: $manifest_ref"
