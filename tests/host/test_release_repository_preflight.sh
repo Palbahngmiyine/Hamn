@@ -20,7 +20,7 @@ repos/example/hamn)
     printf '%s\n' '{"full_name":"example/hamn","private":false,"visibility":"public","archived":false,"owner":{"id":42},"security_and_analysis":{"secret_scanning":{"status":"enabled"},"secret_scanning_push_protection":{"status":"enabled"}}}'
     ;;
 repos/example/hamn/actions/workflows)
-    printf '%s\n' '{"workflows":[{"path":".github/workflows/release.yml","state":"active"},{"path":".github/workflows/ci.yml","state":"active"}]}'
+    printf '%s\n' '{"workflows":[{"path":".github/workflows/release.yml","state":"active"},{"path":".github/workflows/ci.yml","state":"active"},{"path":".github/workflows/release-please.yml","state":"active"}]}'
     ;;
 repos/example/hamn/actions/permissions)
     if [ "${HAMN_TEST_WEAK_ACTIONS_POLICY:-0}" = 1 ]; then
@@ -33,7 +33,7 @@ repos/example/hamn/actions/permissions/selected-actions)
     if [ "${HAMN_TEST_UNSAFE_ACTION:-0}" = 1 ]; then
         printf '%s\n' '{"github_owned_allowed":true,"verified_allowed":true,"patterns_allowed":[]}'
     else
-        printf '%s\n' '{"github_owned_allowed":true,"verified_allowed":false,"patterns_allowed":["cachix/install-nix-action@*"]}'
+        printf '%s\n' '{"github_owned_allowed":true,"verified_allowed":false,"patterns_allowed":["googleapis/release-please-action@*","cachix/install-nix-action@*"]}'
     fi
     ;;
 repos/example/hamn/actions/permissions/workflow)
@@ -53,7 +53,11 @@ repos/example/hamn/actions/variables)
     printf '%s\n' '{"variables":[{"name":"HAMN_GUEST_IMAGE_URL"},{"name":"HAMN_GUEST_IMAGE_SHA256"},{"name":"HAMN_RELEASE_PUBLIC_KEY"},{"name":"HAMN_VALIDATOR_IDENTITY"},{"name":"HAMN_VALIDATOR_PUBLIC_KEY"}]}'
     ;;
 repos/example/hamn/actions/secrets)
-    printf '%s\n' '{"secrets":[]}'
+    if [ "${HAMN_TEST_RELEASE_PLEASE_SECRET:-0}" = 1 ]; then
+        printf '%s\n' '{"secrets":[]}'
+    else
+        printf '%s\n' '{"secrets":[{"name":"RELEASE_PLEASE_TOKEN"}]}'
+    fi
     ;;
 repos/example/hamn/environments)
     printf '%s\n' '{"environments":[{"name":"hamn-validation"},{"name":"hamn-promotion"}]}'
@@ -69,7 +73,7 @@ repos/example/hamn/environments/hamn-promotion/secrets)
     printf '%s\n' '{"secrets":[{"name":"HAMN_RELEASE_SIGNING_KEY"}]}'
     ;;
 repos/example/hamn/rulesets)
-    printf '%s\n' '[{"id":1,"name":"protect-main-and-release-workflow","enforcement":"active"},{"id":2,"name":"immutable-v0.0.1-release-candidates","enforcement":"active"},{"id":3,"name":"immutable-stable-v0.0.1","enforcement":"active"},{"id":4,"name":"v0.0.1-release-candidates-owner-created-only","enforcement":"active"},{"id":5,"name":"stable-v0.0.1-owner-created-only","enforcement":"active"}]'
+    printf '%s\n' '[{"id":1,"name":"protect-main-and-release-workflow","enforcement":"active"},{"id":2,"name":"immutable-stable-releases","enforcement":"active"},{"id":3,"name":"stable-releases-actions-created-only","enforcement":"active"}]'
     ;;
 repos/example/hamn/rulesets/1)
     if [ "${HAMN_TEST_WEAK_RULESET:-0}" = 1 ]; then
@@ -79,16 +83,15 @@ repos/example/hamn/rulesets/1)
     fi
     ;;
 repos/example/hamn/rulesets/2)
-    printf '%s\n' '{"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v0.0.1-rc.*"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"non_fast_forward"}],"bypass_actors":[]}'
+    printf '%s\n' '{"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"non_fast_forward"}],"bypass_actors":[]}'
     ;;
 repos/example/hamn/rulesets/3)
-    printf '%s\n' '{"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v0.0.1"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"non_fast_forward"}],"bypass_actors":[]}'
-    ;;
-repos/example/hamn/rulesets/4)
-    printf '%s\n' '{"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v0.0.1-rc.*"],"exclude":[]}},"rules":[{"type":"creation"}],"bypass_actors":[{"actor_id":42,"actor_type":"User","bypass_mode":"always"}]}'
-    ;;
-repos/example/hamn/rulesets/5)
-    printf '%s\n' '{"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v0.0.1"],"exclude":[]}},"rules":[{"type":"creation"}],"bypass_actors":[{"actor_id":42,"actor_type":"User","bypass_mode":"always"}]}'
+    if [ "${HAMN_TEST_TAG_ACTOR:-0}" = 1 ]; then
+        actor='{"actor_id":42,"actor_type":"User","bypass_mode":"always"}'
+    else
+        actor='{"actor_id":15368,"actor_type":"Integration","bypass_mode":"always"}'
+    fi
+    printf '%s\n' '{"target":"tag","enforcement":"active","conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},"rules":[{"type":"creation"}],"bypass_actors":['"$actor"']}'
     ;;
 repos/example/hamn/immutable-releases)
     printf '%s\n' '{"enabled":true,"enforced_by_owner":false}'
@@ -102,9 +105,6 @@ repos/example/hamn/commits/main)
     else
         printf '%s\n' '{"commit":{"verification":{"verified":true}}}'
     fi
-    ;;
-repos/example/hamn/tags|repos/example/hamn/releases)
-    printf '%s\n' '[]'
     ;;
 *) exit 65 ;;
 esac
@@ -136,13 +136,17 @@ assert_failure() {
 assert_failure HAMN_TEST_WEAK_ACTIONS_POLICY \
     'Actions must be enabled, selected, and SHA-pinned' actions
 assert_failure HAMN_TEST_UNSAFE_ACTION \
-    'only GitHub-owned Actions and the pinned Nix installer may run' action
+    'only GitHub-owned Actions, Nix, and Release Please may run' action
+assert_failure HAMN_TEST_RELEASE_PLEASE_SECRET \
+    'repository secrets must contain only RELEASE_PLEASE_TOKEN' release-please-secret
 assert_failure HAMN_TEST_RUNNER \
     'an online macOS ARM64 hamn-validator runner is required' runner
 assert_failure HAMN_TEST_SECRET \
     'hamn-validation must contain only HAMN_VALIDATOR_SIGNING_KEY' secret
 assert_failure HAMN_TEST_WEAK_RULESET \
     'main pull request rules are not solo-maintainer safe' ruleset
+assert_failure HAMN_TEST_TAG_ACTOR \
+    'stable-actions ruleset bypass actors are invalid' tag-actor
 assert_failure HAMN_TEST_UNSIGNED \
     'main must resolve to a verified signed commit' unsigned
 

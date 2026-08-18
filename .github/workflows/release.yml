@@ -2,44 +2,53 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v0.0.1-rc.*'
-  workflow_dispatch:
-    inputs:
-      stable_tag:
-        description: Stable tag to create or verify at the exact validated RC commit
-        required: false
-        type: string
-      rc_tag:
-        description: Exact validated RC tag to promote without rebuilding
-        required: false
-        type: string
-      rc_run_id:
-        description: Exact successful RC tag-push release workflow run ID
-        required: false
-        type: string
+    branches: [main]
+    paths:
+      - '.release-please-manifest.json'
 
 permissions:
-  actions: read
   contents: read
 
 concurrency:
-  group: hamn-release-${{ github.ref }}
+  group: hamn-release-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Resolve Release Please version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      should_release: ${{ steps.release.outputs.should_release }}
+      version: ${{ steps.release.outputs.version }}
+      stable_tag: ${{ steps.release.outputs.stable_tag }}
+      candidate_tag: ${{ steps.release.outputs.candidate_tag }}
+      commit: ${{ steps.release.outputs.commit }}
+    steps:
+      - name: Check out exact main commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Resolve version manifest transition
+        id: release
+        shell: bash
+        env:
+          PREVIOUS_REF: ${{ github.event.before }}
+        run: bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"
+
   candidate:
-    if: github.event_name == 'push'
-    name: Build release candidate
+    if: needs.prepare.outputs.should_release == 'true'
+    name: Build exact release candidate
+    needs: prepare
     runs-on: macos-14
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       artifact-metadata: write
       attestations: write
       contents: read
       id-token: write
     steps:
-      - name: Check out exact RC tag
+      - name: Check out exact release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
@@ -67,30 +76,16 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build candidate
+      - name: Test source and build candidate
         shell: bash
         env:
           HAMN_GUEST_IMAGE_URL: ${{ vars.HAMN_GUEST_IMAGE_URL }}
           HAMN_GUEST_IMAGE_SHA256: ${{ vars.HAMN_GUEST_IMAGE_SHA256 }}
           HAMN_RELEASE_PUBLIC_KEY_TEXT: ${{ vars.HAMN_RELEASE_PUBLIC_KEY }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
         run: |
           nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
-          make -j1 test-workflows
-          make -j1 test-portable
-          make -j1 test-core-quality
-          make -j1 test-port-forwarding
-          make -j1 test-profile-state
-          make -j1 test-guest-deployment
-          make -j1 test-diagnostics
-          make -j1 test-install
-          make -j1 test-uninstall
-          make -j1 test-update
-          make -j1 test-kubernetes-cli
-          make -j1 test-release-artifacts
-          make -j1 test-release-gate
-          make -j1 test-release-publish
-          make -j1 test-public-export
-          make -j1 test-release-repository-preflight
+          make -j1 test-local-macos
           test -n "$HAMN_GUEST_IMAGE_URL"
           test "$HAMN_GUEST_IMAGE_SHA256" != ""
           test "$HAMN_GUEST_IMAGE_SHA256" = "$(printf '%s' "$HAMN_GUEST_IMAGE_SHA256" | tr -d '\n' | grep -E '^[0-9a-f]{64}$')"
@@ -102,13 +97,13 @@ jobs:
           printf '%s\n' "$HAMN_RELEASE_PUBLIC_KEY_TEXT" > "$RUNNER_TEMP/hamn-release.pub"
           make release-candidate \
             RELEASE_REF="$GITHUB_SHA" \
-            RELEASE_TAG="$GITHUB_REF_NAME" \
+            RELEASE_TAG="$RELEASE_TAG" \
             OUTPUT_DIR="$RUNNER_TEMP/hamn-candidate" \
             HAMN_GUEST_IMAGE="$RUNNER_TEMP/hamn-guest.img" \
             HAMN_RELEASE_PUBLIC_KEY="$RUNNER_TEMP/hamn-release.pub"
           NIX_SHELL
       - name: Attest exact candidate artifact provenance
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-checksums: ${{ runner.temp }}/hamn-candidate/SHA256SUMS
       - name: Upload exact candidate bytes
@@ -120,9 +115,9 @@ jobs:
           retention-days: 14
 
   validate:
-    if: github.event_name == 'push'
+    if: needs.prepare.outputs.should_release == 'true'
     name: Validate exact candidate on physical Apple Silicon
-    needs: candidate
+    needs: [prepare, candidate]
     runs-on:
       - self-hosted
       - macOS
@@ -133,7 +128,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Check out exact RC tag
+      - name: Check out exact release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
@@ -151,6 +146,7 @@ jobs:
         env:
           HAMN_VALIDATOR_SIGNING_KEY_TEXT: ${{ secrets.HAMN_VALIDATOR_SIGNING_KEY }}
           HAMN_VALIDATOR_IDENTITY: ${{ vars.HAMN_VALIDATOR_IDENTITY }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
         run: |
           nix develop .#release --command bash -euo pipefail <<'NIX_SHELL'
           validator_key=
@@ -179,7 +175,7 @@ jobs:
           HAMN_VALIDATOR_PATH="$PATH" \
           HAMN_VALIDATOR_SIGNING_KEY="$validator_key" make release-gate \
             RELEASE_REF="$GITHUB_SHA" \
-            RELEASE_TAG="$GITHUB_REF_NAME" \
+            RELEASE_TAG="$RELEASE_TAG" \
             CANDIDATE_DIR="$RUNNER_TEMP/hamn-candidate" \
             OUTPUT_DIR="$RUNNER_TEMP/hamn-evidence"
           NIX_SHELL
@@ -192,121 +188,41 @@ jobs:
           retention-days: 14
 
   publish:
-    if: github.event_name == 'workflow_dispatch' && inputs.stable_tag != '' && inputs.rc_tag != '' && inputs.rc_run_id != ''
-    name: Promote validated RC without rebuilding
+    if: needs.prepare.outputs.should_release == 'true'
+    name: Publish validated release automatically
+    needs: [prepare, candidate, validate]
     runs-on: macos-14
     environment: hamn-promotion
     timeout-minutes: 30
     permissions:
-      actions: read
       contents: write
     steps:
-      - name: Check out requested RC tag
+      - name: Check out exact release commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          ref: refs/tags/${{ inputs.rc_tag }}
           fetch-depth: 0
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Resolve exact validated RC commit
-        id: rc
-        shell: bash
-        env:
-          RC_TAG: ${{ inputs.rc_tag }}
-        run: |
-          set -euo pipefail
-          [[ "$RC_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]
-          echo "commit=$(git rev-parse --verify \"refs/tags/${RC_TAG}^{commit}\")" >> "$GITHUB_OUTPUT"
-      - name: Verify exact successful RC validation run
-        id: rc_run
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RC_RUN_ID: ${{ inputs.rc_run_id }}
-          RC_TAG: ${{ inputs.rc_tag }}
-          RC_COMMIT: ${{ steps.rc.outputs.commit }}
-        run: |
-          set -euo pipefail
-          [[ "$RC_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
-            echo "RC workflow run ID must be a positive decimal integer" >&2
-            exit 2
-          }
-          [[ "$RC_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] || {
-            echo "RC tag is invalid" >&2
-            exit 2
-          }
-          [[ "$RC_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "RC tag did not resolve to a commit" >&2
-            exit 2
-          }
-          run_json="$RUNNER_TEMP/hamn-rc-workflow-run.json"
-          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RC_RUN_ID}" > "$run_json"
-          python3 - "$run_json" "$RC_RUN_ID" "$RC_TAG" "$RC_COMMIT" \
-            "$GITHUB_REPOSITORY" "$GITHUB_OUTPUT" <<'PY'
-          import json
-          import sys
-
-          path, run_id, tag, commit, repository, output_path = sys.argv[1:]
-          with open(path, encoding="utf-8") as source:
-              value = json.load(source)
-          expected = {
-              "id": int(run_id),
-              "event": "push",
-              "head_branch": tag,
-              "head_sha": commit,
-              "status": "completed",
-              "conclusion": "success",
-          }
-          for key, wanted in expected.items():
-              if value.get(key) != wanted:
-                  raise SystemExit("RC workflow run has unexpected " + key)
-          workflow_path = value.get("path")
-          allowed_workflow_paths = {
-              ".github/workflows/release.yml@" + tag,
-              ".github/workflows/release.yml@refs/tags/" + tag,
-          }
-          if workflow_path not in allowed_workflow_paths:
-              raise SystemExit("RC workflow run is not the release workflow")
-          run_repository = value.get("repository")
-          if not isinstance(run_repository, dict) or \
-                  run_repository.get("full_name") != repository:
-              raise SystemExit("RC workflow run belongs to a different repository")
-          run_attempt = value.get("run_attempt")
-          if not isinstance(run_attempt, int) or run_attempt < 1:
-              raise SystemExit("RC workflow run has an invalid attempt")
-          with open(output_path, "a", encoding="utf-8", newline="\n") as output:
-              output.write("run_id=" + run_id + "\n")
-              output.write("run_attempt=" + str(run_attempt) + "\n")
-          PY
-      - name: Download exact candidate and validation evidence
+      - name: Download exact candidate bytes
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: hamn-candidate-${{ steps.rc.outputs.commit }}
+          name: hamn-candidate-${{ github.sha }}
           path: ${{ runner.temp }}/hamn-release-input/hamn-candidate
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.rc_run.outputs.run_id }}
       - name: Download signed validation evidence
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: hamn-evidence-${{ steps.rc.outputs.commit }}
+          name: hamn-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/hamn-release-input/hamn-evidence
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.rc_run.outputs.run_id }}
       - name: Verify evidence and generate canonical manifest
         shell: bash
         env:
           HAMN_VALIDATOR_PUBLIC_KEY_TEXT: ${{ vars.HAMN_VALIDATOR_PUBLIC_KEY }}
           HAMN_RELEASE_SIGNING_KEY_TEXT: ${{ secrets.HAMN_RELEASE_SIGNING_KEY }}
           HAMN_RELEASE_REPOSITORY: ${{ github.repository }}
-          STABLE_TAG: ${{ inputs.stable_tag }}
-          RC_TAG: ${{ inputs.rc_tag }}
-          RC_COMMIT: ${{ steps.rc.outputs.commit }}
-          RC_RUN_ID: ${{ steps.rc_run.outputs.run_id }}
-          RC_RUN_ATTEMPT: ${{ steps.rc_run.outputs.run_attempt }}
+          STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
+          CANDIDATE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
         run: |
           nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
           mkdir "$RUNNER_TEMP/hamn-publish"
@@ -336,73 +252,30 @@ jobs:
           unset HAMN_VALIDATOR_PUBLIC_KEY_TEXT HAMN_RELEASE_SIGNING_KEY_TEXT
           HAMN_VALIDATOR_PUBLIC_KEY="$validator_public_key" \
           HAMN_RELEASE_SIGNING_KEY="$release_key" \
-          HAMN_EXPECTED_WORKFLOW_RUN="$RC_RUN_ID" \
-          HAMN_EXPECTED_WORKFLOW_ATTEMPT="$RC_RUN_ATTEMPT" \
+          HAMN_EXPECTED_WORKFLOW_RUN="$GITHUB_RUN_ID" \
+          HAMN_EXPECTED_WORKFLOW_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
           bash packaging/release/publish-release.sh \
-            "$STABLE_TAG" "$RC_TAG" "$RC_COMMIT" \
+            "$STABLE_TAG" "$CANDIDATE_TAG" "$GITHUB_SHA" \
             "$RUNNER_TEMP/hamn-release-input" "$RUNNER_TEMP/hamn-publish"
           NIX_SHELL
-      - name: Verify pre-existing signed stable tag
+      - name: Create and verify draft release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          STABLE_TAG: ${{ inputs.stable_tag }}
-          RC_COMMIT: ${{ steps.rc.outputs.commit }}
+          STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
         run: |
           set -euo pipefail
-          [[ "$STABLE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo "stable tag is invalid" >&2
+          if gh release view "$STABLE_TAG" >/dev/null 2>&1; then
+            echo "stable release already exists" >&2
             exit 2
-          }
-          [[ "$RC_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "validated RC commit is invalid" >&2
+          fi
+          if git ls-remote --exit-code --refs origin "refs/tags/$STABLE_TAG" >/dev/null; then
+            echo "stable tag already exists without this release" >&2
             exit 2
-          }
-          stable_ref="refs/tags/$STABLE_TAG"
-          stable_probe="refs/hamn-release/stable-$GITHUB_RUN_ID"
-          ref_json="$RUNNER_TEMP/hamn-stable-ref.json"
-          tag_json="$RUNNER_TEMP/hamn-stable-tag.json"
-          gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${STABLE_TAG}" > "$ref_json"
-          tag_object=$(jq -r '.object.sha' "$ref_json")
-          [[ "$tag_object" =~ ^[0-9a-f]{40}$ ]]
-          gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" > "$tag_json"
-          python3 - "$ref_json" "$tag_json" "$STABLE_TAG" "$RC_COMMIT" <<'PY'
-          import json
-          import re
-          import sys
-
-          ref_path, tag_path, stable_tag, commit = sys.argv[1:]
-          with open(ref_path, encoding="utf-8") as source:
-              ref = json.load(source)
-          with open(tag_path, encoding="utf-8") as source:
-              tag = json.load(source)
-          ref_object = ref.get("object")
-          tag_object = tag.get("object")
-          verification = tag.get("verification")
-          if ref.get("ref") != "refs/tags/" + stable_tag or \
-                  not isinstance(ref_object, dict) or ref_object.get("type") != "tag" or \
-                  not re.fullmatch(r"[0-9a-f]{40}", ref_object.get("sha", "")):
-              raise SystemExit("stable tag must be a pre-existing annotated tag")
-          if tag.get("tag") != stable_tag or not isinstance(tag_object, dict) or \
-                  tag_object.get("sha") != commit or tag_object.get("type") != "commit":
-              raise SystemExit("stable tag does not target the validated RC commit")
-          if not isinstance(verification, dict) or verification.get("verified") is not True:
-              raise SystemExit("stable tag signature is not GitHub Verified")
-          PY
-          git fetch --no-tags origin "+${stable_ref}:${stable_probe}"
-          stable_commit=$(git rev-parse --verify "${stable_probe}^{commit}")
-          [ "$stable_commit" = "$RC_COMMIT" ] || {
-            echo "stable tag does not resolve to the validated RC commit" >&2
-            exit 2
-          }
-      - name: Publish exact validated bytes
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          STABLE_TAG: ${{ inputs.stable_tag }}
-          RC_TAG: ${{ inputs.rc_tag }}
-        run: |
-          set -euo pipefail
+          else
+            status=$?
+            [ "$status" -eq 2 ] || exit "$status"
+          fi
           gh release create "$STABLE_TAG" \
             "$RUNNER_TEMP/hamn-release-input/hamn-candidate/hamn-${STABLE_TAG}-darwin-arm64.tar.gz" \
             "$RUNNER_TEMP/hamn-release-input/hamn-candidate/hamn-${STABLE_TAG}-ubuntu-24.04-arm64.img" \
@@ -413,6 +286,55 @@ jobs:
             "$RUNNER_TEMP/hamn-publish/validation-evidence.json" \
             "$RUNNER_TEMP/hamn-publish/validation-evidence.json.sig" \
             "$RUNNER_TEMP/hamn-publish/e2e.json" \
-            --verify-tag \
+            --draft \
+            --target "$GITHUB_SHA" \
             --title "Hamn $STABLE_TAG" \
-            --notes "Promoted from exact validated RC $RC_TAG without rebuilding."
+            --generate-notes \
+            --notes "Created automatically after Release Please versioning and exact-byte physical validation."
+          gh release view "$STABLE_TAG" \
+            --json tagName,targetCommitish,isDraft,isPrerelease,assets \
+            > "$RUNNER_TEMP/hamn-draft-release.json"
+          python3 - "$RUNNER_TEMP/hamn-draft-release.json" "$STABLE_TAG" "$GITHUB_SHA" <<'PY'
+          import json
+          import sys
+
+          path, tag, commit = sys.argv[1:]
+          with open(path, encoding="utf-8") as source:
+              release = json.load(source)
+          expected = {
+              "hamn-" + tag + "-darwin-arm64.tar.gz",
+              "hamn-" + tag + "-ubuntu-24.04-arm64.img",
+              "hamn-" + tag + ".spdx.json",
+              "install.sh",
+              "hamn-update-manifest.json",
+              "hamn-update-manifest.json.sig",
+              "validation-evidence.json",
+              "validation-evidence.json.sig",
+              "e2e.json",
+          }
+          assets = release.get("assets")
+          names = {asset.get("name") for asset in assets if isinstance(asset, dict)} \
+              if isinstance(assets, list) else set()
+          if release.get("tagName") != tag or release.get("targetCommitish") != commit or \
+                  release.get("isDraft") is not True or \
+                  release.get("isPrerelease") is not False or names != expected:
+              raise SystemExit("draft release does not bind every validated artifact")
+          PY
+      - name: Publish immutable release and verify tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
+        run: |
+          set -euo pipefail
+          gh release edit "$STABLE_TAG" --draft=false --latest
+          stable_probe="refs/hamn-release/stable-$GITHUB_RUN_ID"
+          git fetch --no-tags origin "+refs/tags/${STABLE_TAG}:${stable_probe}"
+          stable_commit=$(git rev-parse --verify "${stable_probe}^{commit}")
+          [ "$stable_commit" = "$GITHUB_SHA" ] || {
+            echo "automatic stable tag does not resolve to the validated commit" >&2
+            exit 2
+          }
+          gh release view "$STABLE_TAG" --json tagName,isDraft,isPrerelease \
+            --jq 'select(.tagName == env.STABLE_TAG and .isDraft == false and .isPrerelease == false) | .tagName' \
+            | grep -Fxq "$STABLE_TAG"
