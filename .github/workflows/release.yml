@@ -341,9 +341,10 @@ jobs:
             "$STABLE_TAG" "$RC_TAG" "$RC_COMMIT" \
             "$RUNNER_TEMP/hamn-release-input" "$RUNNER_TEMP/hamn-publish"
           NIX_SHELL
-      - name: Create or verify exact stable tag
+      - name: Verify pre-existing signed stable tag
         shell: bash
         env:
+          GH_TOKEN: ${{ github.token }}
           STABLE_TAG: ${{ inputs.stable_tag }}
           RC_COMMIT: ${{ steps.rc.outputs.commit }}
         run: |
@@ -358,27 +359,35 @@ jobs:
           }
           stable_ref="refs/tags/$STABLE_TAG"
           stable_probe="refs/hamn-release/stable-$GITHUB_RUN_ID"
-          if git ls-remote --exit-code --refs origin "$stable_ref" >/dev/null; then
-            :
-          else
-            ls_remote_status=$?
-            [ "$ls_remote_status" -eq 2 ] || {
-              echo "cannot determine whether the stable tag exists remotely" >&2
-              exit 2
-            }
-            if git show-ref --verify --quiet "$stable_ref"; then
-              local_commit=$(git rev-parse --verify "${stable_ref}^{commit}")
-              [ "$local_commit" = "$RC_COMMIT" ] || {
-                echo "local stable tag does not resolve to the validated RC commit" >&2
-                exit 2
-              }
-            else
-              git -c tag.gpgSign=false tag "$STABLE_TAG" "$RC_COMMIT"
-            fi
-            if ! git push origin "$stable_ref"; then
-              echo "stable tag creation raced or failed; resolving its remote target" >&2
-            fi
-          fi
+          ref_json="$RUNNER_TEMP/hamn-stable-ref.json"
+          tag_json="$RUNNER_TEMP/hamn-stable-tag.json"
+          gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${STABLE_TAG}" > "$ref_json"
+          tag_object=$(jq -r '.object.sha' "$ref_json")
+          [[ "$tag_object" =~ ^[0-9a-f]{40}$ ]]
+          gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" > "$tag_json"
+          python3 - "$ref_json" "$tag_json" "$STABLE_TAG" "$RC_COMMIT" <<'PY'
+          import json
+          import re
+          import sys
+
+          ref_path, tag_path, stable_tag, commit = sys.argv[1:]
+          with open(ref_path, encoding="utf-8") as source:
+              ref = json.load(source)
+          with open(tag_path, encoding="utf-8") as source:
+              tag = json.load(source)
+          ref_object = ref.get("object")
+          tag_object = tag.get("object")
+          verification = tag.get("verification")
+          if ref.get("ref") != "refs/tags/" + stable_tag or \
+                  not isinstance(ref_object, dict) or ref_object.get("type") != "tag" or \
+                  not re.fullmatch(r"[0-9a-f]{40}", ref_object.get("sha", "")):
+              raise SystemExit("stable tag must be a pre-existing annotated tag")
+          if tag.get("tag") != stable_tag or not isinstance(tag_object, dict) or \
+                  tag_object.get("sha") != commit or tag_object.get("type") != "commit":
+              raise SystemExit("stable tag does not target the validated RC commit")
+          if not isinstance(verification, dict) or verification.get("verified") is not True:
+              raise SystemExit("stable tag signature is not GitHub Verified")
+          PY
           git fetch --no-tags origin "+${stable_ref}:${stable_probe}"
           stable_commit=$(git rev-parse --verify "${stable_probe}^{commit}")
           [ "$stable_commit" = "$RC_COMMIT" ] || {

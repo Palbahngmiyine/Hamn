@@ -1,6 +1,6 @@
 #!/bin/bash
-# Verify the fail-closed GitHub state required before a solo local 0.0.1 RC.
-# This check is read-only and requires private signing keys to stay off GitHub.
+# Verify the fail-closed GitHub state required before an automated 0.0.1 RC.
+# This check is read-only and verifies only secret names, never secret values.
 set -euo pipefail
 export LC_ALL=C
 
@@ -37,11 +37,12 @@ fetch() {
 fetch "repos/$REPOSITORY" repository "repository metadata"
 fetch "repos/$REPOSITORY/actions/workflows" workflows "repository workflows"
 fetch "repos/$REPOSITORY/actions/permissions" actions-permissions "Actions permissions"
+fetch "repos/$REPOSITORY/actions/permissions/selected-actions" selected-actions \
+    "allowed Actions policy"
 fetch "repos/$REPOSITORY/actions/permissions/workflow" workflow-permissions \
     "default workflow token permissions"
 fetch "repos/$REPOSITORY/actions/permissions/fork-pr-contributor-approval" \
     fork-approval "fork workflow approval policy"
-fetch "repos/$REPOSITORY/actions/runs" runs "Actions runs"
 fetch "repos/$REPOSITORY/actions/runners" runners "repository runners"
 fetch "repos/$REPOSITORY/actions/variables" variables "repository variables"
 fetch "repos/$REPOSITORY/actions/secrets" repository-secrets "repository secrets"
@@ -153,13 +154,23 @@ require(isinstance(security, dict) and
         "secret scanning and push protection must be enabled")
 
 workflows = entries("workflows", "workflows")
-require([(item.get("path"), item.get("state")) for item in workflows
-         if isinstance(item, dict)] ==
-        [(".github/workflows/release.yml", "disabled_manually")],
-        "the sole release workflow must be manually disabled")
+observed_workflows = sorted((item.get("path"), item.get("state"))
+                            for item in workflows if isinstance(item, dict))
+require(observed_workflows == [
+            (".github/workflows/ci.yml", "active"),
+            (".github/workflows/release.yml", "active"),
+        ], "only the CI and release workflows may be active")
 actions = read("actions-permissions")
-require(isinstance(actions, dict) and actions.get("enabled") is False,
-        "GitHub Actions must remain disabled for solo local release")
+require(isinstance(actions, dict) and actions.get("enabled") is True and
+        actions.get("allowed_actions") == "selected" and
+        actions.get("sha_pinning_required") is True,
+        "Actions must be enabled, selected, and SHA-pinned")
+selected = read("selected-actions")
+require(isinstance(selected, dict) and
+        selected.get("github_owned_allowed") is True and
+        selected.get("verified_allowed") is False and
+        selected.get("patterns_allowed") == ["cachix/install-nix-action@*"],
+        "only GitHub-owned Actions and the pinned Nix installer may run")
 workflow = read("workflow-permissions")
 require(isinstance(workflow, dict) and
         workflow.get("default_workflow_permissions") == "read" and
@@ -167,10 +178,32 @@ require(isinstance(workflow, dict) and
         "default GITHUB_TOKEN permissions must be read-only")
 require(read("fork-approval") == {"approval_policy": "all_external_contributors"},
         "all external fork workflows must require approval")
-require(read("runs").get("total_count") == 0,
-        "repository must not contain a prior Actions run before the first RC")
-require(entries("runners", "runners") == [], "repository runners must remain empty")
-require(entries("variables", "variables") == [], "repository variables must remain empty")
+validator = False
+for runner in entries("runners", "runners"):
+    if not isinstance(runner, dict):
+        continue
+    labels = runner.get("labels")
+    label_names = {label.get("name") for label in labels if isinstance(label, dict)} \
+        if isinstance(labels, list) else set()
+    if runner.get("os") == "macOS" and runner.get("architecture") == "ARM64" and \
+            runner.get("status") == "online" and \
+            {"self-hosted", "hamn-validator"} <= label_names:
+        validator = True
+        break
+require(validator, "an online macOS ARM64 hamn-validator runner is required")
+
+variable_names = {item.get("name") for item in entries("variables", "variables")
+                  if isinstance(item, dict)}
+required_variables = {
+    "HAMN_GUEST_IMAGE_URL",
+    "HAMN_GUEST_IMAGE_SHA256",
+    "HAMN_RELEASE_PUBLIC_KEY",
+    "HAMN_VALIDATOR_IDENTITY",
+    "HAMN_VALIDATOR_PUBLIC_KEY",
+}
+require(required_variables <= variable_names,
+        "required release variables are missing: " +
+        ", ".join(sorted(required_variables - variable_names)))
 require(entries("repository-secrets", "secrets") == [],
         "repository Actions secrets must remain empty")
 
@@ -178,14 +211,20 @@ environment_names = {item.get("name") for item in entries("environments", "envir
                      if isinstance(item, dict)}
 require({"hamn-validation", "hamn-promotion"} <= environment_names,
         "locked release environments are missing")
-require(entries("validation-secrets", "secrets") == [],
-        "validation environment secrets must remain empty")
-require(entries("promotion-secrets", "secrets") == [],
-        "promotion environment secrets must remain empty")
+validation_secret_names = {item.get("name")
+                           for item in entries("validation-secrets", "secrets")
+                           if isinstance(item, dict)}
+promotion_secret_names = {item.get("name")
+                          for item in entries("promotion-secrets", "secrets")
+                          if isinstance(item, dict)}
+require(validation_secret_names == {"HAMN_VALIDATOR_SIGNING_KEY"},
+        "hamn-validation must contain only HAMN_VALIDATOR_SIGNING_KEY")
+require(promotion_secret_names == {"HAMN_RELEASE_SIGNING_KEY"},
+        "hamn-promotion must contain only HAMN_RELEASE_SIGNING_KEY")
 
 main_rules = check_ruleset("main", "branch", ["~DEFAULT_BRANCH"],
                            {"deletion", "non_fast_forward", "required_linear_history",
-                            "pull_request"}, [])
+                            "pull_request", "required_status_checks"}, [])
 pull = next(rule for rule in main_rules if rule.get("type") == "pull_request")
 parameters = pull.get("parameters")
 require(isinstance(parameters, dict) and parameters == {
@@ -197,6 +236,16 @@ require(isinstance(parameters, dict) and parameters == {
             "required_review_thread_resolution": True,
             "allowed_merge_methods": ["squash", "rebase"],
         }, "main pull request rules are not solo-maintainer safe")
+status = next(rule for rule in main_rules if rule.get("type") ==
+              "required_status_checks")
+parameters = status.get("parameters")
+checks = parameters.get("required_status_checks") if isinstance(parameters, dict) else None
+contexts = {check.get("context") for check in checks if isinstance(check, dict)} \
+    if isinstance(checks, list) else set()
+require(isinstance(parameters, dict) and
+        parameters.get("strict_required_status_checks_policy") is True and
+        contexts == {"Portable source gates", "macOS build and regression gates"},
+        "main must require both Nix CI status checks on the latest commit")
 
 owner_bypass = [{"actor_id": owner["id"], "actor_type": "User",
                  "bypass_mode": "always"}]
@@ -219,5 +268,5 @@ require(isinstance(commit, dict) and commit.get("commit", {}).get("verification"
 require(read("tags") == [], "repository tags must be empty before the first RC")
 require(read("releases") == [], "repository releases must be empty before the first RC")
 
-print("solo local release repository preflight passed for " + repository)
+print("automated release repository preflight passed for " + repository)
 PY
