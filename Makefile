@@ -49,11 +49,12 @@ START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retr
 
 .PHONY: FORCE host install clean test-portable test-qcow2 \
 	test-profile-state test-guest-deployment test-diagnostics test-install \
-	test-uninstall test-update test-release-artifacts test-release-gate test-release-publish \
+	test-uninstall test-update test-release-artifacts test-hosted-validation \
+	test-release-gate test-release-publish \
 	test-release-version \
 	test-kubernetes-cli test-core-quality test-public-export test-release-repository-preflight \
 	test-port-forwarding test-workflows test-local-macos \
-	release-candidate release-gate
+	release-candidate release-gate release-hosted-validation
 
 FORCE:
 
@@ -169,6 +170,7 @@ test-local-macos:
 	$(MAKE) test-update
 	$(MAKE) test-kubernetes-cli
 	$(MAKE) test-release-artifacts
+	$(MAKE) test-hosted-validation
 	$(MAKE) test-release-gate
 	$(MAKE) test-release-publish
 	$(MAKE) test-release-version
@@ -226,6 +228,9 @@ test-update: host
 test-release-artifacts: host
 	bash tests/host/test_release_artifacts.sh
 
+test-hosted-validation: host
+	bash tests/host/test_hosted_validation.sh
+
 test-release-gate: host
 	bash tests/host/test_release_gate.sh
 
@@ -243,6 +248,9 @@ test-release-repository-preflight:
 
 release-candidate:
 	bash packaging/release/build-candidate.sh
+
+release-hosted-validation:
+	bash packaging/release/hosted-validation.sh
 
 release-gate:
 	bash packaging/release/release-gate.sh
