@@ -266,11 +266,20 @@ release_please_workflow=$ROOT/.github/workflows/release-please.yml
 for requirement in \
     '  contents: read' \
     '        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0' \
+    '      - name: Require dedicated Release Please token' \
+    '        run: test -n "$RELEASE_PLEASE_TOKEN"' \
     '          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}' \
     '          skip-github-release: true'; do
     grep -Fqx "$requirement" "$release_please_workflow" ||
         fail "Release Please workflow is incomplete: $requirement"
 done
+
+checkout_count=$(grep -hFc 'uses: actions/checkout@' "$ROOT"/.github/workflows/*.yml | \
+    awk '{ total += $1 } END { print total + 0 }')
+[ "$checkout_count" -gt 0 ] || fail "workflows do not check out source"
+[ "$(grep -hFc '          persist-credentials: false' \
+    "$ROOT"/.github/workflows/*.yml | awk '{ total += $1 } END { print total + 0 }')" \
+    -eq "$checkout_count" ] || fail "every checkout must disable credential persistence"
 
 release_workflow=$ROOT/.github/workflows/release.yml
 for requirement in \
