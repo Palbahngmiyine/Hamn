@@ -17,7 +17,6 @@
       commonPackages = pkgs: with pkgs; [
         actionlint
         bash
-        coreutils
         curl
         git
         gnumake
@@ -33,7 +32,10 @@
         let
           pkgs = pkgsFor system;
           ciPackages = commonPackages pkgs
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.gcc ];
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              pkgs.coreutils
+              pkgs.gcc
+            ];
         in
         {
           default = pkgs.mkShell {
