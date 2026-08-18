@@ -263,7 +263,7 @@ for requirement in \
     '        run: nix develop .#ci --command make -j1 test-portable' \
     '      - name: Run macOS regression gates with the system Apple SDK' \
     '          source scripts/ci/use-system-macos-sdk.sh' \
-    '          make -j1 test-local-macos'; do
+    '          make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos'; do
     grep -Fqx "$requirement" "$ci_workflow" ||
         fail "Nix CI workflow is incomplete: $requirement"
 done
@@ -367,7 +367,7 @@ grep -Fqx '          HAMN_VALIDATOR_PATH="$PATH" \' "$release_workflow" ||
 [ "$(grep -Fc "nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'" \
     "$release_workflow")" -eq 2 ] ||
     fail "candidate build and stable promotion must use the Nix CI shell"
-grep -Fqx '          make -j1 test-local-macos' "$release_workflow" ||
+grep -Fqx '          make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos' "$release_workflow" ||
     fail "hosted candidate does not rerun the full local regression suite"
 grep -Fqx '          source scripts/ci/use-system-macos-sdk.sh' "$release_workflow" ||
     fail "hosted candidate does not use the current system Apple SDK"
