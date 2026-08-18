@@ -35,6 +35,19 @@ jobs:
         env:
           PREVIOUS_REF: ${{ github.event.before }}
         run: bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"
+      - name: Require GitHub Verified release commit
+        if: steps.release.outputs.should_release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          verified=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" \
+            --jq '.commit.verification.verified')
+          [ "$verified" = true ] || {
+            echo "release commit must be GitHub Verified" >&2
+            exit 2
+          }
 
   candidate:
     if: needs.prepare.outputs.should_release == 'true'
