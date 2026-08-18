@@ -57,7 +57,10 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build with Nix tools and the system Apple SDK
-        run: nix develop .#ci --command make -j1 host
-      - name: Run macOS regression gates
-        run: nix develop .#ci --command make -j1 test-local-macos
+      - name: Run macOS regression gates with the system Apple SDK
+        shell: bash
+        run: |
+          nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
+          source scripts/ci/use-system-macos-sdk.sh
+          make -j1 test-local-macos
+          NIX_SHELL
