@@ -2,6 +2,7 @@
 # A fresh curl-style bootstrap must accept only a signed manifest, install the
 # exact candidate bytes, and leave the installed generation intact on failure.
 set -euo pipefail
+unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 WORK=$(mktemp -d /tmp/hamn-release-artifacts.XXXXXX)
