@@ -57,8 +57,6 @@ fetch "repos/$REPOSITORY/immutable-releases" immutable-releases \
 fetch "repos/$REPOSITORY/private-vulnerability-reporting" \
     private-vulnerability-reporting "private vulnerability reporting policy"
 fetch "repos/$REPOSITORY/commits/main" main-commit "main commit verification"
-fetch "repos/$REPOSITORY/tags" tags "repository tags"
-fetch "repos/$REPOSITORY/releases" releases "repository releases"
 
 python3 - "$WORK/rulesets.json" "$WORK/ruleset-ids" <<'PY'
 import json
@@ -67,10 +65,8 @@ import sys
 source_path, output_path = sys.argv[1:]
 expected = {
     "protect-main-and-release-workflow": "main",
-    "immutable-v0.0.1-release-candidates": "rc-immutable",
-    "immutable-stable-v0.0.1": "stable-immutable",
-    "v0.0.1-release-candidates-owner-created-only": "rc-owner",
-    "stable-v0.0.1-owner-created-only": "stable-owner",
+    "immutable-stable-releases": "stable-immutable",
+    "stable-releases-actions-created-only": "stable-actions",
 }
 with open(source_path, encoding="utf-8") as source:
     rulesets = json.load(source)
@@ -158,8 +154,9 @@ observed_workflows = sorted((item.get("path"), item.get("state"))
                             for item in workflows if isinstance(item, dict))
 require(observed_workflows == [
             (".github/workflows/ci.yml", "active"),
+            (".github/workflows/release-please.yml", "active"),
             (".github/workflows/release.yml", "active"),
-        ], "only the CI and release workflows may be active")
+        ], "only CI, Release Please, and release workflows may be active")
 actions = read("actions-permissions")
 require(isinstance(actions, dict) and actions.get("enabled") is True and
         actions.get("allowed_actions") == "selected" and
@@ -169,8 +166,10 @@ selected = read("selected-actions")
 require(isinstance(selected, dict) and
         selected.get("github_owned_allowed") is True and
         selected.get("verified_allowed") is False and
-        selected.get("patterns_allowed") == ["cachix/install-nix-action@*"],
-        "only GitHub-owned Actions and the pinned Nix installer may run")
+        set(selected.get("patterns_allowed", [])) == {
+            "cachix/install-nix-action@*",
+            "googleapis/release-please-action@*",
+        }, "only GitHub-owned Actions, Nix, and Release Please may run")
 workflow = read("workflow-permissions")
 require(isinstance(workflow, dict) and
         workflow.get("default_workflow_permissions") == "read" and
@@ -204,8 +203,11 @@ required_variables = {
 require(required_variables <= variable_names,
         "required release variables are missing: " +
         ", ".join(sorted(required_variables - variable_names)))
-require(entries("repository-secrets", "secrets") == [],
-        "repository Actions secrets must remain empty")
+repository_secret_names = {item.get("name")
+                           for item in entries("repository-secrets", "secrets")
+                           if isinstance(item, dict)}
+require(repository_secret_names == {"RELEASE_PLEASE_TOKEN"},
+        "repository secrets must contain only RELEASE_PLEASE_TOKEN")
 
 environment_names = {item.get("name") for item in entries("environments", "environments")
                      if isinstance(item, dict)}
@@ -247,15 +249,11 @@ require(isinstance(parameters, dict) and
         contexts == {"Portable source gates", "macOS build and regression gates"},
         "main must require both Nix CI status checks on the latest commit")
 
-owner_bypass = [{"actor_id": owner["id"], "actor_type": "User",
-                 "bypass_mode": "always"}]
-check_ruleset("rc-owner", "tag", ["refs/tags/v0.0.1-rc.*"],
-              {"creation"}, owner_bypass)
-check_ruleset("stable-owner", "tag", ["refs/tags/v0.0.1"],
-              {"creation"}, owner_bypass)
-check_ruleset("rc-immutable", "tag", ["refs/tags/v0.0.1-rc.*"],
-              {"deletion", "non_fast_forward"}, [])
-check_ruleset("stable-immutable", "tag", ["refs/tags/v0.0.1"],
+actions_bypass = [{"actor_id": 15368, "actor_type": "Integration",
+                   "bypass_mode": "always"}]
+check_ruleset("stable-actions", "tag", ["refs/tags/v*"],
+              {"creation"}, actions_bypass)
+check_ruleset("stable-immutable", "tag", ["refs/tags/v*"],
               {"deletion", "non_fast_forward"}, [])
 
 require(read("immutable-releases").get("enabled") is True,
@@ -265,8 +263,5 @@ require(read("private-vulnerability-reporting") == {"enabled": True},
 commit = read("main-commit")
 require(isinstance(commit, dict) and commit.get("commit", {}).get("verification", {}).get(
         "verified") is True, "main must resolve to a verified signed commit")
-require(read("tags") == [], "repository tags must be empty before the first RC")
-require(read("releases") == [], "repository releases must be empty before the first RC")
-
 print("automated release repository preflight passed for " + repository)
 PY

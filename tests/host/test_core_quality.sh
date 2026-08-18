@@ -273,6 +273,20 @@ for requirement in \
 done
 
 release_workflow=$ROOT/.github/workflows/release.yml
+for requirement in \
+    '    branches: [main]' \
+    "      - '.release-please-manifest.json'" \
+    '  contents: read' \
+    '    name: Resolve Release Please version' \
+    '        run: bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"'; do
+    grep -Fqx "$requirement" "$release_workflow" ||
+        fail "automated release trigger is incomplete: $requirement"
+done
+if grep -Eq 'workflow_dispatch|^[[:space:]]+tags:|rc_run_id:|inputs\.rc_' \
+    "$release_workflow"; then
+    fail "release workflow still exposes a manual tag or promotion trigger"
+fi
+
 candidate_job=$(awk '
     /^  candidate:$/ { capture = 1 }
     /^  validate:$/ { capture = 0 }
@@ -294,7 +308,7 @@ for permission in '      artifact-metadata: write' '      attestations: write' '
 done
 for requirement in \
     '      - name: Attest exact candidate artifact provenance' \
-    '        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6' \
+    '        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2' \
     '          subject-checksums: ${{ runner.temp }}/hamn-candidate/SHA256SUMS'; do
     printf '%s\n' "$candidate_job" | grep -Fqx "$requirement" ||
         fail "candidate provenance attestation is incomplete: $requirement"
@@ -318,26 +332,8 @@ grep -Fqx '          HAMN_VALIDATOR_PATH="$PATH" \' "$release_workflow" ||
 [ "$(grep -Fc "nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'" \
     "$release_workflow")" -eq 2 ] ||
     fail "candidate build and stable promotion must use the Nix CI shell"
-for gate in \
-    test-workflows \
-    test-portable \
-    test-core-quality \
-    test-port-forwarding \
-    test-profile-state \
-    test-guest-deployment \
-    test-diagnostics \
-    test-install \
-    test-uninstall \
-    test-update \
-    test-kubernetes-cli \
-    test-release-artifacts \
-    test-release-gate \
-    test-release-publish \
-    test-public-export \
-    test-release-repository-preflight; do
-    grep -Fqx "          make -j1 $gate" "$release_workflow" ||
-        fail "hosted candidate job does not run source gate: $gate"
-done
+grep -Fqx '          make -j1 test-local-macos' "$release_workflow" ||
+    fail "hosted candidate does not rerun the full local regression suite"
 if grep -Fq 'HAMN_RELEASE_TEST_FIXTURES' "$release_workflow"; then
     fail "release workflow must not enable fixture validation"
 fi
@@ -440,82 +436,45 @@ for requirement in \
     '          printf '\''%s\n'\'' "$HAMN_VALIDATOR_SIGNING_KEY_TEXT" > "$validator_key"' \
     '          chmod 0600 "$validator_key"' \
     '          unset HAMN_VALIDATOR_SIGNING_KEY_TEXT' \
+    '          HAMN_VALIDATOR_PATH="$PATH" \' \
     '          HAMN_VALIDATOR_SIGNING_KEY="$validator_key" make release-gate \'; do
     grep -Fqx "$requirement" "$release_workflow" ||
         fail "physical validator key-file preparation is incomplete: $requirement"
 done
-grep -Fq 'rc_run_id:' "$release_workflow" ||
-    fail "manual promotion does not require an exact RC workflow run ID"
-grep -Fq "inputs.rc_run_id != ''" "$release_workflow" ||
-    fail "manual promotion may run without an exact RC workflow run ID"
-grep -Fqx '  actions: read' "$release_workflow" ||
-    fail "cross-run artifact retrieval lacks Actions read permission"
-grep -Fqx '          ref: refs/tags/${{ inputs.rc_tag }}' "$release_workflow" ||
-    fail "manual promotion does not check out an explicit RC tag ref"
-grep -Fq 'repos/${GITHUB_REPOSITORY}/actions/runs/${RC_RUN_ID}' \
-    "$release_workflow" ||
-    fail "manual promotion does not inspect the requested RC workflow run"
-for field in '"event": "push"' '"head_branch": tag' \
-    '"head_sha": commit' '"status": "completed"' \
-    '"conclusion": "success"'; do
-    grep -Fq "$field" "$release_workflow" ||
-        fail "manual promotion does not verify RC workflow $field"
-done
-grep -Fq '.github/workflows/release.yml@' "$release_workflow" ||
-    fail "manual promotion does not verify the RC release workflow path"
-grep -Fq 'allowed_workflow_paths' "$release_workflow" ||
-    fail "manual promotion does not bind the RC workflow path to the requested tag"
-grep -Fq 'run_repository.get("full_name") != repository' "$release_workflow" ||
-    fail "manual promotion does not verify the RC workflow repository"
 for requirement in \
-    '          run_attempt = value.get("run_attempt")' \
-    '          if not isinstance(run_attempt, int) or run_attempt < 1:' \
-    '              output.write("run_id=" + run_id + "\n")' \
-    '              output.write("run_attempt=" + str(run_attempt) + "\n")' \
-    '          RC_RUN_ID: ${{ steps.rc_run.outputs.run_id }}' \
-    '          RC_RUN_ATTEMPT: ${{ steps.rc_run.outputs.run_attempt }}'; do
+    '          HAMN_EXPECTED_WORKFLOW_RUN="$GITHUB_RUN_ID" \' \
+    '          HAMN_EXPECTED_WORKFLOW_ATTEMPT="$GITHUB_RUN_ATTEMPT" \'; do
     grep -Fqx "$requirement" "$release_workflow" ||
-        fail "manual promotion does not bind evidence to the verified RC workflow run and attempt: $requirement"
-done
-for requirement in \
-    '          HAMN_EXPECTED_WORKFLOW_RUN="$RC_RUN_ID"' \
-    '          HAMN_EXPECTED_WORKFLOW_ATTEMPT="$RC_RUN_ATTEMPT"'; do
-    grep -Fq "$requirement" "$release_workflow" ||
-        fail "manual promotion does not pass the verified RC workflow identity to the evidence verifier: $requirement"
+        fail "automatic promotion does not bind same-run validation evidence: $requirement"
 done
 for artifact in hamn-candidate hamn-evidence; do
     block=$(awk -v artifact="$artifact" '
-        $0 == "          name: " artifact "-${{ steps.rc.outputs.commit }}" { capture = 1 }
+        $0 == "          name: " artifact "-${{ github.sha }}" { capture = 1 }
         capture && /^      - name: / { exit }
         capture { print }
     ' "$release_workflow")
-    printf '%s\n' "$block" | grep -Fqx '          github-token: ${{ github.token }}' ||
-        fail "cross-run $artifact artifact download lacks a GitHub token"
-    printf '%s\n' "$block" | grep -Fqx '          repository: ${{ github.repository }}' ||
-        fail "cross-run $artifact artifact download lacks an explicit repository"
-    printf '%s\n' "$block" | grep -Fqx '          run-id: ${{ steps.rc_run.outputs.run_id }}' ||
-        fail "cross-run $artifact artifact download lacks the verified run ID"
+    [ -n "$block" ] || fail "same-run $artifact download is missing"
+    if printf '%s\n' "$block" | grep -Eq 'github-token:|repository:|run-id:'; then
+        fail "same-run $artifact download contains cross-run selectors"
+    fi
 done
-grep -Fqx '      - name: Verify pre-existing signed stable tag' "$release_workflow" ||
-    fail "stable promotion does not verify the signed stable tag first"
 for requirement in \
-    '          GH_TOKEN: ${{ github.token }}' \
-    '          stable_ref="refs/tags/$STABLE_TAG"' \
-    '          gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${STABLE_TAG}" > "$ref_json"' \
-    '          gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" > "$tag_json"' \
-    '              raise SystemExit("stable tag signature is not GitHub Verified")' \
-    '          git fetch --no-tags origin "+${stable_ref}:${stable_probe}"' \
-    '          [ "$stable_commit" = "$RC_COMMIT" ] || {'; do
+    '    name: Publish validated release automatically' \
+    '    needs: [prepare, candidate, validate]' \
+    '      contents: write' \
+    '      - name: Create and verify draft release' \
+    '            --draft \' \
+    '            --target "$GITHUB_SHA" \' \
+    '              raise SystemExit("draft release does not bind every validated artifact")' \
+    '      - name: Publish immutable release and verify tag' \
+    '          gh release edit "$STABLE_TAG" --draft=false --latest' \
+    '          [ "$stable_commit" = "$GITHUB_SHA" ] || {'; do
     grep -Fqx "$requirement" "$release_workflow" ||
-        fail "stable tag promotion safety check is incomplete: $requirement"
+        fail "automatic stable release is incomplete: $requirement"
 done
-if rg -n 'git .* tag |git push origin.*stable_ref' "$release_workflow" >/dev/null; then
-    fail "release automation must not create the maintainer-authorized stable tag"
-fi
-grep -Fq -- '--verify-tag' "$release_workflow" ||
-    fail "stable release does not require a pre-existing verified tag"
-if grep -Fq -- '--target ' "$release_workflow"; then
-    fail "stable release may ask gh to create a tag after tag verification"
+if rg -n 'git[[:space:]]+tag|git[[:space:]]+push.*refs/tags|--verify-tag' \
+    "$release_workflow" >/dev/null; then
+    fail "release workflow still depends on a manually prepared tag"
 fi
 if rg -n -i 'HAMN_COLIMA_BENCHMARK_COMMAND|benchmarkSha256|colima-benchmark' \
     "$ROOT/packaging/release" "$ROOT/Makefile" "$release_workflow" >/dev/null; then
