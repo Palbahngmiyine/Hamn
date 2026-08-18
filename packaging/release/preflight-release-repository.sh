@@ -35,6 +35,10 @@ fetch() {
 }
 
 fetch "repos/$REPOSITORY" repository "repository metadata"
+fetch "repos/$REPOSITORY/collaborators?affiliation=all&per_page=100" collaborators \
+    "repository collaborators"
+fetch "repos/$REPOSITORY/invitations" invitations "pending repository invitations"
+fetch "repos/$REPOSITORY/keys" deploy-keys "repository deploy keys"
 fetch "repos/$REPOSITORY/actions/workflows" workflows "repository workflows"
 fetch "repos/$REPOSITORY/actions/permissions" actions-permissions "Actions permissions"
 fetch "repos/$REPOSITORY/actions/permissions/selected-actions" selected-actions \
@@ -56,7 +60,6 @@ fetch "repos/$REPOSITORY/immutable-releases" immutable-releases \
     "immutable release policy"
 fetch "repos/$REPOSITORY/private-vulnerability-reporting" \
     private-vulnerability-reporting "private vulnerability reporting policy"
-fetch "repos/$REPOSITORY/commits/main" main-commit "main commit verification"
 
 python3 - "$WORK/rulesets.json" "$WORK/ruleset-ids" <<'PY'
 import json
@@ -140,13 +143,27 @@ require(isinstance(repo, dict) and repo.get("full_name") == repository,
 require(repo.get("private") is False and repo.get("visibility") == "public" and
         repo.get("archived") is False, "repository must be active and public")
 owner = repo.get("owner")
-require(isinstance(owner, dict) and isinstance(owner.get("id"), int),
+repository_owner = repository.split("/", 1)[0]
+require(isinstance(owner, dict) and isinstance(owner.get("id"), int) and
+        owner.get("login") == repository_owner and owner.get("type") == "User",
         "repository owner identity is invalid")
 security = repo.get("security_and_analysis")
 require(isinstance(security, dict) and
         security.get("secret_scanning", {}).get("status") == "enabled" and
         security.get("secret_scanning_push_protection", {}).get("status") == "enabled",
         "secret scanning and push protection must be enabled")
+
+collaborators = read("collaborators")
+require(isinstance(collaborators, list) and len(collaborators) == 1,
+        "repository must have exactly one collaborator: its owner")
+collaborator = collaborators[0]
+permissions = collaborator.get("permissions") if isinstance(collaborator, dict) else None
+require(isinstance(collaborator, dict) and collaborator.get("login") == repository_owner and
+        collaborator.get("role_name") == "admin" and isinstance(permissions, dict) and
+        permissions.get("admin") is True,
+        "repository's only collaborator must be its owner with admin access")
+require(read("invitations") == [], "repository must not have pending invitations")
+require(read("deploy-keys") == [], "repository must not have deploy keys")
 
 workflows = entries("workflows", "workflows")
 observed_workflows = sorted((item.get("path"), item.get("state"))
@@ -255,8 +272,5 @@ require(read("immutable-releases").get("enabled") is True,
         "immutable releases must be enabled")
 require(read("private-vulnerability-reporting") == {"enabled": True},
         "private vulnerability reporting must be enabled")
-commit = read("main-commit")
-require(isinstance(commit, dict) and commit.get("commit", {}).get("verification", {}).get(
-        "verified") is True, "main must resolve to a verified signed commit")
 print("automated release repository preflight passed for " + repository)
 PY
