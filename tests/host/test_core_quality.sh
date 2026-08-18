@@ -386,7 +386,6 @@ for requirement in \
     '      contents: write' \
     '      id-token: write' \
     '      - name: Verify keyless build provenance' \
-    '            gh attestation verify "$candidate/$name" \' \
     '      - name: Attest immutable update manifest' \
     '      - name: Create and verify draft release' \
     '            --draft --target "$GITHUB_SHA" --title "Hamn $STABLE_TAG" \' \
@@ -397,6 +396,11 @@ for requirement in \
     printf '%s\n' "$publish_job" | grep -Fqx "$requirement" ||
         fail "keyless immutable promotion is incomplete: $requirement"
 done
+printf '%s\n' "$publish_job" |
+    grep -Fq 'gh attestation verify "$candidate/$name"' ||
+    fail "keyless promotion does not verify each candidate attestation"
+printf '%s\n' "$publish_job" | grep -Fq -- '--deny-self-hosted-runners' ||
+    fail "keyless promotion accepts provenance from self-hosted runners"
 
 for requirement in \
     '"validationMode": "github-hosted-no-vm"' \
