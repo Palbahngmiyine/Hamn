@@ -54,7 +54,7 @@ jobs:
     if: needs.prepare.outputs.should_release == 'true'
     name: Build exact release candidate
     needs: prepare
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     permissions:
       artifact-metadata: write
@@ -211,7 +211,7 @@ jobs:
     if: needs.prepare.outputs.should_release == 'true'
     name: Publish validated release automatically
     needs: [prepare, candidate, validate]
-    runs-on: macos-14
+    runs-on: macos-15
     environment: hamn-promotion
     timeout-minutes: 30
     permissions:

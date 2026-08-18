@@ -257,7 +257,7 @@ ci_workflow=$ROOT/.github/workflows/ci.yml
 for requirement in \
     '  contents: read' \
     '    runs-on: ubuntu-24.04' \
-    '    runs-on: macos-14' \
+    '    runs-on: macos-15' \
     '        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1' \
     '        run: nix flake check --print-build-logs' \
     '        run: nix develop .#ci --command make -j1 test-portable' \
@@ -327,8 +327,8 @@ candidate_job=$(awk '
     /^  validate:$/ { capture = 0 }
     capture { print }
 ' "$release_workflow")
-printf '%s\n' "$candidate_job" | grep -Fqx '    runs-on: macos-14' ||
-    fail "candidate job is not pinned to the GitHub-hosted macOS 14 arm64 label"
+printf '%s\n' "$candidate_job" | grep -Fqx '    runs-on: macos-15' ||
+    fail "candidate job is not pinned to the GitHub-hosted macOS 15 arm64 label"
 for permission in \
     '      artifact-metadata: write' \
     '      attestations: write' \
