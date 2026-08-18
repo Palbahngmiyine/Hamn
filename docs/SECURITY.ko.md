@@ -22,6 +22,7 @@ kubeconfig credential, SSH material, 개인 path를 제거하세요.
 
 ## Release 신뢰 경로
 
-공개된 installer 또는 canonical manifest signature와 SHA-256을 검증한 release
-artifact만으로 Hamn을 설치하세요. Installer와 `hamn update`는 서명되지 않았거나
-호환되지 않는 host/guest artifact를 거부합니다.
+GitHub attestation과 SHA-256을 검증한 공개 installer 또는 release artifact만으로
+Hamn을 설치하세요. 공개된 release는 immutable입니다. Installer와 `hamn update`는
+호환되지 않는 artifact 또는 stable manifest digest와 일치하지 않는 host/guest byte를
+거부합니다.

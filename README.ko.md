@@ -12,8 +12,14 @@ CLI, Compose, buildx, SDK, Testcontainers와 선택형 K3s를 격리된 프로�
 ## 설치
 
 ```sh
-curl -fsSL https://github.com/Palbahngmiyine/hamn/releases/latest/download/install.sh | sh
+curl -fsSL --proto '=https' --tlsv1.2 \
+  https://github.com/Palbahngmiyine/Hamn/releases/latest/download/install.sh \
+  | /bin/bash
 ```
+
+실행 전에 bootstrap을 검증하려면
+[Public release repository 설정](docs/RELEASE-SETUP.ko.md#6-설치)의 attestation 절차를
+따르세요.
 
 `~/.local/bin`이 `PATH`에 있는지 확인한 뒤 Hamn을 시작하고 Docker를 사용하세요.
 

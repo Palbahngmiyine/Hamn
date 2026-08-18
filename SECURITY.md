@@ -25,5 +25,6 @@ personal paths before attaching any file.
 ## Release trust
 
 Install Hamn only with the published installer or a release artifact whose
-canonical manifest signature and SHA-256 values verify. The installer and
-`hamn update` reject unsigned or incompatible host and guest artifacts.
+GitHub attestation and SHA-256 values verify. The published release is
+immutable, and the installer and `hamn update` reject incompatible artifacts or
+host and guest bytes that do not match the stable manifest digests.

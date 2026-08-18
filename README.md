@@ -12,8 +12,13 @@ isolated profiles.
 ## Install
 
 ```sh
-curl -fsSL https://github.com/Palbahngmiyine/hamn/releases/latest/download/install.sh | sh
+curl -fsSL --proto '=https' --tlsv1.2 \
+  https://github.com/Palbahngmiyine/Hamn/releases/latest/download/install.sh \
+  | /bin/bash
 ```
+
+For a bootstrap verified before execution, follow the attestation procedure in
+[Public release repository setup](docs/RELEASE-SETUP.md#6-install).
 
 Ensure `~/.local/bin` is on your `PATH`, then start Hamn and use Docker:
 
