@@ -64,6 +64,24 @@ grep -Fxq 'physical validator preflight passed without installing or starting Ha
     echo "FAIL: physical preflight rejected a non-Hamn Docker CLI" >&2
     exit 1
 }
+env -i HOME="$PREFLIGHT_HOME" PATH=/usr/bin:/bin \
+    HAMN_VALIDATOR_PATH="$PREFLIGHT_BIN:/usr/bin:/bin" \
+    /bin/bash "$ROOT/packaging/release/physical-e2e.sh" --preflight \
+    >"$WORK/preflight-nix-path.out"
+grep -Fxq 'physical validator preflight passed without installing or starting Hamn' \
+    "$WORK/preflight-nix-path.out" || {
+    echo "FAIL: physical preflight rejected the explicit Nix validator PATH" >&2
+    exit 1
+}
+if env -i HOME="$PREFLIGHT_HOME" PATH=/usr/bin:/bin \
+    HAMN_VALIDATOR_PATH="relative:/usr/bin:/bin" \
+    /bin/bash "$ROOT/packaging/release/physical-e2e.sh" --preflight \
+    >"$WORK/preflight-relative.out" 2>"$WORK/preflight-relative.err"; then
+    echo "FAIL: physical preflight accepted a relative validator PATH" >&2
+    exit 1
+fi
+grep -Fq 'validator PATH contains a relative directory' \
+    "$WORK/preflight-relative.err"
 if env -i HOME="$PREFLIGHT_HOME" PATH=/usr/bin:/bin \
     HAMN_TEST_VALIDATOR_PATH="$PREFLIGHT_BIN:/usr/bin:/bin" \
     /bin/bash "$ROOT/packaging/release/physical-e2e.sh" --preflight \

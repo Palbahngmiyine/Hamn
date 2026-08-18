@@ -176,6 +176,7 @@ jobs:
           printf '%s\n' "$HAMN_VALIDATOR_SIGNING_KEY_TEXT" > "$validator_key"
           chmod 0600 "$validator_key"
           unset HAMN_VALIDATOR_SIGNING_KEY_TEXT
+          HAMN_VALIDATOR_PATH="$PATH" \
           HAMN_VALIDATOR_SIGNING_KEY="$validator_key" make release-gate \
             RELEASE_REF="$GITHUB_SHA" \
             RELEASE_TAG="$GITHUB_REF_NAME" \

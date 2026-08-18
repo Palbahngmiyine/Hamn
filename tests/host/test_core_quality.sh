@@ -208,6 +208,7 @@ for requirement in \
     '"x86_64-linux"' \
     'devShells = forAllSystems' \
     'release = pkgs.mkShell' \
+    '              kubectl' \
     'packages = forAllSystems' \
     'checks = forAllSystems' \
     'actionlint -config-file'; do
@@ -283,6 +284,8 @@ for requirement in \
 done
 grep -Fq "nix develop .#release --command bash -euo pipefail <<'NIX_SHELL'" \
     "$release_workflow" || fail "physical validation does not use the Nix release shell"
+grep -Fqx '          HAMN_VALIDATOR_PATH="$PATH" \' "$release_workflow" ||
+    fail "physical validation does not pass the Nix release PATH"
 [ "$(grep -Fc "nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'" \
     "$release_workflow")" -eq 2 ] ||
     fail "candidate build and stable promotion must use the Nix CI shell"

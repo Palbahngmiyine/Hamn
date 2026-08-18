@@ -77,6 +77,22 @@ require_value() {
     [ -n "$value" ] || fail "$variable is required"
 }
 
+validate_validator_path() {
+    local path=$1 directory
+    [ -n "$path" ] || fail "validator PATH is empty"
+    case "$path" in
+    :*|*::*|*:) fail "validator PATH contains an empty entry" ;;
+    esac
+    while IFS= read -r directory; do
+        case "$directory" in
+        /*) ;;
+        *) fail "validator PATH contains a relative directory" ;;
+        esac
+        [ -d "$directory" ] && [ ! -L "$directory" ] ||
+            fail "validator PATH contains an unsafe directory: $directory"
+    done < <(printf '%s\n' "$path" | tr ':' '\n')
+}
+
 canonical_regular_path() {
     "$PYTHON3" - "$1" <<'PY'
 import os
@@ -138,13 +154,16 @@ require_validator_environment() {
     [ -n "${HOME:-}" ] && [ "${HOME#/}" != "$HOME" ] ||
         fail "validator HOME must be an absolute path"
     VALIDATOR_HOME=$HOME
-    if [ -n "${HAMN_TEST_VALIDATOR_PATH:-}" ]; then
+    if [ -n "${HAMN_VALIDATOR_PATH:-}" ]; then
+        VALIDATOR_PATH=$HAMN_VALIDATOR_PATH
+    elif [ -n "${HAMN_TEST_VALIDATOR_PATH:-}" ]; then
         [ "${HAMN_RELEASE_TEST_FIXTURES:-0}" = 1 ] ||
             fail "HAMN_TEST_VALIDATOR_PATH is allowed only for test fixtures"
         VALIDATOR_PATH=$HAMN_TEST_VALIDATOR_PATH
     else
         VALIDATOR_PATH="/opt/homebrew/bin:/usr/local/bin:$VALIDATOR_HOME/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     fi
+    validate_validator_path "$VALIDATOR_PATH"
     export PATH=$VALIDATOR_PATH
     [ "$(uname -m)" = arm64 ] || fail "validator must be Apple Silicon"
     PYTHON3=$(require_tool python3)

@@ -49,6 +49,7 @@
           release = pkgs.mkShell {
             packages = ciPackages ++ (with pkgs; [
               go_1_23
+              kubectl
               maven
               nodejs_22
             ]);
