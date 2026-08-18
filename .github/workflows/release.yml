@@ -75,12 +75,6 @@ jobs:
           set -euo pipefail
           work="$RUNNER_TEMP/hamn-guest-inputs"
           mkdir "$work"
-          builder="$work/builder"
-          mkdir -m 0755 "$builder"
-          mkdir -m 0700 "$builder/home" "$builder/runtime" "$builder/tmp"
-          mkdir -m 0755 "$builder/output"
-          guestfs_group=$(id -gn nobody)
-          sudo chown -R "nobody:$guestfs_group" "$builder"
           inputs=guest/image/release-inputs.json
           base_url=$(jq -er '.ubuntu.url' "$inputs")
           base_hash=$(jq -er '.ubuntu.sha256' "$inputs")
@@ -114,6 +108,27 @@ jobs:
             -n hamn-k3s-compatibility "$work/k3s-compatibility.json" >/dev/null
           chmod 0644 "$work/base.img" "$work/k3s-compatibility.json" \
             "$work/k3s-compatibility.json.sig" "$work/k3s-compatibility-key.pub"
+          builder=$(mktemp -d /tmp/hamn-guest-builder.XXXXXX)
+          cleanup_builder() {
+            rm -f "$work/k3s-compatibility-key" \
+              "$work/k3s-compatibility-key.pub"
+            case "$builder" in
+              /tmp/hamn-guest-builder.*) sudo rm -rf -- "$builder" ;;
+              *) return 1 ;;
+            esac
+          }
+          trap cleanup_builder EXIT
+          mkdir -m 0700 "$builder/home" "$builder/runtime" "$builder/tmp"
+          mkdir -m 0755 "$builder/input" "$builder/output"
+          install -m 0644 "$work/base.img" "$builder/input/base.img"
+          install -m 0644 "$work/k3s-compatibility.json" \
+            "$builder/input/k3s-compatibility.json"
+          install -m 0644 "$work/k3s-compatibility.json.sig" \
+            "$builder/input/k3s-compatibility.json.sig"
+          install -m 0644 "$work/k3s-compatibility-key.pub" \
+            "$builder/input/k3s-compatibility-key.pub"
+          guestfs_group=$(id -gn nobody)
+          sudo chown -R "nobody:$guestfs_group" "$builder"
           guest_output="$builder/output/hamn-guest.img"
           sudo -u nobody /usr/bin/env -i \
           HOME="$builder/home" \
@@ -127,16 +142,15 @@ jobs:
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
           LIBGUESTFS_DEBUG=1 \
           LIBGUESTFS_TRACE=1 \
-          HAMN_GUEST_BASE_IMAGE="$work/base.img" \
+          HAMN_GUEST_BASE_IMAGE="$builder/input/base.img" \
           HAMN_GUEST_BASE_SHA256="$base_hash" \
           HAMN_GUEST_OUTPUT="$guest_output" \
-          HAMN_K3S_COMPATIBILITY_MANIFEST="$work/k3s-compatibility.json" \
-          HAMN_K3S_COMPATIBILITY_SIGNATURE="$work/k3s-compatibility.json.sig" \
-          HAMN_RELEASE_PUBLIC_KEY="$work/k3s-compatibility-key.pub" \
+          HAMN_K3S_COMPATIBILITY_MANIFEST="$builder/input/k3s-compatibility.json" \
+          HAMN_K3S_COMPATIBILITY_SIGNATURE="$builder/input/k3s-compatibility.json.sig" \
+          HAMN_RELEASE_PUBLIC_KEY="$builder/input/k3s-compatibility-key.pub" \
             /bin/bash guest/image/build-ubuntu-24.04-arm64.sh
           install -m 0644 "$guest_output" "$RUNNER_TEMP/hamn-guest.img"
           install -m 0644 "$guest_output.sha256" "$RUNNER_TEMP/hamn-guest.img.sha256"
-          rm -f "$work/k3s-compatibility-key" "$work/k3s-compatibility-key.pub"
       - name: Attest completed guest image
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
