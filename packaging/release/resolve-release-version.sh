@@ -86,7 +86,7 @@ if not make_match or make_match.group(1) != new_text:
 
 flake = blob(commit, "flake.nix")
 flake_versions = re.findall(
-    r'^\s*version = "([^"]+)";\s*# x-release-please-version\s*$',
+    r'^\s*hamnVersion = "([^"]+)";\s*# x-release-please-version\s*$',
     flake,
     re.MULTILINE,
 )
