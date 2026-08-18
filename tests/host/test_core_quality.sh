@@ -126,6 +126,14 @@ for requirement in \
     grep -Fq "$requirement" "$ROOT/host/fwd/mount_inotify.c" ||
         fail "mountInotify host bridge is incomplete: $requirement"
 done
+for release_test in \
+    tests/host/test_release_artifacts.sh \
+    tests/host/test_release_gate.sh \
+    tests/host/test_release_publish.sh; do
+    grep -Fq 'unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT' \
+        "$ROOT/$release_test" ||
+        fail "release fixture inherits hosted workflow identity: $release_test"
+done
 grep -Fq 'CFLAGS     += -isysroot $(SDKROOT)' "$ROOT/Makefile" ||
     fail "C compilation does not honor the selected system SDK"
 grep -Fq 'LDFLAGS    += -isysroot $(SDKROOT)' "$ROOT/Makefile" ||

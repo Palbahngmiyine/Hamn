@@ -3,6 +3,7 @@
 # harness results, and the validator signature. The fixture overrides only the
 # test phase; production uses harnesses unpacked from the exact host candidate.
 set -euo pipefail
+unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 WORK=$(mktemp -d /tmp/hamn-release-gate.XXXXXX)

@@ -2,6 +2,7 @@
 # Stable promotion signs only a manifest after checking the exact RC candidate
 # and validator evidence; it never recompiles or replaces candidate bytes.
 set -euo pipefail
+unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 WORK=$(mktemp -d /tmp/hamn-release-publish.XXXXXX)
