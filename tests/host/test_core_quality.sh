@@ -269,12 +269,18 @@ for requirement in \
 done
 
 for requirement in \
-    'SDKROOT=$(env -u SDKROOT -u DEVELOPER_DIR \' \
+    'if [ -n "${HAMN_SYSTEM_SDKROOT:-}" ]; then' \
+    '/nix/store/*)' \
+    'FAIL: Hamn must not compile against the Nix Apple SDK' \
     'export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"' \
     '[ "$(command -v clang)" = /usr/bin/clang ]' \
     '[ "$(command -v codesign)" = /usr/bin/codesign ]'; do
     grep -Fq "$requirement" "$ROOT/scripts/ci/use-system-macos-sdk.sh" ||
         fail "system macOS SDK boundary is incomplete: $requirement"
+done
+for workflow in "$ci_workflow"; do
+    grep -Fq 'HAMN_SYSTEM_SDKROOT="$system_sdk" \' "$workflow" ||
+        fail "macOS Nix workflow does not pass the pre-resolved system SDK: $workflow"
 done
 
 release_please_workflow=$ROOT/.github/workflows/release-please.yml
@@ -297,6 +303,8 @@ checkout_count=$(grep -hFc 'uses: actions/checkout@' "$ROOT"/.github/workflows/*
     -eq "$checkout_count" ] || fail "every checkout must disable credential persistence"
 
 release_workflow=$ROOT/.github/workflows/release.yml
+grep -Fq 'HAMN_SYSTEM_SDKROOT="$system_sdk" \' "$release_workflow" ||
+    fail "release workflow does not pass the pre-resolved system SDK"
 for requirement in \
     '    branches: [main]' \
     "      - '.release-please-manifest.json'" \

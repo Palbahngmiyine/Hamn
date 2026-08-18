@@ -99,6 +99,9 @@ jobs:
           HAMN_RELEASE_PUBLIC_KEY_TEXT: ${{ vars.HAMN_RELEASE_PUBLIC_KEY }}
           RELEASE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
         run: |
+          system_sdk=$(env -u SDKROOT -u DEVELOPER_DIR \
+            /usr/bin/xcrun --sdk macosx --show-sdk-path)
+          HAMN_SYSTEM_SDKROOT="$system_sdk" \
           nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
           source scripts/ci/use-system-macos-sdk.sh
           make -j1 test-local-macos

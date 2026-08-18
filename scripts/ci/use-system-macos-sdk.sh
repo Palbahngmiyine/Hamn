@@ -11,14 +11,25 @@ set -euo pipefail
     return 1 2>/dev/null || exit 1
 }
 
-SDKROOT=$(env -u SDKROOT -u DEVELOPER_DIR \
-    /usr/bin/xcrun --sdk macosx --show-sdk-path)
+if [ -n "${HAMN_SYSTEM_SDKROOT:-}" ]; then
+    SDKROOT=$HAMN_SYSTEM_SDKROOT
+else
+    SDKROOT=$(env -u SDKROOT -u DEVELOPER_DIR \
+        /usr/bin/xcrun --sdk macosx --show-sdk-path)
+fi
 [ -d "$SDKROOT" ] || {
     echo "FAIL: xcrun returned an invalid macOS SDK" >&2
     return 1 2>/dev/null || exit 1
 }
+case "$SDKROOT" in
+/nix/store/*)
+    echo "FAIL: Hamn must not compile against the Nix Apple SDK" >&2
+    return 1 2>/dev/null || exit 1
+    ;;
+esac
 
 export SDKROOT
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 [ "$(command -v clang)" = /usr/bin/clang ]
 [ "$(command -v codesign)" = /usr/bin/codesign ]
+echo "using system macOS SDK: $SDKROOT"
