@@ -49,7 +49,7 @@ while IFS= read -r script; do
 done < <(git -C "$ROOT" ls-files '*.sh' | LC_ALL=C sort)
 
 ruby -e 'require "yaml"; ARGV.each { |path| Psych.parse_file(path) }' \
-    "$ROOT/.github/actionlint.yaml" "$ROOT/.github/workflows/release.yml"
+    "$ROOT/.github/actionlint.yaml" "$ROOT"/.github/workflows/*.yml
 
 if git -C "$ROOT" ls-files --error-unmatch 'desktop/*' >/dev/null 2>&1; then
     fail "tracked Desktop source remains"

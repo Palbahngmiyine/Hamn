@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hamn-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  portable:
+    name: Portable source gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Evaluate locked flake and workflow checks
+        run: nix flake check --print-build-logs
+      - name: Run portable source gates
+        run: nix develop .#ci --command make -j1 test-portable
+
+  macos:
+    name: macOS build and regression gates
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Assert Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_OS" = macOS ]
+          [ "$RUNNER_ARCH" = ARM64 ]
+          [ "$(uname -m)" = arm64 ]
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Nix package
+        run: nix build .#hamn --print-build-logs
+      - name: Run macOS regression gates
+        run: nix develop .#ci --command make -j1 test-local-macos

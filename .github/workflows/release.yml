@@ -40,7 +40,7 @@ jobs:
       id-token: write
     steps:
       - name: Check out exact RC tag
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
       - name: Assert hosted Apple Silicon arm64 runner
@@ -63,9 +63,10 @@ jobs:
             echo "release candidate must run on Apple Silicon arm64" >&2
             exit 2
           }
-      - name: Install source gate dependencies
-        shell: bash
-        run: bash scripts/ci/setup-test-dependencies.sh
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Build candidate
         shell: bash
         env:
@@ -73,7 +74,7 @@ jobs:
           HAMN_GUEST_IMAGE_SHA256: ${{ vars.HAMN_GUEST_IMAGE_SHA256 }}
           HAMN_RELEASE_PUBLIC_KEY_TEXT: ${{ vars.HAMN_RELEASE_PUBLIC_KEY }}
         run: |
-          set -euo pipefail
+          nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
           make -j1 test-workflows
           make -j1 test-portable
           make -j1 test-core-quality
@@ -105,12 +106,13 @@ jobs:
             OUTPUT_DIR="$RUNNER_TEMP/hamn-candidate" \
             HAMN_GUEST_IMAGE="$RUNNER_TEMP/hamn-guest.img" \
             HAMN_RELEASE_PUBLIC_KEY="$RUNNER_TEMP/hamn-release.pub"
+          NIX_SHELL
       - name: Attest exact candidate artifact provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
         with:
           subject-checksums: ${{ runner.temp }}/hamn-candidate/SHA256SUMS
       - name: Upload exact candidate bytes
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hamn-candidate-${{ github.sha }}
           path: ${{ runner.temp }}/hamn-candidate
@@ -132,11 +134,15 @@ jobs:
       contents: read
     steps:
       - name: Check out exact RC tag
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Download exact candidate bytes
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: hamn-candidate-${{ github.sha }}
           path: ${{ runner.temp }}/hamn-candidate
@@ -146,7 +152,7 @@ jobs:
           HAMN_VALIDATOR_SIGNING_KEY_TEXT: ${{ secrets.HAMN_VALIDATOR_SIGNING_KEY }}
           HAMN_VALIDATOR_IDENTITY: ${{ vars.HAMN_VALIDATOR_IDENTITY }}
         run: |
-          set -euo pipefail
+          nix develop .#release --command bash -euo pipefail <<'NIX_SHELL'
           validator_key=
           cleanup_validator_key() {
             local status=$?
@@ -175,8 +181,9 @@ jobs:
             RELEASE_TAG="$GITHUB_REF_NAME" \
             CANDIDATE_DIR="$RUNNER_TEMP/hamn-candidate" \
             OUTPUT_DIR="$RUNNER_TEMP/hamn-evidence"
+          NIX_SHELL
       - name: Upload signed validation evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: hamn-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/hamn-evidence
@@ -194,10 +201,14 @@ jobs:
       contents: write
     steps:
       - name: Check out requested RC tag
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: refs/tags/${{ inputs.rc_tag }}
           fetch-depth: 0
+      - name: Install Nix
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Resolve exact validated RC commit
         id: rc
         shell: bash
@@ -269,7 +280,7 @@ jobs:
               output.write("run_attempt=" + str(run_attempt) + "\n")
           PY
       - name: Download exact candidate and validation evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: hamn-candidate-${{ steps.rc.outputs.commit }}
           path: ${{ runner.temp }}/hamn-release-input/hamn-candidate
@@ -277,7 +288,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ steps.rc_run.outputs.run_id }}
       - name: Download signed validation evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: hamn-evidence-${{ steps.rc.outputs.commit }}
           path: ${{ runner.temp }}/hamn-release-input/hamn-evidence
@@ -296,7 +307,7 @@ jobs:
           RC_RUN_ID: ${{ steps.rc_run.outputs.run_id }}
           RC_RUN_ATTEMPT: ${{ steps.rc_run.outputs.run_attempt }}
         run: |
-          set -euo pipefail
+          nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
           mkdir "$RUNNER_TEMP/hamn-publish"
           validator_public_key=
           release_key=
@@ -329,6 +340,7 @@ jobs:
           bash packaging/release/publish-release.sh \
             "$STABLE_TAG" "$RC_TAG" "$RC_COMMIT" \
             "$RUNNER_TEMP/hamn-release-input" "$RUNNER_TEMP/hamn-publish"
+          NIX_SHELL
       - name: Create or verify exact stable tag
         shell: bash
         env:

@@ -215,9 +215,32 @@ for requirement in \
         fail "Nix flake is missing required integration: $requirement"
 done
 
-workflow_files=$(git -C "$ROOT" ls-files '.github/workflows/*.yml')
-[ "$workflow_files" = .github/workflows/release.yml ] ||
-    fail "only the release workflow may remain"
+workflow_files=$(cd "$ROOT" && find .github/workflows -type f -name '*.yml' | LC_ALL=C sort)
+expected_workflows=$(printf '%s\n' \
+    .github/workflows/ci.yml \
+    .github/workflows/release.yml)
+[ "$workflow_files" = "$expected_workflows" ] ||
+    fail "workflow set must contain only CI and release"
+
+while IFS= read -r action; do
+    [[ "$action" =~ ^[^@]+@[0-9a-f]{40}$ ]] ||
+        fail "workflow action is not pinned to a full commit SHA: $action"
+done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^ #]+).*/\1/p' \
+    "$ROOT"/.github/workflows/*.yml)
+
+ci_workflow=$ROOT/.github/workflows/ci.yml
+for requirement in \
+    '  contents: read' \
+    '    runs-on: ubuntu-24.04' \
+    '    runs-on: macos-14' \
+    '        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1' \
+    '        run: nix flake check --print-build-logs' \
+    '        run: nix build .#hamn --print-build-logs' \
+    '        run: nix develop .#ci --command make -j1 test-portable' \
+    '        run: nix develop .#ci --command make -j1 test-local-macos'; do
+    grep -Fqx "$requirement" "$ci_workflow" ||
+        fail "Nix CI workflow is incomplete: $requirement"
+done
 
 release_workflow=$ROOT/.github/workflows/release.yml
 candidate_job=$(awk '
@@ -248,6 +271,9 @@ for requirement in \
 done
 for requirement in \
     '      - name: Assert hosted Apple Silicon arm64 runner' \
+    '      - name: Install Nix' \
+    '        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1' \
+    "          nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'" \
     '          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || {' \
     '          [ "$RUNNER_OS" = macOS ] || {' \
     '          [ "$RUNNER_ARCH" = ARM64 ] || {' \
@@ -255,6 +281,11 @@ for requirement in \
     printf '%s\n' "$candidate_job" | grep -Fqx "$requirement" ||
         fail "candidate job does not fail closed for its required runner: $requirement"
 done
+grep -Fq "nix develop .#release --command bash -euo pipefail <<'NIX_SHELL'" \
+    "$release_workflow" || fail "physical validation does not use the Nix release shell"
+[ "$(grep -Fc "nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'" \
+    "$release_workflow")" -eq 2 ] ||
+    fail "candidate build and stable promotion must use the Nix CI shell"
 for gate in \
     test-workflows \
     test-portable \
