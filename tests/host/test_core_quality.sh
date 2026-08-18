@@ -318,13 +318,13 @@ for requirement in \
     "      - '.release-please-manifest.json'" \
     '  contents: read' \
     '    name: Resolve Release Please version' \
-    '        run: bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"' \
-    '      - name: Require GitHub Verified release commit' \
-    '          [ "$verified" = true ] || {' \
-    '            echo "release commit must be GitHub Verified" >&2'; do
+    '        run: bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"'; do
     grep -Fqx "$requirement" "$release_workflow" ||
         fail "automated release trigger is incomplete: $requirement"
 done
+if grep -Fq 'commit.verification.verified' "$release_workflow"; then
+    fail "release workflow still requires GitHub Verified commits"
+fi
 if grep -Eq 'workflow_dispatch|^[[:space:]]+tags:|rc_run_id:|inputs\.rc_' \
     "$release_workflow"; then
     fail "release workflow still exposes a manual tag or promotion trigger"

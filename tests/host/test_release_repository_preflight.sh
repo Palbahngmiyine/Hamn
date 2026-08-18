@@ -17,7 +17,28 @@ set -euo pipefail
 [ "${1:-}" = api ] || exit 64
 case "${2:-}" in
 repos/example/hamn)
-    printf '%s\n' '{"full_name":"example/hamn","private":false,"visibility":"public","archived":false,"owner":{"id":42},"security_and_analysis":{"secret_scanning":{"status":"enabled"},"secret_scanning_push_protection":{"status":"enabled"}}}'
+    printf '%s\n' '{"full_name":"example/hamn","private":false,"visibility":"public","archived":false,"owner":{"id":42,"login":"example","type":"User"},"security_and_analysis":{"secret_scanning":{"status":"enabled"},"secret_scanning_push_protection":{"status":"enabled"}}}'
+    ;;
+repos/example/hamn/collaborators?affiliation=all\&per_page=100)
+    if [ "${HAMN_TEST_COLLABORATOR:-0}" = 1 ]; then
+        printf '%s\n' '[{"login":"example","role_name":"admin","permissions":{"admin":true}},{"login":"outsider","role_name":"write","permissions":{"admin":false}}]'
+    else
+        printf '%s\n' '[{"login":"example","role_name":"admin","permissions":{"admin":true}}]'
+    fi
+    ;;
+repos/example/hamn/invitations)
+    if [ "${HAMN_TEST_INVITATION:-0}" = 1 ]; then
+        printf '%s\n' '[{"id":7,"invitee":{"login":"pending-user"}}]'
+    else
+        printf '%s\n' '[]'
+    fi
+    ;;
+repos/example/hamn/keys)
+    if [ "${HAMN_TEST_DEPLOY_KEY:-0}" = 1 ]; then
+        printf '%s\n' '[{"id":8,"title":"unexpected","read_only":false}]'
+    else
+        printf '%s\n' '[]'
+    fi
     ;;
 repos/example/hamn/actions/workflows)
     printf '%s\n' '{"workflows":[{"path":".github/workflows/release.yml","state":"active"},{"path":".github/workflows/ci.yml","state":"active"},{"path":".github/workflows/release-please.yml","state":"active"}]}'
@@ -91,13 +112,6 @@ repos/example/hamn/immutable-releases)
 repos/example/hamn/private-vulnerability-reporting)
     printf '%s\n' '{"enabled":true}'
     ;;
-repos/example/hamn/commits/main)
-    if [ "${HAMN_TEST_UNSIGNED:-0}" = 1 ]; then
-        printf '%s\n' '{"commit":{"verification":{"verified":false}}}'
-    else
-        printf '%s\n' '{"commit":{"verification":{"verified":true}}}'
-    fi
-    ;;
 *) exit 65 ;;
 esac
 EOF
@@ -137,7 +151,11 @@ assert_failure HAMN_TEST_SECRET \
     'hamn-validation must contain only HAMN_VALIDATOR_SIGNING_KEY' secret
 assert_failure HAMN_TEST_WEAK_RULESET \
     'main pull request rules are not solo-maintainer safe' ruleset
-assert_failure HAMN_TEST_UNSIGNED \
-    'main must resolve to a verified signed commit' unsigned
+assert_failure HAMN_TEST_COLLABORATOR \
+    'repository must have exactly one collaborator: its owner' collaborator
+assert_failure HAMN_TEST_INVITATION \
+    'repository must not have pending invitations' invitation
+assert_failure HAMN_TEST_DEPLOY_KEY \
+    'repository must not have deploy keys' deploy-key
 
 echo "PASS: automated release repository preflight is read-only and fail-closed"
