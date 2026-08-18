@@ -11,7 +11,8 @@ set -euo pipefail
     return 1 2>/dev/null || exit 1
 }
 
-SDKROOT=$(/usr/bin/xcrun --sdk macosx --show-sdk-path)
+SDKROOT=$(env -u SDKROOT -u DEVELOPER_DIR \
+    /usr/bin/xcrun --sdk macosx --show-sdk-path)
 [ -d "$SDKROOT" ] || {
     echo "FAIL: xcrun returned an invalid macOS SDK" >&2
     return 1 2>/dev/null || exit 1
