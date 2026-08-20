@@ -26,6 +26,9 @@ K3S_MANIFEST=${HAMN_K3S_COMPATIBILITY_MANIFEST:-}
 K3S_SIGNATURE=${HAMN_K3S_COMPATIBILITY_SIGNATURE:-}
 RELEASE_PUBLIC_KEY=${HAMN_RELEASE_PUBLIC_KEY:-}
 VIRT_CUSTOMIZE=${HAMN_VIRT_CUSTOMIZE:-virt-customize}
+QEMU_IMG=${HAMN_QEMU_IMG:-qemu-img}
+VIRT_RESIZE=${HAMN_VIRT_RESIZE:-virt-resize}
+TARGET_SIZE=8G
 
 [ -n "$BASE_IMAGE" ] && [ -n "$BASE_SHA256" ] && [ -n "$OUTPUT" ] &&
     [ -n "$K3S_MANIFEST" ] && [ -n "$K3S_SIGNATURE" ] &&
@@ -43,6 +46,10 @@ ssh-keygen -lf "$RELEASE_PUBLIC_KEY" | grep -q ED25519 ||
     fail "base image SHA-256 mismatch"
 command -v "$VIRT_CUSTOMIZE" >/dev/null 2>&1 ||
     fail "virt-customize (libguestfs) is required on the trusted image builder"
+command -v "$QEMU_IMG" >/dev/null 2>&1 ||
+    fail "qemu-img is required on the trusted image builder"
+command -v "$VIRT_RESIZE" >/dev/null 2>&1 ||
+    fail "virt-resize (libguestfs) is required on the trusted image builder"
 
 OUTPUT_DIR=$(dirname "$OUTPUT")
 [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] ||
@@ -106,7 +113,9 @@ update-binfmts --enable qemu-x86_64 || test -f /usr/share/binfmts/qemu-x86_64
 EOF
 chmod 0755 "$PROVISION"
 
-cp "$BASE_IMAGE" "$STAGE"
+"$QEMU_IMG" create -q -f qcow2 "$STAGE" "$TARGET_SIZE"
+"$VIRT_RESIZE" --format qcow2 --output-format qcow2 \
+    --expand /dev/sda1 "$BASE_IMAGE" "$STAGE"
 "$VIRT_CUSTOMIZE" -a "$STAGE" \
     --run-command "date -u -s '@$COMMIT_EPOCH'" \
     --install "$PACKAGES" \
