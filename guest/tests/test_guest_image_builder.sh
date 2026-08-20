@@ -84,8 +84,16 @@ set -euo pipefail
 printf '%s\n' "$@" >"$HAMN_TEST_RESIZE_ARGUMENTS"
 [ -f "${@: -2:1}" ] && [ -f "${@: -1}" ]
 EOF
+cat >"$WORK/guestfish" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$@" >"$HAMN_TEST_GUESTFISH_ARGUMENTS"
+cat >"$HAMN_TEST_GUESTFISH_COMMANDS"
+printf 'cloudimg-rootfs\n'
+EOF
 chmod 0755 "$WORK/bin/sha256sum" "$WORK/bin/ssh-keygen" \
-    "$WORK/virt-customize" "$WORK/qemu-img" "$WORK/virt-resize"
+    "$WORK/virt-customize" "$WORK/qemu-img" "$WORK/virt-resize" \
+    "$WORK/guestfish"
 
 BASE=$WORK/base.img
 MANIFEST=$WORK/k3s.json
@@ -96,6 +104,8 @@ ARCHIVE_LIST=$WORK/archive.list
 VIRT_ARGUMENTS=$WORK/virt-arguments
 QEMU_ARGUMENTS=$WORK/qemu-arguments
 RESIZE_ARGUMENTS=$WORK/resize-arguments
+GUESTFISH_ARGUMENTS=$WORK/guestfish-arguments
+GUESTFISH_COMMANDS=$WORK/guestfish-commands
 printf 'base image fixture\n' >"$BASE"
 printf '{}\n' >"$MANIFEST"
 printf 'fixture signature\n' >"$SIGNATURE"
@@ -111,17 +121,26 @@ HAMN_RELEASE_PUBLIC_KEY="$PUBLIC_KEY" \
 HAMN_VIRT_CUSTOMIZE="$WORK/virt-customize" \
 HAMN_QEMU_IMG="$WORK/qemu-img" \
 HAMN_VIRT_RESIZE="$WORK/virt-resize" \
+HAMN_GUESTFISH="$WORK/guestfish" \
 HAMN_TEST_ARCHIVE_LIST="$ARCHIVE_LIST" \
 HAMN_TEST_VIRT_ARGUMENTS="$VIRT_ARGUMENTS" \
 HAMN_TEST_QEMU_ARGUMENTS="$QEMU_ARGUMENTS" \
 HAMN_TEST_RESIZE_ARGUMENTS="$RESIZE_ARGUMENTS" \
+HAMN_TEST_GUESTFISH_ARGUMENTS="$GUESTFISH_ARGUMENTS" \
+HAMN_TEST_GUESTFISH_COMMANDS="$GUESTFISH_COMMANDS" \
 "$REPO/guest/image/build-ubuntu-24.04-arm64.sh"
 
 grep -Fxq 8G "$QEMU_ARGUMENTS"
 grep -Fxq -- --format "$RESIZE_ARGUMENTS"
 grep -Fxq -- --output-format "$RESIZE_ARGUMENTS"
 grep -Fxq -- --expand "$RESIZE_ARGUMENTS"
+grep -Fxq -- --no-expand-content "$RESIZE_ARGUMENTS"
 grep -Fxq /dev/sda1 "$RESIZE_ARGUMENTS"
+grep -Fxq -- --rw "$GUESTFISH_ARGUMENTS"
+grep -Fxq -- --format=qcow2 "$GUESTFISH_ARGUMENTS"
+grep -Fxq 'vfs-label /dev/sda3' "$GUESTFISH_COMMANDS"
+grep -Fxq 'e2fsck-f /dev/sda3' "$GUESTFISH_COMMANDS"
+grep -Fxq 'resize2fs /dev/sda3' "$GUESTFISH_COMMANDS"
 
 FIXTURE_EPOCH=$(git -C "$REPO" show -s --format=%ct HEAD)
 EXPECTED_CLOCK_COMMAND="date -u -s '@$FIXTURE_EPOCH'"
