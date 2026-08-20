@@ -30,6 +30,7 @@ QEMU_IMG=${HAMN_QEMU_IMG:-qemu-img}
 VIRT_RESIZE=${HAMN_VIRT_RESIZE:-virt-resize}
 GUESTFISH=${HAMN_GUESTFISH:-guestfish}
 TARGET_SIZE=8G
+MAX_RELEASE_ASSET_SIZE=2147483648
 
 [ -n "$BASE_IMAGE" ] && [ -n "$BASE_SHA256" ] && [ -n "$OUTPUT" ] &&
     [ -n "$K3S_MANIFEST" ] && [ -n "$K3S_SIGNATURE" ] &&
@@ -63,9 +64,10 @@ OUTPUT_DIR=$(dirname "$OUTPUT")
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/hamn-guest-image.XXXXXX") ||
     fail "cannot create image build workspace"
 STAGE=$OUTPUT_DIR/.hamn-guest-image.$$.img
+COMPACT=$OUTPUT_DIR/.hamn-guest-image.$$.compressed.img
 cleanup() {
     rm -rf "$WORK"
-    rm -f "$STAGE"
+    rm -f "$STAGE" "$COMPACT"
 }
 trap cleanup EXIT
 
@@ -161,8 +163,18 @@ fi
     --run-command 'bash /tmp/hamn-image-provision.sh' \
     --run-command 'rm -f /tmp/hamn-image-provision.sh'
 
-mv -f "$STAGE" "$OUTPUT"
+"$QEMU_IMG" convert -q -f qcow2 -O qcow2 \
+    -o compression_type=zlib -c "$STAGE" "$COMPACT"
+"$QEMU_IMG" compare -q -f qcow2 -F qcow2 "$STAGE" "$COMPACT" ||
+    fail "compressed guest image changed guest-visible bytes"
+OUTPUT_SIZE=$(wc -c <"$COMPACT" | tr -d '[:space:]')
+[[ "$OUTPUT_SIZE" =~ ^[0-9]+$ ]] &&
+    [ "$OUTPUT_SIZE" -lt "$MAX_RELEASE_ASSET_SIZE" ] ||
+    fail "compressed guest image exceeds the GitHub release asset limit"
+rm -f "$STAGE"
 STAGE=
+mv -f "$COMPACT" "$OUTPUT"
+COMPACT=
 printf '%s  %s\n' "$(sha256_file "$OUTPUT")" "$(basename "$OUTPUT")" \
     >"$OUTPUT.sha256"
 chmod 0644 "$OUTPUT" "$OUTPUT.sha256"

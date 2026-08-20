@@ -83,9 +83,25 @@ EOF
 cat >"$WORK/qemu-img" <<'EOF'
 #!/bin/bash
 set -euo pipefail
-printf '%s\n' "$@" >"$HAMN_TEST_QEMU_ARGUMENTS"
-[ "$1" = create ] && [ "$2" = -q ] && [ "$3" = -f ] && [ "$4" = qcow2 ]
-: >"$5"
+printf '%s\n' "$@" >>"$HAMN_TEST_QEMU_ARGUMENTS"
+case "$1" in
+    create)
+        [ "$2" = -q ] && [ "$3" = -f ] && [ "$4" = qcow2 ]
+        : >"$5"
+        ;;
+    convert)
+        [ "$2" = -q ] && [ "$3" = -f ] && [ "$4" = qcow2 ]
+        [ "$5" = -O ] && [ "$6" = qcow2 ]
+        [ "$7" = -o ] && [ "$8" = compression_type=zlib ] && [ "$9" = -c ]
+        cp "${10}" "${11}"
+        ;;
+    compare)
+        [ "$2" = -q ] && [ "$3" = -f ] && [ "$4" = qcow2 ]
+        [ "$5" = -F ] && [ "$6" = qcow2 ]
+        cmp "$7" "$8"
+        ;;
+    *) exit 1 ;;
+esac
 EOF
 cat >"$WORK/virt-resize" <<'EOF'
 #!/bin/bash
@@ -154,6 +170,11 @@ HAMN_TEST_GUESTFISH_RESIZE_COMMANDS="$GUESTFISH_RESIZE_COMMANDS" \
 "$REPO/guest/image/build-ubuntu-24.04-arm64.sh"
 
 grep -Fxq 8G "$QEMU_ARGUMENTS"
+grep -Fxq convert "$QEMU_ARGUMENTS"
+grep -Fxq compression_type=zlib "$QEMU_ARGUMENTS"
+grep -Fxq -- -c "$QEMU_ARGUMENTS"
+grep -Fxq compare "$QEMU_ARGUMENTS"
+grep -Fq 'MAX_RELEASE_ASSET_SIZE=2147483648' "$BUILDER"
 grep -Fxq -- --format "$RESIZE_ARGUMENTS"
 grep -Fxq -- --output-format "$RESIZE_ARGUMENTS"
 grep -Fxq -- --expand "$RESIZE_ARGUMENTS"
