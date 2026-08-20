@@ -64,7 +64,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual passt
+            dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual
           multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
           guestfs_supermin="/usr/lib/$multiarch/guestfs/supermin.d"
           [ -d "$guestfs_supermin" ] && [ ! -L "$guestfs_supermin" ]
@@ -75,30 +75,19 @@ jobs:
           fi
           resolver_overlay="$RUNNER_TEMP/hamn-supermin-resolver"
           mkdir -m 0755 "$resolver_overlay" "$resolver_overlay/etc"
-          printf 'nameserver 169.254.2.2\n' > "$resolver_overlay/etc/resolv.conf"
-          printf '%s\n' \
-            'interface eth0' \
-            'noipv6rs' \
-            'static ip_address=169.254.2.15/16' \
-            'static routers=169.254.2.2' \
-            'static domain_name_servers=169.254.2.2' \
-            > "$resolver_overlay/etc/dhcpcd.conf"
-          chmod 0644 "$resolver_overlay/etc/resolv.conf" \
-            "$resolver_overlay/etc/dhcpcd.conf"
+          printf 'nameserver 169.254.2.3\n' > "$resolver_overlay/etc/resolv.conf"
+          chmod 0644 "$resolver_overlay/etc/resolv.conf"
           resolver_archive="$RUNNER_TEMP/hamn-supermin-resolver.tar.gz"
-          tar -C "$resolver_overlay" -czf "$resolver_archive" \
-            etc/dhcpcd.conf etc/resolv.conf
-          [ "$(tar -tzf "$resolver_archive" | wc -l)" -eq 2 ]
-          tar -tzf "$resolver_archive" | grep -Fxq etc/dhcpcd.conf
-          tar -tzf "$resolver_archive" | grep -Fxq etc/resolv.conf
+          tar -C "$resolver_overlay" -czf "$resolver_archive" etc/resolv.conf
+          [ "$(tar -tzf "$resolver_archive")" = etc/resolv.conf ]
           sudo install -m 0644 "$resolver_archive" \
-            "$guestfs_supermin/zz-hamn-network.tar.gz"
+            "$guestfs_supermin/zz-hamn-resolver.tar.gz"
           sudo chmod a+r /boot/vmlinuz-*
           guestfs_test_log="$RUNNER_TEMP/libguestfs-test-tool.log"
           LIBGUESTFS_BACKEND=direct \
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
             libguestfs-test-tool 2>&1 | tee "$guestfs_test_log"
-          grep -Fq 'nameserver 169.254.2.2' "$guestfs_test_log"
+          grep -Fq 'nameserver 169.254.2.3' "$guestfs_test_log"
       - name: Build completed Ubuntu arm64 guest image
         shell: bash
         run: |
