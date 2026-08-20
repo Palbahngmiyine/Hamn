@@ -71,7 +71,21 @@ for argument in "$@"; do
 done
 exit 1
 EOF
-chmod 0755 "$WORK/bin/sha256sum" "$WORK/bin/ssh-keygen" "$WORK/virt-customize"
+cat >"$WORK/qemu-img" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$@" >"$HAMN_TEST_QEMU_ARGUMENTS"
+[ "$1" = create ] && [ "$2" = -q ] && [ "$3" = -f ] && [ "$4" = qcow2 ]
+: >"$5"
+EOF
+cat >"$WORK/virt-resize" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+printf '%s\n' "$@" >"$HAMN_TEST_RESIZE_ARGUMENTS"
+[ -f "${@: -2:1}" ] && [ -f "${@: -1}" ]
+EOF
+chmod 0755 "$WORK/bin/sha256sum" "$WORK/bin/ssh-keygen" \
+    "$WORK/virt-customize" "$WORK/qemu-img" "$WORK/virt-resize"
 
 BASE=$WORK/base.img
 MANIFEST=$WORK/k3s.json
@@ -80,6 +94,8 @@ PUBLIC_KEY=$WORK/release.pub
 OUTPUT=$WORK/guest.img
 ARCHIVE_LIST=$WORK/archive.list
 VIRT_ARGUMENTS=$WORK/virt-arguments
+QEMU_ARGUMENTS=$WORK/qemu-arguments
+RESIZE_ARGUMENTS=$WORK/resize-arguments
 printf 'base image fixture\n' >"$BASE"
 printf '{}\n' >"$MANIFEST"
 printf 'fixture signature\n' >"$SIGNATURE"
@@ -93,9 +109,19 @@ HAMN_K3S_COMPATIBILITY_MANIFEST="$MANIFEST" \
 HAMN_K3S_COMPATIBILITY_SIGNATURE="$SIGNATURE" \
 HAMN_RELEASE_PUBLIC_KEY="$PUBLIC_KEY" \
 HAMN_VIRT_CUSTOMIZE="$WORK/virt-customize" \
+HAMN_QEMU_IMG="$WORK/qemu-img" \
+HAMN_VIRT_RESIZE="$WORK/virt-resize" \
 HAMN_TEST_ARCHIVE_LIST="$ARCHIVE_LIST" \
 HAMN_TEST_VIRT_ARGUMENTS="$VIRT_ARGUMENTS" \
+HAMN_TEST_QEMU_ARGUMENTS="$QEMU_ARGUMENTS" \
+HAMN_TEST_RESIZE_ARGUMENTS="$RESIZE_ARGUMENTS" \
 "$REPO/guest/image/build-ubuntu-24.04-arm64.sh"
+
+grep -Fxq 8G "$QEMU_ARGUMENTS"
+grep -Fxq -- --format "$RESIZE_ARGUMENTS"
+grep -Fxq -- --output-format "$RESIZE_ARGUMENTS"
+grep -Fxq -- --expand "$RESIZE_ARGUMENTS"
+grep -Fxq /dev/sda1 "$RESIZE_ARGUMENTS"
 
 FIXTURE_EPOCH=$(git -C "$REPO" show -s --format=%ct HEAD)
 EXPECTED_CLOCK_COMMAND="date -u -s '@$FIXTURE_EPOCH'"
