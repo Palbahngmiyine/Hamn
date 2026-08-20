@@ -28,6 +28,7 @@ RELEASE_PUBLIC_KEY=${HAMN_RELEASE_PUBLIC_KEY:-}
 VIRT_CUSTOMIZE=${HAMN_VIRT_CUSTOMIZE:-virt-customize}
 QEMU_IMG=${HAMN_QEMU_IMG:-qemu-img}
 VIRT_RESIZE=${HAMN_VIRT_RESIZE:-virt-resize}
+GUESTFISH=${HAMN_GUESTFISH:-guestfish}
 TARGET_SIZE=8G
 
 [ -n "$BASE_IMAGE" ] && [ -n "$BASE_SHA256" ] && [ -n "$OUTPUT" ] &&
@@ -50,6 +51,8 @@ command -v "$QEMU_IMG" >/dev/null 2>&1 ||
     fail "qemu-img is required on the trusted image builder"
 command -v "$VIRT_RESIZE" >/dev/null 2>&1 ||
     fail "virt-resize (libguestfs) is required on the trusted image builder"
+command -v "$GUESTFISH" >/dev/null 2>&1 ||
+    fail "guestfish (libguestfs) is required on the trusted image builder"
 
 OUTPUT_DIR=$(dirname "$OUTPUT")
 [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] ||
@@ -115,7 +118,16 @@ chmod 0755 "$PROVISION"
 
 "$QEMU_IMG" create -q -f qcow2 "$STAGE" "$TARGET_SIZE"
 "$VIRT_RESIZE" --format qcow2 --output-format qcow2 \
-    --expand /dev/sda1 "$BASE_IMAGE" "$STAGE"
+    --no-expand-content --expand /dev/sda1 "$BASE_IMAGE" "$STAGE"
+ROOT_LABEL=$("$GUESTFISH" --rw --format=qcow2 -a "$STAGE" <<'GUESTFISH_COMMANDS'
+run
+vfs-label /dev/sda3
+e2fsck-f /dev/sda3
+resize2fs /dev/sda3
+GUESTFISH_COMMANDS
+) || fail "cannot check and expand the resized guest root filesystem"
+[ "$ROOT_LABEL" = cloudimg-rootfs ] ||
+    fail "resized guest root filesystem label is invalid"
 "$VIRT_CUSTOMIZE" -a "$STAGE" \
     --run-command "date -u -s '@$COMMIT_EPOCH'" \
     --install "$PACKAGES" \
