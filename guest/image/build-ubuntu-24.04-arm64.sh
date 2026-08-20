@@ -112,7 +112,13 @@ make -C /opt/hamn/guest install
 systemctl enable hamnd.service
 rm -rf /opt/hamn/guest /opt/hamn/vendor \
     /tmp/hamn-guest-sources.tar.gz
-update-binfmts --enable qemu-x86_64 || test -f /usr/share/binfmts/qemu-x86_64
+QEMU_BINFMT_SOURCE=/usr/share/doc/qemu-user-static/qemu-x86_64.conf
+test -f "$QEMU_BINFMT_SOURCE" && test ! -L "$QEMU_BINFMT_SOURCE"
+test -f /usr/lib/binfmt.d/qemu-x86_64.conf && \
+    test ! -L /usr/lib/binfmt.d/qemu-x86_64.conf
+install -m 0644 "$QEMU_BINFMT_SOURCE" /usr/share/binfmts/qemu-x86_64
+update-binfmts --import qemu-x86_64
+update-binfmts --enable qemu-x86_64
 EOF
 chmod 0755 "$PROVISION"
 
