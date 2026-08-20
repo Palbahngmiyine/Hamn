@@ -350,6 +350,7 @@ for requirement in \
     '      contents: read' \
     '      id-token: write' \
     '            dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
+    '            printf '\''dhcpcd-base\n'\'' | sudo tee -a "$guestfs_packages" >/dev/null' \
     '          printf '\''nameserver 169.254.2.2\n'\'' > "$resolver_overlay/etc/resolv.conf"' \
     '            "$guestfs_supermin/zz-hamn-resolver.tar.gz"' \
     '          sudo chmod a+r /boot/vmlinuz-*' \

@@ -68,6 +68,11 @@ jobs:
           multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
           guestfs_supermin="/usr/lib/$multiarch/guestfs/supermin.d"
           [ -d "$guestfs_supermin" ] && [ ! -L "$guestfs_supermin" ]
+          guestfs_packages="$guestfs_supermin/packages"
+          [ -f "$guestfs_packages" ] && [ ! -L "$guestfs_packages" ]
+          if ! grep -Fxq dhcpcd-base "$guestfs_packages"; then
+            printf 'dhcpcd-base\n' | sudo tee -a "$guestfs_packages" >/dev/null
+          fi
           resolver_overlay="$RUNNER_TEMP/hamn-supermin-resolver"
           mkdir -m 0755 "$resolver_overlay" "$resolver_overlay/etc"
           printf 'nameserver 169.254.2.2\n' > "$resolver_overlay/etc/resolv.conf"
