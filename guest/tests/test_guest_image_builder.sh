@@ -59,6 +59,7 @@ EOF
 cat >"$WORK/virt-customize" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+printf '%s\n' "$@" >"$HAMN_TEST_VIRT_ARGUMENTS"
 for argument in "$@"; do
     case "$argument" in
         *:/tmp/hamn-guest-sources.tar.gz)
@@ -78,6 +79,7 @@ SIGNATURE=$WORK/k3s.json.sig
 PUBLIC_KEY=$WORK/release.pub
 OUTPUT=$WORK/guest.img
 ARCHIVE_LIST=$WORK/archive.list
+VIRT_ARGUMENTS=$WORK/virt-arguments
 printf 'base image fixture\n' >"$BASE"
 printf '{}\n' >"$MANIFEST"
 printf 'fixture signature\n' >"$SIGNATURE"
@@ -92,7 +94,23 @@ HAMN_K3S_COMPATIBILITY_SIGNATURE="$SIGNATURE" \
 HAMN_RELEASE_PUBLIC_KEY="$PUBLIC_KEY" \
 HAMN_VIRT_CUSTOMIZE="$WORK/virt-customize" \
 HAMN_TEST_ARCHIVE_LIST="$ARCHIVE_LIST" \
+HAMN_TEST_VIRT_ARGUMENTS="$VIRT_ARGUMENTS" \
 "$REPO/guest/image/build-ubuntu-24.04-arm64.sh"
+
+FIXTURE_EPOCH=$(git -C "$REPO" show -s --format=%ct HEAD)
+EXPECTED_CLOCK_COMMAND="date -u -s '@$FIXTURE_EPOCH'"
+awk -v expected="$EXPECTED_CLOCK_COMMAND" '
+    $0 == "--run-command" {
+        getline
+        if ($0 == expected && clock == 0) clock = NR
+        next
+    }
+    $0 == "--install" { install = NR }
+    END { exit !(clock > 0 && install > clock) }
+' "$VIRT_ARGUMENTS" || {
+    echo "FAIL: guest image builder did not set the source clock before package installation" >&2
+    exit 1
+}
 
 grep -Fxq 'guest/Makefile' "$ARCHIVE_LIST"
 grep -Fxq 'vendor/cjson/cJSON.c' "$ARCHIVE_LIST"

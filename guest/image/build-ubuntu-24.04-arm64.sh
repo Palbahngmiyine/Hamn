@@ -74,6 +74,10 @@ printf '%s\n' \
 SOURCE_ARCHIVE=$WORK/hamn-guest-sources.tar.gz
 git -C "$ROOT" rev-parse --is-inside-work-tree | grep -qx true ||
     fail "guest image builder must run from a Git checkout"
+COMMIT_EPOCH=$(git -C "$ROOT" show -s --format=%ct HEAD) ||
+    fail "cannot resolve guest image source timestamp"
+[[ "$COMMIT_EPOCH" =~ ^[1-9][0-9]*$ ]] ||
+    fail "guest image source timestamp is invalid"
 git -C "$ROOT" archive --format=tar HEAD -- guest vendor |
     gzip -n >"$SOURCE_ARCHIVE" ||
     fail "cannot archive tracked guest image sources"
@@ -104,6 +108,7 @@ chmod 0755 "$PROVISION"
 
 cp "$BASE_IMAGE" "$STAGE"
 "$VIRT_CUSTOMIZE" -a "$STAGE" \
+    --run-command "date -u -s '@$COMMIT_EPOCH'" \
     --install "$PACKAGES" \
     --upload "$GUEST_MANIFEST:/tmp/hamn-guest-image.json" \
     --upload "$K3S_MANIFEST:/tmp/k3s-compatibility.json" \
