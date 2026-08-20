@@ -87,9 +87,19 @@ EOF
 cat >"$WORK/guestfish" <<'EOF'
 #!/bin/bash
 set -euo pipefail
-printf '%s\n' "$@" >"$HAMN_TEST_GUESTFISH_ARGUMENTS"
-cat >"$HAMN_TEST_GUESTFISH_COMMANDS"
-printf 'cloudimg-rootfs\n'
+commands=$(cat)
+case "$commands" in
+    *"vfs-label /dev/sda3"*)
+        printf '%s\n' "$@" >"$HAMN_TEST_GUESTFISH_LABEL_ARGUMENTS"
+        printf '%s\n' "$commands" >"$HAMN_TEST_GUESTFISH_LABEL_COMMANDS"
+        printf 'cloudimg-rootfs\n'
+        ;;
+    *"e2fsck-f /dev/sda3"*)
+        printf '%s\n' "$@" >"$HAMN_TEST_GUESTFISH_RESIZE_ARGUMENTS"
+        printf '%s\n' "$commands" >"$HAMN_TEST_GUESTFISH_RESIZE_COMMANDS"
+        ;;
+    *) exit 1 ;;
+esac
 EOF
 chmod 0755 "$WORK/bin/sha256sum" "$WORK/bin/ssh-keygen" \
     "$WORK/virt-customize" "$WORK/qemu-img" "$WORK/virt-resize" \
@@ -104,8 +114,10 @@ ARCHIVE_LIST=$WORK/archive.list
 VIRT_ARGUMENTS=$WORK/virt-arguments
 QEMU_ARGUMENTS=$WORK/qemu-arguments
 RESIZE_ARGUMENTS=$WORK/resize-arguments
-GUESTFISH_ARGUMENTS=$WORK/guestfish-arguments
-GUESTFISH_COMMANDS=$WORK/guestfish-commands
+GUESTFISH_LABEL_ARGUMENTS=$WORK/guestfish-label-arguments
+GUESTFISH_LABEL_COMMANDS=$WORK/guestfish-label-commands
+GUESTFISH_RESIZE_ARGUMENTS=$WORK/guestfish-resize-arguments
+GUESTFISH_RESIZE_COMMANDS=$WORK/guestfish-resize-commands
 printf 'base image fixture\n' >"$BASE"
 printf '{}\n' >"$MANIFEST"
 printf 'fixture signature\n' >"$SIGNATURE"
@@ -126,8 +138,10 @@ HAMN_TEST_ARCHIVE_LIST="$ARCHIVE_LIST" \
 HAMN_TEST_VIRT_ARGUMENTS="$VIRT_ARGUMENTS" \
 HAMN_TEST_QEMU_ARGUMENTS="$QEMU_ARGUMENTS" \
 HAMN_TEST_RESIZE_ARGUMENTS="$RESIZE_ARGUMENTS" \
-HAMN_TEST_GUESTFISH_ARGUMENTS="$GUESTFISH_ARGUMENTS" \
-HAMN_TEST_GUESTFISH_COMMANDS="$GUESTFISH_COMMANDS" \
+HAMN_TEST_GUESTFISH_LABEL_ARGUMENTS="$GUESTFISH_LABEL_ARGUMENTS" \
+HAMN_TEST_GUESTFISH_LABEL_COMMANDS="$GUESTFISH_LABEL_COMMANDS" \
+HAMN_TEST_GUESTFISH_RESIZE_ARGUMENTS="$GUESTFISH_RESIZE_ARGUMENTS" \
+HAMN_TEST_GUESTFISH_RESIZE_COMMANDS="$GUESTFISH_RESIZE_COMMANDS" \
 "$REPO/guest/image/build-ubuntu-24.04-arm64.sh"
 
 grep -Fxq 8G "$QEMU_ARGUMENTS"
@@ -136,11 +150,13 @@ grep -Fxq -- --output-format "$RESIZE_ARGUMENTS"
 grep -Fxq -- --expand "$RESIZE_ARGUMENTS"
 grep -Fxq -- --no-expand-content "$RESIZE_ARGUMENTS"
 grep -Fxq /dev/sda1 "$RESIZE_ARGUMENTS"
-grep -Fxq -- --rw "$GUESTFISH_ARGUMENTS"
-grep -Fxq -- --format=qcow2 "$GUESTFISH_ARGUMENTS"
-grep -Fxq 'vfs-label /dev/sda3' "$GUESTFISH_COMMANDS"
-grep -Fxq 'e2fsck-f /dev/sda3' "$GUESTFISH_COMMANDS"
-grep -Fxq 'resize2fs /dev/sda3' "$GUESTFISH_COMMANDS"
+grep -Fxq -- --ro "$GUESTFISH_LABEL_ARGUMENTS"
+grep -Fxq -- --format=qcow2 "$GUESTFISH_LABEL_ARGUMENTS"
+grep -Fxq 'vfs-label /dev/sda3' "$GUESTFISH_LABEL_COMMANDS"
+grep -Fxq -- --rw "$GUESTFISH_RESIZE_ARGUMENTS"
+grep -Fxq -- --format=qcow2 "$GUESTFISH_RESIZE_ARGUMENTS"
+grep -Fxq 'e2fsck-f /dev/sda3' "$GUESTFISH_RESIZE_COMMANDS"
+grep -Fxq 'debug sh "resize2fs -f /dev/sda3"' "$GUESTFISH_RESIZE_COMMANDS"
 
 FIXTURE_EPOCH=$(git -C "$REPO" show -s --format=%ct HEAD)
 EXPECTED_CLOCK_COMMAND="date -u -s '@$FIXTURE_EPOCH'"
