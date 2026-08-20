@@ -387,6 +387,7 @@ for requirement in \
     '      contents: read' \
     '      id-token: write' \
     '          make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos' \
+    '          make SDKROOT="$HAMN_SYSTEM_SDKROOT" release-candidate \' \
     '          make release-hosted-validation \' \
     '      - name: Attest exact candidate artifact provenance' \
     '      - name: Attest hosted validation evidence'; do
