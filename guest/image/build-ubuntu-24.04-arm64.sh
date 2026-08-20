@@ -112,7 +112,7 @@ make -C /opt/hamn/guest install
 systemctl enable hamnd.service
 rm -rf /opt/hamn/guest /opt/hamn/vendor \
     /tmp/hamn-guest-sources.tar.gz
-QEMU_BINFMT_INTERPRETER=/usr/libexec/qemu-binfmt/x86_64-binfmt-P
+QEMU_BINFMT_INTERPRETER=/usr/bin/qemu-x86_64-static
 test -x "$QEMU_BINFMT_INTERPRETER" && test ! -L "$QEMU_BINFMT_INTERPRETER"
 printf '%s\n' \
     'package qemu-user-static' \
@@ -125,7 +125,7 @@ printf '%s\n' \
     > /usr/share/binfmts/qemu-x86_64
 chmod 0644 /usr/share/binfmts/qemu-x86_64
 update-binfmts --import qemu-x86_64
-update-binfmts --enable qemu-x86_64
+systemctl enable binfmt-support.service
 EOF
 chmod 0755 "$PROVISION"
 

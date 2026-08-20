@@ -23,13 +23,13 @@ grep -Fq 'k3s-compatibility.json.sig' "$BUILDER"
 grep -Fq 'make -C /opt/hamn/guest install' "$BUILDER"
 grep -Fq 'groupadd --system hamn' "$BUILDER"
 grep -Fq 'systemctl enable hamnd.service' "$BUILDER"
-grep -Fq 'QEMU_BINFMT_INTERPRETER=/usr/libexec/qemu-binfmt/x86_64-binfmt-P' \
+grep -Fq 'QEMU_BINFMT_INTERPRETER=/usr/bin/qemu-x86_64-static' \
     "$BUILDER"
 grep -Fq '\x00\x00\x02\x00\x3e\x00' "$BUILDER"
 grep -Fq 'update-binfmts --import qemu-x86_64' "$BUILDER"
-grep -Fq 'update-binfmts --enable qemu-x86_64' "$BUILDER"
-if grep -Fq '/usr/lib/binfmt.d/qemu-x86_64.conf' "$BUILDER"; then
-    echo "FAIL: hosted image builder requires an unavailable systemd binfmt descriptor" >&2
+grep -Fq 'systemctl enable binfmt-support.service' "$BUILDER"
+if grep -Eq 'x86_64-binfmt-P|update-binfmts --enable qemu-x86_64' "$BUILDER"; then
+    echo "FAIL: hosted image builder depends on a symlink or the build kernel binfmt state" >&2
     exit 1
 fi
 if grep -Eq 'shared|\.\./shared' "$BUILDER" "$GUEST_ROOT/Makefile"; then
