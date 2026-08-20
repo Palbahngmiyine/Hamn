@@ -65,6 +65,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             ipxe-qemu jq libguestfs-tools linux-image-virtual passt
+          multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+          guestfs_hostfiles="/usr/lib/$multiarch/guestfs/supermin.d/hostfiles"
+          resolv_target=$(readlink -f /etc/resolv.conf)
+          [ -f "$guestfs_hostfiles" ] && [ ! -L "$guestfs_hostfiles" ]
+          [ -f "$resolv_target" ] && [ ! -L "$resolv_target" ]
+          case "$resolv_target" in
+            /etc/*|/run/*) ;;
+            *) echo "unsafe host resolver target: $resolv_target" >&2; exit 1 ;;
+          esac
+          if ! grep -Fxq "$resolv_target" "$guestfs_hostfiles"; then
+            printf '%s\n' "$resolv_target" | sudo tee -a "$guestfs_hostfiles" >/dev/null
+          fi
           sudo chmod a+r /boot/vmlinuz-*
           LIBGUESTFS_BACKEND=direct \
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
