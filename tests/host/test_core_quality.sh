@@ -349,17 +349,14 @@ for requirement in \
     '      attestations: write' \
     '      contents: read' \
     '      id-token: write' \
-    '            dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
+    '            dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual' \
     '            printf '\''dhcpcd-base\n'\'' | sudo tee -a "$guestfs_packages" >/dev/null' \
-    '          printf '\''nameserver 169.254.2.2\n'\'' > "$resolver_overlay/etc/resolv.conf"' \
-    '            '\''static ip_address=169.254.2.15/16'\'' \' \
-    '            '\''static routers=169.254.2.2'\'' \' \
-    '            '\''static domain_name_servers=169.254.2.2'\'' \' \
-    '            "$guestfs_supermin/zz-hamn-network.tar.gz"' \
+    '          printf '\''nameserver 169.254.2.3\n'\'' > "$resolver_overlay/etc/resolv.conf"' \
+    '            "$guestfs_supermin/zz-hamn-resolver.tar.gz"' \
     '          sudo chmod a+r /boot/vmlinuz-*' \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
     '            libguestfs-test-tool 2>&1 | tee "$guestfs_test_log"' \
-    '          grep -Fq '\''nameserver 169.254.2.2'\'' "$guestfs_test_log"' \
+    '          grep -Fq '\''nameserver 169.254.2.3'\'' "$guestfs_test_log"' \
     '          LIBGUESTFS_DEBUG=1 \' \
     '          LIBGUESTFS_TRACE=1 \' \
     '          sudo -u nobody /usr/bin/env -i \' \
