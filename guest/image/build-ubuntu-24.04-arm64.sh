@@ -119,15 +119,23 @@ chmod 0755 "$PROVISION"
 "$QEMU_IMG" create -q -f qcow2 "$STAGE" "$TARGET_SIZE"
 "$VIRT_RESIZE" --format qcow2 --output-format qcow2 \
     --no-expand-content --expand /dev/sda1 "$BASE_IMAGE" "$STAGE"
-ROOT_LABEL=$("$GUESTFISH" --rw --format=qcow2 -a "$STAGE" <<'GUESTFISH_COMMANDS'
+if ! ROOT_LABEL=$("$GUESTFISH" --ro --format=qcow2 -a "$STAGE" <<'GUESTFISH_LABEL_COMMANDS'
 run
 vfs-label /dev/sda3
-e2fsck-f /dev/sda3
-resize2fs /dev/sda3
-GUESTFISH_COMMANDS
-) || fail "cannot check and expand the resized guest root filesystem"
+GUESTFISH_LABEL_COMMANDS
+); then
+    fail "cannot verify the resized guest root filesystem"
+fi
 [ "$ROOT_LABEL" = cloudimg-rootfs ] ||
     fail "resized guest root filesystem label is invalid"
+if ! "$GUESTFISH" --rw --format=qcow2 -a "$STAGE" <<'GUESTFISH_RESIZE_COMMANDS'
+run
+e2fsck-f /dev/sda3
+debug sh "resize2fs -f /dev/sda3"
+GUESTFISH_RESIZE_COMMANDS
+then
+    fail "cannot check and force-expand the resized guest root filesystem"
+fi
 "$VIRT_CUSTOMIZE" -a "$STAGE" \
     --run-command "date -u -s '@$COMMIT_EPOCH'" \
     --install "$PACKAGES" \
