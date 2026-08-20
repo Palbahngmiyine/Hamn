@@ -112,11 +112,20 @@ make -C /opt/hamn/guest install
 systemctl enable hamnd.service
 rm -rf /opt/hamn/guest /opt/hamn/vendor \
     /tmp/hamn-guest-sources.tar.gz
-QEMU_BINFMT_SOURCE=/usr/share/doc/qemu-user-static/qemu-x86_64.conf
-test -f "$QEMU_BINFMT_SOURCE" && test ! -L "$QEMU_BINFMT_SOURCE"
 test -f /usr/lib/binfmt.d/qemu-x86_64.conf && \
     test ! -L /usr/lib/binfmt.d/qemu-x86_64.conf
-install -m 0644 "$QEMU_BINFMT_SOURCE" /usr/share/binfmts/qemu-x86_64
+QEMU_BINFMT_INTERPRETER=/usr/libexec/qemu-binfmt/x86_64-binfmt-P
+test -x "$QEMU_BINFMT_INTERPRETER" && test ! -L "$QEMU_BINFMT_INTERPRETER"
+printf '%s\n' \
+    'package qemu-user-static' \
+    "interpreter $QEMU_BINFMT_INTERPRETER" \
+    'magic \x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00' \
+    'mask \xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff' \
+    'credentials no' \
+    'preserve yes' \
+    'fix_binary yes' \
+    > /usr/share/binfmts/qemu-x86_64
+chmod 0644 /usr/share/binfmts/qemu-x86_64
 update-binfmts --import qemu-x86_64
 update-binfmts --enable qemu-x86_64
 EOF
