@@ -28,6 +28,10 @@ grep -Fq 'QEMU_BINFMT_INTERPRETER=/usr/libexec/qemu-binfmt/x86_64-binfmt-P' \
 grep -Fq '\x00\x00\x02\x00\x3e\x00' "$BUILDER"
 grep -Fq 'update-binfmts --import qemu-x86_64' "$BUILDER"
 grep -Fq 'update-binfmts --enable qemu-x86_64' "$BUILDER"
+if grep -Fq '/usr/lib/binfmt.d/qemu-x86_64.conf' "$BUILDER"; then
+    echo "FAIL: hosted image builder requires an unavailable systemd binfmt descriptor" >&2
+    exit 1
+fi
 if grep -Eq 'shared|\.\./shared' "$BUILDER" "$GUEST_ROOT/Makefile"; then
     echo "FAIL: guest image source inputs retain the removed shared tree" >&2
     exit 1
