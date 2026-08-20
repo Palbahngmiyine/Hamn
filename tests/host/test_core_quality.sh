@@ -352,7 +352,10 @@ for requirement in \
     '            dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
     '            printf '\''dhcpcd-base\n'\'' | sudo tee -a "$guestfs_packages" >/dev/null' \
     '          printf '\''nameserver 169.254.2.2\n'\'' > "$resolver_overlay/etc/resolv.conf"' \
-    '            "$guestfs_supermin/zz-hamn-resolver.tar.gz"' \
+    '            '\''static ip_address=169.254.2.15/16'\'' \' \
+    '            '\''static routers=169.254.2.2'\'' \' \
+    '            '\''static domain_name_servers=169.254.2.2'\'' \' \
+    '            "$guestfs_supermin/zz-hamn-network.tar.gz"' \
     '          sudo chmod a+r /boot/vmlinuz-*' \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
     '            libguestfs-test-tool 2>&1 | tee "$guestfs_test_log"' \
