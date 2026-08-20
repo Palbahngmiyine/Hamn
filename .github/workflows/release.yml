@@ -250,7 +250,7 @@ jobs:
           nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
           source scripts/ci/use-system-macos-sdk.sh
           make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos
-          make release-candidate \
+          make SDKROOT="$HAMN_SYSTEM_SDKROOT" release-candidate \
             RELEASE_REF="$GITHUB_SHA" \
             RELEASE_TAG="$RELEASE_TAG" \
             OUTPUT_DIR="$RUNNER_TEMP/hamn-candidate" \
