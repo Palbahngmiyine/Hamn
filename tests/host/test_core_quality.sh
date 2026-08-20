@@ -367,7 +367,9 @@ for requirement in \
     '          XDG_RUNTIME_DIR="$builder/runtime" \' \
     '          GIT_CONFIG_KEY_0=safe.directory \' \
     '            /bin/bash "$builder/source/guest/image/build-ubuntu-24.04-arm64.sh"' \
-    '          install -m 0644 "$guest_output" "$RUNNER_TEMP/hamn-guest.img"' \
+    '          sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 \' \
+    '            "$guest_output" "$RUNNER_TEMP/hamn-guest.img"' \
+    '            "$guest_output.sha256" "$RUNNER_TEMP/hamn-guest.img.sha256"' \
     '      - name: Attest completed guest image'; do
     printf '%s\n' "$guest_job" | grep -Fqx "$requirement" ||
         fail "guest image job is incomplete: $requirement"
