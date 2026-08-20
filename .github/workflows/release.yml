@@ -174,8 +174,10 @@ jobs:
           HAMN_K3S_COMPATIBILITY_SIGNATURE="$builder/input/k3s-compatibility.json.sig" \
           HAMN_RELEASE_PUBLIC_KEY="$builder/input/k3s-compatibility-key.pub" \
             /bin/bash "$builder/source/guest/image/build-ubuntu-24.04-arm64.sh"
-          install -m 0644 "$guest_output" "$RUNNER_TEMP/hamn-guest.img"
-          install -m 0644 "$guest_output.sha256" "$RUNNER_TEMP/hamn-guest.img.sha256"
+          sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 \
+            "$guest_output" "$RUNNER_TEMP/hamn-guest.img"
+          sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 \
+            "$guest_output.sha256" "$RUNNER_TEMP/hamn-guest.img.sha256"
       - name: Attest completed guest image
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
