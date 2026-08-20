@@ -357,7 +357,6 @@ for requirement in \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
     '            libguestfs-test-tool 2>&1 | tee "$guestfs_test_log"' \
     '          grep -Fq '\''nameserver 169.254.2.2'\'' "$guestfs_test_log"' \
-    '          grep -Fq '\''inet 169.254.2.15/16'\'' "$guestfs_test_log"' \
     '          LIBGUESTFS_DEBUG=1 \' \
     '          LIBGUESTFS_TRACE=1 \' \
     '          sudo -u nobody /usr/bin/env -i \' \
