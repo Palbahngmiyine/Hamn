@@ -350,6 +350,8 @@ for requirement in \
     '      contents: read' \
     '      id-token: write' \
     '            ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
+    '          resolv_target=$(readlink -f /etc/resolv.conf)' \
+    '            printf '\''%s\n'\'' "$resolv_target" | sudo tee -a "$guestfs_hostfiles" >/dev/null' \
     '          sudo chmod a+r /boot/vmlinuz-*' \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
     '            libguestfs-test-tool' \
