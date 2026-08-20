@@ -112,8 +112,6 @@ make -C /opt/hamn/guest install
 systemctl enable hamnd.service
 rm -rf /opt/hamn/guest /opt/hamn/vendor \
     /tmp/hamn-guest-sources.tar.gz
-test -f /usr/lib/binfmt.d/qemu-x86_64.conf && \
-    test ! -L /usr/lib/binfmt.d/qemu-x86_64.conf
 QEMU_BINFMT_INTERPRETER=/usr/libexec/qemu-binfmt/x86_64-binfmt-P
 test -x "$QEMU_BINFMT_INTERPRETER" && test ! -L "$QEMU_BINFMT_INTERPRETER"
 printf '%s\n' \
