@@ -350,13 +350,12 @@ for requirement in \
     '      contents: read' \
     '      id-token: write' \
     '            ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
-    '          resolv_target=$(readlink -f /etc/resolv.conf)' \
-    '          for resolver_path in /etc/resolv.conf "$resolv_target"; do' \
-    '              printf '\''%s\n'\'' "$resolver_path" | sudo tee -a "$guestfs_hostfiles" >/dev/null' \
+    '          printf '\''nameserver 169.254.2.2\n'\'' > "$resolver_overlay/etc/resolv.conf"' \
+    '            "$guestfs_supermin/zz-hamn-resolver.tar.gz"' \
     '          sudo chmod a+r /boot/vmlinuz-*' \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
     '            libguestfs-test-tool 2>&1 | tee "$guestfs_test_log"' \
-    '          grep -Eq '\''^nameserver[[:space:]]'\'' "$guestfs_test_log"' \
+    '          grep -Fxq '\''nameserver 169.254.2.2'\'' "$guestfs_test_log"' \
     '          LIBGUESTFS_DEBUG=1 \' \
     '          LIBGUESTFS_TRACE=1 \' \
     '          sudo -u nobody /usr/bin/env -i \' \
