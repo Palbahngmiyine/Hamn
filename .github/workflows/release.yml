@@ -66,26 +66,23 @@ jobs:
           sudo apt-get install --yes --no-install-recommends \
             ipxe-qemu jq libguestfs-tools linux-image-virtual passt
           multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
-          guestfs_hostfiles="/usr/lib/$multiarch/guestfs/supermin.d/hostfiles"
-          resolv_target=$(readlink -f /etc/resolv.conf)
-          [ -f "$guestfs_hostfiles" ] && [ ! -L "$guestfs_hostfiles" ]
-          [ -L /etc/resolv.conf ] || { [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; }
-          [ -f "$resolv_target" ] && [ ! -L "$resolv_target" ]
-          case "$resolv_target" in
-            /etc/*|/run/*) ;;
-            *) echo "unsafe host resolver target: $resolv_target" >&2; exit 1 ;;
-          esac
-          for resolver_path in /etc/resolv.conf "$resolv_target"; do
-            if ! grep -Fxq "$resolver_path" "$guestfs_hostfiles"; then
-              printf '%s\n' "$resolver_path" | sudo tee -a "$guestfs_hostfiles" >/dev/null
-            fi
-          done
+          guestfs_supermin="/usr/lib/$multiarch/guestfs/supermin.d"
+          [ -d "$guestfs_supermin" ] && [ ! -L "$guestfs_supermin" ]
+          resolver_overlay="$RUNNER_TEMP/hamn-supermin-resolver"
+          mkdir -m 0755 "$resolver_overlay" "$resolver_overlay/etc"
+          printf 'nameserver 169.254.2.2\n' > "$resolver_overlay/etc/resolv.conf"
+          chmod 0644 "$resolver_overlay/etc/resolv.conf"
+          resolver_archive="$RUNNER_TEMP/hamn-supermin-resolver.tar.gz"
+          tar -C "$resolver_overlay" -czf "$resolver_archive" etc/resolv.conf
+          [ "$(tar -tzf "$resolver_archive")" = etc/resolv.conf ]
+          sudo install -m 0644 "$resolver_archive" \
+            "$guestfs_supermin/zz-hamn-resolver.tar.gz"
           sudo chmod a+r /boot/vmlinuz-*
           guestfs_test_log="$RUNNER_TEMP/libguestfs-test-tool.log"
           LIBGUESTFS_BACKEND=direct \
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
             libguestfs-test-tool 2>&1 | tee "$guestfs_test_log"
-          grep -Eq '^nameserver[[:space:]]' "$guestfs_test_log"
+          grep -Fxq 'nameserver 169.254.2.2' "$guestfs_test_log"
       - name: Build completed Ubuntu arm64 guest image
         shell: bash
         run: |
