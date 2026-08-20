@@ -23,6 +23,10 @@ grep -Fq 'k3s-compatibility.json.sig' "$BUILDER"
 grep -Fq 'make -C /opt/hamn/guest install' "$BUILDER"
 grep -Fq 'groupadd --system hamn' "$BUILDER"
 grep -Fq 'systemctl enable hamnd.service' "$BUILDER"
+grep -Fq 'QEMU_BINFMT_SOURCE=/usr/share/doc/qemu-user-static/qemu-x86_64.conf' \
+    "$BUILDER"
+grep -Fq 'update-binfmts --import qemu-x86_64' "$BUILDER"
+grep -Fq 'update-binfmts --enable qemu-x86_64' "$BUILDER"
 if grep -Eq 'shared|\.\./shared' "$BUILDER" "$GUEST_ROOT/Makefile"; then
     echo "FAIL: guest image source inputs retain the removed shared tree" >&2
     exit 1
