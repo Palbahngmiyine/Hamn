@@ -351,10 +351,12 @@ for requirement in \
     '      id-token: write' \
     '            ipxe-qemu jq libguestfs-tools linux-image-virtual passt' \
     '          resolv_target=$(readlink -f /etc/resolv.conf)' \
-    '            printf '\''%s\n'\'' "$resolv_target" | sudo tee -a "$guestfs_hostfiles" >/dev/null' \
+    '          for resolver_path in /etc/resolv.conf "$resolv_target"; do' \
+    '              printf '\''%s\n'\'' "$resolver_path" | sudo tee -a "$guestfs_hostfiles" >/dev/null' \
     '          sudo chmod a+r /boot/vmlinuz-*' \
     '          LIBGUESTFS_BACKEND_SETTINGS=force_tcg \' \
-    '            libguestfs-test-tool' \
+    '            libguestfs-test-tool 2>&1 | tee "$guestfs_test_log"' \
+    '          grep -Eq '\''^nameserver[[:space:]]'\'' "$guestfs_test_log"' \
     '          LIBGUESTFS_DEBUG=1 \' \
     '          LIBGUESTFS_TRACE=1 \' \
     '          sudo -u nobody /usr/bin/env -i \' \

@@ -69,18 +69,23 @@ jobs:
           guestfs_hostfiles="/usr/lib/$multiarch/guestfs/supermin.d/hostfiles"
           resolv_target=$(readlink -f /etc/resolv.conf)
           [ -f "$guestfs_hostfiles" ] && [ ! -L "$guestfs_hostfiles" ]
+          [ -L /etc/resolv.conf ] || { [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; }
           [ -f "$resolv_target" ] && [ ! -L "$resolv_target" ]
           case "$resolv_target" in
             /etc/*|/run/*) ;;
             *) echo "unsafe host resolver target: $resolv_target" >&2; exit 1 ;;
           esac
-          if ! grep -Fxq "$resolv_target" "$guestfs_hostfiles"; then
-            printf '%s\n' "$resolv_target" | sudo tee -a "$guestfs_hostfiles" >/dev/null
-          fi
+          for resolver_path in /etc/resolv.conf "$resolv_target"; do
+            if ! grep -Fxq "$resolver_path" "$guestfs_hostfiles"; then
+              printf '%s\n' "$resolver_path" | sudo tee -a "$guestfs_hostfiles" >/dev/null
+            fi
+          done
           sudo chmod a+r /boot/vmlinuz-*
+          guestfs_test_log="$RUNNER_TEMP/libguestfs-test-tool.log"
           LIBGUESTFS_BACKEND=direct \
           LIBGUESTFS_BACKEND_SETTINGS=force_tcg \
-            libguestfs-test-tool
+            libguestfs-test-tool 2>&1 | tee "$guestfs_test_log"
+          grep -Eq '^nameserver[[:space:]]' "$guestfs_test_log"
       - name: Build completed Ubuntu arm64 guest image
         shell: bash
         run: |
