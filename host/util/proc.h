@@ -7,6 +7,13 @@
 
 typedef int (*proc_completion_fn)(int rc, void *context);
 
+#define PROC_RUN_TIMEOUT 124
+/* Finite synchronous command; reap the exact child before returning timeout.
+ * Optional completion still runs under the inherited supervisor locks. */
+int proc_run_bounded(const char *const argv[], char *out, size_t cap,
+                      unsigned timeout_ms, proc_completion_fn completion,
+                      void *context);
+
 /* argv는 NULL 종단 배열. 종료까지 대기, exit code(0~255) 반환, 실패/시그널 -1. */
 int proc_run(const char *const argv[]);
 
