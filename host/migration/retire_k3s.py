@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 
 JOURNAL = Path('/var/lib/hamn/k3s-retirement-v1.json')
+PODS = Path('/var/lib/hamn/k3s-retirement-pods-v1.json')
 TRANSACTIONS = Path('/var/lib/hamn/deployment-transactions')
 UNIT = Path('/etc/systemd/system/k3s.service')
 DATA = ('/var/lib/rancher/k3s', '/etc/rancher/k3s',
@@ -89,6 +90,7 @@ def identifiers(output, header=False):
 
 
 def resources():
+    retire_pods()
     # ctr operates only on metadata scoped to k8s.io. Never remove content blobs,
     # containerd's database, shared snapshots on disk, or the moby namespace.
     for group, header, flags in [('tasks', True, ('--force',)),
@@ -103,6 +105,10 @@ def resources():
     while remaining:
         failed = [name for name in remaining if
                   ctr('snapshots', 'remove', '--', name, check=False).returncode]
+        # Image removal also schedules containerd GC. A snapshot that vanished
+        # between listing and deletion is already retired, not a busy resource.
+        current = identifiers(ctr('snapshots', 'list').stdout, True)
+        failed = [name for name in failed if name in current]
         if len(failed) == len(remaining):
             raise RuntimeError('k8s.io snapshots remain in use; migration is incomplete')
         remaining = failed
@@ -111,9 +117,60 @@ def resources():
             raise RuntimeError(f'k8s.io {group} appeared during retirement')
 
 
+def mountpoints():
+    return [line.split()[4].replace('\\040', ' ').replace('\\134', '\\')
+            for line in Path('/proc/self/mountinfo').read_text().splitlines()]
+
+
+def retire_pods():
+    """CRI owns sandbox networking; ctr alone leaves its metadata and netns."""
+    if not safe('/usr/local/bin/k3s').exists():
+        return
+    def cri(*args):
+        return run('/usr/local/bin/k3s', 'crictl', '--runtime-endpoint',
+                   'unix:///run/containerd/containerd.sock', *args)
+    def records(command, key):
+        rows = json.loads(cri(command, '-o', 'json').stdout)[key]
+        if not isinstance(rows, list) or len(rows) > 20000:
+            raise RuntimeError('invalid CRI resource list')
+        for row in rows:
+            if not isinstance(row, dict) or not re.fullmatch(r'[0-9a-f]{64}', row.get('id', '')):
+                raise RuntimeError('invalid CRI resource identity')
+        return rows
+    pods = records('pods', 'items')
+    uids = [pod.get('metadata', {}).get('uid', '') for pod in pods]
+    if safe(PODS).exists():
+        saved = json.loads(PODS.read_bytes())
+        if not isinstance(saved, list):
+            raise RuntimeError('invalid retirement Pod inventory')
+        uids += saved
+    if len(uids) > 40000 or any(not isinstance(uid, str) or
+            not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', uid) for uid in uids):
+        raise RuntimeError('invalid retirement Pod UID')
+    uids = sorted(set(uids))
+    atomic(PODS, json.dumps(uids).encode())
+    for pod in pods:
+        cri('stopp', pod['id'])
+        cri('rmp', '--force', pod['id'])
+    if records('pods', 'items'):
+        raise RuntimeError('CRI sandboxes remain after retirement')
+    # Kubelet is stopped. Only detach volume mounts belonging to captured Pod
+    # UIDs; never delete the backing hostPath or a shared Docker mount.
+    for uid in uids:
+        directory = safe('/var/lib/kubelet/pods/' + uid)
+        mounts = mountpoints()
+        if str(directory) in mounts:
+            raise RuntimeError('refusing a mounted Pod directory')
+        for mount in sorted((path for path in mounts if path.startswith(str(directory) + '/')),
+                            key=lambda path: path.count('/'), reverse=True):
+            safe(mount)
+            run('umount', '--', mount)
+        if directory.exists():
+            shutil.rmtree(directory)
+
+
 def remove_data():
-    mounts = [line.split()[4].replace('\\040', ' ').replace('\\134', '\\')
-              for line in Path('/proc/self/mountinfo').read_text().splitlines()]
+    mounts = mountpoints()
     for value in DATA:
         path = safe(value)
         if any(mount == value or mount.startswith(value + '/') for mount in mounts):
