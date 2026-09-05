@@ -244,6 +244,9 @@ async fn call_executable(request: &Request, executable: &std::ffi::OsStr) -> Res
         capture(error, 8192, true)
     )
     .map_err(|e| Failure::new("coreProtocol", e))?;
+    if request.headless && !error.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&error));
+    }
     if !status.success() {
         return Err(Failure::new(
             "outcomeUnknown",
