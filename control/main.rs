@@ -4,6 +4,7 @@ mod core;
 mod docker;
 mod headless;
 mod kubeconfig;
+mod kubernetes;
 mod model;
 mod service;
 
