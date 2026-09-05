@@ -14,6 +14,7 @@ AGENT_SRCS := agent/main.c agent/api/cri_status.c agent/api/mount_inotify.c \
               ../vendor/picohttpparser/picohttpparser.c
 
 AGENT_BIN := build/hamnd-agent
+AGENT_TEST_BIN := build/hamnd-agent-test
 CRI_STATUS_TEST := build/test_cri_status
 
 all: $(AGENT_BIN)
@@ -45,8 +46,12 @@ install-common: $(AGENT_BIN)
 clean:
 	rm -rf build
 
-test-agent: $(AGENT_BIN)
-	bash tests/test_agent.sh $(AGENT_BIN)
+$(AGENT_TEST_BIN): $(AGENT_SRCS) Makefile
+	@mkdir -p build
+	$(CC) $(CFLAGS) -DHAMN_TEST $(AGENT_SRCS) -pthread -o $@
+
+test-agent: $(AGENT_TEST_BIN)
+	bash tests/test_agent.sh $(AGENT_TEST_BIN)
 
 $(CRI_STATUS_TEST): tests/test_cri_status.c agent/api/cri_status.c \
 		agent/api/cri_status.h Makefile
