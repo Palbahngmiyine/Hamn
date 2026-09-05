@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import contextlib
 from pathlib import Path
 import sys
 import tarfile
@@ -17,6 +18,16 @@ spec.loader.exec_module(physical)
 
 
 class PhysicalRuntime(unittest.TestCase):
+    def test_help_needs_no_validator_environment_or_runtime(self):
+        output = io.StringIO()
+        with patch('sys.argv', ['physical-e2e.sh', '--help']), patch.dict('os.environ', {}, clear=True), \
+                patch.object(physical, 'run') as run, contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit) as result:
+                physical.main()
+        self.assertEqual(result.exception.code, 0)
+        self.assertIn('usage: physical-e2e.sh', output.getvalue())
+        run.assert_not_called()
+
     def test_headless_operations_target_only_the_isolated_profile(self):
         runtime = Runtime('/tmp/candidate/hamn', '/tmp/isolated', '/usr/local/bin/docker')
         with patch('physical_runtime.run', return_value=json.dumps({'schemaVersion': 1, 'ok': True, 'data': {'state': 'stopped'}})) as run:
