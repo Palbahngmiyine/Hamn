@@ -29,11 +29,12 @@ class Retirement(unittest.TestCase):
                 with patch.object(r, 'JOURNAL', journal), patch.object(r, 'UNIT', unit), \
                      patch.object(r, 'DATA', ()), patch.object(r, 'FILES', ()), \
                      patch.object(r, 'safe', side_effect=Path), patch.object(r.os, 'geteuid', return_value=0), \
+                     patch.object(r, 'recover_deployment'), \
                      patch.object(r, 'stop', side_effect=action(1)), \
                      patch.object(r, 'resources', side_effect=action(2)), \
                      patch.object(r, 'remove_data', side_effect=action(3)), \
                      patch.object(r, 'replace_helpers', side_effect=action(4)), \
-                     patch.object(r, 'run', side_effect=action(5)):
+                     patch.object(r, 'docker_ready', side_effect=action(5)):
                     with self.assertRaises(RuntimeError):
                         r.migrate({})
                     self.assertEqual(json.loads(journal.read_bytes())['stage'], r.STAGES[failed_stage - 1])
@@ -44,7 +45,40 @@ class Retirement(unittest.TestCase):
                     self.assertEqual(calls, list(range(failed_stage_saved, len(r.STAGES))))
                     calls.clear()
                     r.migrate({})
-                    self.assertEqual(calls, [])
+                    self.assertEqual(calls, [5])  # readiness is always rechecked
+
+    def test_old_deployment_backup_is_recovered_before_retirement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transactions = root / 'transactions'
+            transactions.mkdir()
+            entry = transactions / ('a' * 32)
+            entry.mkdir()
+            phase = entry / 'phase'
+            phase.write_text('incomplete')
+            with patch.object(r, 'TRANSACTIONS', transactions), patch.object(r, 'JOURNAL', root / 'journal'), \
+                 patch.object(r, 'safe', side_effect=Path), patch.object(r, 'run') as run:
+                with self.assertRaises(RuntimeError):
+                    r.recover_deployment()
+                run.assert_not_called()
+                phase.write_text('ready\n')
+                with self.assertRaises(RuntimeError):
+                    r.recover_deployment()  # reported success without cleanup is rejected
+                self.assertEqual(run.call_args.args[-2:], ('rollback', 'a' * 32))
+                def recovered(*_args):
+                    phase.unlink()
+                    entry.rmdir()
+                run.side_effect = recovered
+                r.recover_deployment()
+                r.recover_deployment()
+                self.assertFalse(entry.exists())
+
+    def test_docker_success_status_with_wrong_body_is_not_ready(self):
+        with patch.object(r, 'run', return_value=subprocess.CompletedProcess([], 0, b'not ready')):
+            with self.assertRaises(RuntimeError):
+                r.docker_ready()
+        with patch.object(r, 'run', return_value=subprocess.CompletedProcess([], 0, b'OK\n')):
+            r.docker_ready()
 
     def test_containerd_scope_and_snapshot_dependency_order(self):
         commands = []
