@@ -6,7 +6,9 @@ unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 WORK=$(mktemp -d /tmp/hamn-release-artifacts.XXXXXX)
+CACHED_INPUT=$(mktemp "$ROOT/packaging/release/.artifact-fixture.XXXXXX.log")
 cleanup() {
+    rm -f "$CACHED_INPUT"
     rm -rf "$WORK"
     make -C "$ROOT" host VERSION=0.0.1-dev >/dev/null
 }
@@ -85,6 +87,10 @@ HAMN_RELEASE_ALLOW_DIRTY=1 \
 
 HOST_ARTIFACT=$WORK/candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 GUEST_ARTIFACT=$WORK/candidate/hamn-v0.0.1-ubuntu-24.04-arm64.img
+if tar -tzf "$HOST_ARTIFACT" | grep -Fq "$(basename "$CACHED_INPUT")"; then
+    echo "FAIL: host artifact contains untracked local files" >&2
+    exit 1
+fi
 if tar -tzf "$HOST_ARTIFACT" | grep -E '/(guest|shared|vendor)(/|$)' >/dev/null; then
     echo "FAIL: host artifact contains mutable guest build sources" >&2
     exit 1
