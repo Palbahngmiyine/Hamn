@@ -68,6 +68,7 @@ output.mkdir()
 candidate = json.loads((candidate_dir / 'candidate.json').read_bytes())
 snapshot = {key: ['fixture-object'] for key in ['containers', 'images', 'volumes', 'networks']}
 snapshot['volumeSha256'] = 'e' * 64
+snapshot['builtinNetworks'] = ['bridge', 'host', 'none']
 legacy = {'before': snapshot, 'after': snapshot, 'k3sRemoved': True, 'journalComplete': True, 'sourceSha256': 'd' * 64}
 evidence = {'schemaVersion': 2, 'kind': 'hamn-physical-validation-evidence', 'validationMode': 'physical-apple-silicon',
     **{key: candidate[key] for key in ['tag', 'commit', 'sourceTree']},

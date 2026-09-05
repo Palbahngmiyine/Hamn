@@ -92,7 +92,13 @@ class Runtime:
                     raise RuntimeError('TUI did not render before the deadline')
                 output.extend(os.read(master, 65536))
             os.write(master, b'q')
-            if child.wait(timeout=10) or terminal_settings(slave) != before:
+            deadline = time.monotonic() + 10
+            # Continue consuming redraw/restore bytes while quitting: a full
+            # PTY output queue can otherwise block the application's writer.
+            while child.poll() is None and time.monotonic() < deadline:
+                if select.select([master], [], [], max(0, min(0.1, deadline - time.monotonic())))[0]:
+                    os.read(master, 65536)
+            if child.wait(timeout=1) or terminal_settings(slave) != before:
                 raise RuntimeError('TUI did not restore the terminal')
         finally:
             if child.poll() is None:

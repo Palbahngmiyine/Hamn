@@ -18,6 +18,21 @@ spec.loader.exec_module(physical)
 
 
 class PhysicalRuntime(unittest.TestCase):
+    def test_terminal_quit_drains_output_larger_than_the_pty_queue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / 'terminal-fixture'
+            binary.write_text('#!' + sys.executable + '\n' +
+                'import os,termios,tty\n'
+                'before=termios.tcgetattr(0)\n'
+                'try:\n'
+                ' tty.setraw(0)\n'
+                ' os.write(1,b"Hamn")\n'
+                ' for _ in range(64): os.write(1,b"x"*4096)\n'
+                ' assert os.read(0,1)==b"q"\n'
+                'finally: termios.tcsetattr(0,termios.TCSANOW,before)\n')
+            binary.chmod(0o700)
+            Runtime(binary, directory, 'docker').terminal()
+
     def test_snapshot_preserves_user_network_ids_and_requires_builtin_networks(self):
         runtime = Runtime('/tmp/hamn', '/tmp/home', 'docker')
         networks = [{'Name': name, 'Id': name + '-id'} for name in ['bridge', 'host', 'none', 'user']]
