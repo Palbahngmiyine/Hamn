@@ -64,6 +64,7 @@
         python3
         ripgrep
         ruby
+        rustup
       ];
     in
     {

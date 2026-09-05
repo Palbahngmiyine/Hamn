@@ -1,6 +1,7 @@
 # 빌드 산출물
 build/
 target/
+__pycache__/
 dist/
 *.o
 *.dSYM/

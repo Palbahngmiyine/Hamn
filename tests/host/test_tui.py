@@ -41,11 +41,37 @@ def exercise(exit_mode):
             if exit_mode == "q":
                 os.write(master, b":contexts\r")
                 until(b"k8s contexts list")
+                os.write(master, "/작업".encode())
+                until("작".encode())
+                until("업".encode())  # incremental frames put CSI codes between characters
+                os.write(master, b"\r")
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 10, 30, 0, 0))
                 os.kill(process.pid, signal.SIGWINCH)
                 os.write(master, b"q")
             elif exit_mode == "interrupt":
                 os.write(master, b"\x03")
+            elif exit_mode.startswith("suspend"):
+                if exit_mode == "suspend-key":
+                    os.write(master, b"\x1a")
+                else:
+                    os.kill(process.pid, signal.SIGTSTP)
+                until(b"\x1b[?1049l")
+                assert termios.tcgetattr(slave) == before
+                def deadline(*_args):
+                    raise TimeoutError("TUI did not stop after restoring the terminal")
+                old_alarm = signal.signal(signal.SIGALRM, deadline)
+                signal.alarm(5)
+                try:
+                    _, status = os.waitpid(process.pid, os.WUNTRACED)
+                    assert os.WIFSTOPPED(status)
+                finally:
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_alarm)
+                output.clear()
+                os.kill(process.pid, signal.SIGCONT)
+                until(b"Hamn")
+                assert termios.tcgetattr(slave) != before
+                os.write(master, b"q")
             else:
                 os.kill(process.pid, signal.SIGTERM)
             until(b"\x1b[?1049l")
@@ -60,6 +86,6 @@ def exercise(exit_mode):
             os.close(slave)
 
 
-for mode in ("q", "interrupt", "terminate"):
+for mode in ("q", "interrupt", "terminate", "suspend-key", "suspend-signal"):
     exercise(mode)
 print("TUI entry, navigation, resize and terminal restoration: passed")
