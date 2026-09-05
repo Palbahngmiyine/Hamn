@@ -105,6 +105,8 @@ def main():
         root = unpack(candidate_dir / host_name, unpacked)
         binary = owned(root / 'bin/hamn')
         run(['bash', root / 'scripts/check-host-binary.sh', binary])
+        if run([binary, '--version']).strip() != 'hamn ' + candidate['version'].removeprefix('v'):
+            raise ValueError('candidate executable version mismatch')
         binary_hash = sha256(binary)
         checks.add('singleBinary')
         home = work / 'home'

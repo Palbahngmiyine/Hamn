@@ -146,31 +146,12 @@ for requirement in \
         "$ROOT/guest/agent/api/router.c" ||
         fail "mountInotify guest boundary is incomplete: $requirement"
 done
-for requirement in \
-    'run_hamn configure --mount-inotify true' \
-    'IN_ATTRIB | IN_CLOSE_WRITE' \
-    'mountInotify did not produce guest IN_ATTRIB and IN_CLOSE_WRITE events'; do
-    grep -Fq "$requirement" "$ROOT/packaging/release/physical-e2e.sh" ||
-        fail "physical mountInotify proof is incomplete: $requirement"
+for requirement in 'dockerWithoutCli' 'k3sRunningRetirement' 'k3sStoppedRetirement' 'dockerDataPreserved' 'vmSurvivesTuiExit'; do
+    grep -Fq "$requirement" "$ROOT/packaging/release/physical_contract.py" ||
+        fail "physical release contract is incomplete: $requirement"
 done
-for requirement in \
-    'exercise_rosetta()' \
-    'run_hamn configure --profile "$profile" --rosetta true' \
-    '/mnt/hamn-rosetta/rosetta' \
-    '/proc/sys/fs/binfmt_misc/hamn-rosetta' \
-    'linux/amd64 container did not execute under Rosetta'; do
-    grep -Fq "$requirement" "$ROOT/packaging/release/physical-e2e.sh" ||
-        fail "physical Rosetta proof is incomplete: $requirement"
-done
-grep -Fq 'environment: hamn-promotion' "$ROOT/.github/workflows/release.yml" ||
-    fail "release workflow is missing the protected promotion environment"
-if grep -Fq 'environment: hamn-validation' "$ROOT/.github/workflows/release.yml"; then
-    fail "hosted-only release still references a physical validation environment"
-fi
-if awk '/^test-local-macos:/{capture=1; next} capture && /^[^[:space:]]/{exit} capture' \
-    "$ROOT/Makefile" | grep -Fq 'test-release-gate'; then
-    fail "hosted-only local release gates still require physical VM E2E"
-fi
+grep -Fq 'environment: hamn-promotion' "$ROOT/.github/workflows/release.yml" || fail 'promotion environment missing'
+grep -Fq 'environment: hamn-validation' "$ROOT/.github/workflows/release.yml" || fail 'physical environment missing'
 grep -Fqx '  contents: read' "$ROOT/.github/workflows/release.yml" ||
     fail "release workflow must default to read-only repository contents"
 grep -Fqx '      contents: write' "$ROOT/.github/workflows/release.yml" ||
@@ -327,16 +308,8 @@ fi
 if grep -Eq '^[[:space:]]+tags:|rc_run_id:|inputs\.rc_' "$release_workflow"; then
     fail "release workflow exposes an arbitrary tag or cross-run input"
 fi
-for forbidden in hamn-validator HAMN_VALIDATOR HAMN_RELEASE_SIGNING_KEY \
-    'physical validation'; do
-    if grep -Fq "$forbidden" "$release_workflow"; then
-        fail "hosted-only release retains unsupported authority: $forbidden"
-    fi
-done
-if grep -Eq 'runs-on:[[:space:]]*self-hosted|^[[:space:]]+-[[:space:]]+self-hosted' \
-    "$release_workflow"; then
-    fail "hosted-only release still schedules a self-hosted runner"
-fi
+grep -Fq 'runs-on: [self-hosted, macOS, ARM64, hamn-validator]' "$release_workflow" || fail 'dedicated physical validator missing'
+grep -Fq 'Verify physical validation attestation' "$release_workflow" || fail 'physical attestation verification missing'
 
 guest_job=$(awk '
     /^  guest-image:$/ { capture = 1 }
@@ -401,7 +374,7 @@ publish_job=$(awk '
 ' "$release_workflow")
 for requirement in \
     '    name: Publish immutable keyless release' \
-    '    needs: [prepare, candidate]' \
+    '    needs: [prepare, candidate, physical]' \
     '    environment: hamn-promotion' \
     '      attestations: write' \
     '      contents: write' \

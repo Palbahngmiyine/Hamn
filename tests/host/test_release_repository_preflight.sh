@@ -67,7 +67,7 @@ repos/example/hamn/actions/runners)
     if [ "${HAMN_TEST_RUNNER:-0}" = 1 ]; then
         printf '%s\n' '{"runners":[{"name":"unsafe-runner"}]}'
     else
-        printf '%s\n' '{"runners":[]}'
+        printf '%s\n' '{"runners":[{"name":"physical","os":"osx","status":"online","labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"hamn-validator"}]}]}'
     fi
     ;;
 repos/example/hamn/actions/variables)
@@ -85,22 +85,22 @@ repos/example/hamn/actions/secrets)
     fi
     ;;
 repos/example/hamn/environments)
-    printf '%s\n' '{"environments":[{"name":"hamn-promotion"}]}'
+    printf '%s\n' '{"environments":[{"name":"hamn-promotion"},{"name":"hamn-validation"}]}'
     ;;
-repos/example/hamn/environments/hamn-promotion)
-    printf '%s\n' '{"id":7,"name":"hamn-promotion","can_admins_bypass":false,"protection_rules":[{"id":8,"type":"branch_policy"}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
+repos/example/hamn/environments/hamn-promotion|repos/example/hamn/environments/hamn-validation)
+    printf '%s\n' '{"id":7,"name":"'"${2##*/}"'","can_admins_bypass":false,"protection_rules":[{"id":8,"type":"branch_policy"}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
     ;;
-repos/example/hamn/environments/hamn-promotion/secrets)
+repos/example/hamn/environments/hamn-*/secrets)
     if [ "${HAMN_TEST_SECRET:-0}" = 1 ]; then
         printf '%s\n' '{"secrets":[{"name":"HAMN_RELEASE_SIGNING_KEY"}]}'
     else
         printf '%s\n' '{"secrets":[]}'
     fi
     ;;
-repos/example/hamn/environments/hamn-promotion/variables)
+repos/example/hamn/environments/hamn-*/variables)
     printf '%s\n' '{"variables":[]}'
     ;;
-repos/example/hamn/environments/hamn-promotion/deployment-branch-policies)
+repos/example/hamn/environments/hamn-*/deployment-branch-policies)
     if [ "${HAMN_TEST_BRANCH_POLICY:-0}" = 1 ]; then
         printf '%s\n' '{"branch_policies":[{"name":"release/*","type":"branch"}]}'
     else
@@ -160,7 +160,7 @@ assert_failure HAMN_TEST_UNSAFE_ACTION \
 assert_failure HAMN_TEST_RELEASE_PLEASE_SECRET \
     'repository secrets must contain only RELEASE_PLEASE_TOKEN' release-please-secret
 assert_failure HAMN_TEST_RUNNER \
-    'keyless hosted releases must not use repository self-hosted runners' runner
+    'one online dedicated Apple Silicon hamn-validator runner is required' runner
 assert_failure HAMN_TEST_VARIABLE \
     'keyless hosted releases must not depend on repository variables' variable
 assert_failure HAMN_TEST_SECRET \

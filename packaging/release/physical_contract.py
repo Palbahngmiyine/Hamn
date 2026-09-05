@@ -1,6 +1,7 @@
 """Required evidence for promotion of the exact single-binary release candidate."""
 import hashlib
 import json
+import re
 from pathlib import Path
 
 CHECKS = {
@@ -21,6 +22,42 @@ def read_json(path):
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 2 * 1024 * 1024:
         raise ValueError('unsafe or excessive evidence file')
     return json.loads(path.read_bytes())
+
+
+def validate_candidate(directory, tag, commit, tree):
+    directory = Path(directory)
+    value = read_json(directory / 'candidate.json')
+    if set(value) != {'schemaVersion', 'kind', 'tag', 'version', 'commit', 'sourceTree', 'artifacts'} \
+            or value['schemaVersion'] != 1 or value['kind'] != 'hamn-release-candidate':
+        raise ValueError('candidate schema is invalid')
+    if not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+', tag) \
+            or value['tag'] != tag or value['version'] != tag.rsplit('-rc.', 1)[0] \
+            or value['commit'] != commit or value['sourceTree'] != tree:
+        raise ValueError('candidate source identity mismatch')
+    expected = {'hamn-' + value['version'] + suffix for suffix in
+                ['-darwin-arm64.tar.gz', '-ubuntu-24.04-arm64.img', '.spdx.json']} | {'install.sh'}
+    entries = value['artifacts']
+    if not isinstance(entries, list) or len(entries) != 4 or any(not isinstance(item, dict) or set(item) != {'name', 'sha256'} for item in entries):
+        raise ValueError('candidate artifact schema is invalid')
+    artifacts = {item['name']: item['sha256'] for item in entries}
+    if set(artifacts) != expected or {p.name for p in directory.iterdir()} != expected | {'candidate.json', 'SHA256SUMS'}:
+        raise ValueError('candidate artifact set is invalid')
+    checksums = {}
+    path = directory / 'SHA256SUMS'
+    if path.is_symlink() or path.stat().st_size > 4096:
+        raise ValueError('unsafe checksums file')
+    for line in path.read_text().splitlines():
+        match = re.fullmatch(r'([0-9a-f]{64})  ([A-Za-z0-9._-]+)', line)
+        if not match or match[2] in checksums:
+            raise ValueError('invalid candidate checksums')
+        checksums[match[2]] = match[1]
+    if checksums != dict(artifacts, **{'candidate.json': sha256(directory / 'candidate.json')}):
+        raise ValueError('candidate checksums binding mismatch')
+    for name, digest in artifacts.items():
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or sha256(path) != digest:
+            raise ValueError('candidate artifact digest mismatch')
+    return value
 
 
 def validate(candidate_path, checksums_path, evidence_path, run, attempt):
