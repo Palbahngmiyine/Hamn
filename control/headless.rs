@@ -1,5 +1,5 @@
 use crate::{
-    model::{Request, envelope},
+    model::{Failure, Request, envelope},
     service,
 };
 use std::io::{self, Write};
@@ -69,7 +69,12 @@ pub async fn run(request: Request) -> i32 {
         }
         sequence += 1;
         tokio::select! {
-            _ = cancel.cancelled() => break 130,
+            _ = cancel.cancelled() => {
+                let mut value = envelope(&request, &id, Err(Failure::new("cancelled", "Watch cancelled")));
+                value["type"] = "result".into();
+                value["sequence"] = sequence.into();
+                break if write(&value) { 130 } else { 1 };
+            },
             _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
         }
     };
