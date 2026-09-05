@@ -1,5 +1,6 @@
 BUILD      := build
 HOST_BIN   := $(BUILD)/hamn
+CARGO_PROFILE ?= release
 # x-release-please-start-version
 VERSION    ?= 0.0.1
 # x-release-please-end
@@ -73,10 +74,16 @@ $(HOST_OBJS): $(VERSION_STAMP)
 install: host
 	bash scripts/install-host.sh "$(HOST_BIN)" "$(BINDIR)" "$(DATADIR)"
 
-$(HOST_BIN): $(HOST_OBJS) host/entitlements.plist
+$(BUILD)/libhamn_core.a: $(HOST_OBJS)
 	@mkdir -p $(dir $@)
-	clang $(HOST_OBJS) $(LDFLAGS) -o $@
-	codesign --force --sign - --entitlements host/entitlements.plist $@
+	ar rcs $@ $(HOST_OBJS)
+
+$(HOST_BIN): FORCE $(BUILD)/libhamn_core.a host/entitlements.plist
+	MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) HAMN_VERSION=$(VERSION) cargo build --locked --profile $(CARGO_PROFILE)
+	cp target/$(CARGO_PROFILE)/hamn $@.candidate
+	codesign --force --sign - --entitlements host/entitlements.plist $@.candidate
+	bash scripts/check-host-binary.sh $@.candidate
+	mv -f $@.candidate $@
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)

@@ -1,0 +1,17 @@
+[package]
+name = "hamn"
+version = "0.0.1"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "hamn"
+path = "control/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[dependencies]
+libc = "0.2"
