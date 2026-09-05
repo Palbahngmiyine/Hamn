@@ -37,7 +37,7 @@ class Handler(socketserver.StreamRequestHandler):
         if path.endswith("/logs"):
             status = 200
             logs = "".join(f"한글 line {index}\n" for index in range(50)).encode()
-            body = b"\x01\0\0\0" + len(logs).to_bytes(4, "big") + logs
+            body = b"".join(b"\x01\0\0\0" + len(part).to_bytes(4, "big") + part for part in (logs[:2], logs[2:]))
         self.wfile.write(f"HTTP/1.1 {status} Fixture\r\nContent-Length: {len(body)}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n".encode() + body)
 
 
@@ -63,14 +63,15 @@ with tempfile.TemporaryDirectory(prefix="hamn-docker-") as directory:
             before = len(requests)
             assert run("docker", "containers", "delete", "sample", "--profile", "test")[0] != 0
             assert len(requests) == before
-            streamed = subprocess.run([binary, "--headless", "docker", "containers", "logs", "sample",
-                                       "--profile", "test", "--follow"], env=env,
-                                      capture_output=True, text=True, timeout=15)
-            assert streamed.returncode == 0, (streamed.stdout, streamed.stderr)
-            events = [json.loads(line) for line in streamed.stdout.splitlines()]
-            assert len(events) == 51, events
-            assert events[0]["data"]["text"] == "한글 line 0\n"
-            assert events[-1]["type"] == "result" and events[-1]["sequence"] == 50
+            for flags in ([], ["--follow"]):
+                streamed = subprocess.run([binary, "--headless", "docker", "containers", "logs", "sample",
+                                           "--profile", "test", *flags], env=env,
+                                          capture_output=True, text=True, timeout=15)
+                assert streamed.returncode == 0, (streamed.stdout, streamed.stderr)
+                events = [json.loads(line) for line in streamed.stdout.splitlines()]
+                assert len(events) == 51, events
+                assert events[0]["data"]["text"] == "한글 line 0\n"
+                assert events[-1]["type"] == "result" and events[-1]["sequence"] == 50
             mode["post"] = 503
             rc, result = run("docker", "containers", "start", "sample", "--profile", "test", "--yes")
             assert rc != 0 and result["error"]["code"] == "outcomeUnknown", result

@@ -31,7 +31,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "name": "sample", "namespace": "default", "uid": "pod-original", "resourceVersion": "10"}}
         if not mode["uid"]:
             del obj["metadata"]["uid"]
-        if "?" in self.path:
+        if self.path.split('?')[0].endswith('/log'):
+            body = "한글 Pod log\nlast line".encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif "?" in self.path:
             metadata = {"continue": "same"} if mode["list"] == "repeat" else {}
             self.respond({"apiVersion": "v1", "kind": "PodList", "metadata": metadata,
                           "items": [obj] if mode["list"] == "normal" else []})
@@ -74,6 +81,15 @@ with tempfile.TemporaryDirectory(prefix="hamn-kubernetes-") as directory:
         rc, value = run("k8s", "pods", "delete", "sample", "--context", "dev", "--namespace", "default", "--uid", "pod-original", "--yes")
         assert rc == 0, value
         assert requests[-1][2]["preconditions"] == {"uid": "pod-original", "resourceVersion": "10"}
+        for flags in ([], ['--follow']):
+            logs = subprocess.run([binary, '--headless', 'k8s', 'pods', 'logs', 'sample',
+                '--context', 'dev', '--namespace', 'default', '--kubeconfig', config_path, *flags],
+                env=env, capture_output=True, text=True, timeout=15)
+            records = [json.loads(line) for line in logs.stdout.splitlines()]
+            assert logs.returncode == 0 and len(records) == 3, (records, logs.stderr)
+            assert records[0]['data']['text'] == '한글 Pod log\n'
+            assert records[1]['data']['text'] == 'last line'
+            assert records[-1]['type'] == 'result' and records[-1]['ok']
         mode["delete"] = 503
         before = len(requests)
         rc, value = run("k8s", "pods", "delete", "sample", "--context", "dev", "--namespace", "default", "--yes")

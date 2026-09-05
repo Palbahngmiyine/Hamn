@@ -54,8 +54,11 @@ pub async fn run(request: Request) -> i32 {
         }
         let failed = result.is_err();
         let mut value = envelope(&request, &id, result);
-        if request.watch || request.follow {
-            value["type"] = if request.follow { "result" } else { "snapshot" }.into();
+        if request.watch
+            || request.follow
+            || request.words.last().is_some_and(|word| word == "logs")
+        {
+            value["type"] = if request.watch { "snapshot" } else { "result" }.into();
             value["sequence"] = sequence.into();
         }
         if !write(&value) {

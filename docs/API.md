@@ -16,9 +16,9 @@ process exit means failure. Parse errors and missing-terminal errors also use
 JSON. `--help` and `--version` print text.
 
 `--watch` repeats queries every two seconds. `--follow` streams Docker container
-or Pod logs. Each NDJSON record carries the response fields plus `type` and
+or Pod logs. Log queries use NDJSON even without `--follow`. Each NDJSON record carries the response fields plus `type` and
 `sequence`; log records precede the final result. Streams apply bounded
-backpressure. Log lines and one-shot Docker log responses are limited to 1 MiB;
+backpressure. Log lines and one-shot log responses are limited to 1 MiB;
 `--tail` accepts 0 through 10000. The default tail is 200.
 
 `--timeout` is a deadline in seconds (default 600, allowed 1–3600). Ctrl-C and

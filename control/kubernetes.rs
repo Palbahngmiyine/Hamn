@@ -149,13 +149,12 @@ pub async fn execute(request: &Request, events: Option<&crate::stream::Events>) 
                 timestamps: true,
                 ..Default::default()
             };
-            if request.follow {
+            if let Some(events) = events {
                 use futures_util::io::AsyncReadExt;
-                let events = events
-                    .ok_or_else(|| Failure::new("invalidRequest", "stream receiver required"))?;
                 let mut source = pods.log_stream(name, &parameters).await.map_err(failure)?;
                 let mut stream = crate::stream::TextStream::default();
                 let mut bytes = [0; 8192];
+                let mut total = 0usize;
                 loop {
                     let count = source
                         .read(&mut bytes)
@@ -163,6 +162,13 @@ pub async fn execute(request: &Request, events: Option<&crate::stream::Events>) 
                         .map_err(|e| Failure::new("streamDisconnected", e))?;
                     if count == 0 {
                         break;
+                    }
+                    total += count;
+                    if !request.follow && total > 1024 * 1024 {
+                        return Err(Failure::new(
+                            "responseTooLarge",
+                            "log response exceeds 1 MiB",
+                        ));
                     }
                     stream.feed(&bytes[..count], events).await?;
                 }
