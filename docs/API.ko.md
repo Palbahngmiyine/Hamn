@@ -33,7 +33,7 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 | Docker 목록 | `docker images list`, `docker volumes list`, `docker networks list` |
 | Kubernetes 선택 | `k8s contexts list`, `k8s namespaces list` |
 | Kubernetes 목록 | `k8s <resource> list`; pods, deployments, statefulsets, daemonsets, services, nodes, events, jobs, cronjobs, ingresses, pvcs |
-| Kubernetes 상세 | `k8s pods inspect`, `deployments inspect`, `statefulsets inspect`, `daemonsets inspect`; 객체 JSON과 YAML |
+| Kubernetes 상세 | 위 목록의 모든 리소스와 namespaces에 `k8s <resource> inspect <name>` 지원; 객체 JSON과 YAML |
 | Kubernetes 로그 | `k8s pods logs` |
 | Kubernetes 변경 | `k8s deployments scale/restart`, `statefulsets scale/restart`, `daemonsets restart`, `pods delete` |
 | 유지관리 | `system update`, `system uninstall` |
