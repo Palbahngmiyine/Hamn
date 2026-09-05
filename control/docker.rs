@@ -126,25 +126,22 @@ pub async fn execute(
             let mut bytes = 0;
             let mut stream = crate::stream::TextStream::default();
             while let Some(line) = logs.try_next().await.map_err(failure)? {
-                if request.follow {
-                    let events = events.ok_or_else(|| {
-                        Failure::new("invalidRequest", "stream receiver required")
-                    })?;
-                    stream.feed(&line.into_bytes(), events).await?;
-                    continue;
-                }
-                let text = line.to_string();
+                let text = line.into_bytes();
                 bytes += text.len();
-                if bytes > 1024 * 1024 {
+                if !request.follow && bytes > 1024 * 1024 {
                     return Err(Failure::new(
                         "responseTooLarge",
                         "log response exceeds 1 MiB; reduce --tail",
                     ));
                 }
-                lines.push(text);
+                if let Some(events) = events {
+                    stream.feed(&text, events).await?;
+                } else {
+                    lines.push(String::from_utf8_lossy(&text).into_owned());
+                }
             }
-            if request.follow {
-                stream.finish(events.unwrap()).await?;
+            if let Some(events) = events {
+                stream.finish(events).await?;
                 return Ok(json!({"ended":true}));
             }
             Ok(json!({"lines":lines}))
