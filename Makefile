@@ -166,6 +166,7 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
 	python3 tests/host/test_k3s_retirement.py
 	python3 tests/host/test_build_publish.py
+	python3 tests/host/test_rust_sdk.py
 	HAMN=$(HOST_BIN) bash tests/host/test_single_binary.sh
 
 test-workflows:

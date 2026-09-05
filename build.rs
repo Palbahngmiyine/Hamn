@@ -3,6 +3,14 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     assert_eq!(env::var("CARGO_CFG_TARGET_OS").unwrap(), "macos");
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    if let Some(sdk) = env::var_os("SDKROOT").filter(|value| !value.is_empty()) {
+        let sdk = PathBuf::from(sdk);
+        assert!(sdk.is_absolute() && sdk.is_dir(), "SDKROOT must name an absolute SDK directory");
+        // The native make invocation uses -isysroot, but that flag does not
+        // propagate to Rust's final cc invocation (notably inside Nix shells).
+        println!("cargo:rustc-link-arg=-isysroot");
+        println!("cargo:rustc-link-arg={}", sdk.display());
+    }
     let version = env::var("HAMN_VERSION").unwrap_or_else(|_| "0.0.1".into());
     let native = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("core");
     let status = Command::new("make")
