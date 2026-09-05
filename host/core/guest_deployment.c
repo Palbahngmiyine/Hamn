@@ -17,6 +17,7 @@
 #include "core/log.h"
 #include "sshmgr/ssh.h"
 #include "util/fs.h"
+#include "util/proc.h"
 
 #define GUEST_DEPLOYMENT_SCHEMA_VERSION 6
 #define GUEST_DEPLOYMENT_MARKER "guest-deployment.version"
@@ -284,29 +285,22 @@ int guest_deployment_forward_sockets(const struct profile *profile,
     return 0;
 }
 
-static int unix_socket_connectable(const char *path)
+int guest_deployment_docker_ready(const struct profile *profile)
 {
-    if (strlen(path) >= sizeof(((struct sockaddr_un *)0)->sun_path))
+    char path[PROFILE_PATH_CAP], response[16];
+    if (!profile_path(profile, "docker.sock", path, sizeof(path)))
         return 0;
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (fd < 0)
-        return 0;
-    struct sockaddr_un address;
-    memset(&address, 0, sizeof(address));
-    address.sun_family = AF_UNIX;
-    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
-    int ready = connect(fd, (struct sockaddr *)&address,
-                        sizeof(address)) == 0;
-    close(fd);
-    return ready;
+    const char *command[] = {
+        "/usr/bin/curl", "--silent", "--fail", "--noproxy", "*",
+        "--max-time", "2", "--unix-socket", path, "http://localhost/_ping", NULL
+    };
+    return proc_run_capture(command, response, sizeof(response)) == 0 &&
+        strcmp(response, "OK") == 0;
 }
 
 static int runtime_ready_once(const struct profile *profile, const char *ip)
 {
-    char docker_socket[PATH_MAX];
-    profile_path(profile, "docker.sock", docker_socket,
-                 sizeof(docker_socket));
-    if (!unix_socket_connectable(docker_socket))
+    if (!guest_deployment_docker_ready(profile))
         return 0;
 
     const char *agent_probe[] = {

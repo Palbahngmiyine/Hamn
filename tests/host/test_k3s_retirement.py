@@ -17,9 +17,10 @@ class Retirement(unittest.TestCase):
     def test_embedded_helper_allowlist_includes_only_the_migration_contract(self):
         helpers = {name: '# fixed ' + name for name in r.HELPERS}
         self.assertEqual(set(helpers), {'verify-image-contract', 'guest-deployment-transaction', 'configure-docker'})
-        with patch.object(r, 'atomic') as write:
+        with patch.object(r, 'atomic') as write, patch.object(r, 'run') as run:
             r.replace_helpers({'helpers': helpers})
             self.assertEqual(write.call_count, 3)
+            run.assert_called_once_with('usermod', '--append', '--groups', 'docker', 'hamn')
             for call in write.call_args_list:
                 path, content, mode = call.args
                 self.assertEqual(path.parent, Path('/usr/local/libexec/hamn'))

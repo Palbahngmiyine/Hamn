@@ -96,7 +96,7 @@ int main(void)
     }
     if (require_contains(user_data,
                          "- \"ssh-ed25519 test-key user@example.invalid\"") != 0 ||
-        require_contains(user_data, "groups: [sudo, hamn]") != 0 ||
+        require_contains(user_data, "groups: [sudo, hamn, docker]") != 0 ||
         require_contains(user_data, "primary_group: hamn\n") != 0 ||
         require_absent(user_data, "\"/opt/hamn\"") != 0) {
         goto out;
