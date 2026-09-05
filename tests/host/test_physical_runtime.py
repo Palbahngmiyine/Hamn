@@ -18,6 +18,18 @@ spec.loader.exec_module(physical)
 
 
 class PhysicalRuntime(unittest.TestCase):
+    def test_legacy_config_fixture_never_overwrites_an_existing_home_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            physical.legacy_kubeconfig(home)
+            path = home / '.kube/config'
+            before = path.read_bytes()
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(before)['clusters'][0]['cluster']['server'], 'http://127.0.0.1:9')
+            with self.assertRaises(FileExistsError):
+                physical.legacy_kubeconfig(home)
+            self.assertEqual(path.read_bytes(), before)
+
     def test_terminal_quit_drains_output_larger_than_the_pty_queue(self):
         with tempfile.TemporaryDirectory() as directory:
             binary = Path(directory) / 'terminal-fixture'
