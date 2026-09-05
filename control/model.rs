@@ -182,6 +182,15 @@ impl Request {
         if [self.cpu, self.memory, self.disk].contains(&Some(0)) {
             return Err(invalid("VM resource values must be positive"));
         }
+        if self.name.as_ref().is_some_and(|n| {
+            n.is_empty()
+                || n.len() > 253
+                || !n
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
+        }) {
+            return Err(invalid("invalid resource name"));
+        }
         if self.words.last().is_some_and(|v| {
             matches!(
                 v.as_str(),
