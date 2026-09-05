@@ -5,12 +5,10 @@ This is the canonical English configuration reference. See
 
 ## Profile selection and location
 
-All user state for a profile lives under `~/.hamn/<profile>/`; the directory is
-created with mode `0700`. Profile selection is always:
-
-```text
---profile/-p  ->  positional profile  ->  HAMN_PROFILE  ->  default
-```
+Profile state lives under `~/.hamn/<profile>/`, with mode `0700` directories.
+Headless VM and Docker operations require an explicit `--profile`; `vm list`
+needs no profile. The TUI maintains its own selection, initially `default`.
+There is no positional-profile or `HAMN_PROFILE` fallback in the public API.
 
 Profile names may contain only letters, digits, `_`, and `-`. `cache`, `.` and
 `..` are not valid profile names.
@@ -22,23 +20,17 @@ does not convert legacy runtime data in place.
 
 ## Editing configuration
 
-Use flags for a repeatable change or edit a generated YAML file:
-
 ```sh
-hamn template
-hamn start --edit --profile work
-hamn start --template=false --profile scratch
-
-hamn configure --profile work --cpu 6 --memory 8 --disk 80
-hamn configure --profile work --mount-home true --home-read-only false
-hamn configure --profile work --docker-daemon-json '{"log-level":"warn"}'
+hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
+hamn --headless vm configure --profile work --cpu 6 --memory 8 --disk 80 --yes
+hamn --headless vm start --profile work --yes
 ```
 
-`configure` only changes a stopped VM. Disk size can grow but cannot shrink.
-`start` can also receive `--cpu`, `--memory`, and `--disk`; those values are
-persisted when the profile template is enabled. `start --edit` writes the
-template if necessary and opens `$EDITOR`; the editor value must be one
-executable name without arguments.
+`configure` changes stopped profiles only. Existing VM disks are not shrunk.
+For advanced settings, edit `~/.hamn/<profile>/config.yaml` while the VM is
+stopped. Resource-only updates preserve mounts, Docker daemon settings, Rosetta,
+and existing provisioning hooks. The TUI does not execute arbitrary shell
+commands or open an external editor.
 
 ## YAML schema
 
@@ -53,9 +45,6 @@ homeReadOnly: false
 mountInotify: false
 docker:
   daemonJson: ""
-kubernetes:
-  enabled: false
-  version: "v1.36.2+k3s1"
 rosetta: false
 nestedVirtualization: false
 sshAgent: false
@@ -77,8 +66,6 @@ coercion.
 | `homeReadOnly` | boolean, `false` | Make the home share read-only; invalid when `mountHome` is false. |
 | `mountInotify` | boolean, `false` | Experimental best-effort bridge for existing files in writable virtiofs shares; it requires at least one writable share. |
 | `docker.daemonJson` | string containing one JSON object, `""` | Extra Docker daemon settings that do not replace Hamn-managed boundaries. |
-| `kubernetes.enabled` | boolean, `false` | Persisted desired state marker for this profile's optional K3s. |
-| `kubernetes.version` | exact string `v1.36.2+k3s1` | Fixed manifest-compatible K3s version. |
 | `rosetta` | boolean, `false` | Request Apple Linux Rosetta translation; available only when the host supports it. |
 | `nestedVirtualization` | boolean, `false` | Request nested virtualization; requires macOS 15+, an M3-or-later Mac, and the framework capability check. |
 | `sshAgent` | boolean, `false` | Forward the user's SSH agent into the Hamn SSH session only. |
@@ -151,20 +138,19 @@ will be removed in the next release. Hamn does not touch host
 
 ## Kubernetes
 
-The YAML `kubernetes.enabled` value alone does not create a cluster. Use the
-explicit lifecycle command after the VM is running:
+Kubernetes uses external kubeconfig contexts, independently of a Hamn VM:
 
 ```sh
-hamn start --profile work
-hamn kubernetes start --profile work
-hamn kubernetes status --profile work
-hamn kubernetes stop --profile work
-hamn kubernetes delete --profile work
+hamn --headless k8s contexts list
+hamn --headless k8s pods list --context dev --namespace default
 ```
 
-The guest installs K3s only through its signed compatibility manifest. The
-host kubeconfig is profile-local. The default context is `hamn`; named profiles
-use `hamn-<profile>`. A foreign context collision is an error, not an overwrite.
+`--kubeconfig` takes precedence over `KUBECONFIG` and the default `~/.kube/config`.
+Selection does not modify the source files. See [API](API.md) for authentication
+and explicit mutation targets. The legacy `kubernetes` YAML mapping is read
+only for K3s retirement and is removed after successful cleanup. It is not a
+new-profile setting. K3s cluster data and dedicated volumes are deleted;
+Docker data and the original kubeconfig are preserved.
 
 ## Provisioning hooks
 
@@ -191,17 +177,15 @@ continues. Logs record only redacted metadata, not hook commands or output.
 
 ## Docker contexts and SDK environment
 
-When a host Docker CLI is available, `hamn start` creates or reuses the owned
-context and activates it. It refuses a same-named context with another Docker
-endpoint. The previous context is recorded only when Hamn changes it, and is
-restored by the profile lifecycle if Hamn still owns that activation.
-
-For SDKs and Testcontainers, use the profile-specific environment rather than
-assuming the host default socket:
+Hamn does not create, activate, or restore external Docker contexts. Obtain
+connection data from `hamn --headless vm env --profile work`, or select the
+profile socket directly:
 
 ```sh
-eval "$(hamn env --profile work)"
+export DOCKER_HOST="unix://$HOME/.hamn/work/docker.sock"
+export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
+export TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal
 ```
 
-This prints `DOCKER_HOST=unix://~/.hamn/work/docker.sock`, the Testcontainers
-Docker socket override, and `TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal`.
+Docker CLI, Compose, buildx, and SDK clients share the public Docker socket.
+There is no public containerd socket.
