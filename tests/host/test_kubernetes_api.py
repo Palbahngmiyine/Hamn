@@ -76,6 +76,24 @@ with tempfile.TemporaryDirectory(prefix="hamn-kubernetes-") as directory:
         rc, value = run("k8s", "contexts", "list")
         assert rc == 0 and value["data"][0]["name"] == "dev", value
         assert requests == []
+        absent = Path(directory) / 'absent'
+        malformed = Path(directory) / 'malformed'
+        malformed.write_text('contexts: [invalid yaml')
+        for paths in [str(absent) + os.pathsep + str(config_path),
+                      str(config_path) + os.pathsep + str(absent), str(absent)]:
+            merged = subprocess.run([binary, '--headless', 'k8s', 'contexts', 'list'],
+                env=dict(env, KUBECONFIG=paths), capture_output=True, text=True, timeout=15)
+            expected = [] if paths == str(absent) else ['dev']
+            assert merged.returncode == 0, merged
+            assert [row['name'] for row in json.loads(merged.stdout)['data']] == expected
+        # Missing environment entries are optional; explicit or malformed input is not.
+        for paths, flags in [(str(config_path), ['--kubeconfig', str(absent)]),
+                             (str(malformed) + os.pathsep + str(config_path), [])]:
+            rejected = subprocess.run([binary, '--headless', 'k8s', 'contexts', 'list', *flags],
+                env=dict(env, KUBECONFIG=paths), capture_output=True, text=True, timeout=15)
+            assert rejected.returncode != 0, rejected
+            assert json.loads(rejected.stdout)['error']['code'] == 'configurationInvalid'
+        assert requests == []
         rc, value = run("k8s", "pods", "list", "--context", "dev")
         assert rc == 0 and value["data"][0]["metadata"]["name"] == "sample", value
         rc, value = run("k8s", "pods", "delete", "sample", "--context", "dev", "--namespace", "default", "--uid", "replaced", "--yes")
