@@ -29,7 +29,7 @@ class RustSdk(unittest.TestCase):
                        TEST_MAKE_ARGS=str(root / 'make-args'))
             cases = [(value, None) for value in
                      [str(sdk), '', None, str(root / 'missing'), 'relative-sdk']]
-            # A rustup wrapper may reset SDKROOT; the runner's explicit SDK wins.
+            # A toolchain wrapper may reset SDKROOT; the runner's explicit SDK wins.
             cases += [(str(root / 'wrong-nix-sdk'), str(sdk)),
                       (None, str(sdk)), (str(sdk), ''), (str(sdk), str(root / 'missing'))]
             for selected, preserved in cases:
