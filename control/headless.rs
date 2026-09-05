@@ -25,21 +25,42 @@ pub async fn run(request: Request) -> i32 {
     );
     let mut sequence = 0u64;
     let exit = loop {
-        let result = service::execute(&request, &cancel).await;
+        let (events, mut receiver) = tokio::sync::mpsc::channel(32);
+        let execution = service::execute_stream(&request, &cancel, Some(events));
+        tokio::pin!(execution);
+        let result = loop {
+            tokio::select! {
+                biased;
+                Some(event) = receiver.recv() => {
+                    let mut value = envelope(&request, &id, Ok(event.clone()));
+                    value["type"] = event["type"].clone();
+                    value["sequence"] = sequence.into();
+                    sequence += 1;
+                    if !write(&value) { listener.abort(); return 1; }
+                }
+                result = &mut execution => break result,
+            }
+        };
+        // The last poll of execution can enqueue events and complete together.
+        while let Ok(event) = receiver.try_recv() {
+            let mut value = envelope(&request, &id, Ok(event.clone()));
+            value["type"] = event["type"].clone();
+            value["sequence"] = sequence.into();
+            sequence += 1;
+            if !write(&value) {
+                listener.abort();
+                return 1;
+            }
+        }
         let failed = result.is_err();
         let mut value = envelope(&request, &id, result);
-        if request.watch {
-            value["type"] = "snapshot".into();
+        if request.watch || request.follow {
+            value["type"] = if request.follow { "result" } else { "snapshot" }.into();
             value["sequence"] = sequence.into();
         }
-        let mut out = io::stdout().lock();
-        if serde_json::to_writer(&mut out, &value).is_err()
-            || writeln!(out).is_err()
-            || out.flush().is_err()
-        {
+        if !write(&value) {
             break 1;
         }
-        drop(out);
         if failed {
             break 1;
         }
@@ -54,4 +75,9 @@ pub async fn run(request: Request) -> i32 {
     };
     listener.abort();
     exit
+}
+
+fn write(value: &serde_json::Value) -> bool {
+    let mut out = io::stdout().lock();
+    serde_json::to_writer(&mut out, value).is_ok() && writeln!(out).is_ok() && out.flush().is_ok()
 }

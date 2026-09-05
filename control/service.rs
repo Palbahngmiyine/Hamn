@@ -5,10 +5,6 @@ use crate::{
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-pub async fn execute(request: &Request, cancel: &CancellationToken) -> Result<Value> {
-    execute_stream(request, cancel, None).await
-}
-
 pub async fn execute_stream(
     request: &Request,
     cancel: &CancellationToken,
@@ -31,6 +27,8 @@ pub async fn execute_stream(
         if request.words.first().is_some_and(|word| word == "docker") {
             let mut status_request = request.clone();
             status_request.words = vec!["vm".into(), "status".into()];
+            status_request.follow = false;
+            status_request.watch = false;
             let status = core::call(&status_request).await?;
             let socket = status["dockerSocket"]
                 .as_str()

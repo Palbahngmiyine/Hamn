@@ -45,7 +45,23 @@ impl Job {
         let sender = self.sender.clone();
         state.loading = true;
         self.task = Some(tokio::spawn(async move {
-            let result = service::execute(&request, &cancel).await;
+            let (events, mut receiver) = mpsc::channel(32);
+            let execution = service::execute_stream(&request, &cancel, Some(events));
+            tokio::pin!(execution);
+            let result = loop {
+                tokio::select! {
+                    biased;
+                    Some(event) = receiver.recv() => {
+                        if sender.send((generation, Ok(event))).await.is_err() { return; }
+                    }
+                    result = &mut execution => break result,
+                }
+            };
+            while let Ok(event) = receiver.try_recv() {
+                if sender.send((generation, Ok(event))).await.is_err() {
+                    return;
+                }
+            }
             let _ = sender.send((generation, result)).await;
         }));
     }
@@ -139,7 +155,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     KeyCode::Char('q') => break,
                     KeyCode::Char(':') => state.input = Some((':', String::new())),
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
-                    KeyCode::Esc => { state.detail = None; state.filter.clear(); job.cancel.cancel(); state.loading = false; },
+                    KeyCode::Esc => { state.detail = None; state.filter.clear(); job.cancel.cancel(); job.generation += 1; state.loading = false; },
                     KeyCode::Down | KeyCode::Char('j') => state.move_by(1),
                     KeyCode::Up | KeyCode::Char('k') => state.move_by(-1),
                     KeyCode::Enter => match state.enter() {
