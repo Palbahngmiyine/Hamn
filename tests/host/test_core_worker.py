@@ -26,6 +26,10 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
     created = call("vm create", profile="test", yes=True, cpu=2, memory=2)
     assert created["Ok"]["cpus"] == 2
     assert created["Ok"]["memoryMiB"] == 2048
+    assert call("vm create", profile="test", yes=True, cpu=10)["Err"]["code"] == "conflict"
+    assert call("vm status", profile="test")["Ok"]["cpus"] == 2
+    assert "Err" in call("vm stop", profile="missing", yes=True)
+    assert not (Path(directory) / ".hamn/missing").exists()
     assert created["Ok"]["migration"] == "current"
     config = Path(directory) / ".hamn/test/config.yaml"
     assert "kubernetes:" not in config.read_text()
@@ -80,6 +84,10 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
                             capture_output=True, text=True, env=env, timeout=10)
     assert result.returncode != 0
     assert json.loads(result.stdout)["error"]["code"] == "invalidRequest"
+    assert "Ok" in call("vm create", profile="deleted", yes=True)
+    assert "Ok" in call("vm delete", profile="deleted", yes=True)
+    assert all(row["name"] != "deleted" for row in call("vm list")["Ok"])
+    assert (Path(directory) / ".hamn/deleted/config.yaml").exists()
     result = subprocess.run([binary], capture_output=True, text=True, env=env, timeout=10)
     assert result.returncode != 0 and "\x1b" not in result.stdout
     result = subprocess.run([binary, "vm", "start", "--profile", "test"],

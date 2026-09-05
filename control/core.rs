@@ -129,6 +129,8 @@ fn execute(request: &Request) -> Result<Value> {
         return Err(Failure::new(
             if rc == 3 {
                 "restartRequired"
+            } else if rc == 4 {
+                "conflict"
             } else {
                 "operationFailed"
             },

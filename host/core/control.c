@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "cjson/cJSON.h"
@@ -74,6 +75,14 @@ static cJSON *profiles_snapshot(void)
                 continue;
             goto fail;
         }
+        length = snprintf(path, sizeof(path), "%s/%s/deleted", root, entry->d_name);
+        if (length < 0 || length >= (int)sizeof(path)) { errno = ENAMETOOLONG; goto fail; }
+        struct stat deleted;
+        if (lstat(path, &deleted) == 0) {
+            if (!S_ISREG(deleted.st_mode) || deleted.st_uid != geteuid()) { errno = EINVAL; goto fail; }
+            continue;
+        }
+        if (errno != ENOENT) goto fail;
         cJSON *value = profile_snapshot(entry->d_name);
         if (!value)
             goto fail;
@@ -123,6 +132,19 @@ int hamn_control_configure(const char *name, unsigned cpus,
         return 1;
     struct profile profile;
     int rc = 1, mutation = -1;
+    if (create) {
+        char root[PROFILE_PATH_CAP], path[PROFILE_PATH_CAP];
+        struct stat existing;
+        if (!hamn_home(root, sizeof(root))) goto out;
+        int length = snprintf(path, sizeof(path), "%s/%s", root, name);
+        if (length < 0 || length >= (int)sizeof(path)) goto out;
+        if (lstat(path, &existing) == 0) {
+            logerr("profile already exists: %s", name);
+            rc = 4;
+            goto out;
+        }
+        if (errno != ENOENT) goto out;
+    }
     if ((create ? profile_load(&profile, name) :
          profile_read_existing(&profile, name)) != 0)
         goto out;
