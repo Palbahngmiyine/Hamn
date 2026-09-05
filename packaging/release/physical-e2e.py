@@ -143,6 +143,8 @@ def main():
         checks.update(['tuiTerminalRestore', 'vmSurvivesTuiExit'])
         runtime.call('vm', 'stop', yes=True)
         runtime.call('vm', 'start', yes=True)
+        for profile in ['default', 'second']:
+            runtime.call('vm', 'stop', profile=profile, yes=True)
         for state in ['running', 'stopped']:
             profile = 'retire-' + state
             before, source_hash = fixture(os.environ['HAMN_LEGACY_' + state.upper() + '_FIXTURE'], home / '.hamn' / profile, state, legacy_hash)
@@ -157,6 +159,9 @@ def main():
             if before != after:
                 raise ValueError('Docker identifiers or volume bytes changed during ' + state + ' retirement')
             legacy_results[state] = {'before': before, 'after': after, 'k3sRemoved': True, 'journalComplete': True, 'sourceSha256': source_hash}
+            # The fixtures may originate from the same legacy VM/MAC. Never
+            # boot both clones concurrently or let them share a DHCP identity.
+            runtime.call('vm', 'stop', profile=profile, yes=True)
         checks.update(['k3sRunningRetirement', 'k3sStoppedRetirement', 'dockerDataPreserved'])
         kube_path = work / 'kubernetes.json'
         kube_command = [sys.executable, root / 'packaging/release/external-kubernetes-e2e.py', '--hamn', binary,
