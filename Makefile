@@ -164,6 +164,7 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness
 	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_exec_auth.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui_navigation.py
 	python3 tests/host/test_k3s_retirement.py
 	python3 tests/host/test_build_publish.py
 	python3 tests/host/test_rust_sdk.py

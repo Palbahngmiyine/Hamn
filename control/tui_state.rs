@@ -176,6 +176,17 @@ impl State {
         request.validate()?;
         if !request.mutates() {
             self.request = request.clone();
+            // Detail commands dispatch once; Esc and periodic refresh must
+            // return to the resource list, just like keyboard detail actions.
+            if self.request.words.last().is_some_and(|word| word != "list") {
+                *self.request.words.last_mut().unwrap() = "list".into();
+                self.request.name = None;
+                self.request.uid = None;
+                self.request.container = None;
+                self.request.previous = false;
+                self.request.follow = false;
+                self.request.watch = false;
+            }
             self.data = Value::Null;
             self.stale = false;
         }
@@ -489,6 +500,36 @@ pub fn draw(frame: &mut Frame, state: &State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn direct_details_keep_a_clean_list_request_for_escape_and_refresh() {
+        for command in [
+            "vm status", "vm env", "docker containers inspect sample",
+            "docker containers stats sample", "docker containers logs sample --follow",
+            "k8s pods inspect sample --uid original",
+            "k8s pods logs sample --follow --container app --previous",
+        ] {
+            let mut state = State::new(Request {
+                context: Some("dev".into()), namespace: Some("work".into()),
+                ..Default::default()
+            });
+            let dispatched = state.view(command).unwrap();
+            assert_ne!(dispatched.words.last().unwrap(), "list");
+            assert_eq!(state.request.words.last().unwrap(), "list");
+            assert_eq!(state.request.profile, dispatched.profile);
+            assert_eq!(state.request.context, dispatched.context);
+            assert_eq!(state.request.namespace, dispatched.namespace);
+            assert!(state.request.name.is_none() && state.request.uid.is_none());
+            assert!(state.request.container.is_none());
+            assert!(!state.request.follow && !state.request.watch && !state.request.previous);
+            state.request.validate().unwrap();
+            state.accept(Ok(serde_json::json!({"yaml":"detail"})));
+            state.detail = None; // Esc clears the detail before the next refresh.
+            state.accept(Ok(serde_json::json!([{"metadata":{"name":"sample", "uid":"original", "namespace":"work"}, "Id":"sample", "name":"default"}])));
+            assert_eq!(state.rows().len(), 1);
+            assert!(state.action(if state.request.words[0] == "vm" {"status"} else {"inspect"}).is_ok());
+        }
+    }
+
     #[test]
     fn switching_context_uses_its_namespace_unless_explicitly_overridden() {
         struct Fixture(std::path::PathBuf);
