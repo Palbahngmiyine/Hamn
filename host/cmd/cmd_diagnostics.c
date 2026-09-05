@@ -14,6 +14,7 @@
 #include "cli.h"
 #include "cjson/cJSON.h"
 #include "core/log.h"
+#include "core/control.h"
 #include "core/profile.h"
 #include "util/fs.h"
 
@@ -688,8 +689,22 @@ int cmd_diagnostics(int argc, char **argv)
         return 2;
     }
 
+    char *result = NULL;
+    int rc = hamn_control_diagnostics(profile_name, requested_path, &result);
+    if (rc == 0) {
+        printf("%s\n", result);
+        hamn_control_free(result);
+    }
+    return rc;
+}
+
+int hamn_control_diagnostics(const char *profile_name, const char *requested_path,
+                              char **output)
+{
+    if (!output || !profile_name) { errno = EINVAL; return 1; }
+    *output = NULL;
     struct profile profile;
-    if (profile_load(&profile, profile_name) != 0) {
+    if (profile_read_existing(&profile, profile_name) != 0) {
         logerr("cannot load profile");
         return 1;
     }
@@ -744,8 +759,7 @@ int cmd_diagnostics(int argc, char **argv)
         logerr("cannot encode diagnostic result");
         goto out;
     }
-    printf("%s\n", result_text);
-    cJSON_free(result_text);
+    *output = result_text;
     rc = 0;
 
 out:

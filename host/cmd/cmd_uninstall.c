@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "cli.h"
+#include "core/control.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/mutation_lock.h"
@@ -482,6 +483,11 @@ int cmd_uninstall(int argc, char **argv)
         fprintf(stderr, "usage: hamn uninstall\n");
         return 2;
     }
+    return hamn_control_uninstall(0);
+}
+
+int hamn_control_uninstall(int confirmed)
+{
     struct uninstall_plan plan;
     memset(&plan, 0, sizeof(plan));
     if (discover_runtime(&plan) != 0 || discover_installation(&plan) != 0)
@@ -501,7 +507,7 @@ int cmd_uninstall(int argc, char **argv)
         return 0;
     }
     print_plan(&plan);
-    if (!confirm_uninstall())
+    if (!confirmed && !confirm_uninstall())
         return 1;
     if (plan.runtime_exists && stop_all_profiles(plan.runtime_root) != 0)
         return 1;

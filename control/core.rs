@@ -20,6 +20,13 @@ unsafe extern "C" {
     ) -> i32;
     fn hamn_control_stop(profile: *const libc::c_char) -> i32;
     fn hamn_control_delete(profile: *const libc::c_char) -> i32;
+    fn hamn_control_diagnostics(
+        profile: *const libc::c_char,
+        path: *const libc::c_char,
+        result: *mut *mut libc::c_char,
+    ) -> i32;
+    fn hamn_control_update(manifest: *const libc::c_char) -> i32;
+    fn hamn_control_uninstall(confirmed: i32) -> i32;
     fn log_last_error() -> *const libc::c_char;
     fn cli_set_invocation_path(path: *const libc::c_char);
 }
@@ -59,6 +66,19 @@ fn execute(request: &Request) -> Result<Value> {
     let memory = request.memory.unwrap_or(0);
     let disk = request.disk.unwrap_or(0);
     let operation = request.operation();
+    let path = request
+        .path
+        .as_deref()
+        .map(CString::new)
+        .transpose()
+        .map_err(|e| Failure::new("invalidRequest", e))?;
+    let manifest = request
+        .manifest
+        .as_deref()
+        .map(CString::new)
+        .transpose()
+        .map_err(|e| Failure::new("invalidRequest", e))?;
+    let mut output = std::ptr::null_mut();
     if operation == "vm list" {
         return query(None);
     }
@@ -73,6 +93,15 @@ fn execute(request: &Request) -> Result<Value> {
     }
     let rc = unsafe {
         match operation.as_str() {
+            "vm diagnostics" => hamn_control_diagnostics(
+                pointer,
+                path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),
+                &mut output,
+            ),
+            "system update" => {
+                hamn_control_update(manifest.as_ref().map_or(std::ptr::null(), |m| m.as_ptr()))
+            }
+            "system uninstall" => hamn_control_uninstall(i32::from(request.yes)),
             "vm start" => hamn_control_start(pointer, cpu, memory, disk),
             "vm create" | "vm configure" => hamn_control_configure(
                 pointer,
@@ -86,6 +115,13 @@ fn execute(request: &Request) -> Result<Value> {
             _ => return Err(Failure::new("unsupportedOperation", &operation)),
         }
     };
+    if !output.is_null() {
+        let value = serde_json::from_slice(unsafe { CStr::from_ptr(output) }.to_bytes());
+        unsafe { hamn_control_free(output) };
+        if rc == 0 {
+            return value.map_err(|e| Failure::new("coreProtocol", e));
+        }
+    }
     if rc != 0 {
         let message = unsafe { CStr::from_ptr(log_last_error()) }.to_string_lossy();
         return Err(Failure::new(
@@ -101,7 +137,9 @@ fn execute(request: &Request) -> Result<Value> {
             },
         ));
     }
-    if operation == "vm delete" {
+    if operation.starts_with("system ") {
+        Ok(json!({"completed":true}))
+    } else if operation == "vm delete" {
         Ok(json!({"deleted":true}))
     } else {
         query(profile.as_ref())
@@ -125,7 +163,12 @@ pub fn worker() -> i32 {
     if saved < 0 || unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
         return 1;
     }
-    if let Ok(path) = CString::new(std::env::args().next().unwrap_or_default()) {
+    if let Ok(path) = CString::new(
+        std::env::args()
+            .nth(2)
+            .or_else(|| std::env::args().next())
+            .unwrap_or_default(),
+    ) {
         unsafe { cli_set_invocation_path(path.as_ptr()) };
     }
     let result = request.and_then(|r| execute(&r));
@@ -165,6 +208,7 @@ pub async fn call(request: &Request) -> Result<Value> {
     let executable = std::env::current_exe().map_err(|e| Failure::new("coreUnavailable", e))?;
     let mut child = tokio::process::Command::new(executable)
         .arg("__core-worker")
+        .arg(std::env::args_os().next().unwrap_or_default())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

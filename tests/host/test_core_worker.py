@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+import tarfile
 
 binary = Path(os.environ.get("HAMN", "target/debug/hamn")).resolve()
 with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
@@ -30,6 +31,17 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
     assert "Err" in call("vm status", profile="missing")
     assert not (Path(directory) / ".hamn" / "missing").exists()
     assert len(call("vm list")["Ok"]) == 1
+    archive = Path(directory) / "diagnostics.tar"
+    assert "Err" in call("vm diagnostics", profile="test", path=str(archive))
+    assert not archive.exists()
+    diagnostic = call("vm diagnostics", profile="test", path=str(archive), yes=True)
+    assert diagnostic["Ok"]["redacted"] and diagnostic["Ok"]["bytes"] > 0, diagnostic
+    with tarfile.open(archive) as bundle:
+        assert len(bundle.getmembers()) >= 3
+        assert not any("ed25519" in member.name for member in bundle.getmembers())
+    assert "Err" in call("vm diagnostics", profile="test", path=str(archive), yes=True)
+    assert "Err" in call("system update", yes=True)
+    assert "Err" in call("system uninstall")
     result = subprocess.run([binary, "--headless", "vm", "status", "--profile", "test"],
                             capture_output=True, text=True, env=env, timeout=10, check=True)
     value = json.loads(result.stdout)

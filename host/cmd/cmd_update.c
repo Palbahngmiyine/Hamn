@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "cli.h"
+#include "core/control.h"
 #include "core/log.h"
 #include "util/proc.h"
 
@@ -125,6 +126,11 @@ int cmd_update(int argc, char **argv)
         }
     }
 
+    return hamn_control_update(manifest);
+}
+
+int hamn_control_update(const char *manifest)
+{
     char executable[PATH_MAX], datadir[PATH_MAX], helper[PATH_MAX];
     if (managed_paths(executable, datadir, helper) != 0) {
         logerr("update requires a managed Hamn installation; reinstall with the signed installer");
