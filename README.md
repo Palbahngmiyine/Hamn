@@ -1,13 +1,17 @@
 # Hamn
 
-Hamn runs Docker workloads in a Linux VM on Apple Silicon Macs. Use your usual
-Docker CLI, Compose, buildx, SDKs, Testcontainers, and optional K3s with
-isolated profiles.
+Hamn manages a Linux VM, its Docker Engine, and external Kubernetes clusters
+from one macOS executable. Run `hamn` for the Ratatui terminal interface or
+use `hamn --headless` for JSON and NDJSON automation.
 
 ## Requirements
 
-- Apple Silicon Mac running macOS 13 or later
-- A Docker CLI installed separately. Docker Desktop is not required.
+- Apple Silicon Mac with macOS 13 or later.
+- A signed Hamn guest image for VM and Docker operations.
+- A kubeconfig for Kubernetes operations. These work independently of the VM.
+
+The built-in Docker client does not require Docker CLI or Docker Desktop.
+External Docker CLI, Compose, buildx, and SDKs can use the profile socket.
 
 ## Install
 
@@ -17,74 +21,68 @@ curl -fsSL --proto '=https' --tlsv1.2 \
   | /bin/bash
 ```
 
-For a bootstrap verified before execution, follow the attestation procedure in
-[Public release repository setup](docs/RELEASE-SETUP.md#6-install).
-
-Ensure `~/.local/bin` is on your `PATH`, then start Hamn and use Docker:
-
 ```sh
-hamn start
-docker run --rm alpine uname -m
-docker compose up -d
-docker ps
+hamn
 ```
 
-Hamn creates the Docker context for the active profile automatically. After it
-starts, use Docker commands exactly as you normally would.
+For source builds, see [Development](docs/DEVELOPMENT.md).
+Signed release installation is described in [release setup](docs/RELEASE-SETUP.md).
 
-## Everyday commands
+## Terminal interface
+
+Use `:vm`, `:containers`, `:images`, `:volumes`, `:networks`, `:contexts`, `:ns`,
+and `:pods` to select a resource view. `/` filters, arrows or `j/k` select,
+Enter opens details, Esc returns, and `?` shows help. The selected profile,
+context and namespace appear in the header. Changes require confirmation.
+Closing the interface leaves running VMs running.
+
+## Headless interface
 
 ```sh
-hamn status
-hamn stop
-hamn start
+hamn --headless capabilities
+hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
+hamn --headless vm start --profile work --yes
+hamn --headless docker containers list --profile work
+hamn --headless docker containers logs api --profile work --follow
+hamn --headless k8s contexts list
+hamn --headless k8s pods list --context dev --namespace default
+hamn --headless k8s deployments scale api --replicas 3 --context dev --namespace default --yes
+hamn --headless vm stop --profile work --yes
+```
 
-docker compose down --volumes
+Mutations require `--yes` and explicit resource targets. One-shot commands emit
+one JSON response; `--follow` logs and `--watch` queries emit NDJSON. stdout is
+reserved for machine-readable responses. See [API](docs/API.md).
+
+## External tools
+
+```sh
+export DOCKER_HOST="unix://$HOME/.hamn/work/docker.sock"
+docker compose up -d
 docker buildx build --load -t example .
 ```
 
-## Profiles
+Hamn does not change Docker's current context or kubeconfig `current-context`.
+Kubernetes supports `--kubeconfig`, `KUBECONFIG`, or `~/.kube/config` and uses only
+the explicitly selected context. Interactive authentication must be completed
+outside Hamn before using that context.
 
-Profiles keep their VM, Docker socket, configuration, and data separate.
+## Migration and data
 
-```sh
-hamn start --profile work
-hamn configure --profile work --cpu 6 --memory 8 --disk 80
-hamn status --profile work
+This revision replaces the old CLI and JSON format. Managed K3s is removed.
+The first TUI session retires running legacy profiles; stopped profiles retire
+on their next start. VM/Docker mutations also run the retirement preflight.
+Read-only commands report pending migration without running it.
 
-# Docker SDKs and Testcontainers
-eval "$(hamn env --profile work)"
-```
+**K3s cluster data and its dedicated local volumes are permanently deleted.**
+Rolling back the Hamn executable cannot recover them. Retirement preserves
+Docker's `moby` namespace, Docker volumes, shared containerd content storage,
+user mounts, and the original kubeconfig. Interrupted retirement resumes from
+its durable journal and does not mark a failed migration complete.
 
-Use `hamn template` to view the default configuration or `hamn start --edit`
-to edit it before startup.
+`vm delete` stops and hides a profile while preserving its disk and Docker data.
+`system uninstall --yes` permanently removes all Hamn profiles and managed
+installation files. [Configuration](docs/CONFIGURATION.md) describes persistence.
 
-## Kubernetes
-
-K3s is off by default. Enable it for the profile you want to use:
-
-```sh
-hamn start --profile dev
-hamn kubernetes start --profile dev
-hamn kubectl --profile dev -- get nodes
-```
-
-## Files, ports, and architecture emulation
-
-- Your home directory is mounted into the VM by default. Configure additional
-  mounts with `hamn configure`.
-- Docker-published TCP and UDP ports are available from macOS. Containers can
-  reach the Mac at `host.docker.internal`.
-- amd64 containers work through `binfmt`; Rosetta is available as an opt-in
-  profile setting when supported by macOS.
-
-## Remove a profile
-
-`hamn delete` stops a profile and keeps its data for later reuse.
-`hamn delete --data` permanently removes that profile's data after confirmation.
-
-## Learn more
-
-- [Configuration](docs/CONFIGURATION.md)
-- [Colima migration and command mapping](docs/COLIMA-COMPATIBILITY.md)
-- [Security policy](SECURITY.md)
+Container creation, Compose execution, arbitrary shell/exec, Kubernetes apply,
+port-forward, and an MCP server are outside the built-in command set.
