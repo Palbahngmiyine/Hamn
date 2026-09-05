@@ -149,15 +149,15 @@ int main(void)
         goto out;
 
     /* A group named hamn already exists in the managed image. The user must
-     * join it as its primary group, and no-mount profiles need a YAML list. */
+     * join it as its primary group. Omit mounts when there are no entries:
+     * cloud-init's schema rejects both null and an empty list. */
     profile.mount_home = 0;
     profile.rosetta = 0;
     profile.mount_count = 0;
     if (cloudinit_seed_ensure(&profile, 1) != 0 ||
         extract_user_data(iso, user_data, sizeof(user_data)) != 0 ||
         require_contains(user_data, "primary_group: hamn\n") != 0 ||
-        require_contains(user_data, "mounts: []") != 0 ||
-        require_absent(user_data, "mounts:\n") != 0)
+        require_absent(user_data, "mounts:") != 0)
         goto out;
 
     rc = 0;
