@@ -97,6 +97,7 @@ pub const OPERATIONS: &[(&str, bool)] = &[
     ("docker networks list", false),
     ("k8s contexts list", false),
     ("k8s namespaces list", false),
+    ("k8s namespaces inspect", false),
     ("k8s pods list", false),
     ("k8s pods inspect", false),
     ("k8s pods logs", false),
@@ -113,12 +114,19 @@ pub const OPERATIONS: &[(&str, bool)] = &[
     ("k8s daemonsets inspect", false),
     ("k8s daemonsets restart", true),
     ("k8s services list", false),
+    ("k8s services inspect", false),
     ("k8s nodes list", false),
+    ("k8s nodes inspect", false),
     ("k8s events list", false),
+    ("k8s events inspect", false),
     ("k8s jobs list", false),
+    ("k8s jobs inspect", false),
     ("k8s cronjobs list", false),
+    ("k8s cronjobs inspect", false),
     ("k8s ingresses list", false),
+    ("k8s ingresses inspect", false),
     ("k8s pvcs list", false),
+    ("k8s pvcs inspect", false),
 ];
 
 impl Request {
@@ -177,6 +185,20 @@ impl Request {
         }
         if self.mutates() && self.all_namespaces {
             return Err(invalid("mutations cannot target all namespaces"));
+        }
+        if self.all_namespaces && self.words.last().is_none_or(|v| v != "list") {
+            return Err(invalid("--all-namespaces is only supported for lists"));
+        }
+        if self.namespace.as_ref().is_some_and(|v| {
+            v.is_empty()
+                || v.len() > 63
+                || v.starts_with('-')
+                || v.ends_with('-')
+                || !v
+                    .bytes()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        }) {
+            return Err(invalid("invalid Kubernetes namespace"));
         }
         if self.mutates() && (self.watch || self.follow) {
             return Err(invalid("mutations cannot be repeated or streamed"));
