@@ -26,7 +26,11 @@ fn value<T: serde::Serialize>(data: T) -> Result<Value> {
     serde_json::to_value(data).map_err(|e| Failure::new("invalidResponse", e))
 }
 
-pub async fn execute(request: &Request, socket: &str) -> Result<Value> {
+pub async fn execute(
+    request: &Request,
+    socket: &str,
+    events: Option<&crate::stream::Events>,
+) -> Result<Value> {
     let docker = Docker::connect_with_unix(socket, 30, API_DEFAULT_VERSION)
         .map_err(failure)?
         .negotiate_version()
@@ -89,6 +93,7 @@ pub async fn execute(request: &Request, socket: &str) -> Result<Value> {
         Some("inspect") => value(&inspected),
         Some("logs") => {
             let options = LogsOptions {
+                follow: request.follow,
                 stdout: true,
                 stderr: true,
                 timestamps: true,
@@ -98,7 +103,15 @@ pub async fn execute(request: &Request, socket: &str) -> Result<Value> {
             let mut logs = docker.logs(id, Some(options));
             let mut lines = Vec::new();
             let mut bytes = 0;
+            let mut stream = crate::stream::TextStream::default();
             while let Some(line) = logs.try_next().await.map_err(failure)? {
+                if request.follow {
+                    let events = events.ok_or_else(|| {
+                        Failure::new("invalidRequest", "stream receiver required")
+                    })?;
+                    stream.feed(&line.into_bytes(), events).await?;
+                    continue;
+                }
                 let text = line.to_string();
                 bytes += text.len();
                 if bytes > 1024 * 1024 {
@@ -108,6 +121,9 @@ pub async fn execute(request: &Request, socket: &str) -> Result<Value> {
                     ));
                 }
                 lines.push(text);
+            }
+            if request.follow {
+                stream.finish(events.unwrap()).await?;
             }
             Ok(json!({"lines":lines}))
         }

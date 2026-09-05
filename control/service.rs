@@ -6,6 +6,14 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 pub async fn execute(request: &Request, cancel: &CancellationToken) -> Result<Value> {
+    execute_stream(request, cancel, None).await
+}
+
+pub async fn execute_stream(
+    request: &Request,
+    cancel: &CancellationToken,
+    events: Option<crate::stream::Events>,
+) -> Result<Value> {
     if request.operation() == "capabilities" {
         return Ok(json!({"operations":OPERATIONS.iter().map(|(name, mutation)|
             json!({"name":name,"mutates":mutation})).collect::<Vec<_>>(),
@@ -27,9 +35,9 @@ pub async fn execute(request: &Request, cancel: &CancellationToken) -> Result<Va
             let socket = status["dockerSocket"]
                 .as_str()
                 .ok_or_else(|| Failure::new("coreProtocol", "Docker socket missing"))?;
-            crate::docker::execute(request, socket).await
+            crate::docker::execute(request, socket, events.as_ref()).await
         } else if request.words.first().is_some_and(|word| word == "k8s") {
-            crate::kubernetes::execute(request).await
+            crate::kubernetes::execute(request, events.as_ref()).await
         } else {
             core::call(request).await
         }
