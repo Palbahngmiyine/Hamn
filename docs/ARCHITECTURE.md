@@ -1,161 +1,94 @@
 # Architecture
 
-This is the canonical English architecture reference for Hamn 0.0.1. See
-[ARCHITECTURE.ko.md](ARCHITECTURE.ko.md) for the Korean translation.
+Hamn is one macOS executable with a Rust control plane and a statically linked
+C/Objective-C virtualization core. [API](API.md) describes the public requests.
 
-## Design boundary
-
-Hamn is a macOS CLI that owns a profile-scoped Linux VM and the narrow host ↔
-guest transports around it. It is not a container engine, a Docker CLI
-replacement, a Desktop application, or a host containerd distribution.
-
-macOS XNU does not implement the Linux kernel ABI required by Linux container
-processes, including Linux namespaces, cgroups, and the overlay filesystem.
-The product boundary is therefore a Linux guest VM, created with Apple
-Virtualization.framework, rather than an attempt to run a Linux container
-directly on macOS. Apple's guide documents the architecture-specific Linux
-image and VM-device configuration this requires: [Creating and Running a Linux
-Virtual Machine](https://developer.apple.com/documentation/virtualization/creating-and-running-a-linux-virtual-machine).
+## Shared control plane
 
 ```text
-macOS, profile <name>                         Ubuntu 24.04 arm64 guest
-────────────────────────────────────────────  ─────────────────────────────────
-hamn CLI                                       Linux kernel
-  lifecycle lock                               hamnd (small guest-control agent)
-  VZ VM owner                                  dockerd
-  SSH ControlMaster                             system containerd + CRI plugin
-  Docker socket forward                         runc, CNI, BuildKit, binfmt
-  port observer / TCP forward / UDP relay       optional K3s + kubelet
-  virtiofs mount setup
+Ratatui/Crossterm TUI ─┐
+                      ├─ typed Request → service → typed result / events
+Clap headless CLI ────┘                       │
+                         ┌───────────────────┼───────────────────┐
+                         ▼                   ▼                   ▼
+                    C worker             Bollard             kube-rs
+                  same executable      Docker Engine     external Kubernetes
+                         │               Unix socket          kubeconfig
+                         ▼
+                 profile VM lifecycle
+                 Virtualization.framework
 ```
 
-The guest is a release-selected, preconfigured image. It contains the runtime binaries,
-`hamnd.service`, guest helper scripts, K3s compatibility manifest, and public
-keys. On boot, Hamn only reconciles profile-controlled configuration, such as
-Docker daemon JSON and Rosetta selection. It does not rsync source code into a
-running VM or compile the guest runtime on first boot.
+`control/` contains both frontends, operation validation, JSON envelopes, API
+clients, bounded log streams, and cancellation. A TUI operation uses exactly
+the same service as its headless equivalent. A view generation discards late
+responses from a previously selected target. Network calls run asynchronously.
 
-## Process and socket ownership
+C functions in `host/core/control.h` execute only in a fresh `__core-worker`
+process. The entrypoint dispatches internal C modes before starting Tokio or
+initializing a terminal. This keeps C globals, fork, and exit outside Rust's
+multithreaded process. The worker protocol is generated JSON, not legacy CLI
+text. The caller frees C results with `hamn_control_free`.
 
-One profile owns one private state directory:
+## VM and socket ownership
 
-```text
-~/.hamn/<profile>/
-  config.yaml               strict profile configuration
-  disk.img                  guest data disk
-  docker.sock (0600)        forwarded guest Docker Engine API
-  agent.sock                forwarded Hamn guest-agent control socket
-  state.json, VM PID, locks, logs, SSH control path, port records
-  kubeconfig                only when K3s is explicitly enabled
-```
+C owns profile configuration, VM identity checks, lifecycle and mutation locks,
+SSH ControlMaster, port observers, image validation, and profile state. The
+Objective-C Virtualization.framework boundary stays inside `host/vz/`.
 
-The default profile's Docker context is `hamn`; named profiles use
-`hamn-<profile>`. The profile-local Docker socket is the only container API
-Hamn exposes to the host. It forwards to `/var/run/docker.sock` inside the
-guest through SSH. Host `/var/run/docker.sock` is never created, replaced, or
-used by Hamn.
+Each profile owns its disk, SSH key, `vmrun` identity, `vmrun.sock`, `ssh.sock`,
+`docker.sock`, and `agent.sock` below `~/.hamn/<profile>/`. The long-lived VM
+owner is another process of the same executable. Closing a TUI cancels that
+frontend's operations without stopping the VM. C supervisors retain locks
+and reap subprocesses when an operation worker disappears.
 
-The system containerd socket, `/run/containerd/containerd.sock`, remains in the
-guest. It is a native containerd endpoint, not a Docker Engine endpoint and not
-a supported host API. `status --json` reports Docker API readiness separately
-from CRI readiness instead of exposing this socket.
+Docker API requests flow through the profile's SSH-forwarded Unix socket to
+guest dockerd. Docker uses system containerd's `moby` namespace. The C port
+observer continues to reconcile published TCP and UDP ports. External Docker
+CLI, Compose, buildx, SDKs and Testcontainers use the same public socket;
+Hamn does not switch their current context. Registry credentials remain the
+external client's responsibility. The home share is not a credential-isolation
+boundary.
 
-## Docker path
+Kubernetes uses a kube-rs client against the selected external context. It does
+not use the Hamn VM, guest CRI, or a Hamn API forward. Kubeconfig merging and
+credentials are read locally; context selection does not rewrite source files.
+Mutations resolve object identity and use resource-version/UID preconditions.
+Automatic HTTP retries are disabled to avoid replaying a mutation.
 
-```text
-macOS Docker CLI / Compose / buildx / SDK
-  │  Docker Engine API
-  ▼
-~/.hamn/<profile>/docker.sock  (0600, SSH Unix-socket forward)
-  ▼
-guest /var/run/docker.sock
-  ▼
-guest dockerd --containerd=/run/containerd/containerd.sock
-  │  native containerd API, namespace moby
-  ▼
-guest system containerd
-  ▼
-runc -> Linux kernel
-```
+## Guest configuration and retirement
 
-Docker documents that `dockerd` may be pointed at a separately started
-containerd with `--containerd`, and that its default containerd namespace is
-`moby`; see [dockerd](https://docs.docker.com/reference/cli/dockerd/). Docker's
-logical state is owned by Docker (`/var/lib/docker` and `moby`); containerd's
-native store is owned by the guest system service.
+The signed Ubuntu 24.04 arm64 image owns hamnd, Docker, shared containerd, runc,
+CNI, binfmt and normal guest helpers. There is no unsigned cloud-image fallback
+or source-directory mount used to build guest code during VM startup.
 
-Hamn does not proxy arbitrary Docker requests itself. Its internal Docker
-observer is limited to published-port synchronization: it reads Docker events
-and inspect data, then owns only the macOS forwarding resources it creates.
+For a legacy profile, SSH readiness starts managed K3s retirement before normal
+provisioning. The existing EFI boot path is preserved; old K3s can briefly run
+before SSH becomes available. The fixed Python payload and replacement verifier
+and transaction helper are embedded in the signed host binary. This narrowly
+scoped, one-time replacement updates existing guest disks without treating the
+host checkout as a general guest configuration source.
 
-Registry credentials remain a host Docker-client concern. A host Docker CLI or
-SDK resolves its configured credential helper and sends registry authorization
-with the individual Docker API request through the profile socket. Hamn does
-not run `docker login`, copy a credential helper, or create a guest
-`/home/hamn/.docker` credential store. The default home virtiofs share is a
-user-exposed filesystem, not a credential-isolation boundary; do not treat it
-as one.
+The root-owned guest journal records verified ownership, service stop/mask,
+`k8s.io` resource cleanup, dedicated file removal, helper replacement and Docker
+readiness. Interrupted stages retry. Shared content, Docker objects, user
+mounts and source kubeconfig files are preserved. K3s data deletion cannot be
+undone by restoring an older binary. C publishes the new profile format only
+after guest retirement and profile-local forward cleanup succeed.
 
-## Kubernetes path
+The normal guest transaction snapshots managed runtime configuration and
+service state before changing it. The deployment fingerprint is recorded after
+commit and Docker/containerd readiness. Retirement is separate from that
+rollback: restoring runtime configuration does not resurrect K3s data.
 
-```text
-macOS kubectl
-  │  HTTPS Kubernetes API, profile-local kubeconfig
-  ▼
-SSH loopback forward -> guest K3s API server
-  ▼
-guest kubelet
-  │  CRI gRPC
-  ▼
-guest system containerd, namespace k8s.io
-  ▼
-runc -> Linux kernel
-```
+## Single executable build
 
-CRI is the kubelet-to-runtime protocol; it is not the Docker containerd API.
-The [Kubernetes CRI documentation](https://kubernetes.io/docs/concepts/containers/cri/)
-defines that boundary. Host `kubectl` never connects directly to CRI or to the
-containerd socket.
-
-K3s is disabled on a new profile. When the user runs `hamn kubernetes start`,
-the guest verifies a signed compatibility manifest and checksums, installs the
-fixed K3s artifact, configures it to use the existing system containerd, and
-waits for node and CoreDNS readiness. K3s owns its `k8s.io` namespace and K3s
-state directories. Docker's `moby` namespace remains distinct.
-
-The profile-local kubeconfig gets context `hamn` for the default profile and
-`hamn-<profile>` for other profiles. A collision with a foreign context fails;
-Hamn does not overwrite it. `hamn kubectl` rejects `--kubeconfig` overrides,
-so it cannot silently operate on another cluster.
-
-containerd's own guidance distinguishes its native CLI/API from CRI and notes
-that the CRI plugin is built into containerd: [getting
-started](https://github.com/containerd/containerd/blob/main/docs/getting-started.md).
-
-## Lifecycle and rollback
-
-`start` serializes profile mutation, validates immutable image inputs, prepares
-the disk, SSH keys, cloud-init seed, mounts, and VM state, then launches the VZ
-VM owner. Shared NAT discovers its DHCP lease. Hamn has no non-shared network
-attachment or alternate guest-address reporting path; the container runtime
-always remains inside the guest VM.
-
-After SSH comes up, Hamn runs configured provisioning stages in this order:
-
-```text
-system -> user -> guest configuration transaction -> after-boot -> ready
-```
-
-The guest transaction snapshots the runtime-related files and service states
-before it updates managed configuration. A failed Docker/containerd/K3s helper
-step restores that snapshot. The host only records the configuration
-fingerprint after the transaction commits and Docker plus containerd readiness
-checks succeed.
-
-`stop` and `delete` close the SSH forwards, Docker observer, TCP listeners,
-UDP relays, and VM process state that the profile owns. A soft `delete`
-preserves the disk. `delete --data` requires an exact interactive `y` before it
-removes the profile directory.
+`make host` builds a C/Objective-C static archive, links the Rust executable,
+then signs and inspects a temporary candidate before atomically publishing
+`build/hamn`. Cargo.lock and rust-toolchain.toml pin dependencies and compiler.
+System macOS libraries, SSH, guest images/binaries and kubeconfig exec plugins
+are permitted dependencies. No separate host core binary or dedicated shared
+library is required at runtime.
 
 ## Mount and network boundaries
 
@@ -183,6 +116,6 @@ before enabling it; Apple documents that capability for Macs with an M3 chip or
 later.
 
 There is no Intel Mac backend, Linux host backend, Incus runtime, GPU/AI
-integration, external kubeconfig catalog, managed kind cluster, public
+integration, managed kind cluster, public
 containerd socket, Desktop app, XPC service, Homebrew Cask, DMG, notarization,
 or Docker shim in this release.
