@@ -34,7 +34,7 @@ DATA_LOCK=$(dirname "$DATADIR")/.$(basename "$DATADIR").hamn-install.lock
 
 # n, uppercase Y, and EOF must preserve both runtime data and install files.
 for answer in n Y; do
-    if printf '%s\n' "$answer" | HOME="$HOME_DIR" "$INSTALLED" uninstall \
+    if printf '%s\n' "$answer" | HOME="$HOME_DIR" "$INSTALLED" --headless system uninstall \
         >"$WORK/$answer.out" 2>"$WORK/$answer.err"; then
         echo "FAIL: uninstall accepted '$answer'" >&2
         exit 1
@@ -44,24 +44,16 @@ for answer in n Y; do
         exit 1
     }
 done
-if HOME="$HOME_DIR" "$INSTALLED" uninstall \
+if HOME="$HOME_DIR" "$INSTALLED" --headless system uninstall \
     >"$WORK/eof.out" 2>"$WORK/eof.err" </dev/null; then
     echo "FAIL: uninstall accepted EOF" >&2
     exit 1
 fi
 [ -d "$HOME_DIR/.hamn" ] && [ -L "$INSTALLED" ] && [ -d "$DATADIR" ]
-grep -Fq "managed installation root: $CANON_DATADIR" "$WORK/n.out" || {
-    sed -n '1,160p' "$WORK/n.out" >&2
-    sed -n '1,160p' "$WORK/n.err" >&2
-    exit 1
-}
-grep -Fq "managed executable link: $INSTALLED" "$WORK/n.out"
-grep -Fq "Hamn runtime root: $HOME_DIR/.hamn" "$WORK/n.out"
-grep -Fq 'profile default (VM, Docker, and Kubernetes data)' "$WORK/n.out"
-grep -Fq 'image cache:' "$WORK/n.out"
+grep -Fq '"code":"invalidRequest"' "$WORK/n.out"
 
-# An exact lower-case y removes only the proven installer and Hamn runtime.
-printf 'y\n' | HOME="$HOME_DIR" "$INSTALLED" uninstall \
+# --yes removes only the proven installation and Hamn runtime.
+HOME="$HOME_DIR" "$INSTALLED" --headless system uninstall --yes \
     >"$WORK/y.out" 2>"$WORK/y.err"
 [ ! -e "$HOME_DIR/.hamn" ] && [ ! -L "$INSTALLED" ] && [ ! -e "$DATADIR" ] || {
     echo "FAIL: confirmed uninstall left managed files behind" >&2
@@ -71,7 +63,7 @@ printf 'y\n' | HOME="$HOME_DIR" "$INSTALLED" uninstall \
     echo "FAIL: confirmed uninstall left managed install locks behind" >&2
     exit 1
 }
-grep -Fq 'Hamn has been uninstalled.' "$WORK/y.out"
+grep -Fq '"completed":true' "$WORK/y.out"
 
 # A symlinked runtime root is never followed, even after a valid confirmation.
 prepare_install unsafe
@@ -83,12 +75,12 @@ mkdir -p "$VICTIM"
 printf '%s\n' keep >"$VICTIM/keep"
 rm -rf "$UNSAFE_HOME/.hamn"
 ln -s "$VICTIM" "$UNSAFE_HOME/.hamn"
-if printf 'y\n' | HOME="$UNSAFE_HOME" "$UNSAFE_BIN/hamn" uninstall \
+if printf 'y\n' | HOME="$UNSAFE_HOME" "$UNSAFE_BIN/hamn" --headless system uninstall --yes \
     >"$WORK/unsafe.out" 2>"$WORK/unsafe.err"; then
     echo "FAIL: uninstall accepted a symlinked runtime root" >&2
     exit 1
 fi
-grep -Fq 'refusing unsafe Hamn runtime path' "$WORK/unsafe.err"
+grep -Fq 'refusing unsafe Hamn runtime path' "$WORK/unsafe.out"
 grep -qx 'keep' "$VICTIM/keep"
 [ -L "$UNSAFE_HOME/.hamn" ] && [ -L "$UNSAFE_BIN/hamn" ] && [ -d "$UNSAFE_DATA" ]
 

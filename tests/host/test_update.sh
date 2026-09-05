@@ -4,11 +4,12 @@
 set -euo pipefail
 
 HAMN=${HAMN:-build/hamn}
+ORIGINAL_VERSION=$("$HAMN" --version | awk '{print $2}')
 INSTALL=scripts/install-host.sh
 WORK=$(mktemp -d /tmp/hamn-update.XXXXXX)
 cleanup() {
     rm -rf "$WORK"
-    make host VERSION=0.0.1-dev >/dev/null
+    make host VERSION="$ORIGINAL_VERSION" >/dev/null
 }
 trap cleanup EXIT
 
@@ -40,7 +41,7 @@ assert_active_state() {
 run_update() {
     HOME="$HOME_DIR" \
     HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
-        "$BINDIR/hamn" update --manifest "$1"
+        "$BINDIR/hamn" --headless system update --yes --manifest "$1"
 }
 
 build_release() {
@@ -106,19 +107,19 @@ MANAGED_DATADIR=$(cd "$DATADIR" && pwd -P)
 
 MANIFEST_2=$(build_release 0.0.2 'immutable guest image v0.0.2' normal)
 run_update "$MANIFEST_2" >"$WORK/update.out"
-grep -Fq 'selected guest image is used for new profile disks' "$WORK/update.out"
+grep -Fq '"completed":true' "$WORK/update.out"
 new_target=$(readlink "$BINDIR/hamn")
 [ "$new_target" != "$old_target" ] || {
     echo "FAIL: signed update did not switch the managed binary" >&2
     exit 1
 }
-HOME="$HOME_DIR" "$BINDIR/hamn" version | grep -Fxq 'hamn 0.0.2'
+HOME="$HOME_DIR" "$BINDIR/hamn" --version | grep -Fxq 'hamn 0.0.2'
 grep -Fq 'hamn-guest-' "$HOME_DIR/.hamn/cache/guest-image.json"
 selection_2=$(selection_hash)
 
 # A direct generation binary cannot update itself, and a modified manifest
 # cannot change either selected generation or guest image.
-if HOME="$HOME_DIR" "$new_target" update --manifest "$MANIFEST_2" \
+if HOME="$HOME_DIR" "$new_target" --headless system update --yes --manifest "$MANIFEST_2" \
     >"$WORK/direct.out" 2>"$WORK/direct.err"; then
     echo "FAIL: direct generation binary was accepted for update" >&2
     exit 1
@@ -193,7 +194,7 @@ fi
     echo "FAIL: SIGKILL did not reach the host cutover boundary" >&2
     exit 1
 }
-if HOME="$HOME_DIR" "$BINDIR/hamn" start --template=false \
+if HOME="$HOME_DIR" "$BINDIR/hamn" --headless vm start --profile default --yes \
     >"$WORK/pending-start.out" 2>"$WORK/pending-start.err"; then
     echo "FAIL: pending update transaction allowed VM start" >&2
     exit 1
@@ -217,7 +218,7 @@ target_3=$(readlink "$BINDIR/hamn")
     echo "FAIL: recovered updater could not perform a later signed update" >&2
     exit 1
 }
-HOME="$HOME_DIR" "$BINDIR/hamn" version | grep -Fxq 'hamn 0.0.3'
+HOME="$HOME_DIR" "$BINDIR/hamn" --version | grep -Fxq 'hamn 0.0.3'
 [ "$(selection_hash)" != "$selection_2" ] || {
     echo "FAIL: later signed update did not change guest image selection" >&2
     exit 1

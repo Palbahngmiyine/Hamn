@@ -13,6 +13,7 @@ fail() {
 
 PROFILE="$WORK/.hamn/default"
 LOGS="$PROFILE/logs"
+HOME="$WORK" "$HAMN" --headless vm create --profile default --yes >/dev/null
 mkdir -p "$LOGS" "$WORK/.kube"
 
 TOKEN_CANARY=hamn-diagnostic-token-canary-9f31e7
@@ -103,7 +104,7 @@ EOF
 chmod 0600 "$LOGS/serial.log" "$LOGS/vmrun.log"
 
 ARCHIVE="$WORK/output with spaces/nested/diagnostic archive.tar"
-HOME="$WORK" "$HAMN" diagnostics create --path "$ARCHIVE" --output json \
+HOME="$WORK" "$HAMN" --headless vm diagnostics --profile default --yes --path "$ARCHIVE" \
     >"$WORK/result.json" 2>"$WORK/result.err"
 grep -q '"schemaVersion":1' "$WORK/result.json"
 grep -q '"operation":"diagnostics.create"' "$WORK/result.json"
@@ -152,22 +153,22 @@ grep -q '^\[REDACTED sensitive log line\]$' \
     "$WORK/extracted/logs/serial.log"
 grep -q '"schemaVersion":1' "$WORK/extracted/status.json"
 grep -q '"dockerContext":"hamn"' "$WORK/extracted/status.json"
-grep -q '"enabled":false' "$WORK/extracted/status.json"
+grep -q '"migrationPending":false' "$WORK/extracted/status.json"
 grep -q '"collectionPolicy":"allowlisted metadata and bounded log tails"' \
     "$WORK/extracted/manifest.json"
 
 # Existing files and symlinks are never replaced by archive publication.
 ARCHIVE_HASH=$(shasum -a 256 "$ARCHIVE")
-if HOME="$WORK" "$HAMN" diagnostics create --path "$ARCHIVE" \
+if HOME="$WORK" "$HAMN" --headless vm diagnostics --profile default --yes --path "$ARCHIVE" \
     >"$WORK/existing.out" 2>"$WORK/existing.err"; then
     fail "diagnostics replaced an existing archive"
 fi
-grep -q 'cannot create diagnostic archive' "$WORK/existing.err"
+grep -q 'cannot create diagnostic archive' "$WORK/existing.out"
 test "$ARCHIVE_HASH" = "$(shasum -a 256 "$ARCHIVE")"
 
 printf '%s\n' outside-unchanged >"$WORK/outside"
 ln -s "$WORK/outside" "$WORK/output-link.tar"
-if HOME="$WORK" "$HAMN" diagnostics create --path "$WORK/output-link.tar" \
+if HOME="$WORK" "$HAMN" --headless vm diagnostics --profile default --yes --path "$WORK/output-link.tar" \
     >"$WORK/output-link.out" 2>"$WORK/output-link.err"; then
     fail "diagnostics replaced an output symlink"
 fi
@@ -191,7 +192,7 @@ vmrun JSON diagnostic line safely
 }
 EOF
 BOUNDARY_ARCHIVE="$WORK/boundary.tar"
-HOME="$WORK" "$HAMN" diagnostics create --path "$BOUNDARY_ARCHIVE" \
+HOME="$WORK" "$HAMN" --headless vm diagnostics --profile default --yes --path "$BOUNDARY_ARCHIVE" \
     >"$WORK/boundary.json"
 mkdir "$WORK/boundary"
 tar -xf "$BOUNDARY_ARCHIVE" -C "$WORK/boundary"
@@ -212,7 +213,7 @@ $PRIVATE_BLOCK_CANARY
 vmrun after private block safely
 EOF
 SYMLINK_ARCHIVE="$WORK/symlink-log.tar"
-HOME="$WORK" "$HAMN" diagnostics create --path "$SYMLINK_ARCHIVE" \
+HOME="$WORK" "$HAMN" --headless vm diagnostics --profile default --yes --path "$SYMLINK_ARCHIVE" \
     >"$WORK/symlink-log.json"
 mkdir "$WORK/symlink-log"
 tar -xf "$SYMLINK_ARCHIVE" -C "$WORK/symlink-log"
@@ -232,7 +233,7 @@ printf '%s\n' "$DIRECTORY_SYMLINK_CANARY" \
     >"$WORK/outside-logs/vmrun.log"
 ln -s "$WORK/outside-logs" "$LOGS"
 DIRECTORY_SYMLINK_ARCHIVE="$WORK/symlink-log-directory.tar"
-HOME="$WORK" "$HAMN" diagnostics create \
+HOME="$WORK" "$HAMN" --headless vm diagnostics --profile default --yes \
     --path "$DIRECTORY_SYMLINK_ARCHIVE" >"$WORK/symlink-log-directory.json"
 mkdir "$WORK/symlink-log-directory"
 tar -xf "$DIRECTORY_SYMLINK_ARCHIVE" -C "$WORK/symlink-log-directory"
@@ -246,7 +247,8 @@ grep -q '^(log unavailable)$' \
 # Without --path, the command writes a mode-0600 archive below ~/.hamn.
 DEFAULT_HOME="$WORK/default-home"
 mkdir -p "$DEFAULT_HOME"
-HOME="$DEFAULT_HOME" "$HAMN" diagnostics create \
+HOME="$DEFAULT_HOME" "$HAMN" --headless vm create --profile default --yes >/dev/null
+HOME="$DEFAULT_HOME" "$HAMN" --headless vm diagnostics --profile default --yes \
     >"$WORK/default-result.json"
 DEFAULT_PATH=$(sed -n 's/.*"path":"\([^"]*\)".*/\1/p' \
     "$WORK/default-result.json")
@@ -258,10 +260,10 @@ esac
 test -f "$DEFAULT_PATH"
 test "$(stat -f '%Lp' "$DEFAULT_PATH")" = 600
 
-if HOME="$WORK" "$HAMN" diagnostics create --path \
+if HOME="$WORK" "$HAMN" --headless vm diagnostics --profile default --yes --path \
     >"$WORK/missing-path.out" 2>"$WORK/missing-path.err"; then
     fail "diagnostics accepted a missing --path value"
 fi
-grep -q 'usage: hamn diagnostics create' "$WORK/missing-path.err"
+grep -q '"code":"invalidRequest"' "$WORK/missing-path.out"
 
 echo "OK: diagnostic archives are bounded, atomic, and credential-redacted"
