@@ -379,9 +379,9 @@ static int ensure_signed_guest_image(char *image, size_t capacity,
     }
 
     logmsg("preparing the signed Hamn guest image (first start only) ...");
-    const char *command[] = { invocation, "update", NULL };
+    const char *command[] = { invocation, "--headless", "system", "update", "--yes", NULL };
     if (proc_run(command) != 0) {
-        logerr("cannot prepare the signed guest image; run 'hamn update' to see the verification error");
+        logerr("cannot prepare the signed guest image; run 'hamn --headless system update --yes' to see the verification error");
         return -1;
     }
     if (fetch_image_ensure(image, capacity) != 0) {

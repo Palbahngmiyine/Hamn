@@ -127,6 +127,7 @@ int main(void)
         "#!/bin/sh\n"
         "set -eu\n"
         "state=${HAMN_TEST_BOOTSTRAP_STATE:?}\n"
+        "if [ \"${1:-}\" = --headless ]; then shift; [ \"$1\" = system ]; shift; fi\n"
         "case \"${1:-}\" in\n"
         "update)\n"
         "  printf 'update\\n' >>\"$state\"\n"

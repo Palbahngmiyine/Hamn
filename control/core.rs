@@ -208,6 +208,17 @@ async fn capture(
 
 pub async fn call(request: &Request) -> Result<Value> {
     let executable = std::env::current_exe().map_err(|e| Failure::new("coreUnavailable", e))?;
+    let result = call_executable(request, executable.as_os_str()).await;
+    if request.operation() == "vm start"
+        && result.as_ref().is_err_and(|e| e.code == "restartRequired")
+    {
+        let invocation = std::env::args_os().next().unwrap_or_default();
+        return call_executable(request, &invocation).await;
+    }
+    result
+}
+
+async fn call_executable(request: &Request, executable: &std::ffi::OsStr) -> Result<Value> {
     let mut child = tokio::process::Command::new(executable)
         .arg("__core-worker")
         .arg(std::env::args_os().next().unwrap_or_default())

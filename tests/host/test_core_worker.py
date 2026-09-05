@@ -82,4 +82,7 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
     assert json.loads(result.stdout)["error"]["code"] == "invalidRequest"
     result = subprocess.run([binary], capture_output=True, text=True, env=env, timeout=10)
     assert result.returncode != 0 and "\x1b" not in result.stdout
+    result = subprocess.run([binary, "vm", "start", "--profile", "test"],
+                            capture_output=True, text=True, env=env, timeout=10)
+    assert json.loads(result.stdout)["error"]["code"] == "invalidRequest"
 print("core worker isolation and protocol: passed")

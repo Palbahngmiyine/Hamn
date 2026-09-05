@@ -5,6 +5,7 @@ mod docker;
 mod headless;
 mod kubeconfig;
 mod kubernetes;
+mod migration;
 mod model;
 mod service;
 mod stream;
@@ -52,6 +53,20 @@ fn main() {
         std::process::exit(2);
     }
     if !request.headless {
+        if !request.words.is_empty() {
+            println!(
+                "{}",
+                model::envelope(
+                    &request,
+                    "mode",
+                    Err(model::Failure::new(
+                        "invalidRequest",
+                        "operations require hamn --headless <operation>"
+                    ))
+                )
+            );
+            std::process::exit(2);
+        }
         if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

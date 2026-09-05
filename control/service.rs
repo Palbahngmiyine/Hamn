@@ -24,6 +24,18 @@ pub async fn execute_stream(
         )?));
     }
     let run = async {
+        if request.mutates()
+            && matches!(
+                request.words.first().map(String::as_str),
+                Some("vm" | "docker")
+            )
+            && !matches!(
+                request.operation().as_str(),
+                "vm create" | "vm start" | "vm migrate"
+            )
+        {
+            crate::migration::prepare(request.profile.as_deref().unwrap()).await?;
+        }
         if request.words.first().is_some_and(|word| word == "docker") {
             let mut status_request = request.clone();
             status_request.words = vec!["vm".into(), "status".into()];
