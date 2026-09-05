@@ -69,14 +69,19 @@ $(VERSION_STAMP): FORCE
 		mv $@.tmp $@; \
 	fi
 
-$(HOST_OBJS): $(VERSION_STAMP)
+$(BUILD)/generated/k3s_retirement.h: scripts/embed-retirement.py host/migration/retire_k3s.py host/migration/legacy-k3s.service guest/scripts/verify-image-contract.sh guest/scripts/guest-deployment-transaction.sh
+	python3 scripts/embed-retirement.py $@
+
+$(HOST_OBJS): $(VERSION_STAMP) $(BUILD)/generated/k3s_retirement.h
 
 install: host
 	bash scripts/install-host.sh "$(HOST_BIN)" "$(BINDIR)" "$(DATADIR)"
 
 $(BUILD)/libhamn_core.a: $(HOST_OBJS)
 	@mkdir -p $(dir $@)
-	ar rcs $@ $(HOST_OBJS)
+	rm -f $@.tmp
+	ar rcs $@.tmp $(HOST_OBJS)
+	mv $@.tmp $@
 
 $(HOST_BIN): FORCE $(BUILD)/libhamn_core.a host/entitlements.plist
 	MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) HAMN_VERSION=$(VERSION) cargo build --locked --profile $(CARGO_PROFILE)

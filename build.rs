@@ -30,7 +30,13 @@ fn main() {
     );
     println!("cargo:rustc-link-lib=static=clang_rt.osx");
     println!("cargo:rustc-env=HAMN_VERSION={version}");
-    for path in ["host", "vendor", "Makefile"] {
+    for path in [
+        "host",
+        "vendor",
+        "Makefile",
+        "scripts/embed-retirement.py",
+        "guest/scripts",
+    ] {
         println!("cargo:rerun-if-changed={path}");
     }
     for key in ["HAMN_VERSION", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET"] {

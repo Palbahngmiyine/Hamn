@@ -26,6 +26,17 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
     created = call("vm create", profile="test", yes=True, cpu=2, memory=2)
     assert created["Ok"]["cpus"] == 2
     assert created["Ok"]["memoryMiB"] == 2048
+    assert created["Ok"]["migration"] == "current"
+    config = Path(directory) / ".hamn/test/config.yaml"
+    assert "kubernetes:" not in config.read_text()
+    with config.open("a") as output:
+        output.write('\nkubernetes:\n  enabled: false\n  version: "v1.30.0+k3s1"\n')
+    assert call("vm status", profile="test")["Ok"]["migration"] == "pending"
+    old_config = config.read_bytes()
+    assert call("vm migrate", profile="test", yes=True)["Ok"]["migration"] == "pending"
+    assert config.read_bytes() == old_config  # stopped profiles wait for next start
+    assert "Ok" in call("vm configure", profile="test", yes=True, cpu=2)
+    assert "kubernetes:" in config.read_text()  # edits cannot discard migration evidence
     assert call("vm status", profile="test")["Ok"]["state"] == "stopped"
     assert "Err" in call("vm configure", profile="../escape", yes=True)
     assert "Err" in call("vm status", profile="missing")

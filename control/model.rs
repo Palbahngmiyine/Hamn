@@ -75,6 +75,7 @@ pub const OPERATIONS: &[(&str, bool)] = &[
     ("vm status", false),
     ("vm create", true),
     ("vm configure", true),
+    ("vm migrate", true),
     ("vm start", true),
     ("vm stop", true),
     ("vm delete", true),

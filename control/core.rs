@@ -20,6 +20,7 @@ unsafe extern "C" {
     ) -> i32;
     fn hamn_control_stop(profile: *const libc::c_char) -> i32;
     fn hamn_control_delete(profile: *const libc::c_char) -> i32;
+    fn hamn_control_migrate(profile: *const libc::c_char) -> i32;
     fn hamn_control_diagnostics(
         profile: *const libc::c_char,
         path: *const libc::c_char,
@@ -93,6 +94,7 @@ fn execute(request: &Request) -> Result<Value> {
     }
     let rc = unsafe {
         match operation.as_str() {
+            "vm migrate" => hamn_control_migrate(pointer),
             "vm diagnostics" => hamn_control_diagnostics(
                 pointer,
                 path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),

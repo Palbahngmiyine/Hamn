@@ -23,6 +23,7 @@
 #include "core/log.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
+#include "core/retirement.h"
 #include "core/provision.h"
 #include "core/state.h"
 #include "fwd/docker_observer.h"
@@ -477,6 +478,10 @@ static int cmd_start_locked(const struct start_options *options,
             goto out;
         }
         if (running_state.ip[0]) {
+            if (p.legacy_k3s &&
+                (ssh_master_start(&p, running_state.ip, 15) != 0 ||
+                 retirement_run(&p, running_state.ip) != 0))
+                goto out;
             if (deployment_current == 0 &&
                 guest_deployment_refresh_locked(&p, &running_state) != 0) {
                 logerr("cannot refresh the running VM guest deployment");
@@ -758,6 +763,8 @@ static int cmd_start_locked(const struct start_options *options,
         goto rollback;
     }
     start_trace_stage(&trace, "ssh-ready");
+    if (retirement_run(&p, ip) != 0)
+        goto rollback;
 
     if (provision_run_stage(&p, ip, "system") != 0 ||
         provision_run_stage(&p, ip, "user") != 0)
