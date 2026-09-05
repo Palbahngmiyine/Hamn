@@ -272,7 +272,7 @@ static int discover_installation(struct uninstall_plan *plan)
 static int discover_runtime(struct uninstall_plan *plan)
 {
     if (!hamn_home(plan->runtime_root, sizeof(plan->runtime_root))) {
-        logerr("HOME is not set");
+        logerr(errno == EPERM ? "refusing unsafe Hamn runtime path" : "cannot resolve Hamn runtime path");
         return -1;
     }
     struct stat status;
