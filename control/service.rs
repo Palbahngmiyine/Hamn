@@ -14,6 +14,11 @@ pub async fn execute(request: &Request, cancel: &CancellationToken) -> Result<Va
             "formats":["json","ndjson"]}));
     }
     request.validate()?;
+    if request.operation() == "k8s contexts list" {
+        return Ok(crate::kubeconfig::contexts(&crate::kubeconfig::load(
+            request,
+        )?));
+    }
     let run = async {
         if request.words.first().is_some_and(|word| word == "docker") {
             let mut status_request = request.clone();
