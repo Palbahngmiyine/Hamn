@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import stat
@@ -9,6 +10,7 @@ import subprocess
 import tempfile
 
 JOURNAL = Path('/var/lib/hamn/k3s-retirement-v1.json')
+TRANSACTIONS = Path('/var/lib/hamn/deployment-transactions')
 UNIT = Path('/etc/systemd/system/k3s.service')
 DATA = ('/var/lib/rancher/k3s', '/etc/rancher/k3s',
         '/var/lib/hamn/k3s-cni-transaction')
@@ -134,14 +136,44 @@ def remove_data():
             path.unlink()
 
 
+def recover_deployment():
+    """Resolve an old rollback backup before it can restore retired K3s helpers."""
+    root = safe(TRANSACTIONS)
+    if not root.exists():
+        return
+    entries = list(root.iterdir())
+    if not entries:
+        return
+    if JOURNAL.exists() or len(entries) != 1:
+        raise RuntimeError('deployment backup conflicts with retirement; recovery is required')
+    entry = safe(entries[0])
+    if not entry.is_dir() or not re.fullmatch(r'[0-9a-f]{32}', entry.name):
+        raise RuntimeError('invalid deployment backup')
+    phase = safe(entry / 'phase')
+    if not phase.is_file() or phase.stat().st_size > 32 or phase.read_text().strip() != 'ready':
+        raise RuntimeError('incomplete deployment backup; recover it before K3s retirement')
+    helper = safe('/usr/local/libexec/hamn/guest-deployment-transaction')
+    run('bash', str(helper), 'rollback', entry.name)
+    if entry.exists():
+        raise RuntimeError('deployment recovery did not remove its backup')
+
+
+def docker_ready():
+    response = run('curl', '--fail', '--silent', '--max-time', '15',
+                   '--unix-socket', '/var/run/docker.sock', 'http://localhost/_ping')
+    if response.stdout.strip() != b'OK':
+        raise RuntimeError('Docker did not report ready after retirement')
+
+
 def migrate(payload):
     if os.geteuid() != 0:
         raise RuntimeError('guest retirement requires root')
     safe(JOURNAL)
+    recover_deployment()
     JOURNAL.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if JOURNAL.exists():
         state = json.loads(JOURNAL.read_bytes())
-        if set(state) != {'version', 'stage'} or state['version'] != 1 or state['stage'] not in STAGES:
+        if set(state) != {'version', 'stage'} or type(state['version']) is not int or state['version'] != 1 or state['stage'] not in STAGES:
             raise RuntimeError('invalid retirement journal')
         stage = STAGES.index(state['stage'])
     else:
@@ -166,12 +198,13 @@ def migrate(payload):
         resources,
         remove_data,
         lambda: replace_helpers(payload),
-        lambda: run('curl', '--fail', '--silent', '--max-time', '15',
-                    '--unix-socket', '/var/run/docker.sock', 'http://localhost/_ping'),
+        docker_ready,
     )
     for index in range(stage + 1, len(STAGES)):
         actions[index]()
         atomic(JOURNAL, json.dumps({'version': 1, 'stage': STAGES[index]}).encode())
+    if stage == len(STAGES) - 1:
+        docker_ready()  # A retry must not publish a ready profile while Docker is down.
 
 
 def stop():
