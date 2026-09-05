@@ -58,6 +58,25 @@ int main(void)
     snprintf(config, sizeof(config), "%s/.locks", root);
     assert(rmdir(config) == 0);
     assert(rmdir(root) == 0);
+    char foreign[1024];
+    snprintf(foreign, sizeof(foreign), "%s/foreign", temporary);
+    assert(mkdir(foreign, 0700) == 0);
+    assert(symlink(foreign, root) == 0);
+    assert(profile_read_existing(&profile, "existing") == -1);
+    assert(hamn_control_query(NULL, &json) == -1);
+    assert(hamn_control_configure("escape", 2, 2, 0, 1) != 0);
+    assert(unlink(root) == 0);
+    assert(mkdir(root, 0700) == 0);
+    snprintf(config, sizeof(config), "%s/escape", root);
+    assert(symlink(foreign, config) == 0);
+    assert(profile_load(&profile, "escape") == -1);
+    assert(unlink(config) == 0);
+    snprintf(config, sizeof(config), "%s/.locks", root);
+    assert(symlink(foreign, config) == 0);
+    assert(hamn_control_configure("escape", 2, 2, 0, 1) != 0);
+    assert(unlink(config) == 0);
+    assert(rmdir(root) == 0);
+    assert(rmdir(foreign) == 0); /* No state or lock was created in the target. */
     assert(rmdir(temporary) == 0);
     puts("read-only profiles: passed");
     return 0;

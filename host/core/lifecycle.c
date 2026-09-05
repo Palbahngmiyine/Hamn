@@ -46,6 +46,12 @@ int vm_lifecycle_lock_acquire(const char *profile_name,
     if (n < 0 || n >= (int)sizeof(lock_dir) ||
         fs_mkdirs(lock_dir, 0700) != 0)
         return -1;
+    struct stat directory;
+    if (lstat(lock_dir, &directory) != 0 || !S_ISDIR(directory.st_mode) ||
+        directory.st_uid != geteuid() || (directory.st_mode & 0022)) {
+        errno = EPERM;
+        return -1;
+    }
     n = snprintf(path, sizeof(path), "%s/%s.lock", lock_dir, profile_name);
     if (n < 0 || n >= (int)sizeof(path)) {
         errno = ENAMETOOLONG;
@@ -56,7 +62,8 @@ int vm_lifecycle_lock_acquire(const char *profile_name,
     if (fd < 0)
         return -1;
     struct stat sb;
-    if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+    if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode) ||
+        sb.st_uid != geteuid() || sb.st_nlink != 1 || (sb.st_mode & 0022)) {
         close(fd);
         errno = EINVAL;
         return -1;
