@@ -68,7 +68,7 @@ $(VERSION_STAMP): FORCE
 		mv $@.tmp $@; \
 	fi
 
-$(BUILD)/generated/k3s_retirement.h: scripts/embed-retirement.py host/migration/retire_k3s.py host/migration/legacy-k3s.service guest/scripts/verify-image-contract.sh guest/scripts/guest-deployment-transaction.sh
+$(BUILD)/generated/k3s_retirement.h: scripts/embed-retirement.py host/migration/retire_k3s.py host/migration/legacy-k3s.service guest/scripts/verify-image-contract.sh guest/scripts/guest-deployment-transaction.sh guest/scripts/configure-docker.sh
 	python3 scripts/embed-retirement.py $@
 
 $(HOST_OBJS): $(VERSION_STAMP) $(BUILD)/generated/k3s_retirement.h

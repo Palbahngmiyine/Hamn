@@ -109,7 +109,7 @@ grep -Fxq 'address=/host.docker.internal/192.168.64.1' "$HAMN_HOST_DNS_CONFIG"
 grep -Fxq 'address=/host.hamn.internal/192.168.64.1' "$HAMN_HOST_DNS_CONFIG"
 grep -Fq "ExecStart=$BIN/dnsmasq --keep-in-foreground --conf-file=$HAMN_HOST_DNS_CONFIG" \
     "$HAMN_HOST_DNS_UNIT"
-grep -Fq "ExecStart=$BIN/dockerd -H fd:// --containerd=$SOCKET" \
+grep -Fxq "ExecStart=$BIN/dockerd -H fd://" \
     "$HAMN_DOCKER_DROPIN"
 grep -Fq 'host.hamn.internal is a 0.0.1 compatibility alias' "$WORK/first.err"
 

@@ -14,6 +14,23 @@ spec.loader.exec_module(r)
 
 
 class Retirement(unittest.TestCase):
+    def test_embedded_helper_allowlist_includes_only_the_migration_contract(self):
+        helpers = {name: '# fixed ' + name for name in r.HELPERS}
+        self.assertEqual(set(helpers), {'verify-image-contract', 'guest-deployment-transaction', 'configure-docker'})
+        with patch.object(r, 'atomic') as write:
+            r.replace_helpers({'helpers': helpers})
+            self.assertEqual(write.call_count, 3)
+            for call in write.call_args_list:
+                path, content, mode = call.args
+                self.assertEqual(path.parent, Path('/usr/local/libexec/hamn'))
+                self.assertEqual(content, helpers[path.name].encode())
+                self.assertEqual(mode, 0o755)
+            for invalid in ({}, dict(helpers, arbitrary='untrusted')):
+                write.reset_mock()
+                with self.assertRaises(RuntimeError):
+                    r.replace_helpers({'helpers': invalid})
+                write.assert_not_called()
+
     def test_each_stage_resumes_without_repeating_committed_steps(self):
         for failed_stage in range(1, len(r.STAGES)):
             with self.subTest(stage=failed_stage), tempfile.TemporaryDirectory() as directory:

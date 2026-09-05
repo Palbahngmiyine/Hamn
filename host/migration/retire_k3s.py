@@ -22,7 +22,7 @@ LINKS = {
     '/opt/cni/bin/flannel': '/var/lib/rancher/k3s/data/cni/flannel',
     '/opt/cni/bin/bandwidth': '/var/lib/rancher/k3s/data/cni/bandwidth',
 }
-HELPERS = ('verify-image-contract', 'guest-deployment-transaction')
+HELPERS = ('verify-image-contract', 'guest-deployment-transaction', 'configure-docker')
 STAGES = ('verified', 'stopped', 'resources', 'removed', 'helpers', 'complete')
 
 

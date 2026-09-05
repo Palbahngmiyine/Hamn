@@ -9,7 +9,7 @@ root = Path(__file__).resolve().parent.parent
 unit = root / 'host/migration/legacy-k3s.service'
 payload = {'unitSha256': hashlib.sha256(unit.read_bytes()).hexdigest(),
            'helpers': {name: (root / f'guest/scripts/{name}.sh').read_text()
-                       for name in ('verify-image-contract', 'guest-deployment-transaction')}}
+                       for name in ('verify-image-contract', 'guest-deployment-transaction', 'configure-docker')}}
 script = (root / 'host/migration/retire_k3s.py').read_text()
 script += '\nmigrate(json.loads(' + repr(json.dumps(payload)) + '))\n'
 # The SSH command argument stays well below macOS ARG_MAX including quoting.
