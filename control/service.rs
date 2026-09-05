@@ -14,7 +14,19 @@ pub async fn execute(request: &Request, cancel: &CancellationToken) -> Result<Va
             "formats":["json","ndjson"]}));
     }
     request.validate()?;
-    let run = core::call(request);
+    let run = async {
+        if request.words.first().is_some_and(|word| word == "docker") {
+            let mut status_request = request.clone();
+            status_request.words = vec!["vm".into(), "status".into()];
+            let status = core::call(&status_request).await?;
+            let socket = status["dockerSocket"]
+                .as_str()
+                .ok_or_else(|| Failure::new("coreProtocol", "Docker socket missing"))?;
+            crate::docker::execute(request, socket).await
+        } else {
+            core::call(request).await
+        }
+    };
     tokio::select! {
         _ = cancel.cancelled() => Err(Failure::new(if request.mutates() {"outcomeUnknown"} else {"cancelled"}, "operation cancelled")),
         result = tokio::time::timeout(std::time::Duration::from_secs(request.timeout), run) => {
