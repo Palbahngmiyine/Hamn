@@ -2,6 +2,7 @@
 #include <stdio.h>
 
 #include "cli.h"
+#include "core/control.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/mutation_lock.h"
@@ -59,6 +60,13 @@ int cmd_stop(int argc, char **argv)
 {
     char profile_name[PROFILE_NAME_CAP];
     if (resolve_stop_profile(argc, argv, profile_name) != 0)
+        return 2;
+    return hamn_control_stop(profile_name);
+}
+
+int hamn_control_stop(const char *profile_name)
+{
+    if (!profile_name_valid(profile_name))
         return 2;
     struct vm_lifecycle_lock lock;
     if (vm_lifecycle_lock_acquire(profile_name, &lock) != 0) {

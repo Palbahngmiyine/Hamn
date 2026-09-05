@@ -10,6 +10,11 @@ static char last_error[8192];
 static int machine_json;
 static int machine_error_emitted;
 
+const char *log_last_error(void)
+{
+    return last_error;
+}
+
 void log_set_machine_json(int enabled)
 {
     machine_json = enabled != 0;

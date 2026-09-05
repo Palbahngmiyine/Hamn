@@ -8,5 +8,6 @@ void logerr(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void die(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 void log_set_machine_json(int enabled);
 void log_emit_machine_error(int exit_code);
+const char *log_last_error(void);
 
 #endif

@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 
 #include "cli.h"
+#include "core/control.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/mutation_lock.h"
@@ -147,6 +148,19 @@ static int cmd_delete_locked(const struct delete_options *options,
     profile_mutation_unlock(mutation);
     logmsg("deleted profile %s and all of its data", profile.name);
     return 0;
+}
+
+int hamn_control_delete(const char *profile_name)
+{
+    if (!profile_name_valid(profile_name))
+        return 2;
+    struct vm_lifecycle_lock lock;
+    if (vm_lifecycle_lock_acquire(profile_name, &lock) != 0)
+        return 1;
+    const struct delete_options options = {0};
+    int rc = cmd_delete_locked(&options, profile_name);
+    vm_lifecycle_lock_release(&lock);
+    return rc;
 }
 
 int cmd_delete(int argc, char **argv)

@@ -31,6 +31,14 @@ int main(void)
     assert(profile_load(&profile, "existing") == 0);
     assert(profile_save(&profile) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
+    assert(hamn_control_start("../escape", 0, 0, 0) == 2);
+    assert(hamn_control_configure("existing", 2, 2, 0, 0) == 0);
+    assert(profile_read_existing(&profile, "existing") == 0);
+    assert(profile.cpus == 2 && profile.mem_mib == 2048);
+    assert(profile.disk_gib == 60);
+    assert(hamn_control_configure("existing", 0, UINT_MAX, 0, 0) == 2);
+    assert(profile_read_existing(&profile, "existing") == 0);
+    assert(profile.mem_mib == 2048);
     assert(hamn_control_query("existing", &json) == 0);
     items = cJSON_Parse(json);
     assert(cJSON_IsObject(items));
@@ -43,6 +51,12 @@ int main(void)
     assert(profile_read_existing(&profile, "existing") == -1);
     assert(errno == ENOENT);
     assert(rmdir(profile.dir) == 0);
+    snprintf(config, sizeof(config), "%s/.existing-mutation.lock", root);
+    assert(unlink(config) == 0);
+    snprintf(config, sizeof(config), "%s/.locks/existing.lock", root);
+    assert(unlink(config) == 0);
+    snprintf(config, sizeof(config), "%s/.locks", root);
+    assert(rmdir(config) == 0);
     assert(rmdir(root) == 0);
     assert(rmdir(temporary) == 0);
     puts("read-only profiles: passed");
