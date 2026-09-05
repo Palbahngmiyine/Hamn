@@ -4,13 +4,18 @@ fn main() {
     assert_eq!(env::var("CARGO_CFG_TARGET_OS").unwrap(), "macos");
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let version = env::var("HAMN_VERSION").unwrap_or_else(|_| "0.0.1".into());
+    let native = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("core");
     let status = Command::new("make")
         .current_dir(&root)
-        .args(["build/libhamn_core.a", &format!("VERSION={version}")])
+        .args([
+            format!("{}/libhamn_core.a", native.display()),
+            format!("BUILD={}", native.display()),
+            format!("VERSION={version}"),
+        ])
         .status()
         .expect("make is required to build the C virtualization core");
     assert!(status.success(), "C core build failed");
-    println!("cargo:rustc-link-search=native={}/build", root.display());
+    println!("cargo:rustc-link-search=native={}", native.display());
     println!("cargo:rustc-link-lib=static=hamn_core");
     for framework in ["Virtualization", "Foundation", "CoreServices"] {
         println!("cargo:rustc-link-lib=framework={framework}");

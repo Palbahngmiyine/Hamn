@@ -14,7 +14,7 @@
 #include "core/mutation_lock.h"
 #include "core/state.h"
 #include "sshmgr/ssh.h"
-#include "../../build/generated/k3s_retirement.h"
+#include "k3s_retirement.h"
 
 static int retire_forward(const struct profile *profile, const char *ip)
 {

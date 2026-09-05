@@ -16,7 +16,7 @@ CFLAGS     := -std=c11 -Wall -Wextra -O2 -g \
               -mmacosx-version-min=$(MACOS_MIN) \
               -DHAVE_CONFIG_H \
               -DHAMN_VERSION=\"$(VERSION)\" \
-              -Ihost -Ivendor -Ivendor/libyaml/include
+              -Ihost -Ivendor -Ivendor/libyaml/include -I$(BUILD)/generated
 LDFLAGS    := -framework Virtualization -framework Foundation -framework CoreServices -lz \
               -mmacosx-version-min=$(MACOS_MIN)
 ifneq ($(strip $(SDKROOT)),)
@@ -82,12 +82,8 @@ $(BUILD)/libhamn_core.a: $(HOST_OBJS)
 	ar rcs $@.tmp $(HOST_OBJS)
 	mv $@.tmp $@
 
-$(HOST_BIN): FORCE $(BUILD)/libhamn_core.a host/entitlements.plist
-	MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) HAMN_VERSION=$(VERSION) cargo build --locked --profile $(CARGO_PROFILE)
-	cp target/$(CARGO_PROFILE)/hamn $@.candidate
-	codesign --force --sign - --entitlements host/entitlements.plist $@.candidate
-	bash scripts/check-host-binary.sh $@.candidate
-	mv -f $@.candidate $@
+$(HOST_BIN): FORCE host/entitlements.plist
+	MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) python3 scripts/build-host.py $@ $(VERSION) $(CARGO_PROFILE)
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -163,6 +159,7 @@ test-control: host $(PROFILE_READ_TEST)
 	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
 	python3 tests/host/test_k3s_retirement.py
+	python3 tests/host/test_build_publish.py
 	HAMN=$(HOST_BIN) bash tests/host/test_single_binary.sh
 
 test-workflows:
