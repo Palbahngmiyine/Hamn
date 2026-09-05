@@ -4,7 +4,8 @@ use serde_json::{Value, json};
 
 #[derive(Clone, Debug, Default, Parser, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-#[command(name = "hamn", version = env!("HAMN_VERSION"), about = "VM, Docker and Kubernetes console")]
+#[command(name = "hamn", version = env!("HAMN_VERSION"), about = "VM, Docker and Kubernetes console",
+    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. system uninstall permanently removes all Hamn data.\nLegacy managed K3s data is automatically retired before VM/Docker mutations; Docker data is preserved.")]
 pub struct Request {
     #[arg(long)]
     pub uid: Option<String>,

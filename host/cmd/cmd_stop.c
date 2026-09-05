@@ -38,8 +38,10 @@ static int resolve_stop_profile(int argc, char **argv,
 static int cmd_stop_locked(const char *profile_name)
 {
     struct profile profile;
-    if (profile_load(&profile, profile_name) != 0)
-        die("cannot load profile");
+    if (profile_read_existing(&profile, profile_name) != 0) {
+        logerr("cannot load profile");
+        return 1;
+    }
     int mutation_fd = profile_mutation_lock(&profile);
     if (mutation_fd < 0) {
         logerr("another %s profile mutation is running", profile.name);

@@ -514,12 +514,14 @@ fi
 grep -A1 -F '<key>com.apple.security.virtualization</key>' \
     "$ROOT/host/entitlements.plist" | grep -Fq '<true/>' ||
     fail "required Virtualization entitlement is missing"
-"$ROOT/build/hamn" version >/dev/null ||
+"$ROOT/build/hamn" --version >/dev/null ||
     fail "the ad-hoc signed Hamn binary is not executable"
 help=$("$ROOT/build/hamn" --help)
 printf '%s\n' "$help" |
-    grep -Fq 'delete   soft-delete the VM; --data removes all profile data' ||
-    fail "CLI help does not describe the soft-delete and hard-delete boundary"
+    grep -Fq 'vm delete preserves the VM disk and Docker data.' ||
+    fail "help does not describe profile deletion semantics"
+printf '%s\n' "$help" | grep -Fq 'system uninstall permanently removes all Hamn data.' ||
+    fail "help does not describe uninstall data deletion"
 if printf '%s\n' "$help" | grep -Fq -- '--force'; then
     fail "CLI help advertises a removed force-delete option"
 fi
