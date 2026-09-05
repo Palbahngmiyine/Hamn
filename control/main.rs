@@ -3,6 +3,7 @@ use std::{ffi::CString, io::IsTerminal, os::unix::ffi::OsStrExt};
 mod capabilities;
 mod core;
 mod docker;
+mod exec_auth;
 mod headless;
 mod kubeconfig;
 mod kubernetes;

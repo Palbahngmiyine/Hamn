@@ -60,8 +60,10 @@ Docker 공개 포트의 포워딩은 기존 C 관찰기가 소유하며 외부 �
 
 Kubernetes 설정은 `--kubeconfig`, `KUBECONFIG`, `~/.kube/config` 순서로 읽습니다.
 context·namespace 선택은 파일에 쓰지 않습니다. 인증서·토큰·exec 인증 플러그인은
-kube-rs가 처리합니다. 인증 플러그인이 터미널 입력을 소비하거나 자동화 중 대기하지
-않도록 대화형 인증을 거부합니다.
+kube-rs를 사용합니다. Hamn은 클라이언트를 만들기 전에 exec 인증을 비동기로
+수행하며 대화형 인증은 거부합니다. Exec 인증은 터미널 입력 없이 출력 크기·작업 시간 제한을 적용합니다. 작업과 watch
+조회마다 인증을 다시 수행합니다. 구형 `auth-provider` 설정은 exec 인증으로
+교체해야 합니다.
 
 C VM 작업은 같은 실행 파일의 새 프로세스에서 수행합니다. `host/core/control.h`의
 ABI는 입력 문자열을 빌리고, 반환하는 UTF-8 JSON의 소유권은 호출자에게 넘깁니다.

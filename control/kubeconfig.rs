@@ -188,6 +188,7 @@ pub async fn client(request: &Request, mut config: Kubeconfig) -> Result<(Client
         .namespace
         .clone()
         .unwrap_or_else(|| config.default_namespace.clone());
+    crate::exec_auth::resolve(&mut config).await?;
     let client = Client::try_from(config).map_err(|_| {
         Failure::new(
             "authenticationFailed",
