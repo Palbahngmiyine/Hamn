@@ -96,6 +96,26 @@ with tempfile.TemporaryDirectory(prefix="hamn-kubernetes-") as directory:
         assert len(requests) == before + 2
         assert config_path.read_bytes() == original
         assert not (Path(directory) / ".hamn").exists()
+        legacy = {"apiVersion": "v1", "kind": "Config", "current-context": "hamn",
+                  "contexts": [{"name": "hamn", "context": {"cluster": "hamn", "user": "hamn"}}],
+                  "clusters": [{"name": "hamn", "cluster": {"server": "https://127.0.0.1:16443"}}]}
+        config_path.write_text(json.dumps(legacy))
+        legacy_bytes = config_path.read_bytes()
+        marker_dir = Path(directory) / '.hamn/.kube-contexts'
+        marker_dir.mkdir(parents=True)
+        marker = marker_dir / 'default'
+        marker.write_text('schema=1\ncontext=hamn\n')
+        for retired in [False, True]:
+            if retired:
+                marker_dir.rename(marker_dir.with_name('.retired-kube-contexts'))
+            assert run('k8s', 'contexts', 'list')[1]['data'][0]['available'] is False
+            rc, value = run('k8s', 'pods', 'list', '--context', 'hamn')
+            assert rc != 0 and value['error']['code'] == 'managedK3sRemoved', value
+            assert config_path.read_bytes() == legacy_bytes
+        # Reusing the context name for a real external endpoint remains allowed.
+        legacy['clusters'][0]['cluster']['server'] = 'https://external.example:6443'
+        config_path.write_text(json.dumps(legacy))
+        assert run('k8s', 'contexts', 'list')[1]['data'][0]['available'] is True
     finally:
         server.shutdown()
         server.server_close()

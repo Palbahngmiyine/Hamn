@@ -6,6 +6,59 @@ use kube::{
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
+fn retired(config: &Kubeconfig, name: &str) -> bool {
+    let profile = if name == "hamn" {
+        "default"
+    } else if let Some(value) = name.strip_prefix("hamn-") {
+        value
+    } else {
+        return false;
+    };
+    if profile.is_empty()
+        || profile.len() >= 64
+        || !profile
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_".contains(&c))
+    {
+        return false;
+    }
+    let Some(context) = config
+        .contexts
+        .iter()
+        .find(|entry| entry.name == name)
+        .and_then(|entry| entry.context.as_ref())
+    else {
+        return false;
+    };
+    if context.cluster != name || context.user.as_deref() != Some(name) {
+        return false;
+    }
+    let Some(server) = config
+        .clusters
+        .iter()
+        .find(|entry| entry.name == name)
+        .and_then(|entry| entry.cluster.as_ref())
+        .and_then(|cluster| cluster.server.as_deref())
+    else {
+        return false;
+    };
+    if !server
+        .strip_prefix("https://127.0.0.1:")
+        .and_then(|port| port.parse::<u16>().ok())
+        .is_some_and(|port| (16443..17467).contains(&port))
+    {
+        return false;
+    }
+    let Some(home) = std::env::var_os("HOME") else {
+        return false;
+    };
+    let root = PathBuf::from(home).join(".hamn");
+    // An unsafe marker still fails closed for this exact legacy local endpoint.
+    [".kube-contexts", ".retired-kube-contexts"]
+        .iter()
+        .any(|directory| std::fs::symlink_metadata(root.join(directory).join(profile)).is_ok())
+}
+
 pub fn load(request: &Request) -> Result<Kubeconfig> {
     let paths: Vec<PathBuf> = if let Some(path) = &request.kubeconfig {
         vec![path.into()]
@@ -76,7 +129,9 @@ pub fn contexts(config: &Kubeconfig) -> Value {
                 let context = entry.context.as_ref();
                 json!({"name":entry.name,"cluster":context.map(|v| &v.cluster),
             "namespace":context.and_then(|v| v.namespace.as_deref()).unwrap_or("default"),
-            "current":config.current_context.as_ref() == Some(&entry.name)})
+            "current":config.current_context.as_ref() == Some(&entry.name),
+            "available":!retired(config, &entry.name),
+            "reason":if retired(config, &entry.name) {Some("managedK3sRemoved")} else {None}})
             })
             .collect::<Vec<_>>()
     )
@@ -87,6 +142,12 @@ pub async fn client(request: &Request, mut config: Kubeconfig) -> Result<(Client
         .context
         .as_ref()
         .ok_or_else(|| Failure::new("invalidRequest", "--context required"))?;
+    if retired(&config, selected) {
+        return Err(Failure::new(
+            "managedK3sRemoved",
+            "this legacy Hamn context is unavailable; the source kubeconfig has been preserved",
+        ));
+    }
     let context = config
         .contexts
         .iter()
