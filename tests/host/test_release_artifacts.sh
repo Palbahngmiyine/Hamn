@@ -161,7 +161,7 @@ grep -Fq 'local artifacts are disabled' "$WORK/local.err"
 
 HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     bash "$WORK/candidate/install.sh" >"$WORK/install.out"
-"$HOME_DIR/.local/bin/hamn" version | grep -Fxq 'hamn 0.0.1'
+"$HOME_DIR/.local/bin/hamn" --version | grep -Fxq 'hamn 0.0.1'
 grep -Fq "\"sha256\":\"$GUEST_HASH\"" \
     "$HOME_DIR/.hamn/cache/guest-image.json"
 [ -f "$HOME_DIR/.hamn/cache/hamn-guest-$GUEST_HASH.img" ]

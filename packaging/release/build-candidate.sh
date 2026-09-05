@@ -85,7 +85,7 @@ cleanup() {
 trap cleanup EXIT
 
 make -C "$ROOT" host VERSION="${VERSION#v}" >/dev/null
-"$ROOT/build/hamn" version | grep -Fxq "hamn ${VERSION#v}" ||
+"$ROOT/build/hamn" --version | grep -Fxq "hamn ${VERSION#v}" ||
     fail "candidate binary version does not match tag"
 
 ARTIFACT_ROOT="$WORK/hamn-${VERSION}-darwin-arm64"
