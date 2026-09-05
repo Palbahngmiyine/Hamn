@@ -3,8 +3,13 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     assert_eq!(env::var("CARGO_CFG_TARGET_OS").unwrap(), "macos");
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    if let Some(sdk) = env::var_os("SDKROOT").filter(|value| !value.is_empty()) {
-        let sdk = PathBuf::from(sdk);
+    // Nix's rustup wrapper can replace SDKROOT after the CI shell selects it.
+    // The separately preserved selection must govern both native and Rust links.
+    let sdk = env::var_os("HAMN_SYSTEM_SDKROOT")
+        .filter(|value| !value.is_empty())
+        .or_else(|| env::var_os("SDKROOT").filter(|value| !value.is_empty()))
+        .map(PathBuf::from);
+    if let Some(sdk) = &sdk {
         assert!(sdk.is_absolute() && sdk.is_dir(), "SDKROOT must name an absolute SDK directory");
         // The native make invocation uses -isysroot, but that flag does not
         // propagate to Rust's final cc invocation (notably inside Nix shells).
@@ -13,13 +18,16 @@ fn main() {
     }
     let version = env::var("HAMN_VERSION").unwrap_or_else(|_| "0.0.1".into());
     let native = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("core");
-    let status = Command::new("make")
-        .current_dir(&root)
-        .args([
+    let mut make = Command::new("make");
+    make.current_dir(&root).args([
             format!("{}/libhamn_core.a", native.display()),
             format!("BUILD={}", native.display()),
             format!("VERSION={version}"),
-        ])
+        ]);
+    if let Some(sdk) = sdk {
+        make.arg(format!("SDKROOT={}", sdk.display()));
+    }
+    let status = make
         .status()
         .expect("make is required to build the C virtualization core");
     assert!(status.success(), "C core build failed");
@@ -52,7 +60,7 @@ fn main() {
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
-    for key in ["HAMN_VERSION", "SDKROOT", "MACOSX_DEPLOYMENT_TARGET"] {
+    for key in ["HAMN_VERSION", "SDKROOT", "HAMN_SYSTEM_SDKROOT", "MACOSX_DEPLOYMENT_TARGET"] {
         println!("cargo:rerun-if-env-changed={key}");
     }
 }
