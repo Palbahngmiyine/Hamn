@@ -38,7 +38,7 @@ static void profile_defaults(struct profile *profile)
     profile->mem_mib = 4096;
     profile->disk_gib = 60;
     profile->mount_home = 1;
-    snprintf(profile->kubernetes_version, sizeof(profile->kubernetes_version),
+    snprintf(profile->legacy_k3s_version, sizeof(profile->legacy_k3s_version),
              "v1.36.2+k3s1");
 }
 
@@ -409,7 +409,7 @@ static int parse_docker(struct yaml_parse *parse, yaml_event_t *event,
     }
 }
 
-static int parse_kubernetes(struct yaml_parse *parse, yaml_event_t *event,
+static int parse_legacy_kubernetes(struct yaml_parse *parse, yaml_event_t *event,
                             struct profile *profile)
 {
     profile->legacy_k3s = 1;
@@ -436,10 +436,10 @@ static int parse_kubernetes(struct yaml_parse *parse, yaml_event_t *event,
             return -1;
         int rc;
         if (strcmp(key, "enabled") == 0)
-            rc = yaml_bool(parse, &value, &profile->kubernetes_enabled);
+            rc = yaml_bool(parse, &value, &profile->legacy_k3s_enabled);
         else if (strcmp(key, "version") == 0)
-            rc = yaml_string(parse, &value, profile->kubernetes_version,
-                             sizeof(profile->kubernetes_version));
+            rc = yaml_string(parse, &value, profile->legacy_k3s_version,
+                             sizeof(profile->legacy_k3s_version));
         else {
             yaml_event_delete(&value);
             yaml_fail(parse, "unknown kubernetes key: %s", key);
@@ -653,7 +653,7 @@ static int parse_root(struct yaml_parse *parse, yaml_event_t *event,
         else if (strcmp(key, "docker") == 0)
             rc = parse_docker(parse, &value, profile);
         else if (strcmp(key, "kubernetes") == 0)
-            rc = parse_kubernetes(parse, &value, profile);
+            rc = parse_legacy_kubernetes(parse, &value, profile);
         else if (strcmp(key, "rosetta") == 0)
             rc = yaml_bool(parse, &value, &profile->rosetta);
         else if (strcmp(key, "nestedVirtualization") == 0)
@@ -907,8 +907,8 @@ static int profile_serialize(const struct profile *profile,
     /* Preserve migration evidence until guest cleanup and Docker readiness pass. */
     if (profile->legacy_k3s &&
         (text_append(text, "\nkubernetes:\n  enabled: %s\n  version: ",
-                    profile->kubernetes_enabled ? "true" : "false") != 0 ||
-        text_quote(text, profile->kubernetes_version) != 0))
+                    profile->legacy_k3s_enabled ? "true" : "false") != 0 ||
+        text_quote(text, profile->legacy_k3s_version) != 0))
         return -1;
     if (text_append(text,
                     "\nrosetta: %s\nnestedVirtualization: %s\nsshAgent: %s\n",

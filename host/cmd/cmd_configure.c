@@ -26,8 +26,6 @@ struct configure_options {
     int mount_inotify;
     int mount_inotify_set;
     const char *docker_daemon_json;
-    int kubernetes_enabled;
-    int kubernetes_enabled_set;
     int rosetta;
     int rosetta_set;
     int nested_virtualization;
@@ -140,9 +138,7 @@ static int print_json(const struct profile *profile)
         !cJSON_AddNumberToObject(root, "memoryMiB", profile->mem_mib) ||
         !cJSON_AddNumberToObject(root, "diskGiB", profile->disk_gib) ||
         !cJSON_AddBoolToObject(root, "mountHome", profile->mount_home) ||
-        !cJSON_AddBoolToObject(root, "mountInotify", profile->mount_inotify) ||
-        !cJSON_AddBoolToObject(root, "kubernetesEnabled",
-                               profile->kubernetes_enabled)) {
+        !cJSON_AddBoolToObject(root, "mountInotify", profile->mount_inotify)) {
         cJSON_Delete(root);
         return -1;
     }
@@ -178,7 +174,6 @@ static int parse_options(int argc, char **argv, struct configure_options *out)
         OPT_HOME_READ_ONLY,
         OPT_MOUNT_INOTIFY,
         OPT_DOCKER_DAEMON_JSON,
-        OPT_KUBERNETES,
         OPT_ROSETTA,
         OPT_NESTED_VIRTUALIZATION,
         OPT_SSH_AGENT,
@@ -197,7 +192,6 @@ static int parse_options(int argc, char **argv, struct configure_options *out)
         { "home-read-only", required_argument, NULL, OPT_HOME_READ_ONLY },
         { "mount-inotify", required_argument, NULL, OPT_MOUNT_INOTIFY },
         { "docker-daemon-json", required_argument, NULL, OPT_DOCKER_DAEMON_JSON },
-        { "kubernetes", required_argument, NULL, OPT_KUBERNETES },
         { "rosetta", required_argument, NULL, OPT_ROSETTA },
         { "nested-virtualization", required_argument, NULL, OPT_NESTED_VIRTUALIZATION },
         { "ssh-agent", required_argument, NULL, OPT_SSH_AGENT },
@@ -260,11 +254,6 @@ static int parse_options(int argc, char **argv, struct configure_options *out)
                 return -1;
             out->docker_daemon_json = optarg;
             break;
-        case OPT_KUBERNETES:
-            if (parse_bool_once(optarg, &out->kubernetes_enabled_set,
-                                &out->kubernetes_enabled) != 0)
-                return -1;
-            break;
         case OPT_ROSETTA:
             if (parse_bool_once(optarg, &out->rosetta_set, &out->rosetta) != 0)
                 return -1;
@@ -312,7 +301,7 @@ static int parse_options(int argc, char **argv, struct configure_options *out)
     return out->cpus_set || out->memory_set || out->disk_set ||
            out->mount_home_set || out->home_read_only_set ||
            out->mount_inotify_set ||
-           out->docker_daemon_json || out->kubernetes_enabled_set ||
+           out->docker_daemon_json ||
            out->rosetta_set ||
            out->nested_virtualization_set || out->ssh_agent_set ||
            out->mount_count || out->clear_mounts || out->hook_count ||
@@ -341,8 +330,6 @@ static int apply_options(struct profile *profile,
     if (options->docker_daemon_json)
         snprintf(profile->docker_daemon_json, sizeof(profile->docker_daemon_json),
                  "%s", options->docker_daemon_json);
-    if (options->kubernetes_enabled_set)
-        profile->kubernetes_enabled = options->kubernetes_enabled;
     if (options->rosetta_set)
         profile->rosetta = options->rosetta;
     if (options->nested_virtualization_set)

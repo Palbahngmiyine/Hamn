@@ -66,11 +66,10 @@ bash "$ROOT/guest/tests/test_configure_containerd.sh"
 bash "$ROOT/guest/tests/test_configure_docker.sh"
 bash "$ROOT/guest/tests/test_configure_rosetta.sh"
 bash "$ROOT/guest/tests/test_make_install_targets.sh"
-bash "$ROOT/guest/tests/test_k3s_configuration.sh"
+python3 "$ROOT/tests/host/test_k3s_retirement.py"
 bash "$ROOT/guest/tests/test_guest_deployment_transaction.sh"
 bash "$ROOT/guest/tests/test_verify_image_contract.sh"
 bash "$ROOT/guest/tests/test_guest_image_builder.sh"
-bash "$ROOT/guest/tests/test_install_k3s.sh"
 git -C "$ROOT" diff --check
 
 echo "PASS: CLI-only portable test gates"

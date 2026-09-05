@@ -16,7 +16,6 @@
 
 #include "cjson/cJSON.h"
 #include "core/log.h"
-#include "core/kubeconfig.h"
 #include "core/state.h"
 #include "fwd/docker_observer.h"
 #include "fwd/mount_inotify.h"

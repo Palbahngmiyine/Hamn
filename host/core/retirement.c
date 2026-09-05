@@ -82,7 +82,7 @@ int retirement_run(struct profile *profile, const char *ip)
         }
     }
     profile->legacy_k3s = 0;
-    profile->kubernetes_enabled = 0;
+    profile->legacy_k3s_enabled = 0;
     if (profile_save(profile) != 0) {
         profile->legacy_k3s = 1;
         logerr("cannot publish K3s retirement; retry will resume guest completion");

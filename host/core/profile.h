@@ -36,8 +36,8 @@ struct profile {
     int mount_inotify;
     char docker_daemon_json[4096];
     int legacy_k3s; /* Migration-only: old Kubernetes mapping was present. */
-    int kubernetes_enabled;
-    char kubernetes_version[64];
+    int legacy_k3s_enabled;
+    char legacy_k3s_version[64];
     int rosetta;
     int nested_virtualization;
     int ssh_agent;

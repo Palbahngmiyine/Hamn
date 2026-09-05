@@ -404,7 +404,7 @@ static char *build_status_json(const struct profile *profile)
         return NULL;
 
     cJSON *root = cJSON_CreateObject();
-    cJSON *vm = NULL, *kubernetes = NULL, *logs = NULL;
+    cJSON *vm = NULL, *logs = NULL;
     if (!root || !cJSON_AddNumberToObject(root, "schemaVersion", 1) ||
         !cJSON_AddStringToObject(root, "hamnVersion", HAMN_VERSION) ||
         !cJSON_AddStringToObject(root, "profile", profile->name) ||
@@ -414,9 +414,7 @@ static char *build_status_json(const struct profile *profile)
         !cJSON_AddNumberToObject(vm, "memoryMiB", profile->mem_mib) ||
         !cJSON_AddNumberToObject(vm, "diskGiB", profile->disk_gib) ||
         !cJSON_AddStringToObject(vm, "dockerContext", context) ||
-        !(kubernetes = cJSON_AddObjectToObject(root, "kubernetes")) ||
-        !cJSON_AddBoolToObject(kubernetes, "enabled",
-                               profile->kubernetes_enabled) ||
+        !cJSON_AddBoolToObject(root, "migrationPending", profile->legacy_k3s) ||
         !(logs = cJSON_AddObjectToObject(root, "logs")) ||
         !cJSON_AddNumberToObject(logs, "tailBytes",
                                 DIAGNOSTIC_LOG_TAIL_BYTES) ||
