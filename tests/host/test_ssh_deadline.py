@@ -44,4 +44,16 @@ for operation, budget in [('alive', 5), ('exit', 5), ('start', 1),
             thread.join(timeout=12)
             server.close()
         assert not errors and not thread.is_alive(), errors
+# A fresh-master attempt must share the total deadline, including authentication.
+with tempfile.TemporaryDirectory(prefix='hamn-ssh-start-', dir='/tmp') as directory:
+    fake = Path(directory) / 'ssh'
+    fake.write_text("#!/usr/bin/python3\nimport signal,sys\n"
+                    "if '-O' in sys.argv: sys.exit(255)\n"
+                    "while True: signal.pause()\n")
+    fake.chmod(0o755)
+    started = time.monotonic()
+    result = subprocess.run([binary, directory, 'start'], capture_output=True,
+        env=dict(os.environ, PATH=directory + ':/usr/bin:/bin'), timeout=5)
+    assert result.returncode == 0, result
+    assert 1 <= time.monotonic() - started < 5
 print('PASS: real SSH check/exit/start/forward/cancel/exec obey operation deadlines')
