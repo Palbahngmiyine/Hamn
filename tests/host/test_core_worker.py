@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import tarfile
+import signal
 
 binary = Path(os.environ.get("HAMN", "target/debug/hamn")).resolve()
 with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
@@ -84,6 +85,21 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
                             capture_output=True, text=True, env=env, timeout=10)
     assert result.returncode != 0
     assert json.loads(result.stdout)["error"]["code"] == "invalidRequest"
+    watch = subprocess.Popen([binary, '--headless', 'vm', 'list', '--watch'],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+    try:
+        snapshot = json.loads(watch.stdout.readline())
+        assert snapshot['type'] == 'snapshot' and snapshot['ok']
+        watch.send_signal(signal.SIGTERM)
+        output, error = watch.communicate(timeout=10)
+        events = [json.loads(line) for line in output.splitlines()]
+        assert watch.returncode != 0 and events[-1]['error']['code'] == 'cancelled', (events, error)
+        assert events[-1]['requestId'] == snapshot['requestId']
+        assert events[-1]['sequence'] > snapshot['sequence']
+    finally:
+        if watch.poll() is None:
+            watch.kill()
+        watch.wait(timeout=5)
     assert "Ok" in call("vm create", profile="deleted", yes=True)
     assert "Ok" in call("vm delete", profile="deleted", yes=True)
     assert all(row["name"] != "deleted" for row in call("vm list")["Ok"])

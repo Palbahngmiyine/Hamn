@@ -8,6 +8,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Release tags in the developer checkout must not affect deterministic tests.
+SOURCE=$ROOT
+ROOT=$WORK/repo
+mkdir -p "$ROOT/packaging/release"
+cp "$SOURCE/packaging/release/resolve-release-request.sh" "$ROOT/packaging/release/"
+for name in .release-please-manifest.json version.txt Makefile flake.nix; do
+    cp "$SOURCE/$name" "$ROOT/$name"
+done
+git -C "$ROOT" init -q
+git -C "$ROOT" add .
+git -C "$ROOT" -c user.name=Hamn-test -c user.email=test@example.invalid \
+    -c commit.gpgsign=false commit -qm fixture
 commit=$(git -C "$ROOT" rev-parse HEAD)
 output=$WORK/output
 : >"$output"
@@ -36,5 +48,17 @@ if GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/feature \
     exit 1
 fi
 grep -Fq 'release recovery must run from main' "$WORK/wrong-ref.err"
+
+git -C "$ROOT" tag v0.0.1
+: >"$output"
+if GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main \
+    GITHUB_SHA="$commit" GITHUB_RUN_ID=417123456 GITHUB_OUTPUT="$output" \
+    bash "$ROOT/packaging/release/resolve-release-request.sh" \
+    >"$WORK/tag.out" 2>"$WORK/tag.err"; then
+    echo "FAIL: release recovery accepted an already published version" >&2
+    exit 1
+fi
+grep -Fq 'stable tag already exists' "$WORK/tag.err"
+[ ! -s "$output" ]
 
 echo "PASS: unpublished release recovery is pinned to protected main"

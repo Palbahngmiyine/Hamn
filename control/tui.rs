@@ -20,7 +20,14 @@ struct Job {
     generation: u64,
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
-    sender: mpsc::Sender<(u64, Result<Value>)>,
+    sender: mpsc::Sender<(u64, bool, Result<Value>)>,
+    mutation: Option<Request>,
+}
+
+fn uncertain(request: &Request) -> Value {
+    serde_json::json!({"code":"outcomeUnknown", "operation":request.operation(),
+        "target":request.target(), "uid":request.uid, "kubeconfig":request.kubeconfig,
+        "message":"The operation may have changed the target. Inspect it before retrying; cancellation does not undo changes."})
 }
 
 impl Drop for Job {
@@ -29,15 +36,28 @@ impl Drop for Job {
         if let Some(task) = &self.task {
             task.abort();
         }
+        if let Some(request) = &self.mutation {
+            ratatui::restore();
+            eprintln!("{}", uncertain(request));
+        }
     }
 }
 
 impl Job {
-    fn start(&mut self, request: Request, state: &mut State) {
+    fn cancel(&mut self, state: &mut State) {
         self.cancel.cancel();
         if let Some(task) = self.task.take() {
             task.abort();
         }
+        if let Some(request) = self.mutation.take() {
+            state.uncertain.push(uncertain(&request));
+        }
+        self.generation += 1;
+        state.loading = false;
+    }
+    fn start(&mut self, request: Request, state: &mut State) {
+        self.cancel(state);
+        self.mutation = request.mutates().then(|| request.clone());
         self.cancel = CancellationToken::new();
         self.generation += 1;
         let generation = self.generation;
@@ -52,17 +72,17 @@ impl Job {
                 tokio::select! {
                     biased;
                     Some(event) = receiver.recv() => {
-                        if sender.send((generation, Ok(event))).await.is_err() { return; }
+                        if sender.send((generation, false, Ok(event))).await.is_err() { return; }
                     }
                     result = &mut execution => break result,
                 }
             };
             while let Ok(event) = receiver.try_recv() {
-                if sender.send((generation, Ok(event))).await.is_err() {
+                if sender.send((generation, false, Ok(event))).await.is_err() {
                     return;
                 }
             }
-            let _ = sender.send((generation, result)).await;
+            let _ = sender.send((generation, true, result)).await;
         }));
     }
     fn dispatch(&mut self, request: Result<Request>, state: &mut State) {
@@ -97,6 +117,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         cancel: CancellationToken::new(),
         task: None,
         sender,
+        mutation: None,
     };
     job.start(state.request.clone(), &mut state);
     let mut events = EventStream::new();
@@ -116,8 +137,17 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 unsafe { libc::raise(libc::SIGSTOP); }
                 terminal = ratatui::init();
             }
-            Some((generation, result)) = responses.recv() => {
-                if generation == job.generation { state.accept(result); }
+            Some((generation, finished, result)) = responses.recv() => {
+                if generation == job.generation {
+                    if finished {
+                        if let Some(request) = job.mutation.take() {
+                            if result.as_ref().is_err_and(|error| error.code == "outcomeUnknown") {
+                                state.uncertain.push(uncertain(&request));
+                            }
+                        }
+                    }
+                    state.accept(result);
+                }
             }
             _ = refresh.tick() => {
                 if !state.loading && state.pending.is_none() && state.input.is_none() && state.detail.is_none() {
@@ -166,7 +196,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     KeyCode::Char('q') => break,
                     KeyCode::Char(':') => state.input = Some((':', String::new())),
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
-                    KeyCode::Esc => { state.detail = None; state.filter.clear(); job.cancel.cancel(); job.generation += 1; state.loading = false; },
+                    KeyCode::Esc => { state.detail = None; state.filter.clear(); job.cancel(&mut state); },
                     KeyCode::Down | KeyCode::Char('j') => state.move_by(1),
                     KeyCode::Up | KeyCode::Char('k') => state.move_by(-1),
                     KeyCode::Enter => match state.enter() {
@@ -174,6 +204,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         Err(error) => state.message = error.message,
                         _ => {}
                     },
+                    KeyCode::Char('!') => state.detail = Some(serde_json::to_string_pretty(&state.uncertain).unwrap()),
                     KeyCode::Char('?') => state.detail = Some("Commands: :vm :containers :images :volumes :networks :contexts :ns :pods :deployments :sts :ds :services :nodes :events :jobs :cronjobs :ingresses :pvcs\n\nUse a full headless operation after ':' for configuration and scaling.\nExample: :vm create --profile work --cpu 2 --memory 4\nExample: :k8s deployments scale api --replicas 3 --namespace default\n\nEnter selects context/namespace/profile. Mutations require y confirmation. Esc returns to the list. Ctrl-Z suspends; q exits without stopping VMs.".into()),
                     KeyCode::Char(c) if "strdlg".contains(c) => {
                         let action = match c { 's'=>"start", 't'=>"stop", 'r'=>"restart", 'd'=>"delete", 'l'=>"logs", _=>"stats" };
@@ -185,10 +216,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
             }
         }
     }
-    job.cancel.cancel();
-    if let Some(task) = job.task.take() {
-        task.abort();
-        let _ = task.await;
+    job.cancel(&mut state);
+    drop(_restore);
+    for outcome in &state.uncertain {
+        eprintln!("{outcome}");
     }
     Ok(())
 }
@@ -196,6 +227,37 @@ pub async fn run(request: Request) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_mutation_retains_its_target_across_navigation_and_refresh() {
+        let request = Request {
+            words: vec!["k8s".into(), "pods".into(), "delete".into()],
+            context: Some("old-context".into()),
+            namespace: Some("old-namespace".into()),
+            name: Some("pod".into()),
+            uid: Some("old-uid".into()),
+            ..Default::default()
+        };
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut job = Job {
+            generation: 7,
+            cancel: CancellationToken::new(),
+            task: None,
+            sender,
+            mutation: Some(request),
+        };
+        let mut state = State::new(Request::default());
+        job.cancel(&mut state);
+        assert!(job.cancel.is_cancelled());
+        assert_eq!(job.generation, 8);
+        state.view("k8s pods list --context new-context").unwrap();
+        state.accept(Ok(serde_json::json!([])));
+        assert_eq!(state.uncertain[0]["target"]["context"], "old-context");
+        assert_eq!(state.uncertain[0]["uid"], "old-uid");
+        assert_eq!(state.uncertain[0]["code"], "outcomeUnknown");
+        job.cancel(&mut state);
+        assert_eq!(state.uncertain.len(), 1); // read cancellation cannot add a mutation
+    }
+
     #[test]
     #[ignore = "executed in a PTY by tests/host/test_tui.py; intentionally panics"]
     fn panic_restores_terminal_fixture() {

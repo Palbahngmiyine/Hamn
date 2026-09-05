@@ -57,6 +57,7 @@ pub struct State {
     pub loading: bool,
     pub scroll: u16,
     pub stale: bool,
+    pub uncertain: Vec<Value>,
 }
 
 impl State {
@@ -76,6 +77,7 @@ impl State {
             loading: false,
             scroll: 0,
             stale: false,
+            uncertain: Vec::new(),
         }
     }
     pub fn rows(&self) -> Vec<&Value> {
@@ -379,6 +381,14 @@ pub fn draw(frame: &mut Frame, state: &State) {
         state.request.context.as_deref().unwrap_or("-"),
         state.request.namespace.as_deref().unwrap_or("default")
     );
+    let header = if state.uncertain.is_empty() {
+        header
+    } else {
+        format!(
+            "{header}\noutcomeUnknown: {} operation(s). ! shows targets; inspect before retry.",
+            state.uncertain.len()
+        )
+    };
     let header = wrap_lines(&header, frame.area().width.saturating_sub(2));
     let header_height = header.len().saturating_add(2).min(u16::MAX as usize) as u16;
     if frame.area().width < 20 || header_height.saturating_add(6) > frame.area().height {
