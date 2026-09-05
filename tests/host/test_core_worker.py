@@ -42,6 +42,22 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
     assert "Err" in call("vm diagnostics", profile="test", path=str(archive), yes=True)
     assert "Err" in call("system update", yes=True)
     assert "Err" in call("system uninstall")
+    # Legacy context records must not cause either external CLI to run at stop.
+    fake_bin = Path(directory) / "bin"
+    fake_bin.mkdir()
+    invoked = Path(directory) / "external-cli-invoked"
+    for tool in ("docker", "kubectl"):
+        command = fake_bin / tool
+        command.write_text(f"#!/bin/sh\n/usr/bin/touch '{invoked}'\nexit 99\n")
+        command.chmod(0o700)
+    env["PATH"] = str(fake_bin) + ":/usr/bin:/bin"
+    state_file = Path(directory) / ".hamn/test/state.json"
+    state_file.write_text(json.dumps({"state": "stopped", "prev_docker_context": "outside",
+                                      "prev_kube_context": "outside"}))
+    assert "Ok" in call("vm stop", profile="test", yes=True)
+    assert not invoked.exists()
+    assert "prev_docker_context" not in json.loads(state_file.read_text())
+    assert "prev_kube_context" not in json.loads(state_file.read_text())
     result = subprocess.run([binary, "--headless", "vm", "status", "--profile", "test"],
                             capture_output=True, text=True, env=env, timeout=10, check=True)
     value = json.loads(result.stdout)

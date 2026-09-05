@@ -13,8 +13,6 @@
 #include "core/state.h"
 
 /* Test-only seam from host/cmd/cmd_start.c. */
-int hamn_test_start_retry_running_docker_context(
-    const struct profile *profile, struct vm_state *state);
 int hamn_test_start_ensure_signed_guest_image(char *image, size_t capacity,
                                               int *updated);
 int cmd_start(int argc, char **argv);
@@ -92,17 +90,6 @@ static int require_text(const char *path, const char *expected)
     return 0;
 }
 
-static int require_state(const struct profile *profile, const char *previous)
-{
-    struct vm_state loaded;
-    if (state_load(profile, &loaded) != 0 || strcmp(loaded.state, "running") != 0 ||
-        strcmp(loaded.prev_docker_context, previous) != 0) {
-        fprintf(stderr, "Docker context state was not persisted as expected\n");
-        return -1;
-    }
-    return 0;
-}
-
 static void cleanup_path(const char *path)
 {
     (void)unlink(path);
@@ -159,7 +146,6 @@ int main(void)
     char bootstrap_home[PATH_MAX], bootstrap_cache[PATH_MAX], reexec_home[PATH_MAX];
     char image[PATH_MAX];
     char profile_dir[PATH_MAX], path[PATH_MAX];
-    char expected_endpoint[PATH_MAX + 8], expected_endpoint_line[PATH_MAX + 9];
     int rc = 1;
 
     if (!mkdtemp(root) ||
@@ -268,90 +254,6 @@ int main(void)
         goto out;
     }
 
-    struct profile profile;
-    memset(&profile, 0, sizeof(profile));
-    snprintf(profile.name, sizeof(profile.name), "default");
-    snprintf(profile.dir, sizeof(profile.dir), "%s", profile_dir);
-    struct vm_state state;
-    memset(&state, 0, sizeof(state));
-    snprintf(state.state, sizeof(state.state), "running");
-    snprintf(state.ip, sizeof(state.ip), "192.0.2.10");
-
-    /* The running VM is not rolled back while Docker CLI is absent. When the
-     * CLI appears later, the next start retry creates and activates context. */
-    if (hamn_test_start_retry_running_docker_context(&profile, &state) != 0 ||
-        join_path(path, sizeof(path), docker_state, "endpoint") != 0 ||
-        access(path, F_OK) == 0 || setenv("PATH", bin, 1) != 0) {
-        fprintf(stderr, "missing Docker CLI did not remain retryable\n");
-        goto out;
-    }
-
-    /* The first create attempt can fail after a VM is already healthy. It
-     * must leave that VM's durable state alone and succeed on a later retry. */
-    if (state_save(&profile, &state) != 0 ||
-        join_path(path, sizeof(path), docker_state, "create-fail") != 0 ||
-        write_text(path, "fail\n", 0600) != 0 ||
-        join_path(path, sizeof(path), profile_dir, "vmrun.pid") != 0 ||
-        write_text(path, "still-running\n", 0600) != 0 ||
-        hamn_test_start_retry_running_docker_context(&profile, &state) == 0 ||
-        join_path(path, sizeof(path), docker_state, "current") != 0 ||
-        require_text(path, "foreign\n") != 0 || require_state(&profile, "") != 0 ||
-        join_path(path, sizeof(path), profile_dir, "vmrun.pid") != 0 ||
-        require_text(path, "still-running\n") != 0 ||
-        join_path(path, sizeof(path), docker_state, "create-fail") != 0) {
-        fprintf(stderr, "failed initial context creation changed running VM ownership\n");
-        goto out;
-    }
-    cleanup_path(path);
-
-    if (snprintf(expected_endpoint, sizeof(expected_endpoint), "unix://%s/docker.sock",
-                 profile_dir) >= (int)sizeof(expected_endpoint) ||
-        snprintf(expected_endpoint_line, sizeof(expected_endpoint_line), "%s\n",
-                 expected_endpoint) >= (int)sizeof(expected_endpoint_line) ||
-        hamn_test_start_retry_running_docker_context(&profile, &state) != 0 ||
-        join_path(path, sizeof(path), docker_state, "current") != 0 ||
-        require_text(path, "hamn\n") != 0 ||
-        join_path(path, sizeof(path), docker_state, "endpoint") != 0 ||
-        require_text(path, expected_endpoint_line) != 0 ||
-        require_state(&profile, "foreign") != 0) {
-        fprintf(stderr, "initial Docker context activation failed\n");
-        goto out;
-    }
-
-    /* A user-selected foreign context is reactivated to this running profile. */
-    if (join_path(path, sizeof(path), docker_state, "current") != 0 ||
-        write_text(path, "outside\n", 0600) != 0 ||
-        hamn_test_start_retry_running_docker_context(&profile, &state) != 0 ||
-        require_text(path, "hamn\n") != 0 || require_state(&profile, "outside") != 0) {
-        fprintf(stderr, "running profile did not reactivate its Docker context\n");
-        goto out;
-    }
-
-    /* A context-use failure returns an error, preserves running VM state, and
-     * can be retried after the host Docker CLI recovers. */
-    if (write_text(path, "foreign\n", 0600) != 0 ||
-        join_path(path, sizeof(path), docker_state, "use-fail") != 0 ||
-        write_text(path, "fail\n", 0600) != 0 ||
-        join_path(path, sizeof(path), profile_dir, "vmrun.pid") != 0 ||
-        write_text(path, "still-running\n", 0600) != 0 ||
-        hamn_test_start_retry_running_docker_context(&profile, &state) == 0 ||
-        join_path(path, sizeof(path), docker_state, "current") != 0 ||
-        require_text(path, "foreign\n") != 0 || require_state(&profile, "") != 0 ||
-        join_path(path, sizeof(path), profile_dir, "vmrun.pid") != 0 ||
-        require_text(path, "still-running\n") != 0) {
-        fprintf(stderr, "failed context retry changed running VM ownership\n");
-        goto out;
-    }
-    if (join_path(path, sizeof(path), docker_state, "use-fail") != 0) {
-        goto out;
-    }
-    cleanup_path(path);
-    if (hamn_test_start_retry_running_docker_context(&profile, &state) != 0 ||
-        join_path(path, sizeof(path), docker_state, "current") != 0 ||
-        require_text(path, "hamn\n") != 0 || require_state(&profile, "foreign") != 0) {
-        fprintf(stderr, "Docker context did not recover on retry\n");
-        goto out;
-    }
     rc = 0;
 
 out:
@@ -405,6 +307,6 @@ out:
     (void)rmdir(profile_dir);
     (void)rmdir(root);
     if (rc == 0)
-        puts("PASS: running Docker context is retried without VM rollback");
+        puts("PASS: signed image bootstrap and re-exec");
     return rc;
 }

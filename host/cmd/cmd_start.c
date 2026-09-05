@@ -135,92 +135,6 @@ static int rollback_incomplete_start(const struct profile *p)
     return 0;
 }
 
-/* 정식 Docker CLI가 있으면 이 프로필만 소유한 context를 전환한다. */
-static int setup_docker_context(const struct profile *p,
-                                struct vm_state *st, const char *sock)
-{
-    char previous[128] = "";
-    const char *show[] = { "docker", "context", "show", NULL };
-    if (proc_run_capture(show, previous, sizeof(previous)) != 0) {
-        logmsg("note: Docker CLI was not found; install Docker CLI separately "
-               "or use 'hamn env' with an SDK");
-        return 0;
-    }
-    char context[128], endpoint[1100], hostarg[1100];
-    if (profile_docker_context_name(p, context, sizeof(context)) != 0) {
-        logerr("cannot resolve Docker context for profile %s", p->name);
-        return -1;
-    }
-    snprintf(endpoint, sizeof(endpoint), "unix://%s", sock);
-    snprintf(hostarg, sizeof(hostarg), "host=%s", endpoint);
-
-    char output[512] = "";
-    const char *inspect[] = {
-        "docker", "context", "inspect", context, "--format",
-        "{{.Endpoints.docker.Host}}", NULL
-    };
-    if (proc_run_capture(inspect, output, sizeof(output)) != 0) {
-        output[0] = '\0';
-        const char *create[] = { "docker", "context", "create", context,
-                                 "--docker", hostarg, NULL };
-        if (proc_run_capture(create, output, sizeof(output)) != 0) {
-            logerr("docker context '%s' create failed: %s", context,
-                   output[0] ? output : "no output");
-            return -1;
-        }
-    } else if (strcmp(output, endpoint) != 0) {
-        logerr("Docker context '%s' belongs to another endpoint (%s); "
-               "Hamn will not overwrite it", context, output);
-        return -1;
-    }
-
-    if (strcmp(previous, context) != 0) {
-        snprintf(st->prev_docker_context, sizeof(st->prev_docker_context),
-                 "%s", previous);
-        if (state_save(p, st) != 0) {
-            logerr("cannot persist previous Docker context");
-            st->prev_docker_context[0] = '\0';
-            return -1;
-        }
-    }
-    output[0] = '\0';
-    const char *use[] = { "docker", "context", "use", context, NULL };
-    if (proc_run_capture(use, output, sizeof(output)) != 0) {
-        logerr("docker context '%s' use failed: %s", context,
-               output[0] ? output : "no output");
-        if (strcmp(previous, context) != 0) {
-            st->prev_docker_context[0] = '\0';
-            if (state_save(p, st) != 0)
-                logerr("cannot clear the failed Docker context activation");
-        }
-        return -1;
-    }
-    logmsg("docker context '%s' is now active", context);
-    return 0;
-}
-
-/* 실행 중인 VM도 Docker CLI/context가 뒤늦게 바뀔 수 있으므로, profile
- * socket을 기준으로 context 소유권과 활성화를 다시 확인한다. */
-static int retry_running_docker_context(const struct profile *p,
-                                        struct vm_state *st)
-{
-    char socket_path[1024];
-    if (!profile_path(p, "docker.sock", socket_path, sizeof(socket_path))) {
-        logerr("cannot resolve profile Docker socket");
-        return -1;
-    }
-    return setup_docker_context(p, st, socket_path);
-}
-
-#ifdef HAMN_TEST
-/* Test-only seam for the already-running start branch. */
-int hamn_test_start_retry_running_docker_context(const struct profile *p,
-                                                 struct vm_state *st)
-{
-    return retry_running_docker_context(p, st);
-}
-#endif
-
 static int wait_vmrun_running(const struct profile *p, const char *ctl,
                               int timeout_sec)
 {
@@ -569,13 +483,6 @@ static int cmd_start_locked(const struct start_options *options,
                 goto out;
             }
             if (running_start_ready(&running_profile)) {
-                /* Do not stop a healthy VM merely because a host Docker CLI
-                 * context must be retried. setup failure returns nonzero with
-                 * the VM and its forwarding state intact. */
-                if (retry_running_docker_context(&p, &running_state) != 0) {
-                    logerr("cannot activate Docker context for the already-running VM");
-                    goto out;
-                }
                 if (docker_observer_start(&p, &running_state) != 0) {
                     logerr("cannot start the Docker port observer");
                     goto out;
@@ -886,11 +793,9 @@ static int cmd_start_locked(const struct start_options *options,
     profile_path(&p, "agent.sock", agent_sock, sizeof(agent_sock));
     logmsg("agent is up: %s", agent_sock);
 
-    /* 9. Docker socket context */
+    /* 9. Public Docker API socket; external tools select their own context. */
     char dsock[1024];
     profile_path(&p, "docker.sock", dsock, sizeof(dsock));
-    if (setup_docker_context(&p, &st, dsock) != 0)
-        goto out;
     logmsg("Docker API is up: %s", dsock);
     if (docker_observer_start(&p, &st) != 0) {
         logerr("cannot start the Docker port observer");
