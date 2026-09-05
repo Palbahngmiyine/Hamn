@@ -3,7 +3,7 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     assert_eq!(env::var("CARGO_CFG_TARGET_OS").unwrap(), "macos");
     let root = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    // Nix's rustup wrapper can replace SDKROOT after the CI shell selects it.
+    // Nix toolchain wrappers can replace SDKROOT after the CI shell selects it.
     // The separately preserved selection must govern both native and Rust links.
     let sdk = env::var_os("HAMN_SYSTEM_SDKROOT")
         .filter(|value| !value.is_empty())
