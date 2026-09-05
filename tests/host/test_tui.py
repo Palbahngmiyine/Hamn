@@ -32,7 +32,7 @@ def exercise(exit_mode):
                 remaining = deadline - time.monotonic()
                 assert remaining > 0, (exit_mode, bytes(output))
                 ready, _, _ = select.select([master], [], [], remaining)
-                assert ready, "TUI output deadline exceeded"
+                assert ready, (exit_mode, "TUI output deadline exceeded", bytes(output[-5000:]))
                 output.extend(os.read(master, 65536))
 
         try:
@@ -54,7 +54,11 @@ def exercise(exit_mode):
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 30, 0, 0))
                 os.kill(process.pid, signal.SIGWINCH)
                 until(b"disabled.")
-                os.write(master, b"yn:contexts\r")
+                os.write(master, b"yn")
+                until(b"selected")  # cancellation has returned to the small-screen warning
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+                os.kill(process.pid, signal.SIGWINCH)
+                os.write(master, b":contexts\r")
                 until(b"contexts")
                 assert not (Path(directory) / ".hamn").exists(), "hidden confirmation executed a mutation"
                 os.write(master, b"q")

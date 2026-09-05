@@ -8,6 +8,43 @@ use ratatui::{
 };
 use serde_json::Value;
 
+fn split_command(command: &str) -> Result<Vec<String>> {
+    let (mut words, mut word, mut quote, mut escaped, mut started) =
+        (Vec::new(), String::new(), None, false, false);
+    for c in command.chars() {
+        if escaped {
+            word.push(c);
+            escaped = false;
+        } else if c == '\\' && quote != Some('\'') {
+            escaped = true;
+            started = true;
+        } else if quote == Some(c) {
+            quote = None;
+        } else if quote.is_none() && matches!(c, '\'' | '"') {
+            quote = Some(c);
+            started = true;
+        } else if quote.is_none() && c.is_whitespace() {
+            if started {
+                words.push(std::mem::take(&mut word));
+                started = false;
+            }
+        } else {
+            word.push(c);
+            started = true;
+        }
+    }
+    if escaped || quote.is_some() {
+        return Err(Failure::new(
+            "invalidRequest",
+            "unfinished quote or escape in command",
+        ));
+    }
+    if started {
+        words.push(word);
+    }
+    Ok(words)
+}
+
 pub struct State {
     pub request: Request,
     pub data: Value,
@@ -92,9 +129,10 @@ impl State {
             "pvcs" => "k8s pvcs list",
             _ => command,
         };
-        let mut request =
-            Request::try_parse_from(std::iter::once("hamn").chain(words.split_whitespace()))
-                .map_err(|e| Failure::new("invalidRequest", e))?;
+        let mut request = Request::try_parse_from(
+            std::iter::once("hamn".to_owned()).chain(split_command(words)?),
+        )
+        .map_err(|e| Failure::new("invalidRequest", e))?;
         request.normalize()?;
         request.profile = request.profile.or_else(|| self.request.profile.clone());
         request.context = request.context.or_else(|| self.request.context.clone());
@@ -266,7 +304,7 @@ fn confirmation(request: &Request, width: u16) -> Vec<String> {
         ("Manifest", &request.manifest),
     ] {
         if let Some(value) = value {
-            text.push_str(&format!("{key}: {value}\n"));
+            text.push_str(&format!("{key}: {value:?}\n"));
         }
     }
     for (key, value) in [
@@ -291,6 +329,10 @@ fn confirmation(request: &Request, width: u16) -> Vec<String> {
     {
         text.push_str("\nPending legacy K3s retirement permanently deletes its cluster data and local volumes before this operation. Docker data is preserved.");
     }
+    wrap_lines(&text, width)
+}
+
+fn wrap_lines(text: &str, width: u16) -> Vec<String> {
     let mut lines = Vec::new();
     for line in clean(&text).lines() {
         let mut current = String::new();
@@ -331,21 +373,31 @@ pub fn draw(frame: &mut Frame, state: &State) {
         );
         return;
     }
+    let header = format!(
+        "Hamn | profile: {:?}\ncontext: {:?}\nnamespace: {:?}",
+        state.request.profile.as_deref().unwrap_or("-"),
+        state.request.context.as_deref().unwrap_or("-"),
+        state.request.namespace.as_deref().unwrap_or("default")
+    );
+    let header = wrap_lines(&header, frame.area().width.saturating_sub(2));
+    let header_height = header.len().saturating_add(2).min(u16::MAX as usize) as u16;
+    if frame.area().width < 20 || header_height.saturating_add(6) > frame.area().height {
+        frame.render_widget(
+            Paragraph::new("Hamn: resize terminal to show the selected target. q exits.")
+                .wrap(Wrap { trim: false }),
+            frame.area(),
+        );
+        return;
+    }
     let areas = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(header_height),
         Constraint::Min(3),
         Constraint::Length(3),
         Constraint::Length(1),
     ])
     .split(frame.area());
-    let header = format!(
-        "Hamn  |  profile: {}  |  context: {}  |  namespace: {}",
-        state.request.profile.as_deref().unwrap_or("-"),
-        state.request.context.as_deref().unwrap_or("-"),
-        state.request.namespace.as_deref().unwrap_or("default")
-    );
     frame.render_widget(
-        Paragraph::new(clean(&header)).block(Block::bordered()),
+        Paragraph::new(header.join("\n")).block(Block::bordered()),
         areas[0],
     );
     let title = format!(
@@ -393,6 +445,21 @@ pub fn draw(frame: &mut Frame, state: &State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn command_paths_support_quotes_without_shell_expansion() {
+        let mut state = State::new(Request::default());
+        let request = state
+            .view("vm diagnostics --path '/tmp/한글 report.tar'")
+            .unwrap();
+        assert_eq!(request.path.as_deref(), Some("/tmp/한글 report.tar"));
+        assert_eq!(
+            split_command(r#"one "two three" 'four\\five' $HOME $(command)"#).unwrap(),
+            ["one", "two three", "four\\\\five", "$HOME", "$(command)"]
+        );
+        assert!(split_command("'unfinished").is_err());
+        assert!(split_command("unfinished\\").is_err());
+        assert_eq!(split_command("''").unwrap(), [""]);
+    }
     #[test]
     fn confirmation_requires_complete_target_and_impact_to_fit() {
         let mut request = Request::try_parse_from([

@@ -76,9 +76,15 @@ impl Job {
 
 pub async fn run(request: Request) -> std::io::Result<()> {
     let mut state = State::new(request);
-    if state.request.context.is_none() {
-        if let Ok(config) = crate::kubeconfig::load(&state.request) {
-            state.request.context = config.current_context;
+    if let Ok(config) = crate::kubeconfig::load(&state.request) {
+        state.request.context = state.request.context.or(config.current_context);
+        if state.request.namespace.is_none() {
+            state.request.namespace = config
+                .contexts
+                .iter()
+                .find(|entry| Some(&entry.name) == state.request.context.as_ref())
+                .and_then(|entry| entry.context.as_ref())
+                .and_then(|context| context.namespace.clone());
         }
     }
     let mut terminal = ratatui::init();
