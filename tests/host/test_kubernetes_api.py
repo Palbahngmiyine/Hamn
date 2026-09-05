@@ -10,6 +10,7 @@ import threading
 
 binary = Path(os.environ.get("HAMN", "target/debug/hamn")).resolve()
 requests = []
+mode = {"uid": True, "delete": 200, "list": "normal"}
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -28,15 +29,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
         requests.append(("GET", self.path, None))
         obj = {"apiVersion": "v1", "kind": "Pod", "metadata": {
             "name": "sample", "namespace": "default", "uid": "pod-original", "resourceVersion": "10"}}
+        if not mode["uid"]:
+            del obj["metadata"]["uid"]
         if "?" in self.path:
-            self.respond({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": [obj]})
+            metadata = {"continue": "same"} if mode["list"] == "repeat" else {}
+            self.respond({"apiVersion": "v1", "kind": "PodList", "metadata": metadata,
+                          "items": [obj] if mode["list"] == "normal" else []})
         else:
             self.respond(obj)
 
     def do_DELETE(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         requests.append(("DELETE", self.path, body))
-        self.respond({"apiVersion": "v1", "kind": "Status", "status": "Success", "code": 200})
+        self.respond({"apiVersion": "v1", "kind": "Status", "status": "Success" if mode["delete"] == 200 else "Failure",
+                      "message": "fixture", "reason": "Fixture", "code": mode["delete"]}, mode["delete"])
 
 
 with tempfile.TemporaryDirectory(prefix="hamn-kubernetes-") as directory:
@@ -68,6 +74,26 @@ with tempfile.TemporaryDirectory(prefix="hamn-kubernetes-") as directory:
         rc, value = run("k8s", "pods", "delete", "sample", "--context", "dev", "--namespace", "default", "--uid", "pod-original", "--yes")
         assert rc == 0, value
         assert requests[-1][2]["preconditions"] == {"uid": "pod-original", "resourceVersion": "10"}
+        mode["delete"] = 503
+        before = len(requests)
+        rc, value = run("k8s", "pods", "delete", "sample", "--context", "dev", "--namespace", "default", "--yes")
+        assert rc != 0 and value["error"]["code"] == "outcomeUnknown", value
+        assert len(requests) == before + 2  # one identity GET and exactly one DELETE
+        mode["delete"] = 403
+        rc, value = run("k8s", "pods", "delete", "sample", "--context", "dev", "--namespace", "default", "--yes")
+        assert rc != 0 and value["error"]["code"] == "permissionDenied", value
+        mode["uid"] = False
+        before = len(requests)
+        rc, value = run("k8s", "pods", "delete", "sample", "--context", "dev", "--namespace", "default", "--yes")
+        assert rc != 0 and value["error"]["code"] == "invalidResponse", value
+        assert all(method != "DELETE" for method, _, _ in requests[before:])
+        mode["list"] = "empty"
+        assert run("k8s", "pods", "list", "--context", "dev")[1]["data"] == []
+        mode["list"] = "repeat"
+        before = len(requests)
+        rc, value = run("k8s", "pods", "list", "--context", "dev")
+        assert rc != 0 and value["error"]["code"] == "invalidResponse", value
+        assert len(requests) == before + 2
         assert config_path.read_bytes() == original
         assert not (Path(directory) / ".hamn").exists()
     finally:

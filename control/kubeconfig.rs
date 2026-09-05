@@ -123,6 +123,8 @@ pub async fn client(request: &Request, mut config: Kubeconfig) -> Result<(Client
         })?;
     config.connect_timeout = Some(std::time::Duration::from_secs(10));
     config.read_timeout = Some(std::time::Duration::from_secs(30));
+    // A transient response must not silently replay a user-approved mutation.
+    config.default_retry = false;
     let namespace = request
         .namespace
         .clone()

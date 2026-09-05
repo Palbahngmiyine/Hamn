@@ -11,7 +11,7 @@ import threading
 
 binary = Path(os.environ.get("HAMN", "target/debug/hamn")).resolve()
 requests = []
-mode = {"status": 200}
+mode = {"status": 200, "post": 204}
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -30,7 +30,7 @@ class Handler(socketserver.StreamRequestHandler):
         elif path.endswith("/json"):
             data = {"Id": "abc123", "Name": "/sample", "State": {"Running": True}}
         else:
-            data, status = {}, 204
+            data, status = {}, mode["post"] if method == "POST" else 204
         if status != 200 and status != 204:
             data = {"message": "fixture denied"}
         body = b"" if status == 204 else json.dumps(data).encode()
@@ -71,6 +71,13 @@ with tempfile.TemporaryDirectory(prefix="hamn-docker-") as directory:
             assert len(events) == 51, events
             assert events[0]["data"]["text"] == "한글 line 0\n"
             assert events[-1]["type"] == "result" and events[-1]["sequence"] == 50
+            mode["post"] = 503
+            rc, result = run("docker", "containers", "start", "sample", "--profile", "test", "--yes")
+            assert rc != 0 and result["error"]["code"] == "outcomeUnknown", result
+            mode["post"] = 403
+            rc, result = run("docker", "containers", "start", "sample", "--profile", "test", "--yes")
+            assert rc != 0 and result["error"]["code"] == "permissionDenied", result
+            mode["post"] = 204
             mode["status"] = 403
             rc, result = run("docker", "containers", "list", "--profile", "test")
             assert rc != 0 and result["error"]["code"] == "permissionDenied", result

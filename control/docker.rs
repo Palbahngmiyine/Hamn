@@ -22,6 +22,27 @@ fn failure(error: bollard::errors::Error) -> Failure {
     Failure::new(code, error)
 }
 
+fn mutation_failure(error: bollard::errors::Error) -> Failure {
+    if matches!(
+        &error,
+        bollard::errors::Error::DockerResponseServerError {
+            status_code: 400..=499,
+            ..
+        }
+    ) {
+        failure(error)
+    } else {
+        Failure::new("outcomeUnknown", error)
+    }
+}
+
+fn confirmation_failure(error: bollard::errors::Error) -> Failure {
+    Failure::new(
+        "outcomeUnknown",
+        format!("mutation accepted; final state could not be read: {error}"),
+    )
+}
+
 fn value<T: serde::Serialize>(data: T) -> Result<Value> {
     serde_json::to_value(data).map_err(|e| Failure::new("invalidResponse", e))
 }
@@ -143,8 +164,16 @@ pub async fn execute(
             value(stats)
         }
         Some("start") => {
-            docker.start_container(id, None).await.map_err(failure)?;
-            value(docker.inspect_container(id, None).await.map_err(failure)?)
+            docker
+                .start_container(id, None)
+                .await
+                .map_err(mutation_failure)?;
+            value(
+                docker
+                    .inspect_container(id, None)
+                    .await
+                    .map_err(confirmation_failure)?,
+            )
         }
         Some("stop") => {
             docker
@@ -156,8 +185,13 @@ pub async fn execute(
                     }),
                 )
                 .await
-                .map_err(failure)?;
-            value(docker.inspect_container(id, None).await.map_err(failure)?)
+                .map_err(mutation_failure)?;
+            value(
+                docker
+                    .inspect_container(id, None)
+                    .await
+                    .map_err(confirmation_failure)?,
+            )
         }
         Some("restart") => {
             docker
@@ -169,8 +203,13 @@ pub async fn execute(
                     }),
                 )
                 .await
-                .map_err(failure)?;
-            value(docker.inspect_container(id, None).await.map_err(failure)?)
+                .map_err(mutation_failure)?;
+            value(
+                docker
+                    .inspect_container(id, None)
+                    .await
+                    .map_err(confirmation_failure)?,
+            )
         }
         Some("delete") => {
             docker
@@ -183,7 +222,7 @@ pub async fn execute(
                     }),
                 )
                 .await
-                .map_err(failure)?;
+                .map_err(mutation_failure)?;
             Ok(json!({"deleted":true,"id":id}))
         }
         _ => Err(Failure::new(

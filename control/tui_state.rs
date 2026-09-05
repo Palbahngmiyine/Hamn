@@ -199,6 +199,10 @@ impl State {
                 self.detail = Some(serde_json::to_string_pretty(&row).unwrap());
                 Ok(None)
             }
+            "docker images list" | "docker volumes list" | "docker networks list" => {
+                self.detail = Some(serde_json::to_string_pretty(&row).unwrap());
+                Ok(None)
+            }
             _ => self.action("inspect").map(Some),
         }
     }

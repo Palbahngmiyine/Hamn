@@ -24,6 +24,14 @@ pub fn failure(error: kube::Error) -> Failure {
     Failure::new(code, error)
 }
 
+fn mutation_failure(error: kube::Error) -> Failure {
+    if matches!(&error, kube::Error::Api(response) if (400..500).contains(&response.code)) {
+        failure(error)
+    } else {
+        Failure::new("outcomeUnknown", error)
+    }
+}
+
 fn resource(name: &str) -> Result<(ApiResource, bool)> {
     let (group, version, kind, plural, cluster) = match name {
         "pods" => ("", "v1", "Pod", "pods", false),
@@ -70,6 +78,7 @@ pub async fn execute(request: &Request, events: Option<&crate::stream::Events>) 
     if action == "list" {
         let mut parameters = ListParams::default().limit(500);
         let mut objects = Vec::new();
+        let mut pages = std::collections::HashSet::new();
         loop {
             let page = api.list(&parameters).await.map_err(failure)?;
             objects.extend(page.items);
@@ -80,7 +89,15 @@ pub async fn execute(request: &Request, events: Option<&crate::stream::Events>) 
                 ));
             }
             match page.metadata.continue_.filter(|token| !token.is_empty()) {
-                Some(token) => parameters.continue_token = Some(token),
+                Some(token) => {
+                    if pages.len() >= 1024 || !pages.insert(token.clone()) {
+                        return Err(Failure::new(
+                            "invalidResponse",
+                            "Kubernetes pagination did not advance",
+                        ));
+                    }
+                    parameters.continue_token = Some(token);
+                }
                 None => break,
             }
         }
@@ -99,6 +116,19 @@ pub async fn execute(request: &Request, events: Option<&crate::stream::Events>) 
         return Err(Failure::new(
             "conflict",
             "resource was replaced; refresh before acting",
+        ));
+    }
+    if request.mutates()
+        && (object.metadata.uid.as_ref().is_none_or(String::is_empty)
+            || object
+                .metadata
+                .resource_version
+                .as_ref()
+                .is_none_or(String::is_empty))
+    {
+        return Err(Failure::new(
+            "invalidResponse",
+            "resource identity or version missing",
         ));
     }
     match action {
@@ -150,7 +180,9 @@ pub async fn execute(request: &Request, events: Option<&crate::stream::Events>) 
                 }),
                 ..Default::default()
             };
-            api.delete(name, &parameters).await.map_err(failure)?;
+            api.delete(name, &parameters)
+                .await
+                .map_err(mutation_failure)?;
             Ok(json!({"accepted":true,"uid":object.metadata.uid}))
         }
         "scale" => {
@@ -159,7 +191,7 @@ pub async fn execute(request: &Request, events: Option<&crate::stream::Events>) 
             Ok(json!(
                 api.patch_scale(name, &PatchParams::default(), &Patch::Merge(&body))
                     .await
-                    .map_err(failure)?
+                    .map_err(mutation_failure)?
             ))
         }
         "restart" => {
@@ -169,7 +201,7 @@ pub async fn execute(request: &Request, events: Option<&crate::stream::Events>) 
             Ok(json!(
                 api.patch(name, &PatchParams::default(), &Patch::Merge(&body))
                     .await
-                    .map_err(failure)?
+                    .map_err(mutation_failure)?
             ))
         }
         _ => Err(Failure::new(
