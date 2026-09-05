@@ -28,6 +28,8 @@ pub async fn execute(request: &Request, cancel: &CancellationToken) -> Result<Va
                 .as_str()
                 .ok_or_else(|| Failure::new("coreProtocol", "Docker socket missing"))?;
             crate::docker::execute(request, socket).await
+        } else if request.words.first().is_some_and(|word| word == "k8s") {
+            crate::kubernetes::execute(request).await
         } else {
             core::call(request).await
         }

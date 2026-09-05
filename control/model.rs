@@ -7,6 +7,12 @@ use serde_json::{Value, json};
 #[command(name = "hamn", version = env!("HAMN_VERSION"), about = "VM, Docker and Kubernetes console")]
 pub struct Request {
     #[arg(long)]
+    pub uid: Option<String>,
+    #[arg(long)]
+    pub container: Option<String>,
+    #[arg(long)]
+    pub previous: bool,
+    #[arg(long)]
     pub headless: bool,
     #[arg(num_args = 1..=4)]
     pub words: Vec<String>,
