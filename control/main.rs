@@ -1,4 +1,5 @@
 use std::{ffi::CString, os::unix::ffi::OsStrExt};
+mod core;
 mod model;
 
 unsafe extern "C" {
@@ -6,6 +7,9 @@ unsafe extern "C" {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("__core-worker") {
+        std::process::exit(core::worker());
+    }
     // C internal modes run before any Rust background thread is created.
     let args: Vec<CString> = std::env::args_os()
         .map(|arg| CString::new(arg.as_bytes()).expect("NUL in process argument"))
