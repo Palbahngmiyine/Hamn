@@ -7,6 +7,7 @@ mod kubeconfig;
 mod kubernetes;
 mod model;
 mod service;
+mod tui;
 mod tui_state;
 
 unsafe extern "C" {
@@ -50,6 +51,17 @@ fn main() {
         std::process::exit(2);
     }
     if !request.headless {
+        if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("async runtime");
+            if let Err(error) = runtime.block_on(tui::run(request)) {
+                eprintln!("hamn: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         let message = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
             "use --headless and an operation"
         } else {
