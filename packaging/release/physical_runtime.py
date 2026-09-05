@@ -32,7 +32,14 @@ class Runtime:
             command.append('--' + key.replace('_', '-'))
             if value is not True:
                 command.append(str(value))
-        result = json.loads(run(command, self.environment))
+        output = run(command, self.environment)
+        if words[-1:] == ('logs',) or (len(words) > 2 and words[2] == 'logs'):
+            records = [json.loads(line) for line in output.splitlines()]
+            if not records or any(record.get('ok') is not True for record in records):
+                raise RuntimeError('invalid log stream result')
+            result = records[-1]
+        else:
+            result = json.loads(output)
         if result.get('schemaVersion') != 1 or result.get('ok') is not True:
             raise RuntimeError(f'invalid headless result: {result}')
         return result['data']

@@ -18,6 +18,26 @@ spec.loader.exec_module(physical)
 
 
 class PhysicalRuntime(unittest.TestCase):
+    def test_invalid_network_mode_is_rejected_before_any_runtime_action(self):
+        for value in ['true', '', '2']:
+            with patch('sys.argv', ['physical-e2e.sh']), \
+                    patch.dict('os.environ', {'HAMN_E2E_K8S_HOST_NETWORK': value}, clear=True), \
+                    patch.object(physical, 'run') as run:
+                with self.assertRaisesRegex(ValueError, 'HOST_NETWORK'):
+                    physical.main()
+                run.assert_not_called()
+
+    def test_log_records_are_read_as_ndjson_and_failures_are_not_hidden(self):
+        runtime = Runtime('/tmp/candidate/hamn', '/tmp/isolated', '/usr/local/bin/docker')
+        records = [{'schemaVersion': 1, 'ok': True, 'data': {'text': 'hello'}},
+                   {'schemaVersion': 1, 'ok': True, 'data': {'complete': True}}]
+        with patch('physical_runtime.run', return_value='\n'.join(map(json.dumps, records))):
+            self.assertEqual(runtime.call('docker', 'containers', 'logs', 'fixture'), {'complete': True})
+        records[0]['ok'] = False
+        with patch('physical_runtime.run', return_value='\n'.join(map(json.dumps, records))):
+            with self.assertRaises(RuntimeError):
+                runtime.call('docker', 'containers', 'logs', 'fixture')
+
     def test_help_needs_no_validator_environment_or_runtime(self):
         output = io.StringIO()
         with patch('sys.argv', ['physical-e2e.sh', '--help']), patch.dict('os.environ', {}, clear=True), \
