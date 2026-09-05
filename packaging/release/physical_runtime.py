@@ -107,6 +107,9 @@ test "$(readlink /etc/systemd/system/k3s.service)" = /dev/null
 test ! -e /usr/local/bin/k3s
 test ! -e /var/lib/rancher/k3s
 test ! -e /etc/rancher/k3s
+test ! -e /var/lib/kubelet
+test ! -e /var/lib/cni/networks/cbr0
+test ! -e /run/flannel
 test ! -e /etc/hamn/k3s-compatibility.json
 test "$(ctr --namespace k8s.io containers list -q | wc -l)" -eq 0
 cat /var/lib/hamn/k3s-retirement-v1.json

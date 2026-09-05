@@ -14,7 +14,8 @@ PODS = Path('/var/lib/hamn/k3s-retirement-pods-v1.json')
 TRANSACTIONS = Path('/var/lib/hamn/deployment-transactions')
 UNIT = Path('/etc/systemd/system/k3s.service')
 DATA = ('/var/lib/rancher/k3s', '/etc/rancher/k3s',
-        '/var/lib/hamn/k3s-cni-transaction')
+        '/var/lib/hamn/k3s-cni-transaction', '/var/lib/kubelet',
+        '/var/lib/cni/networks/cbr0', '/run/flannel')
 FILES = ('/usr/local/bin/k3s', '/usr/local/libexec/hamn/configure-k3s',
          '/usr/local/libexec/hamn/install-k3s', '/etc/hamn/k3s-compatibility.json',
          '/etc/hamn/k3s-compatibility.json.sig')
@@ -171,10 +172,14 @@ def retire_pods():
 
 def remove_data():
     mounts = mountpoints()
+    # Validate every path before removing any directory. Unexpected mounts
+    # outside captured Pod UIDs must preserve the entire remaining state.
     for value in DATA:
         path = safe(value)
         if any(mount == value or mount.startswith(value + '/') for mount in mounts):
             raise RuntimeError(f'refusing to delete a mounted path: {path}')
+    for value in DATA:
+        path = safe(value)
         if path.exists():
             if not path.is_dir():
                 raise RuntimeError(f'expected owned directory: {path}')
