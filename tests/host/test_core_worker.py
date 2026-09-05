@@ -29,6 +29,18 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
     assert created["Ok"]["memoryMiB"] == 2048
     assert call("vm create", profile="test", yes=True, cpu=10)["Err"]["code"] == "conflict"
     assert call("vm status", profile="test")["Ok"]["cpus"] == 2
+    disk = Path(directory) / ".hamn/test/disk.img"
+    with disk.open("wb") as output:
+        output.truncate(60 * 1024**3)
+    config_before_shrink = (disk.parent / "config.yaml").read_bytes()
+    rejected = call("vm configure", profile="test", yes=True, cpu=3, disk=1)
+    assert "Err" in rejected and "cannot shrink" in rejected["Err"]["message"], rejected
+    assert (disk.parent / "config.yaml").read_bytes() == config_before_shrink
+    assert disk.stat().st_size == 60 * 1024**3
+    assert call("vm configure", profile="test", yes=True, disk=60)["Ok"]["diskGiB"] == 60
+    assert call("vm configure", profile="test", yes=True, disk=61)["Ok"]["diskGiB"] == 61
+    # Configuration records growth for the next start; it cannot shrink storage.
+    assert disk.stat().st_size == 60 * 1024**3
     assert "Err" in call("vm stop", profile="missing", yes=True)
     assert not (Path(directory) / ".hamn/missing").exists()
     assert created["Ok"]["migration"] == "current"

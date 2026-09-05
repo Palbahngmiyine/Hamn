@@ -161,6 +161,10 @@ int hamn_control_configure(const char *name, unsigned cpus,
         logerr("VM must be stopped before changing settings");
         goto out;
     }
+    if (!create && disk_gib && disk_gib < profile.disk_gib) {
+        logerr("disk size cannot shrink (current: %u GiB)", profile.disk_gib);
+        goto out;
+    }
     if (cpus) profile.cpus = cpus;
     if (memory_gib) profile.mem_mib = memory_gib * 1024U;
     if (disk_gib) profile.disk_gib = disk_gib;
