@@ -122,9 +122,9 @@ static int build_user_data(const struct profile *profile, const char *pubkey,
         append_yaml_string(output, USER_DATA_CAP, &length, pubkey) != 0 ||
         append_text(output, USER_DATA_CAP, &length, "\n") != 0)
         return -1;
-    if (append_text(output, USER_DATA_CAP, &length,
-                    profile->mount_home || profile->rosetta || profile->mount_count
-                        ? "mounts:\n" : "mounts: []\n") != 0)
+    /* cloud-init requires a nonempty list when mounts is present. */
+    if ((profile->mount_home || profile->rosetta || profile->mount_count) &&
+        append_text(output, USER_DATA_CAP, &length, "mounts:\n") != 0)
         return -1;
     if (profile->mount_home &&
         append_mount(output, USER_DATA_CAP, &length, "home", home,
