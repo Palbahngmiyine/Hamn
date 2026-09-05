@@ -19,6 +19,7 @@ pub struct State {
     pub pending: Option<Request>,
     pub loading: bool,
     pub scroll: u16,
+    pub stale: bool,
 }
 
 impl State {
@@ -37,6 +38,7 @@ impl State {
             pending: None,
             loading: false,
             scroll: 0,
+            stale: false,
         }
     }
     pub fn rows(&self) -> Vec<&Value> {
@@ -104,6 +106,8 @@ impl State {
         request.validate()?;
         if !request.mutates() {
             self.request = request.clone();
+            self.data = Value::Null;
+            self.stale = false;
         }
         self.selected = 0;
         self.filter.clear();
@@ -112,6 +116,12 @@ impl State {
         Ok(request)
     }
     pub fn action(&self, action: &str) -> Result<Request> {
+        if self.stale {
+            return Err(Failure::new(
+                "staleData",
+                "refresh this view before acting on previous data",
+            ));
+        }
         let row = self
             .selected()
             .ok_or_else(|| Failure::new("noSelection", "select a resource first"))?;
@@ -159,6 +169,7 @@ impl State {
         self.loading = false;
         match result {
             Ok(value) if value.is_array() => {
+                self.stale = false;
                 self.data = value;
                 self.move_by(0);
                 self.message.clear();
@@ -173,6 +184,7 @@ impl State {
                 self.message.clear();
             }
             Err(error) => {
+                self.stale = true;
                 self.message = format!(
                     "{}: {} (previous data may be stale)",
                     error.code, error.message
@@ -231,7 +243,84 @@ fn label(value: &Value) -> String {
     clean(&format!("{name}  {status}"))
 }
 
+fn confirmation(request: &Request, width: u16) -> Vec<String> {
+    let mut text = format!("Confirm {}\n", request.operation());
+    for (key, value) in [
+        ("Profile", &request.profile),
+        ("Context", &request.context),
+        ("Namespace", &request.namespace),
+        ("Name", &request.name),
+        ("UID", &request.uid),
+        ("Kubeconfig", &request.kubeconfig),
+        ("Output path", &request.path),
+        ("Manifest", &request.manifest),
+    ] {
+        if let Some(value) = value {
+            text.push_str(&format!("{key}: {value}\n"));
+        }
+    }
+    for (key, value) in [
+        ("CPU", request.cpu),
+        ("Memory GiB", request.memory),
+        ("Disk GiB", request.disk),
+    ] {
+        if let Some(value) = value {
+            text.push_str(&format!("{key}: {value}\n"));
+        }
+    }
+    text.push_str(&format!(
+        "\nImpact: {}\n\ny = execute; Esc / n = cancel",
+        request.impact()
+    ));
+    if request.mutates()
+        && matches!(
+            request.words.first().map(String::as_str),
+            Some("vm" | "docker")
+        )
+        && request.operation() != "vm create"
+    {
+        text.push_str("\nPending legacy K3s retirement permanently deletes its cluster data and local volumes before this operation. Docker data is preserved.");
+    }
+    let mut lines = Vec::new();
+    for line in clean(&text).lines() {
+        let mut current = String::new();
+        let mut columns = 0;
+        for c in line.chars() {
+            let size = ratatui::text::Line::raw(c.to_string()).width();
+            if columns + size > usize::from(width) && !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                columns = 0;
+            }
+            current.push(c);
+            columns += size;
+        }
+        lines.push(current);
+    }
+    lines
+}
+
+pub fn confirmation_visible(request: &Request, area: ratatui::layout::Rect) -> bool {
+    area.width >= 20
+        && area.height >= 8
+        && confirmation(request, area.width - 2).len() <= usize::from(area.height - 2)
+}
+
 pub fn draw(frame: &mut Frame, state: &State) {
+    if let Some(pending) = &state.pending {
+        let area = frame.area();
+        let text = if confirmation_visible(pending, area) {
+            confirmation(pending, area.width - 2).join("\n")
+        } else {
+            "Resize terminal to review the full target and impact.\nExecution disabled. Esc cancels.".into()
+        };
+        frame.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered().title("Hamn confirmation")),
+            area,
+        );
+        return;
+    }
     let areas = Layout::vertical([
         Constraint::Length(3),
         Constraint::Min(3),
@@ -277,13 +366,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
             &mut ListState::default().with_selected(Some(state.selected)),
         );
     }
-    let message = if let Some(pending) = &state.pending {
-        format!(
-            "Confirm {} on {}? y = execute, Esc = cancel",
-            pending.operation(),
-            pending.target()
-        )
-    } else if let Some((prefix, input)) = &state.input {
+    let message = if let Some((prefix, input)) = &state.input {
         format!("{prefix}{input}")
     } else {
         state.message.clone()
@@ -300,6 +383,54 @@ pub fn draw(frame: &mut Frame, state: &State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn confirmation_requires_complete_target_and_impact_to_fit() {
+        let mut request = Request::try_parse_from([
+            "hamn",
+            "k8s",
+            "pods",
+            "delete",
+            "api",
+            "--context",
+            "dev",
+            "--namespace",
+            "default",
+            "--yes",
+        ])
+        .unwrap();
+        request.normalize().unwrap();
+        let area = ratatui::layout::Rect::new(0, 0, 100, 24);
+        assert!(confirmation_visible(&request, area));
+        assert!(!confirmation_visible(
+            &request,
+            ratatui::layout::Rect::new(0, 0, 20, 8)
+        ));
+        request.context = Some("long-context-".repeat(300));
+        assert!(!confirmation_visible(&request, area));
+        let mut state = State::new(Request::default());
+        state.pending = Some(request);
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Execution disabled"));
+    }
+    #[test]
+    fn failed_refresh_blocks_actions_and_view_switch_clears_old_rows() {
+        let mut state = State::new(Request::default());
+        state.accept(Ok(serde_json::json!([{"name":"work"}])));
+        state.accept(Err(Failure::new("connection", "disconnected")));
+        assert_eq!(state.action("stop").unwrap_err().code, "staleData");
+        state.view("containers").unwrap();
+        assert!(state.rows().is_empty());
+        assert!(!state.stale);
+    }
     #[test]
     fn renders_small_terminal_and_filters_unicode_without_panicking() {
         let mut state = State::new(Request::try_parse_from(["hamn"]).unwrap());

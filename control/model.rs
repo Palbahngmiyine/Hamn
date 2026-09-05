@@ -147,6 +147,27 @@ impl Request {
             .iter()
             .any(|(op, mutation)| *op == self.operation() && *mutation)
     }
+    pub fn impact(&self) -> String {
+        match self.operation().as_str() {
+            "vm create" => "Create a profile and its VM configuration.".into(),
+            "vm configure" => "Change the stopped VM's CPU, memory or disk settings.".into(),
+            "vm start" => "Start the VM. Pending legacy K3s data will be permanently deleted; Docker data is preserved.".into(),
+            "vm stop" => "Stop the VM and interrupt its running containers.".into(),
+            "vm delete" => "Stop and remove the profile from active listings. Its disk and Docker data are preserved.".into(),
+            "vm migrate" => "Permanently delete owned legacy K3s cluster data and local volumes. Docker data is preserved; binary rollback cannot recover K3s data.".into(),
+            "vm diagnostics" => "Write a redacted diagnostic archive to the selected path.".into(),
+            "system update" => "Download and publish a verified Hamn release and managed guest image.".into(),
+            "system uninstall" => "Permanently remove ALL Hamn profiles, VM disks, Docker data and the managed installation.".into(),
+            "docker containers delete" => "Delete the selected container. Named volumes are preserved.".into(),
+            "docker containers start" => "Start the selected container.".into(),
+            "docker containers stop" => "Stop the selected container and interrupt its workload.".into(),
+            "docker containers restart" => "Restart the selected container and interrupt its workload.".into(),
+            "k8s pods delete" => "Delete the selected Pod. Its controller may create a replacement.".into(),
+            _ if self.words.last().is_some_and(|v| v == "scale") => format!("Set the selected workload to {} replicas; Pods may be created or terminated.", self.replicas.unwrap_or(0)),
+            _ if self.words.last().is_some_and(|v| v == "restart") => "Request a rolling restart of the selected workload's Pods.".into(),
+            _ => "Read the selected resource without changing it.".into(),
+        }
+    }
     pub fn validate(&self) -> Result<()> {
         let invalid = |message| Failure::new("invalidRequest", message);
         if !OPERATIONS.iter().any(|(op, _)| *op == self.operation()) {

@@ -131,7 +131,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 }
                 if state.pending.is_some() {
                     match key.code {
-                        KeyCode::Char('y') => { let request = state.pending.take().unwrap(); job.start(request, &mut state); },
+                        KeyCode::Char('y') if tui_state::confirmation_visible(state.pending.as_ref().unwrap(), terminal.get_frame().area()) => {
+                            let request = state.pending.take().unwrap(); job.start(request, &mut state);
+                        },
                         KeyCode::Esc | KeyCode::Char('n') => state.pending = None,
                         _ => {}
                     }
