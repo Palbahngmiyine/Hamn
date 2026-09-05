@@ -48,6 +48,16 @@ def exercise(exit_mode):
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 10, 30, 0, 0))
                 os.kill(process.pid, signal.SIGWINCH)
                 os.write(master, b"q")
+            elif exit_mode == "confirm-small":
+                os.write(master, b":vm create --profile work\r")
+                until(b"Impact:")
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 8, 30, 0, 0))
+                os.kill(process.pid, signal.SIGWINCH)
+                until(b"disabled.")
+                os.write(master, b"yn:contexts\r")
+                until(b"contexts")
+                assert not (Path(directory) / ".hamn").exists(), "hidden confirmation executed a mutation"
+                os.write(master, b"q")
             elif exit_mode == "interrupt":
                 os.write(master, b"\x03")
             elif exit_mode.startswith("suspend"):
@@ -86,6 +96,6 @@ def exercise(exit_mode):
             os.close(slave)
 
 
-for mode in ("q", "interrupt", "terminate", "suspend-key", "suspend-signal"):
+for mode in ("q", "confirm-small", "interrupt", "terminate", "suspend-key", "suspend-signal"):
     exercise(mode)
 print("TUI entry, navigation, resize and terminal restoration: passed")
