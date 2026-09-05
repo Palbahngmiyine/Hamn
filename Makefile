@@ -42,11 +42,12 @@ PROVISION_TEST := $(BUILD)/tests/test_provision
 DEPLOYMENT_FINGERPRINT_TEST := $(BUILD)/tests/test_guest_deployment_fingerprint
 MANAGED_GUEST_IMAGE_TEST := $(BUILD)/tests/test_managed_guest_image
 SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
+PROFILE_READ_TEST := $(BUILD)/tests/test_profile_read
 START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retry
 
 -include $(HOST_DEPS)
 
-.PHONY: FORCE host install clean test-portable test-qcow2 \
+.PHONY: FORCE host install clean test-portable test-qcow2 test-control \
 	test-profile-state test-guest-deployment test-diagnostics test-install \
 	test-uninstall test-update test-release-artifacts test-hosted-validation \
 	test-release-gate test-release-publish \
@@ -149,6 +150,21 @@ $(START_DOCKER_CONTEXT_RETRY_TEST): tests/host/test_start_docker_context_retry.c
 test-portable:
 	bash tests/ci/test_portable.sh
 
+$(PROFILE_READ_TEST): tests/host/test_profile_read.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) $(LDFLAGS) -o $@
+
+test-control: host $(PROFILE_READ_TEST)
+	cargo test --locked
+	@test "$$(cargo tree --locked --prefix none --format '{p}' | sed -n '/^crossterm v/p' | cut -d ' ' -f 1,2 | sort -u | wc -l | tr -d ' ')" = 1
+	$(PROFILE_READ_TEST)
+	HAMN=$(HOST_BIN) python3 tests/host/test_core_worker.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_docker_api.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
+	python3 tests/host/test_k3s_retirement.py
+	HAMN=$(HOST_BIN) bash tests/host/test_single_binary.sh
+
 test-workflows:
 	@command -v actionlint >/dev/null || { \
 		echo "actionlint is required for test-workflows" >&2; exit 1; \
@@ -159,6 +175,7 @@ test-local-macos:
 	$(MAKE) test-workflows
 	$(MAKE) test-portable
 	$(MAKE) test-core-quality
+	$(MAKE) test-control
 	$(MAKE) test-port-forwarding
 	$(MAKE) host
 	$(MAKE) test-profile-state
