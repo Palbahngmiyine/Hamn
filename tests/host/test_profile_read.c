@@ -6,6 +6,9 @@
 #include <unistd.h>
 #include "core/profile.h"
 #include "core/control.h"
+#include "core/retirement.h"
+#include "util/fs.h"
+#include <string.h>
 #include "cjson/cJSON.h"
 
 int main(void)
@@ -39,6 +42,24 @@ int main(void)
     assert(hamn_control_configure("existing", 0, UINT_MAX, 0, 0) == 2);
     assert(profile_read_existing(&profile, "existing") == 0);
     assert(profile.mem_mib == 2048);
+    char owner_dir[1024], owner[1100], tombstone[1100], marker[1400];
+    snprintf(owner_dir, sizeof(owner_dir), "%s/.kube-contexts", root);
+    assert(mkdir(owner_dir, 0700) == 0);
+    snprintf(owner, sizeof(owner), "%s/existing", owner_dir);
+    snprintf(marker, sizeof(marker), "schema=1\npath=%s/.kube/config\ncontext=foreign\n", temporary);
+    assert(fs_write_file_atomic(owner, marker, strlen(marker), 0600) == 0);
+    assert(retirement_context(&profile) == -1);
+    snprintf(marker, sizeof(marker), "schema=1\npath=%s/.kube/config\ncontext=hamn-existing\n", temporary);
+    assert(fs_write_file_atomic(owner, marker, strlen(marker), 0600) == 0);
+    assert(retirement_context(&profile) == 0);
+    assert(access(owner, F_OK) == -1);
+    snprintf(tombstone, sizeof(tombstone), "%s/.retired-kube-contexts/existing", root);
+    assert(access(tombstone, F_OK) == 0);
+    assert(retirement_context(&profile) == 0);
+    assert(unlink(tombstone) == 0);
+    assert(rmdir(owner_dir) == 0);
+    snprintf(owner_dir, sizeof(owner_dir), "%s/.retired-kube-contexts", root);
+    assert(rmdir(owner_dir) == 0);
     assert(hamn_control_query("existing", &json) == 0);
     items = cJSON_Parse(json);
     assert(cJSON_IsObject(items));

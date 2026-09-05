@@ -198,6 +198,12 @@ impl State {
         };
         match self.request.operation().as_str() {
             "k8s contexts list" => {
+                if row["available"] == false {
+                    return Err(Failure::new(
+                        "managedK3sRemoved",
+                        "legacy Hamn context is unavailable",
+                    ));
+                }
                 self.request.context = row["name"].as_str().map(String::from);
                 self.request.namespace = row["namespace"].as_str().map(String::from);
                 self.view("pods").map(Some)
@@ -235,10 +241,14 @@ fn label(value: &Value) -> String {
         .or_else(|| value["RepoTags"][0].as_str())
         .or_else(|| value["Id"].as_str())
         .unwrap_or("-");
-    let status = value["state"]
+    let status = value["reason"]
         .as_str()
-        .or_else(|| value["State"].as_str())
-        .or_else(|| value["status"]["phase"].as_str())
+        .or_else(|| {
+            value["state"]
+                .as_str()
+                .or_else(|| value["State"].as_str())
+                .or_else(|| value["status"]["phase"].as_str())
+        })
         .unwrap_or("");
     clean(&format!("{name}  {status}"))
 }

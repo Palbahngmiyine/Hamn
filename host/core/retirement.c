@@ -14,7 +14,45 @@
 #include "core/mutation_lock.h"
 #include "core/state.h"
 #include "sshmgr/ssh.h"
+#include "util/fs.h"
 #include "k3s_retirement.h"
+
+int retirement_context(const struct profile *profile)
+{
+    char root[PROFILE_PATH_CAP], old_dir[PROFILE_PATH_CAP], new_dir[PROFILE_PATH_CAP];
+    char source[PROFILE_PATH_CAP], target[PROFILE_PATH_CAP], context[128], expected[PROFILE_PATH_CAP + 256];
+    if (!hamn_home(root, sizeof(root)) ||
+        profile_docker_context_name(profile, context, sizeof(context)) != 0)
+        return -1;
+    if (snprintf(old_dir, sizeof(old_dir), "%s/.kube-contexts", root) >= (int)sizeof(old_dir) ||
+        snprintf(new_dir, sizeof(new_dir), "%s/.retired-kube-contexts", root) >= (int)sizeof(new_dir) ||
+        snprintf(source, sizeof(source), "%s/%s", old_dir, profile->name) >= (int)sizeof(source) ||
+        snprintf(target, sizeof(target), "%s/%s", new_dir, profile->name) >= (int)sizeof(target))
+        return -1;
+    struct stat st;
+    if (lstat(old_dir, &st) != 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 0022)) return -1;
+    int fd = open(source, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno == ENOENT ? 0 : -1;
+    char actual[sizeof(expected)];
+    int valid = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
+        st.st_nlink == 1 && !(st.st_mode & 0022) && st.st_size > 0 && st.st_size < (off_t)sizeof(actual);
+    ssize_t length = valid ? read(fd, actual, sizeof(actual) - 1) : -1;
+    close(fd);
+    if (length <= 0 || length != st.st_size) return -1;
+    actual[length] = '\0';
+    int size = snprintf(expected, sizeof(expected), "schema=1\npath=%s/.kube/config\ncontext=%s\n", getenv("HOME"), context);
+    if (size < 0 || size >= (int)sizeof(expected) || length != size || memcmp(expected, actual, (size_t)size))
+        return -1;
+    if (mkdir(new_dir, 0700) != 0 && errno != EEXIST) return -1;
+    if (lstat(new_dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 0022))
+        return -1;
+    if (lstat(target, &st) == 0) {
+        if (!S_ISREG(st.st_mode) || st.st_uid != geteuid() || st.st_nlink != 1) return -1;
+    } else if (errno != ENOENT) return -1;
+    if (fs_write_file_atomic(target, actual, (size_t)length, 0600) != 0) return -1;
+    return unlink(source);
+}
 
 static int retire_forward(const struct profile *profile, const char *ip)
 {
@@ -63,6 +101,10 @@ int retirement_run(struct profile *profile, const char *ip)
     }
     if (retire_forward(profile, ip) != 0) {
         logerr("cannot safely remove the legacy Kubernetes API forward");
+        return -1;
+    }
+    if (retirement_context(profile) != 0) {
+        logerr("cannot safely retire the legacy Kubernetes context ownership record");
         return -1;
     }
     const char *files[] = { "kubeconfig", NULL };
