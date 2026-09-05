@@ -170,6 +170,18 @@ impl Request {
         if self.mutates() && self.all_namespaces {
             return Err(invalid("mutations cannot target all namespaces"));
         }
+        if self.mutates() && (self.watch || self.follow) {
+            return Err(invalid("mutations cannot be repeated or streamed"));
+        }
+        if self.mutates()
+            && self.words.first().is_some_and(|v| v == "k8s")
+            && self.namespace.as_ref().is_none_or(|v| v.is_empty())
+        {
+            return Err(invalid("Kubernetes mutations require --namespace"));
+        }
+        if [self.cpu, self.memory, self.disk].contains(&Some(0)) {
+            return Err(invalid("VM resource values must be positive"));
+        }
         if self.words.last().is_some_and(|v| {
             matches!(
                 v.as_str(),
