@@ -253,12 +253,19 @@ static int monotonic_milliseconds(uint64_t *milliseconds)
     return 0;
 }
 
-int proc_run_guarded(const char *const argv[], char *out, size_t cap,
-                     int *truncated, int owner_fd, int release_fd,
-                     int spawn_ack_fd)
+static int run_guarded(const char *const argv[], char *out, size_t cap,
+                        int *truncated, int owner_fd, int release_fd,
+                        int spawn_ack_fd, unsigned timeout_ms)
 {
     if ((out && cap == 0) || owner_fd < 0)
         return -1;
+    uint64_t deadline = 0;
+    if (timeout_ms) {
+        if (monotonic_milliseconds(&deadline) != 0)
+            return -1;
+        deadline += timeout_ms;
+    }
+    int timed_out = 0;
     int output_pipe[2] = { -1, -1 };
     if (out && pipe(output_pipe) != 0)
         return -1;
@@ -341,6 +348,15 @@ int proc_run_guarded(const char *const argv[], char *out, size_t cap,
     uint64_t kill_at = 0;
     unsigned grace_ms = supervisor_grace_milliseconds();
     while (!command_exited || !output_eof) {
+        if (timeout_ms && !timed_out) {
+            uint64_t now = 0;
+            if (monotonic_milliseconds(&now) != 0 || now >= deadline) {
+                timed_out = 1;
+                if (!command_exited)
+                    (void)kill(command, SIGKILL);
+                output_eof = 1;
+            }
+        }
         struct pollfd pfds[2] = {
             {
                 .fd = owner_fd,
@@ -461,9 +477,19 @@ int proc_run_guarded(const char *const argv[], char *out, size_t cap,
     }
     if (owner_fd >= 0)
         close(owner_fd);
+    if (timed_out)
+        return PROC_RUN_TIMEOUT;
     if (read_failed || !WIFEXITED(status))
         return -1;
     return WEXITSTATUS(status);
+}
+
+int proc_run_guarded(const char *const argv[], char *out, size_t cap,
+                     int *truncated, int owner_fd, int release_fd,
+                     int spawn_ack_fd)
+{
+    return run_guarded(argv, out, cap, truncated, owner_fd, release_fd,
+                       spawn_ack_fd, 0);
 }
 
 struct supervised_result {
@@ -517,7 +543,7 @@ int proc_read_all(int fd, void *data, size_t length)
 
 static int run_supervised(const char *const argv[], char *out, size_t cap,
                           int *truncated, proc_completion_fn completion,
-                          void *context, int terminal_mode)
+                          void *context, int terminal_mode, unsigned timeout_ms)
 {
     if ((out && cap == 0) || (out && terminal_mode))
         return -1;
@@ -567,9 +593,9 @@ static int run_supervised(const char *const argv[], char *out, size_t cap,
         char *capture = out ? calloc(cap, 1) : NULL;
         struct supervised_result result = { .rc = -1 };
         if (!out || capture) {
-            result.rc = proc_run_guarded(argv, capture, cap,
+            result.rc = run_guarded(argv, capture, cap,
                                          &result.truncated, owner_pipe[0],
-                                         -1, -1);
+                                         -1, -1, timeout_ms);
             if (completion && completion(result.rc, context) != 0)
                 result.rc = -1;
             result.length = capture ? strlen(capture) : 0;
@@ -677,35 +703,46 @@ static int run_supervised(const char *const argv[], char *out, size_t cap,
 
 int proc_run(const char *const argv[])
 {
-    return run_supervised(argv, NULL, 0, NULL, NULL, NULL, 0);
+    return run_supervised(argv, NULL, 0, NULL, NULL, NULL, 0, 0);
 }
 
 int proc_run_terminal(const char *const argv[])
 {
-    return run_supervised(argv, NULL, 0, NULL, NULL, NULL, 1);
+    return run_supervised(argv, NULL, 0, NULL, NULL, NULL, 1, 0);
 }
 
 int proc_run_capture(const char *const argv[], char *out, size_t cap)
 {
-    return run_supervised(argv, out, cap, NULL, NULL, NULL, 0);
+    return run_supervised(argv, out, cap, NULL, NULL, NULL, 0, 0);
 }
 
 int proc_run_capture_checked(const char *const argv[], char *out, size_t cap,
                              int *truncated)
 {
-    return run_supervised(argv, out, cap, truncated, NULL, NULL, 0);
+    return run_supervised(argv, out, cap, truncated, NULL, NULL, 0, 0);
 }
 
 int proc_run_supervised(const char *const argv[])
 {
-    return run_supervised(argv, NULL, 0, NULL, NULL, NULL, 0);
+    return run_supervised(argv, NULL, 0, NULL, NULL, NULL, 0, 0);
 }
 
 int proc_run_supervised_callback(const char *const argv[],
                                  proc_completion_fn completion,
                                  void *context)
 {
-    return run_supervised(argv, NULL, 0, NULL, completion, context, 0);
+    return run_supervised(argv, NULL, 0, NULL, completion, context, 0, 0);
+}
+
+int proc_run_bounded(const char *const argv[], char *out, size_t cap,
+                      unsigned timeout_ms, proc_completion_fn completion,
+                      void *context)
+{
+    if (!timeout_ms) {
+        errno = EINVAL;
+        return -1;
+    }
+    return run_supervised(argv, out, cap, NULL, completion, context, 0, timeout_ms);
 }
 
 pid_t proc_spawn_daemon(const char *const argv[], const char *logfile)

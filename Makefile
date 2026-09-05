@@ -154,7 +154,12 @@ $(BUILD)/tests/test_docker_readiness: tests/host/test_docker_readiness.c $(HOST_
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) $(LDFLAGS) -o $@
 
-test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness
+$(BUILD)/tests/test_proc_deadline: tests/host/test_proc_deadline.c host/util/proc.c host/util/proc.h
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< host/util/proc.c -o $@
+
+test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(BUILD)/tests/test_proc_deadline
+	$(BUILD)/tests/test_proc_deadline
 	python3 tests/host/test_docker_readiness.py
 	cargo test --locked
 	@test "$$(cargo tree --locked --prefix none --format '{p}' | sed -n '/^crossterm v/p' | cut -d ' ' -f 1,2 | sort -u | wc -l | tr -d ' ')" = 1
