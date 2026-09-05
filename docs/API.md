@@ -36,7 +36,7 @@ before retrying. Hamn never claims to undo an accepted server mutation.
 | Docker inventory | `docker images list`, `docker volumes list`, `docker networks list` |
 | Kubernetes selection | `k8s contexts list`, `k8s namespaces list` |
 | Kubernetes resources | `k8s <resource> list`; pods, deployments, statefulsets, daemonsets, services, nodes, events, jobs, cronjobs, ingresses, pvcs |
-| Kubernetes details | `k8s pods inspect`, `deployments inspect`, `statefulsets inspect`, `daemonsets inspect`; JSON object and YAML |
+| Kubernetes details | `k8s <resource> inspect <name>` for every listed resource and namespaces; JSON object and YAML |
 | Kubernetes logs | `k8s pods logs` |
 | Kubernetes mutations | `k8s deployments scale/restart`, `statefulsets scale/restart`, `daemonsets restart`, `pods delete` |
 | Maintenance | `system update`, `system uninstall` |
