@@ -7,6 +7,7 @@ mod kubeconfig;
 mod kubernetes;
 mod model;
 mod service;
+mod stream;
 mod tui;
 mod tui_state;
 

@@ -179,6 +179,11 @@ impl Request {
         if self.mutates() && (self.watch || self.follow) {
             return Err(invalid("mutations cannot be repeated or streamed"));
         }
+        if self.follow && (self.watch || self.words.last().is_none_or(|word| word != "logs")) {
+            return Err(invalid(
+                "--follow is only supported for logs and cannot be combined with --watch",
+            ));
+        }
         if self.mutates()
             && self.words.first().is_some_and(|v| v == "k8s")
             && self.namespace.as_ref().is_none_or(|v| v.is_empty())

@@ -57,7 +57,7 @@ fn resource(name: &str) -> Result<(ApiResource, bool)> {
     ))
 }
 
-pub async fn execute(request: &Request) -> Result<Value> {
+pub async fn execute(request: &Request, events: Option<&crate::stream::Events>) -> Result<Value> {
     let config = kubeconfig::load(request)?;
     let (client, namespace) = kubeconfig::client(request, config).await?;
     let (resource, cluster) = resource(&request.words[1])?;
@@ -107,13 +107,38 @@ pub async fn execute(request: &Request) -> Result<Value> {
         "logs" => {
             let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(client, &namespace);
             let parameters = LogParams {
+                follow: request.follow,
                 container: request.container.clone(),
                 previous: request.previous,
                 tail_lines: Some(request.tail.into()),
-                limit_bytes: Some(1024 * 1024),
+                limit_bytes: if request.follow {
+                    None
+                } else {
+                    Some(1024 * 1024)
+                },
                 timestamps: true,
                 ..Default::default()
             };
+            if request.follow {
+                use futures_util::io::AsyncReadExt;
+                let events = events
+                    .ok_or_else(|| Failure::new("invalidRequest", "stream receiver required"))?;
+                let mut source = pods.log_stream(name, &parameters).await.map_err(failure)?;
+                let mut stream = crate::stream::TextStream::default();
+                let mut bytes = [0; 8192];
+                loop {
+                    let count = source
+                        .read(&mut bytes)
+                        .await
+                        .map_err(|e| Failure::new("streamDisconnected", e))?;
+                    if count == 0 {
+                        break;
+                    }
+                    stream.feed(&bytes[..count], events).await?;
+                }
+                stream.finish(events).await?;
+                return Ok(json!({"ended":true}));
+            }
             let logs = pods.logs(name, &parameters).await.map_err(failure)?;
             Ok(json!({"lines":logs.lines().collect::<Vec<_>>()}))
         }
