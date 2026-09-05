@@ -42,8 +42,6 @@ PROVISION_TEST := $(BUILD)/tests/test_provision
 DEPLOYMENT_FINGERPRINT_TEST := $(BUILD)/tests/test_guest_deployment_fingerprint
 MANAGED_GUEST_IMAGE_TEST := $(BUILD)/tests/test_managed_guest_image
 SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
-KUBECONFIG_CONTEXT_TEST := $(BUILD)/tests/test_kubeconfig_context
-KUBERNETES_TRANSACTION_TEST := $(BUILD)/tests/test_kubernetes_transaction
 START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retry
 
 -include $(HOST_DEPS)
@@ -141,18 +139,6 @@ $(SSH_OPTIONS_TEST): tests/host/test_ssh_options.c $(HOST_TEST_OBJS)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
 		$(LDFLAGS) -o $@
 
-$(KUBECONFIG_CONTEXT_TEST): tests/host/test_kubeconfig_context.c $(HOST_TEST_OBJS)
-	@mkdir -p $(dir $@)
-	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
-		$(LDFLAGS) -o $@
-
-$(KUBERNETES_TRANSACTION_TEST): tests/host/test_kubernetes_transaction.c \
-		host/cmd/cmd_kubernetes.c $(HOST_C_SRCS)
-	@mkdir -p $(dir $@)
-	clang -DHAMN_TEST $(filter-out -MMD -MP,$(CFLAGS)) $< \
-		$(filter-out host/main.c host/cmd/cmd_kubernetes.c,$(HOST_C_SRCS)) \
-		host/cmd/cmd_kubernetes.c $(HOST_M_SRCS) $(LDFLAGS) -o $@
-
 $(START_DOCKER_CONTEXT_RETRY_TEST): tests/host/test_start_docker_context_retry.c \
 		host/cmd/cmd_start.c $(HOST_C_SRCS)
 	@mkdir -p $(dir $@)
@@ -201,7 +187,7 @@ test-qcow2: host
 
 test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
-		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) $(KUBECONFIG_CONTEXT_TEST) \
+		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST)
 	$(CTLSOCK_TEST)
 	$(FS_TEST)
@@ -210,7 +196,6 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(DEPLOYMENT_FINGERPRINT_TEST)
 	$(MANAGED_GUEST_IMAGE_TEST)
 	$(SSH_OPTIONS_TEST)
-	$(KUBECONFIG_CONTEXT_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
 	HAMN=$(HOST_BIN) LIFECYCLE_LOCK_TEST=$(LIFECYCLE_LOCK_TEST) \
 		bash tests/host/test_profile_yaml.sh
@@ -271,12 +256,10 @@ release-hosted-validation:
 release-gate:
 	bash packaging/release/release-gate.sh
 
-test-kubernetes-cli: host $(KUBERNETES_TRANSACTION_TEST)
-	HAMN=$(HOST_BIN) bash tests/host/test_kubernetes_profile.sh
-	$(KUBERNETES_TRANSACTION_TEST)
-	bash guest/tests/test_install_k3s.sh
+test-kubernetes-cli: host
+	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
+	python3 tests/host/test_k3s_retirement.py
 	bash guest/tests/test_configure_containerd.sh
-	bash guest/tests/test_k3s_configuration.sh
 
 test-core-quality: host
 	bash tests/host/test_core_quality.sh
