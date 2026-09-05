@@ -3,6 +3,7 @@ use std::{ffi::CString, io::IsTerminal, os::unix::ffi::OsStrExt};
 mod core;
 mod docker;
 mod headless;
+mod kubeconfig;
 mod model;
 mod service;
 
