@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 #[derive(Clone, Debug, Default, Parser, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 #[command(name = "hamn", version = env!("HAMN_VERSION"), about = "VM, Docker and Kubernetes console")]
 pub struct Request {
     #[arg(long)]
