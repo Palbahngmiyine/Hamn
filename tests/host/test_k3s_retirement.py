@@ -186,6 +186,20 @@ class Retirement(unittest.TestCase):
                     r.remove_data()
             self.assertEqual(outside.read_text(), 'Docker volume sentinel')
 
+    def test_foreign_mount_in_later_directory_prevents_all_data_removal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            roots = [Path(directory) / name for name in ['k3s', 'kubelet']]
+            for root in roots:
+                root.mkdir()
+                (root / 'sentinel').write_text('preserved')
+            with patch.object(r, 'DATA', tuple(map(str, roots))), \
+                    patch.object(r, 'safe', side_effect=Path), \
+                    patch.object(r, 'mountpoints', return_value=[str(roots[1] / 'foreign')]):
+                with self.assertRaises(RuntimeError):
+                    r.remove_data()
+            for root in roots:
+                self.assertEqual((root / 'sentinel').read_text(), 'preserved')
+
     def test_pod_unmount_failure_preserves_directory_and_retry_inventory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
