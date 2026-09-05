@@ -120,7 +120,7 @@ value = {
     "channel": "stable",
     "version": version,
     "commit": commit,
-    "validationMode": "github-hosted-no-vm",
+    "validationMode": "physical-apple-silicon",
     "compatibility": {
         "os": "darwin",
         "architecture": "arm64",

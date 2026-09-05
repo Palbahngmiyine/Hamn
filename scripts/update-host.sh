@@ -588,7 +588,7 @@ try:
     if not isinstance(manifest["commit"], str) or \
             not re.fullmatch(r"[0-9a-f]{40}", manifest["commit"]):
         raise ValueError("release commit is invalid")
-    if manifest["validationMode"] != "github-hosted-no-vm":
+    if manifest["validationMode"] not in ("github-hosted-no-vm", "physical-apple-silicon"):
         raise ValueError("release validation mode is invalid")
     compatibility = manifest["compatibility"]
     require_keys(compatibility, ("os", "architecture", "minimumMacOS"), "compatibility")
