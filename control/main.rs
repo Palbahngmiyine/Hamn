@@ -7,6 +7,7 @@ mod kubeconfig;
 mod kubernetes;
 mod model;
 mod service;
+mod tui_state;
 
 unsafe extern "C" {
     fn hamn_core_main(argc: libc::c_int, argv: *mut *mut libc::c_char) -> libc::c_int;
