@@ -1,4 +1,5 @@
 use std::{ffi::CString, os::unix::ffi::OsStrExt};
+mod model;
 
 unsafe extern "C" {
     fn hamn_core_main(argc: libc::c_int, argv: *mut *mut libc::c_char) -> libc::c_int;
