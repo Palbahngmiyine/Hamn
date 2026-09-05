@@ -111,8 +111,9 @@ BINDIR="$WORK/bin with space"
 DATADIR="$WORK/share with space/hamn/src"
 bash "$INSTALL" "$HAMN" "$BINDIR" "$DATADIR" >"$WORK/install.out"
 assert_managed_install "$BINDIR" "$DATADIR" "$HAMN"
-HOME="$WORK/home" "$BINDIR/hamn" status >"$WORK/status.out"
-grep -q '^profile: default$' "$WORK/status.out"
+HOME="$WORK/home" "$BINDIR/hamn" --headless vm list >"$WORK/status.out"
+grep -Fq '"data":[]' "$WORK/status.out"
+[ ! -e "$WORK/home/.hamn" ]
 
 # Reinstall succeeds without mutating or deleting the previous generation.
 old_target=$(readlink "$BINDIR/hamn")

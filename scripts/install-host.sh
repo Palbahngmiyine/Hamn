@@ -538,4 +538,5 @@ esac
 
 echo "installed: $HAMN_PATH -> $generation/bin/hamn"
 echo "installed: $generation/share/hamn/src/{scripts,packaging}"
-echo "verify: hamn start && docker context use hamn && docker run --rm alpine echo hello"
+echo "verify: hamn --headless vm start --profile default --yes"
+echo "Docker connection: hamn --headless vm env --profile default"
