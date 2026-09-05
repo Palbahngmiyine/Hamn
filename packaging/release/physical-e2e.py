@@ -71,6 +71,20 @@ def fixture(source, destination, state, legacy_hash):
     return expected['docker'], digest.hexdigest()
 
 
+def legacy_kubeconfig(home):
+    # Old kubectl serializes empty config lists as null; the legacy Hamn
+    # parser rejects those. Seed only this disposable HOME with inert records.
+    directory = home / '.kube'
+    directory.mkdir(mode=0o700)
+    path = directory / 'config'
+    with path.open('x') as output:
+        json.dump({'apiVersion': 'v1', 'kind': 'Config', 'current-context': 'fixture-base',
+            'clusters': [{'name': 'fixture-base', 'cluster': {'server': 'http://127.0.0.1:9'}}],
+            'users': [{'name': 'fixture-base', 'user': {'token': 'fixture-only'}}],
+            'contexts': [{'name': 'fixture-base', 'context': {'cluster': 'fixture-base', 'user': 'fixture-base'}}]}, output)
+    path.chmod(0o600)
+
+
 def main():
     parser = argparse.ArgumentParser(prog='physical-e2e.sh', description=__doc__)
     parser.parse_args()
@@ -118,6 +132,7 @@ def main():
         home = work / 'home'
         cache = home / '.hamn/cache'
         cache.mkdir(parents=True, mode=0o700)
+        legacy_kubeconfig(home)
         runtime = Runtime(binary, home, docker)
         digest = artifacts[guest_name]
         image_name = 'hamn-guest-' + digest + '.img'
