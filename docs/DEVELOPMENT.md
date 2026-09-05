@@ -1,103 +1,96 @@
 # Development
 
-This is the canonical English development guide. See
-[DEVELOPMENT.ko.md](DEVELOPMENT.ko.md) for Korean.
+See [DEVELOPMENT.ko.md](DEVELOPMENT.ko.md) for Korean.
 
-Hamn 0.0.1 is a Docker-only local-container product for Apple Silicon macOS
-13 or later. Host code is C11 and uses Virtualization.framework; Objective-C
-code stays in `host/vz/`. Guest code is GNU11 and is built into the immutable
-Ubuntu guest image, not copied from a host checkout into a running VM.
-
-There is no Desktop, XPC, Docker shim, `hamn docker`, `nerdctl`, public
-containerd socket, external Kubernetes catalog, Homebrew Cask, or DMG build
-path to develop.
+Hamn targets Apple Silicon macOS 13 or later. Rust owns the Ratatui TUI,
+headless interface, and Docker/Kubernetes clients. C11 owns VM lifecycle,
+profiles, images, SSH, and forwarding. Objective-C stays in `host/vz/`.
+The GNU11 guest agent is part of the immutable Ubuntu image.
 
 ## Build
 
-On an Apple Silicon Mac with the macOS command-line developer tools:
+Install the macOS command-line developer tools and the Rust toolchain pinned
+in `rust-toolchain.toml`, then run:
 
 ```sh
 make host
-build/hamn version
+build/hamn --version
+build/hamn --headless capabilities
 ```
 
-`make host` compiles `build/hamn` with C11 warnings and ad-hoc signs the
-binary with only the Virtualization entitlement. It is not a Developer ID or
-notarized distribution build.
+Cargo locks dependencies in `Cargo.lock` and builds C/Objective-C into a static
+archive in its own output directory. `scripts/build-host.py` serializes
+publication, signs and checks a temporary executable, then atomically replaces
+`build/hamn`. The single Mach-O uses macOS system libraries and the existing
+Virtualization entitlement. This is ad-hoc signing, not Developer ID signing
+or notarization. Do not distribute a separate core executable or dynamic library.
 
-Use a real Docker CLI separately; Hamn neither installs nor replaces it. A
-local source binary has no selected guest image, so `hamn start` deliberately
-fails until a signed release installs or updates one.
+Docker CLI is optional for users of the built-in Engine API client. External
+Docker CLI, Compose, buildx, and SDKs can use the profile's public socket.
+A VM needs an installed, verified managed guest image; there is no unsigned
+cloud-image fallback. External Kubernetes operations do not need a Hamn VM.
 
 ## Source gates
 
-Run Make targets one at a time: several targets rebuild the shared
-`build/hamn` path.
-
 ```sh
-make test-portable
-make test-core-quality
+make test-control
 make test-profile-state
 make test-guest-deployment
-make test-diagnostics
-make test-install
-make test-uninstall
-make test-update
-make test-kubernetes-cli
-make test-release-artifacts
-make test-hosted-validation
-make test-release-publish
+make test-release-gate
+make test-local-macos
 ```
 
-`make test-local-macos` runs the applicable host/source gates serially and
-also requires `actionlint`.
+`test-control` covers Rust services, the C boundary, worker isolation, mock
+Docker/Kubernetes APIs, K3s retirement, terminal restoration in a PTY, and
+binary publication. `test-release-gate` tests the evidence contract without a
+VM. Neither is physical release proof. `test-local-macos` runs the local
+source, guest, installation, update, and release gates; it requires actionlint.
+Run Make gates serially: packaging/update fixtures temporarily build other
+versions into the public `build/hamn` path.
 
-`make test-release-gate` retains the optional physical VM E2E harness for
-maintainer experiments. It is not part of `test-local-macos` or the automated
-release authority.
+## Guest images and retirement
 
-Do not run source tests concurrently when they rebuild the shared host binary.
+`guest/image/release-inputs.json` pins the Ubuntu base URL and SHA-256.
+`guest/image/build-ubuntu-24.04-arm64.sh` runs on Linux arm64 with libguestfs.
+Supply `HAMN_GUEST_BASE_IMAGE`, `HAMN_GUEST_BASE_SHA256`, and
+`HAMN_GUEST_OUTPUT`; the builder verifies the base digest and archives only
+committed `guest/` and `vendor/` sources. Docker, containerd, runc, CNI, binfmt,
+DNS, and hamnd remain image-owned. New images contain no managed K3s.
 
-## Guest-image work
+The fixed payload in `host/migration/` is embedded in the signed host binary.
+It may retire K3s and replace the old guest verifier/helpers once; this is not
+a general host-to-guest software installation path. Retirement records its
+steps, preserves Docker's `moby` namespace and shared content, and verifies
+Docker readiness before completing. K3s data cannot be restored by rolling
+back the host binary. See [Configuration](CONFIGURATION.md).
 
-The release guest image is Ubuntu 24.04 arm64. It must already contain
-`hamnd`, Moby `dockerd`, system containerd and CRI, runc, BuildKit, CNI,
-binfmt, guest configuration helpers, and the K3s manifest/trust material. The
-image builder requires a trusted Linux arm64 environment and signed input
-metadata:
+## Runtime validation
+
+Use an isolated HOME, owned test profiles, and an explicitly selected test
+Kubernetes context. Never run destructive tests against an existing user VM.
+The external Kubernetes harness creates a unique namespace and removes it in
+`finally`; it verifies kubeconfig bytes are unchanged:
 
 ```sh
-bash guest/image/build-ubuntu-24.04-arm64.sh --help
+python3 packaging/release/external-kubernetes-e2e.py --help
+packaging/release/physical-e2e.sh --help
 ```
 
-The builder rejects absent signatures and checksums. It must run from a Git
-checkout and archives only the committed `guest/` and `vendor/` trees while
-preparing the image; untracked checkout files are never image inputs. It then
-removes those sources from the finished root image. At VM boot, host code
-supplies profile configuration and permitted virtiofs mounts only; it does not
-mount `/opt/hamn` from the checkout or compile guest code.
+`make release-gate` runs the harness extracted from an exact candidate, with
+prepared running/stopped legacy fixtures and a pinned legacy binary. It must
+prove Docker data preservation on actual Apple Silicon. See
+[Release setup](RELEASE-SETUP.md) for runner inputs and promotion authority.
 
-## Local runtime discipline
+## Source boundaries
 
-Use an isolated `HOME` for destructive or lifecycle tests. Do not point a
-source checkout at an existing `~/.hamn` directory, Docker context, or Colima
-profile.
+- `control/`: typed requests/results, shared services, TUI, headless output.
+- `host/core/`: C ABI, profiles, VM lifecycle, image and migration coordination.
+- `host/vz/`: Virtualization.framework only.
+- `host/fwd/`: owned Docker socket and published-port forwarding.
+- `guest/agent/` and `guest/scripts/`: guest management and image-owned helpers.
+- `packaging/release/`: exact candidate assembly, validation, promotion.
 
-When changing an interface, update both canonical English and Korean Markdown
-references, add a deterministic success and failure test, and run the smallest
-relevant gate before broader gates. Keep host, guest, and vendored ownership
-separate.
-
-## Useful boundaries to inspect
-
-- `host/cmd/` owns CLI parsing and profile lifecycle.
-- `host/vz/` is the only Virtualization.framework implementation.
-- `host/fwd/` owns Docker-published TCP/UDP forwarding, not a Docker API
-  client.
-- `guest/agent/` is the guest control agent; it is not a container engine.
-- `guest/scripts/` configures image-provided Docker, containerd, K3s, and
-  Rosetta components transactionally.
-- `packaging/release/` builds, validates, and promotes release bytes.
-
-For architectural boundaries, read [Architecture](ARCHITECTURE.md); for the
-complete profile schema, read [Configuration](CONFIGURATION.md).
+Internal worker dispatch runs before terminal or asynchronous runtime setup.
+Keep C process-global state and fork/exit behavior in the worker. TUI exit
+must not terminate the independently owned VM supervisor. When changing an
+interface, update English and Korean references and success/failure tests.
