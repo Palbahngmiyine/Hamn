@@ -97,40 +97,12 @@ jobs:
           inputs=guest/image/release-inputs.json
           base_url=$(jq -er '.ubuntu.url' "$inputs")
           base_hash=$(jq -er '.ubuntu.sha256' "$inputs")
-          k3s_version=$(jq -er '.k3s.version' "$inputs")
-          binary_url=$(jq -er '.k3s.binaryUrl' "$inputs")
-          binary_hash=$(jq -er '.k3s.binarySha256' "$inputs")
-          airgap_url=$(jq -er '.k3s.airgapUrl' "$inputs")
-          airgap_hash=$(jq -er '.k3s.airgapSha256' "$inputs")
           curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
             --retry 3 --retry-delay 1 -o "$work/base.img" "$base_url"
           printf '%s  %s\n' "$base_hash" "$work/base.img" | sha256sum -c -
-          python3 - "$work/k3s-compatibility.json" "$k3s_version" \
-            "$binary_url" "$binary_hash" "$airgap_url" "$airgap_hash" <<'PY'
-          import json
-          import sys
-
-          path, version, binary_url, binary_hash, airgap_url, airgap_hash = sys.argv[1:]
-          value = {
-              "schemaVersion": 1,
-              "version": version,
-              "architecture": "arm64",
-              "binary": {"url": binary_url, "sha256": binary_hash},
-              "airgapImages": {"url": airgap_url, "sha256": airgap_hash},
-          }
-          with open(path, "w", encoding="utf-8", newline="\n") as output:
-              json.dump(value, output, sort_keys=True, separators=(",", ":"))
-              output.write("\n")
-          PY
-          ssh-keygen -q -t ed25519 -N '' -f "$work/k3s-compatibility-key"
-          ssh-keygen -Y sign -f "$work/k3s-compatibility-key" \
-            -n hamn-k3s-compatibility "$work/k3s-compatibility.json" >/dev/null
-          chmod 0644 "$work/base.img" "$work/k3s-compatibility.json" \
-            "$work/k3s-compatibility.json.sig" "$work/k3s-compatibility-key.pub"
+          chmod 0644 "$work/base.img"
           builder=$(mktemp -d /tmp/hamn-guest-builder.XXXXXX)
           cleanup_builder() {
-            rm -f "$work/k3s-compatibility-key" \
-              "$work/k3s-compatibility-key.pub"
             case "$builder" in
               /tmp/hamn-guest-builder.*) sudo rm -rf -- "$builder" ;;
               *) return 1 ;;
@@ -140,12 +112,6 @@ jobs:
           mkdir -m 0700 "$builder/home" "$builder/runtime" "$builder/tmp"
           mkdir -m 0755 "$builder/input" "$builder/output"
           install -m 0644 "$work/base.img" "$builder/input/base.img"
-          install -m 0644 "$work/k3s-compatibility.json" \
-            "$builder/input/k3s-compatibility.json"
-          install -m 0644 "$work/k3s-compatibility.json.sig" \
-            "$builder/input/k3s-compatibility.json.sig"
-          install -m 0644 "$work/k3s-compatibility-key.pub" \
-            "$builder/input/k3s-compatibility-key.pub"
           git clone --quiet --no-hardlinks --no-checkout \
             "$GITHUB_WORKSPACE" "$builder/source"
           git -C "$builder/source" checkout --quiet --detach "$GITHUB_SHA"
@@ -170,9 +136,6 @@ jobs:
           HAMN_GUEST_BASE_IMAGE="$builder/input/base.img" \
           HAMN_GUEST_BASE_SHA256="$base_hash" \
           HAMN_GUEST_OUTPUT="$guest_output" \
-          HAMN_K3S_COMPATIBILITY_MANIFEST="$builder/input/k3s-compatibility.json" \
-          HAMN_K3S_COMPATIBILITY_SIGNATURE="$builder/input/k3s-compatibility.json.sig" \
-          HAMN_RELEASE_PUBLIC_KEY="$builder/input/k3s-compatibility-key.pub" \
             /bin/bash "$builder/source/guest/image/build-ubuntu-24.04-arm64.sh"
           sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 \
             "$guest_output" "$RUNNER_TEMP/hamn-guest.img"

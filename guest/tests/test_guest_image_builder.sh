@@ -19,7 +19,10 @@ grep -Fq 'HAMN_GUEST_BASE_IMAGE' "$WORK/missing.err"
 grep -Fq 'docker.io,containerd,runc,containernetworking-plugins' "$BUILDER"
 grep -Fq 'qemu-user-static,binfmt-support,dnsmasq' "$BUILDER"
 grep -Fq '"components":["docker","buildkit","containerd","runc","cni","binfmt","dnsmasq","hamnd"]' "$BUILDER"
-grep -Fq 'k3s-compatibility.json.sig' "$BUILDER"
+if grep -Eiq 'k3s|HAMN_RELEASE_PUBLIC_KEY' "$BUILDER" "$GUEST_ROOT/Makefile"; then
+    echo "FAIL: new guest image still includes managed K3s inputs" >&2
+    exit 1
+fi
 grep -Fq 'make -C /opt/hamn/guest install' "$BUILDER"
 grep -Fq 'groupadd --system hamn' "$BUILDER"
 grep -Fq 'systemctl enable hamnd.service' "$BUILDER"
@@ -131,9 +134,6 @@ chmod 0755 "$WORK/bin/sha256sum" "$WORK/bin/ssh-keygen" \
     "$WORK/guestfish"
 
 BASE=$WORK/base.img
-MANIFEST=$WORK/k3s.json
-SIGNATURE=$WORK/k3s.json.sig
-PUBLIC_KEY=$WORK/release.pub
 OUTPUT=$WORK/guest.img
 ARCHIVE_LIST=$WORK/archive.list
 VIRT_ARGUMENTS=$WORK/virt-arguments
@@ -144,17 +144,11 @@ GUESTFISH_LABEL_COMMANDS=$WORK/guestfish-label-commands
 GUESTFISH_RESIZE_ARGUMENTS=$WORK/guestfish-resize-arguments
 GUESTFISH_RESIZE_COMMANDS=$WORK/guestfish-resize-commands
 printf 'base image fixture\n' >"$BASE"
-printf '{}\n' >"$MANIFEST"
-printf 'fixture signature\n' >"$SIGNATURE"
-printf 'fixture public key\n' >"$PUBLIC_KEY"
 BASE_SHA256=$(shasum -a 256 "$BASE" | awk '{print $1}')
 PATH="$WORK/bin:$PATH" \
 HAMN_GUEST_BASE_IMAGE="$BASE" \
 HAMN_GUEST_BASE_SHA256="$BASE_SHA256" \
 HAMN_GUEST_OUTPUT="$OUTPUT" \
-HAMN_K3S_COMPATIBILITY_MANIFEST="$MANIFEST" \
-HAMN_K3S_COMPATIBILITY_SIGNATURE="$SIGNATURE" \
-HAMN_RELEASE_PUBLIC_KEY="$PUBLIC_KEY" \
 HAMN_VIRT_CUSTOMIZE="$WORK/virt-customize" \
 HAMN_QEMU_IMG="$WORK/qemu-img" \
 HAMN_VIRT_RESIZE="$WORK/virt-resize" \
