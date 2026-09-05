@@ -17,6 +17,7 @@
 #include <unistd.h>
 
 #include "cli.h"
+#include "core/control.h"
 #include "core/guest_deployment.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
@@ -909,6 +910,27 @@ rollback:
 out:
     profile_mutation_unlock(mutation_fd);
     return 1;
+}
+
+int hamn_control_start(const char *profile, unsigned cpus,
+                       unsigned memory_gib, unsigned disk_gib)
+{
+    if (!profile_name_valid(profile) || memory_gib > UINT_MAX / 1024U) {
+        logerr("invalid VM resource request");
+        return 2;
+    }
+    struct start_options options = {
+        .cpus = cpus, .memory_gib = memory_gib, .disk_gib = disk_gib,
+        .template_enabled = 1,
+    };
+    struct vm_lifecycle_lock lock;
+    if (vm_lifecycle_lock_acquire(profile, &lock) != 0) {
+        logerr("cannot lock the %s profile lifecycle", profile);
+        return 1;
+    }
+    int rc = cmd_start_locked(&options, profile);
+    vm_lifecycle_lock_release(&lock);
+    return rc;
 }
 
 int cmd_start(int argc, char **argv)

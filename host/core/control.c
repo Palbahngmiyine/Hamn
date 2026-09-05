@@ -8,6 +8,9 @@
 
 #include "cjson/cJSON.h"
 #include "core/guest_status.h"
+#include "core/lifecycle.h"
+#include "core/log.h"
+#include "core/mutation_lock.h"
 #include "core/profile.h"
 #include "core/state.h"
 
@@ -107,4 +110,39 @@ int hamn_control_query(const char *profile, char **result)
 void hamn_control_free(char *result)
 {
     cJSON_free(result);
+}
+
+int hamn_control_configure(const char *name, unsigned cpus,
+                           unsigned memory_gib, unsigned disk_gib, int create)
+{
+    if (!profile_name_valid(name) || memory_gib > UINT_MAX / 1024U)
+        return 2;
+    struct vm_lifecycle_lock lifecycle;
+    if (vm_lifecycle_lock_acquire(name, &lifecycle) != 0)
+        return 1;
+    struct profile profile;
+    int rc = 1, mutation = -1;
+    if ((create ? profile_load(&profile, name) :
+         profile_read_existing(&profile, name)) != 0)
+        goto out;
+    mutation = profile_mutation_lock(&profile);
+    if (mutation < 0)
+        goto out;
+    if (vm_process_probe(&profile, NULL) != VM_PROCESS_STALE) {
+        logerr("VM must be stopped before changing settings");
+        goto out;
+    }
+    if (cpus) profile.cpus = cpus;
+    if (memory_gib) profile.mem_mib = memory_gib * 1024U;
+    if (disk_gib) profile.disk_gib = disk_gib;
+    if (profile_save(&profile) != 0) {
+        logerr("cannot save settings: %s", strerror(errno));
+        goto out;
+    }
+    rc = 0;
+out:
+    if (mutation >= 0)
+        profile_mutation_unlock(mutation);
+    vm_lifecycle_lock_release(&lifecycle);
+    return rc;
 }
