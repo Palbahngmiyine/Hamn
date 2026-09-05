@@ -92,9 +92,9 @@ ARTIFACT_ROOT="$WORK/hamn-${VERSION}-darwin-arm64"
 mkdir -m 0755 "$ARTIFACT_ROOT"
 mkdir -m 0755 "$ARTIFACT_ROOT/bin"
 install -m 0755 "$ROOT/build/hamn" "$ARTIFACT_ROOT/bin/hamn"
-rsync -a --delete --exclude build --exclude '._*' \
-    "$ROOT/scripts" "$ROOT/packaging" \
-    "$ARTIFACT_ROOT/"
+git -C "$ROOT" ls-files -z -- scripts packaging |
+    tar -C "$ROOT" --null -T - -cf - |
+    tar -C "$ARTIFACT_ROOT" -xf -
 printf '%s\n' "$MANIFEST_URL" \
     >"$ARTIFACT_ROOT/packaging/release/update-manifest-url"
 chmod 0644 "$ARTIFACT_ROOT/packaging/release/update-manifest-url"
