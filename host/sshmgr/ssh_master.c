@@ -21,6 +21,8 @@ int ssh_base_argv(const struct profile *p, const char *argv[], int cap,
     const char *base[] = {
         "ssh",
         "-F", "none",
+        "-n", "-T",
+        "-o", "BatchMode=yes",
         "-i", sb->key,
         "-o", "IdentitiesOnly=yes",
         "-o", "UserKnownHostsFile=/dev/null",
@@ -43,7 +45,7 @@ int ssh_base_argv(const struct profile *p, const char *argv[], int cap,
     return n;
 }
 
-int ssh_master_alive(const struct profile *p)
+static int master_alive(const struct profile *p, unsigned timeout_ms)
 {
     const char *argv[SSH_ARGV_MAX];
     struct ssh_strbuf sb;
@@ -56,7 +58,12 @@ int ssh_master_alive(const struct profile *p)
     argv[n] = NULL;
 
     char out[256];
-    return proc_run_capture(argv, out, sizeof(out)) == 0 ? 0 : -1;
+    return proc_run_bounded(argv, out, sizeof(out), timeout_ms, NULL, NULL) == 0 ? 0 : -1;
+}
+
+int ssh_master_alive(const struct profile *p)
+{
+    return master_alive(p, SSH_CONTROL_TIMEOUT_MS);
 }
 
 void ssh_master_exit(const struct profile *p)
@@ -72,10 +79,11 @@ void ssh_master_exit(const struct profile *p)
     argv[n] = NULL;
 
     char out[256];
-    proc_run_capture(argv, out, sizeof(out));
+    proc_run_bounded(argv, out, sizeof(out), SSH_CONTROL_TIMEOUT_MS, NULL, NULL);
 }
 
-static int try_master_once(const struct profile *p, const char *ip)
+static int try_master_once(const struct profile *p, const char *ip,
+                            unsigned timeout_ms)
 {
     const char *argv[SSH_ARGV_MAX];
     struct ssh_strbuf sb;
@@ -96,13 +104,13 @@ static int try_master_once(const struct profile *p, const char *ip)
     argv[n] = NULL;
 
     char out[256];
-    return proc_run_capture(argv, out, sizeof(out)) == 0 ? 0 : -1;
+    return proc_run_bounded(argv, out, sizeof(out), timeout_ms, NULL, NULL) == 0 ? 0 : -1;
 }
 
 int ssh_master_start(const struct profile *p, const char *ip, int timeout_sec)
 {
-    if (ssh_master_alive(p) == 0)
-        return 0;
+    if (timeout_sec <= 0)
+        return -1;
 
     /* 첫 부팅은 cloud-init이 사용자/키를 만들 때까지 거부될 수 있다 */
     struct timespec now;
@@ -110,9 +118,20 @@ int ssh_master_start(const struct profile *p, const char *ip, int timeout_sec)
         return -1;
     long long deadline = (long long)now.tv_sec * 1000 +
         now.tv_nsec / 1000000 + (long long)timeout_sec * 1000;
+    unsigned check_ms = timeout_sec < 5 ? (unsigned)timeout_sec * 1000 :
+        SSH_CONTROL_TIMEOUT_MS;
+    if (master_alive(p, check_ms) == 0)
+        return 0;
     long delay_ms = 100;
     for (;;) {
-        if (try_master_once(p, ip) == 0)
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            return -1;
+        long long budget = deadline - ((long long)now.tv_sec * 1000 +
+                                      now.tv_nsec / 1000000);
+        if (budget <= 0)
+            return -1;
+        unsigned attempt_ms = budget < 10000 ? (unsigned)budget : 10000;
+        if (try_master_once(p, ip, attempt_ms) == 0)
             return 0;
         if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
             return -1;
@@ -200,8 +219,9 @@ static char *remote_command_build(const char *const remote_argv[])
     return command;
 }
 
-int ssh_exec(const struct profile *p, const char *ip,
-             const char *const remote_argv[], int quiet)
+static int exec_remote(const struct profile *p, const char *ip,
+                        const char *const remote_argv[], int quiet,
+                        unsigned timeout_ms)
 {
     const char *argv[SSH_ARGV_MAX];
     struct ssh_strbuf sb;
@@ -220,12 +240,30 @@ int ssh_exec(const struct profile *p, const char *ip,
     int rc;
     if (quiet) {
         char out[1024];
-        rc = proc_run_capture(argv, out, sizeof(out));
+        rc = timeout_ms ?
+            proc_run_bounded(argv, out, sizeof(out), timeout_ms, NULL, NULL) :
+            proc_run_capture(argv, out, sizeof(out));
     } else {
         rc = proc_run(argv);
     }
     free(command);
     return rc;
+}
+
+int ssh_exec(const struct profile *p, const char *ip,
+             const char *const remote_argv[], int quiet)
+{
+    return exec_remote(p, ip, remote_argv, quiet, 0);
+}
+
+int ssh_exec_bounded(const struct profile *p, const char *ip,
+                     const char *const remote_argv[], unsigned timeout_ms)
+{
+    if (!timeout_ms) {
+        errno = EINVAL;
+        return -1;
+    }
+    return exec_remote(p, ip, remote_argv, 1, timeout_ms);
 }
 
 int ssh_exec_capture(const struct profile *p, const char *ip,

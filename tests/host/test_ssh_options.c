@@ -23,7 +23,8 @@ static int test_agent_forwarding(void)
 
     int count = ssh_base_argv(&profile, argv, SSH_ARGV_MAX, &strings);
     if (count < 1 || strcmp(argv[0], "ssh") != 0 ||
-        contains(argv, count, "-A")) {
+        contains(argv, count, "-A") || !contains(argv, count, "BatchMode=yes") ||
+        !contains(argv, count, "-n") || !contains(argv, count, "-T")) {
         fprintf(stderr, "SSH agent forwarding was enabled by default\n");
         return -1;
     }

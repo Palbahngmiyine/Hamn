@@ -14,6 +14,7 @@
 #define SSH_USER "hamn"
 /* base 옵션 + 목적지/명령에 충분한 argv 슬롯 */
 #define SSH_ARGV_MAX 64
+#define SSH_CONTROL_TIMEOUT_MS 5000
 
 /* <profile>/id_ed25519 없으면 ssh-keygen으로 생성. 0=성공 */
 int ssh_keys_ensure(const struct profile *p);
@@ -49,6 +50,9 @@ void ssh_master_exit(const struct profile *p);
  */
 int ssh_exec(const struct profile *p, const char *ip,
              const char *const remote_argv[], int quiet);
+/* Quiet bounded command; timeout ends the local client, not guest-side work. */
+int ssh_exec_bounded(const struct profile *p, const char *ip,
+                     const char *const remote_argv[], unsigned timeout_ms);
 int ssh_exec_capture(const struct profile *p, const char *ip,
                      const char *const remote_argv[], char *out, size_t cap);
 int ssh_exec_capture_checked(const struct profile *p, const char *ip,

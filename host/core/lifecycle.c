@@ -863,7 +863,7 @@ int vm_stop(const struct profile *p, int *was_running)
         if (st.ip[0] && ssh_master_alive(p) == 0) {
             logmsg("stopping guest via ssh poweroff ...");
             const char *off[] = { "sudo", "systemctl", "poweroff", NULL };
-            int off_rc = ssh_exec(p, st.ip, off, 1);
+            int off_rc = ssh_exec_bounded(p, st.ip, off, 10000);
             if (off_rc != 0)
                 logmsg("ssh poweroff returned %d; waiting for vm exit",
                        off_rc);
