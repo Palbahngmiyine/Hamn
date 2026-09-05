@@ -26,5 +26,5 @@ personal paths before attaching any file.
 
 Install Hamn only with the published installer or a release artifact whose
 GitHub attestation and SHA-256 values verify. The published release is
-immutable, and the installer and `hamn update` reject incompatible artifacts or
+immutable, and the installer and `hamn --headless system update --yes` reject incompatible artifacts or
 host and guest bytes that do not match the stable manifest digests.

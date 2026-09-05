@@ -195,6 +195,8 @@ if replace_if_changed "$config_tmp" "$CONFIG"; then
 fi
 trap - EXIT
 
+# containerd is set only in daemon.json; dockerd rejects duplicate flags even
+# when their value is identical. Preserve socket activation in ExecStart.
 dropin_tmp=$(mktemp "${DROPIN}.XXXXXX")
 trap 'rm -f "$dropin_tmp"' EXIT
 cat >"$dropin_tmp" <<EOF
@@ -204,7 +206,7 @@ Requires=containerd.service
 
 [Service]
 ExecStart=
-ExecStart=$DOCKERD_BIN -H fd:// --containerd=$CONTAINERD_SOCKET
+ExecStart=$DOCKERD_BIN -H fd://
 EOF
 dropin_changed=0
 if replace_if_changed "$dropin_tmp" "$DROPIN"; then

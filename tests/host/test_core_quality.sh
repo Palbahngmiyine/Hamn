@@ -49,8 +49,6 @@ for path in \
     docs/RELEASE-CHECKLIST.md \
     docs/RELEASE.md \
     docs/RELEASE.ko.md \
-    docs/RELEASE-REVIEW.md \
-    docs/RELEASE-REVIEW.ko.md \
     docs/ROADMAP.md \
     packaging/release/README.md \
     tests/ci/test_desktop_xcode.sh \
