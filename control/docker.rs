@@ -124,6 +124,7 @@ pub async fn execute(
             }
             if request.follow {
                 stream.finish(events.unwrap()).await?;
+                return Ok(json!({"ended":true}));
             }
             Ok(json!({"lines":lines}))
         }

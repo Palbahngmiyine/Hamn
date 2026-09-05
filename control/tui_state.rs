@@ -18,6 +18,7 @@ pub struct State {
     pub detail: Option<String>,
     pub pending: Option<Request>,
     pub loading: bool,
+    pub scroll: u16,
 }
 
 impl State {
@@ -35,6 +36,7 @@ impl State {
             detail: None,
             pending: None,
             loading: false,
+            scroll: 0,
         }
     }
     pub fn rows(&self) -> Vec<&Value> {
@@ -55,6 +57,12 @@ impl State {
         self.rows().get(self.selected).map(|v| (*v).clone())
     }
     pub fn move_by(&mut self, delta: isize) {
+        if self.detail.is_some() {
+            self.scroll = self
+                .scroll
+                .saturating_add_signed(delta.clamp(-32768, 32767) as i16);
+            return;
+        }
         self.selected = self
             .selected
             .saturating_add_signed(delta)
@@ -100,6 +108,7 @@ impl State {
         self.selected = 0;
         self.filter.clear();
         self.detail = None;
+        self.scroll = 0;
         Ok(request)
     }
     pub fn action(&self, action: &str) -> Result<Request> {
@@ -122,12 +131,31 @@ impl State {
             }
         }
         request.watch = false;
-        request.follow = false;
+        request.follow = action == "logs";
         request.all_namespaces = false;
         request.validate()?;
         Ok(request)
     }
     pub fn accept(&mut self, result: Result<Value>) {
+        if let Ok(value) = &result {
+            if value["type"] == "log" {
+                let text = self.detail.get_or_insert_with(String::new);
+                text.push_str(value["text"].as_str().unwrap_or_default());
+                if text.len() > 1024 * 1024 {
+                    let mut split = text.len() - 1024 * 1024;
+                    while !text.is_char_boundary(split) {
+                        split += 1;
+                    }
+                    text.drain(..split);
+                }
+                return;
+            }
+            if value["ended"] == true {
+                self.loading = false;
+                self.message = "log stream ended".into();
+                return;
+            }
+        }
         self.loading = false;
         match result {
             Ok(value) if value.is_array() => {
@@ -225,6 +253,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
     if let Some(detail) = &state.detail {
         frame.render_widget(
             Paragraph::new(clean(detail))
+                .scroll((state.scroll, 0))
                 .wrap(Wrap { trim: false })
                 .block(Block::bordered().title(title)),
             areas[1],
