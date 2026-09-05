@@ -21,6 +21,12 @@ def run(command, env=None, timeout=660, data=None):
     return result.stdout
 
 
+def terminal_settings(fd):
+    settings = termios.tcgetattr(fd)
+    settings[3] &= ~getattr(termios, 'PENDIN', 0)
+    return settings
+
+
 class Runtime:
     def __init__(self, binary, home, docker):
         self.binary, self.home, self.docker = Path(binary), Path(home), docker
@@ -68,7 +74,7 @@ class Runtime:
     def terminal(self, retiring=None):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 100, 0, 0))
-        before = termios.tcgetattr(slave)
+        before = terminal_settings(slave)
         child = subprocess.Popen([self.binary], stdin=slave, stdout=slave, stderr=slave,
             env=dict(self.environment, TERM='xterm-256color'), start_new_session=True)
         output = bytearray()
@@ -80,7 +86,7 @@ class Runtime:
                     raise RuntimeError('TUI did not render before the deadline')
                 output.extend(os.read(master, 65536))
             os.write(master, b'q')
-            if child.wait(timeout=10) or termios.tcgetattr(slave) != before:
+            if child.wait(timeout=10) or terminal_settings(slave) != before:
                 raise RuntimeError('TUI did not restore the terminal')
         finally:
             if child.poll() is None:
