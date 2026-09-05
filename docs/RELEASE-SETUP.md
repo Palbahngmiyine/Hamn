@@ -57,9 +57,11 @@ launching the candidate TUI. It starts the stopped fixture with the candidate
 headless interface. Both must finish retirement, preserve Docker snapshots,
 and leave no live test VM. The Kubernetes harness creates and removes a
 unique test namespace and verifies the source kubeconfig is unchanged.
-The standalone Kubernetes harness also supports `--host-network` for
-separate API checks when Pod CNI is unavailable. The full release gate uses
-the cluster Pod network; a standalone check does not replace its evidence.
+The release gate defaults to the cluster Pod network. For an API validation
+cluster without working CNI, explicitly set `HAMN_E2E_K8S_HOST_NETWORK=1`.
+The evidence records `podNetwork: "host"`; this validates Kubernetes operations
+and logs but does not establish Pod network connectivity. The standalone
+Kubernetes harness accepts the equivalent `--host-network` option.
 
 ## Inputs and release authority
 

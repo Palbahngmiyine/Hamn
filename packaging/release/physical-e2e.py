@@ -74,6 +74,9 @@ def fixture(source, destination, state, legacy_hash):
 def main():
     parser = argparse.ArgumentParser(prog='physical-e2e.sh', description=__doc__)
     parser.parse_args()
+    host_network = os.environ.get('HAMN_E2E_K8S_HOST_NETWORK', '0')
+    if host_network not in ('0', '1'):
+        raise ValueError('HAMN_E2E_K8S_HOST_NETWORK must be 0 or 1')
     required = ['HAMN_CANDIDATE_DIR', 'HAMN_E2E_OUTPUT', 'HAMN_E2E_CONTEXT', 'HAMN_E2E_KUBECONFIG',
                 'HAMN_LEGACY_BINARY', 'HAMN_LEGACY_BINARY_SHA256', 'HAMN_LEGACY_RUNNING_FIXTURE', 'HAMN_LEGACY_STOPPED_FIXTURE']
     if any(not os.environ.get(key) for key in required):
@@ -156,8 +159,11 @@ def main():
             legacy_results[state] = {'before': before, 'after': after, 'k3sRemoved': True, 'journalComplete': True, 'sourceSha256': source_hash}
         checks.update(['k3sRunningRetirement', 'k3sStoppedRetirement', 'dockerDataPreserved'])
         kube_path = work / 'kubernetes.json'
-        run([sys.executable, root / 'packaging/release/external-kubernetes-e2e.py', '--hamn', binary,
-             '--context', os.environ['HAMN_E2E_CONTEXT'], '--kubeconfig', os.environ['HAMN_E2E_KUBECONFIG'], '--output', kube_path], timeout=1200)
+        kube_command = [sys.executable, root / 'packaging/release/external-kubernetes-e2e.py', '--hamn', binary,
+             '--context', os.environ['HAMN_E2E_CONTEXT'], '--kubeconfig', os.environ['HAMN_E2E_KUBECONFIG'], '--output', kube_path]
+        if host_network == '1':
+            kube_command.append('--host-network')
+        run(kube_command, timeout=1200)
         kubernetes = read_json(kube_path)
         checks.update(['externalKubernetes', 'kubeconfigUnchanged'])
         assert sha256(binary) == binary_hash

@@ -51,9 +51,11 @@ fixture는 K3s 데이터를 유지하되 K3s를 비활성화한 상태입니다.
 검증기는 running fixture를 고정한 구형 바이너리로 시작한 뒤 후보 TUI를 실행합니다.
 stopped fixture는 후보 헤드리스 인터페이스로 시작합니다. 두 경우 모두 전환 완료,
 Docker 스냅샷 보존, 테스트 VM 정리를 확인해야 합니다. Kubernetes 검증기는 고유
-namespace를 만들고 제거하며 원본 kubeconfig가 동일한지 확인합니다. 독립 Kubernetes
-검증기는 CNI가 없는 환경의 API 검사에 `--host-network`도 지원합니다. 전체 릴리스
-검증은 클러스터 Pod 네트워크를 사용하며 독립 검사로 그 증거를 대체하지 않습니다.
+namespace를 만들고 제거하며 원본 kubeconfig가 동일한지 확인합니다. 기본값은
+클러스터 Pod 네트워크입니다. CNI가 동작하지 않는 API 검증 클러스터에서는
+`HAMN_E2E_K8S_HOST_NETWORK=1`을 명시할 수 있습니다. 증거에 `podNetwork: "host"`가
+기록되며 Kubernetes 조작과 로그를 검증하지만 Pod 네트워크 연결을 입증하지는
+않습니다. 독립 Kubernetes 검증기에는 같은 의미의 `--host-network` 옵션이 있습니다.
 
 ## 입력과 배포 권한
 
