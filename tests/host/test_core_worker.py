@@ -30,4 +30,17 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
     assert "Err" in call("vm status", profile="missing")
     assert not (Path(directory) / ".hamn" / "missing").exists()
     assert len(call("vm list")["Ok"]) == 1
+    result = subprocess.run([binary, "--headless", "vm", "status", "--profile", "test"],
+                            capture_output=True, text=True, env=env, timeout=10, check=True)
+    value = json.loads(result.stdout)
+    assert value["ok"] is True and value["data"]["cpus"] == 2
+    result = subprocess.run([binary, "--headless", "capabilities"],
+                            capture_output=True, text=True, env=env, timeout=10, check=True)
+    assert json.loads(result.stdout)["data"]["formats"] == ["json", "ndjson"]
+    result = subprocess.run([binary, "--headless", "vm", "configure", "--profile", "test", "--yes", "--watch"],
+                            capture_output=True, text=True, env=env, timeout=10)
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["error"]["code"] == "invalidRequest"
+    result = subprocess.run([binary], capture_output=True, text=True, env=env, timeout=10)
+    assert result.returncode != 0 and "\x1b" not in result.stdout
 print("core worker isolation and protocol: passed")
