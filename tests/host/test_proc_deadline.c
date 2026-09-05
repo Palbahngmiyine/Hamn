@@ -20,6 +20,9 @@ int main(int argc, char **argv)
         fflush(stdout);
         for (;;) pause();
     }
+    if (argc == 2 && strcmp(argv[1], "silent") == 0) {
+        for (;;) pause();
+    }
     char output[128];
     const char *success[] = {"/bin/sh", "-c", "printf ready; exit 7", NULL};
     assert(proc_run_bounded(success, output, sizeof(output), 5000, NULL, NULL) == 7);
@@ -39,6 +42,8 @@ int main(int argc, char **argv)
     assert(result == PROC_RUN_TIMEOUT);
     assert(read(notify[0], &result, sizeof(result)) == 0); /* exactly once */
     close(notify[0]);
+    const char *silent[] = {argv[0], "silent", NULL};
+    assert(proc_run_bounded(silent, NULL, 0, 100, NULL, NULL) == PROC_RUN_TIMEOUT);
     const char *absent[] = {"/hamn-no-such-command", NULL};
     assert(proc_run_bounded(absent, output, sizeof(output), 5000, NULL, NULL) == 127);
     puts("PASS: process deadlines reap blocked children and retain completion semantics");
