@@ -22,9 +22,6 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 BASE_IMAGE=${HAMN_GUEST_BASE_IMAGE:-}
 BASE_SHA256=${HAMN_GUEST_BASE_SHA256:-}
 OUTPUT=${HAMN_GUEST_OUTPUT:-}
-K3S_MANIFEST=${HAMN_K3S_COMPATIBILITY_MANIFEST:-}
-K3S_SIGNATURE=${HAMN_K3S_COMPATIBILITY_SIGNATURE:-}
-RELEASE_PUBLIC_KEY=${HAMN_RELEASE_PUBLIC_KEY:-}
 VIRT_CUSTOMIZE=${HAMN_VIRT_CUSTOMIZE:-virt-customize}
 QEMU_IMG=${HAMN_QEMU_IMG:-qemu-img}
 VIRT_RESIZE=${HAMN_VIRT_RESIZE:-virt-resize}
@@ -32,18 +29,11 @@ GUESTFISH=${HAMN_GUESTFISH:-guestfish}
 TARGET_SIZE=8G
 MAX_RELEASE_ASSET_SIZE=2147483648
 
-[ -n "$BASE_IMAGE" ] && [ -n "$BASE_SHA256" ] && [ -n "$OUTPUT" ] &&
-    [ -n "$K3S_MANIFEST" ] && [ -n "$K3S_SIGNATURE" ] &&
-    [ -n "$RELEASE_PUBLIC_KEY" ] ||
-    fail "HAMN_GUEST_BASE_IMAGE, HAMN_GUEST_BASE_SHA256, HAMN_GUEST_OUTPUT, HAMN_K3S_COMPATIBILITY_MANIFEST, HAMN_K3S_COMPATIBILITY_SIGNATURE, and HAMN_RELEASE_PUBLIC_KEY are required"
+[ -n "$BASE_IMAGE" ] && [ -n "$BASE_SHA256" ] && [ -n "$OUTPUT" ] ||
+    fail "HAMN_GUEST_BASE_IMAGE, HAMN_GUEST_BASE_SHA256, and HAMN_GUEST_OUTPUT are required"
 [[ "$BASE_SHA256" =~ ^[0-9a-f]{64}$ ]] ||
     fail "HAMN_GUEST_BASE_SHA256 must be lowercase SHA-256"
 safe_regular "$BASE_IMAGE" || fail "base image is unsafe"
-safe_regular "$K3S_MANIFEST" || fail "K3s compatibility manifest is unsafe"
-safe_regular "$K3S_SIGNATURE" || fail "K3s compatibility signature is unsafe"
-safe_regular "$RELEASE_PUBLIC_KEY" || fail "release public key is unsafe"
-ssh-keygen -lf "$RELEASE_PUBLIC_KEY" | grep -q ED25519 ||
-    fail "release public key is not Ed25519"
 [ "$(sha256_file "$BASE_IMAGE")" = "$BASE_SHA256" ] ||
     fail "base image SHA-256 mismatch"
 command -v "$VIRT_CUSTOMIZE" >/dev/null 2>&1 ||
@@ -70,13 +60,6 @@ cleanup() {
     rm -f "$STAGE" "$COMPACT"
 }
 trap cleanup EXIT
-
-allowed=$WORK/allowed-signers
-printf 'hamn-release ' >"$allowed"
-cat "$RELEASE_PUBLIC_KEY" >>"$allowed"
-ssh-keygen -Y verify -f "$allowed" -I hamn-release \
-    -n hamn-k3s-compatibility -s "$K3S_SIGNATURE" <"$K3S_MANIFEST" >/dev/null ||
-    fail "K3s compatibility manifest signature verification failed"
 
 GUEST_MANIFEST=$WORK/guest-image.json
 printf '%s\n' \
@@ -105,9 +88,6 @@ cat >"$PROVISION" <<'EOF'
 set -euo pipefail
 install -d -m 0755 /etc/hamn /opt/hamn
 install -m 0644 /tmp/hamn-guest-image.json /etc/hamn/guest-image.json
-install -m 0644 /tmp/k3s-compatibility.json /etc/hamn/k3s-compatibility.json
-install -m 0644 /tmp/k3s-compatibility.json.sig /etc/hamn/k3s-compatibility.json.sig
-install -m 0644 /tmp/hamn-release.pub /etc/hamn/hamn-release.pub
 tar -xzf /tmp/hamn-guest-sources.tar.gz -C /opt/hamn
 getent group hamn >/dev/null || groupadd --system hamn
 make -C /opt/hamn/guest install
@@ -155,9 +135,6 @@ fi
     --run-command "date -u -s '@$COMMIT_EPOCH'" \
     --install "$PACKAGES" \
     --upload "$GUEST_MANIFEST:/tmp/hamn-guest-image.json" \
-    --upload "$K3S_MANIFEST:/tmp/k3s-compatibility.json" \
-    --upload "$K3S_SIGNATURE:/tmp/k3s-compatibility.json.sig" \
-    --upload "$RELEASE_PUBLIC_KEY:/tmp/hamn-release.pub" \
     --upload "$SOURCE_ARCHIVE:/tmp/hamn-guest-sources.tar.gz" \
     --upload "$PROVISION:/tmp/hamn-image-provision.sh" \
     --run-command 'bash /tmp/hamn-image-provision.sh' \

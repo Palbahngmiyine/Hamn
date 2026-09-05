@@ -36,17 +36,11 @@ install-common: $(AGENT_BIN)
 		$(DESTDIR)/usr/local/libexec/hamn/configure-rosetta
 	install -m 0755 scripts/verify-image-contract.sh \
 		$(DESTDIR)/usr/local/libexec/hamn/verify-image-contract
-	install -m 0755 scripts/configure-k3s.sh \
-		$(DESTDIR)/usr/local/libexec/hamn/configure-k3s
-	install -m 0755 scripts/install-k3s.sh \
-		$(DESTDIR)/usr/local/libexec/hamn/install-k3s
 	install -m 0755 scripts/guest-deployment-transaction.sh \
 		$(DESTDIR)/usr/local/libexec/hamn/guest-deployment-transaction
 	install -d -m 0755 $(DESTDIR)/etc/systemd/system
 	install -m 0644 systemd/hamnd.service \
 		$(DESTDIR)/etc/systemd/system/hamnd.service
-	install -m 0644 systemd/k3s.service \
-		$(DESTDIR)/etc/systemd/system/k3s.service
 
 clean:
 	rm -rf build
