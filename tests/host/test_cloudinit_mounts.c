@@ -33,7 +33,7 @@ static int require_contains(const char *text, const char *expected)
 {
     if (strstr(text, expected))
         return 0;
-    fprintf(stderr, "missing expected seed entry: %s\n", expected);
+    fprintf(stderr, "missing expected seed entry: %s\nseed: %s\n", expected, text);
     return -1;
 }
 
@@ -97,6 +97,7 @@ int main(void)
     if (require_contains(user_data,
                          "- \"ssh-ed25519 test-key user@example.invalid\"") != 0 ||
         require_contains(user_data, "groups: [sudo, hamn]") != 0 ||
+        require_contains(user_data, "primary_group: hamn\n") != 0 ||
         require_absent(user_data, "\"/opt/hamn\"") != 0) {
         goto out;
     }
@@ -145,6 +146,18 @@ int main(void)
                        home);
     if (written < 0 || written >= (int)sizeof(expected_home) ||
         require_contains(user_data, expected_home) != 0)
+        goto out;
+
+    /* A group named hamn already exists in the managed image. The user must
+     * join it as its primary group, and no-mount profiles need a YAML list. */
+    profile.mount_home = 0;
+    profile.rosetta = 0;
+    profile.mount_count = 0;
+    if (cloudinit_seed_ensure(&profile, 1) != 0 ||
+        extract_user_data(iso, user_data, sizeof(user_data)) != 0 ||
+        require_contains(user_data, "primary_group: hamn\n") != 0 ||
+        require_contains(user_data, "mounts: []") != 0 ||
+        require_absent(user_data, "mounts:\n") != 0)
         goto out;
 
     rc = 0;

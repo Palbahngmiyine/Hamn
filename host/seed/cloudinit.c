@@ -39,6 +39,7 @@ static const char USER_DATA_HEADER[] =
     "hostname: hamn\n"
     "users:\n"
     "  - name: hamn\n"
+    "    primary_group: hamn\n"
     "    groups: [sudo, hamn]\n"
     "    sudo: \"ALL=(ALL) NOPASSWD:ALL\"\n"
     "    shell: /bin/bash\n"
@@ -119,7 +120,11 @@ static int build_user_data(const struct profile *profile, const char *pubkey,
     size_t length = 0;
     if (append_text(output, USER_DATA_CAP, &length, "%s", USER_DATA_HEADER) != 0 ||
         append_yaml_string(output, USER_DATA_CAP, &length, pubkey) != 0 ||
-        append_text(output, USER_DATA_CAP, &length, "\nmounts:\n") != 0)
+        append_text(output, USER_DATA_CAP, &length, "\n") != 0)
+        return -1;
+    if (append_text(output, USER_DATA_CAP, &length,
+                    profile->mount_home || profile->rosetta || profile->mount_count
+                        ? "mounts:\n" : "mounts: []\n") != 0)
         return -1;
     if (profile->mount_home &&
         append_mount(output, USER_DATA_CAP, &length, "home", home,
