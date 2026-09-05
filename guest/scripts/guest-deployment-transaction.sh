@@ -77,14 +77,13 @@ chmod 0700 "$TRANSACTION_ROOT" || fail "cannot secure transaction root"
 TRANSACTION="$TRANSACTION_ROOT/$TOKEN"
 
 ITEM_KEYS=(
-    hamnd libexec_hamn hamnd_unit k3s_unit etc_hamn containerd_config docker_config
+    hamnd libexec_hamn hamnd_unit etc_hamn containerd_config docker_config
     docker_dropin host_dns_config host_dns_unit modules_config sysctl_config cni_bin
 )
 ITEM_PATHS=(
     /usr/local/bin/hamnd
     /usr/local/libexec/hamn
     /etc/systemd/system/hamnd.service
-    /etc/systemd/system/k3s.service
     /etc/hamn
     /etc/containerd/config.toml
     /etc/docker/daemon.json
@@ -96,9 +95,9 @@ ITEM_PATHS=(
     /opt/cni/bin
 )
 ITEM_TYPES=(
-    file directory file file directory file file directory file file file file directory
+    file directory file directory file file directory file file file file directory
 )
-SERVICES=(hamnd.service containerd.service docker.service hamn-host-dns.service k3s.service)
+SERVICES=(hamnd.service containerd.service docker.service hamn-host-dns.service)
 
 validate_item_type() {
     local path=$1

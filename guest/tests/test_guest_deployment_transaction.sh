@@ -80,7 +80,6 @@ chmod 0755 "$ROOT/usr/local/bin/hamnd"
 write_file "$ROOT/usr/local/libexec/hamn/old-helper" old-helper
 chmod 0710 "$ROOT/usr/local/libexec/hamn"
 write_file "$ROOT/etc/systemd/system/hamnd.service" old-hamnd-unit
-write_file "$ROOT/etc/systemd/system/k3s.service" old-k3s-unit
 write_file "$ROOT/etc/hamn/runtime-state" old-state
 write_file "$ROOT/etc/containerd/config.toml" old-containerd
 write_file "$ROOT/etc/docker/daemon.json" old-docker
@@ -98,7 +97,7 @@ TRANSACTION="$TRANSACTION_ROOT/$TOKEN"
 [ -d "$TRANSACTION" ] || fail "transaction was not created"
 [ "$(file_mode "$TRANSACTION")" = 700 ] || fail "transaction mode"
 [ "$(cat "$TRANSACTION/phase")" = ready ] || fail "transaction phase"
-for key in hamnd libexec_hamn hamnd_unit k3s_unit etc_hamn containerd_config \
+for key in hamnd libexec_hamn hamnd_unit etc_hamn containerd_config \
     docker_config docker_dropin host_dns_config host_dns_unit modules_config \
     sysctl_config cni_bin; do
     [ -f "$TRANSACTION/meta/$key" ] || fail "missing metadata: $key"
@@ -119,7 +118,6 @@ write_file "$ROOT/usr/local/bin/hamnd" new-hamnd
 rm -rf "$ROOT/usr/local/libexec/hamn"
 write_file "$ROOT/usr/local/libexec/hamn/new-helper" new-helper
 write_file "$ROOT/etc/systemd/system/hamnd.service" new-hamnd-unit
-write_file "$ROOT/etc/systemd/system/k3s.service" new-k3s-unit
 rm -rf "$ROOT/etc/hamn"
 write_file "$ROOT/etc/hamn/new-state" new-state
 write_file "$ROOT/etc/containerd/config.toml" new-containerd
@@ -140,7 +138,6 @@ assert_file "$ROOT/usr/local/bin/hamnd" old-hamnd
 assert_file "$ROOT/usr/local/libexec/hamn/old-helper" old-helper
 test ! -e "$ROOT/usr/local/libexec/hamn/new-helper"
 assert_file "$ROOT/etc/systemd/system/hamnd.service" old-hamnd-unit
-assert_file "$ROOT/etc/systemd/system/k3s.service" old-k3s-unit
 assert_file "$ROOT/etc/hamn/runtime-state" old-state
 assert_file "$ROOT/etc/containerd/config.toml" old-containerd
 assert_file "$ROOT/etc/docker/daemon.json" old-docker

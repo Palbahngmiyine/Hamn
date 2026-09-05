@@ -4,11 +4,8 @@ export LC_ALL=C
 
 # This check is intentionally local and side-effect free. It distinguishes a
 # signed preconfigured Hamn image from a stock Ubuntu cloud image before host
-# lifecycle code writes containerd, Docker, or K3s state into the guest.
+# lifecycle code writes containerd, or Docker state into the guest.
 IMAGE_MANIFEST=${HAMN_GUEST_IMAGE_MANIFEST:-/etc/hamn/guest-image.json}
-K3S_MANIFEST=${HAMN_K3S_MANIFEST:-/etc/hamn/k3s-compatibility.json}
-K3S_SIGNATURE=${HAMN_K3S_MANIFEST_SIGNATURE:-$K3S_MANIFEST.sig}
-RELEASE_KEY=${HAMN_K3S_PUBLIC_KEY:-/etc/hamn/hamn-release.pub}
 CNI_DIR=${HAMN_CNI_SOURCE_DIR:-/usr/lib/cni}
 HAMND_BIN=${HAMN_HAMND_BIN:-/usr/local/bin/hamnd}
 GETENT=${HAMN_GETENT:-getent}
@@ -33,9 +30,6 @@ safe_regular() {
 
 [ "$ARCH" = aarch64 ] || fail "guest architecture is not arm64"
 safe_regular "$IMAGE_MANIFEST" || fail "guest image manifest is unavailable"
-safe_regular "$K3S_MANIFEST" || fail "K3s compatibility manifest is unavailable"
-safe_regular "$K3S_SIGNATURE" || fail "K3s compatibility manifest signature is unavailable"
-safe_regular "$RELEASE_KEY" || fail "release public key is unavailable"
 
 python3 - "$IMAGE_MANIFEST" <<'PY'
 import json

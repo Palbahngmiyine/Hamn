@@ -27,15 +27,10 @@ printf 'enabled\n' >"$BINFMT"
 ROSETTA_BINFMT=$WORK/hamn-rosetta
 printf 'enabled\n' >"$ROSETTA_BINFMT"
 MANIFEST=$ETC/guest-image.json
-K3S=$ETC/k3s-compatibility.json
-KEY=$ETC/hamn-release.pub
 printf '%s' \
     '{"schemaVersion":1,"distribution":"ubuntu-24.04","architecture":"arm64",' \
     '"components":["docker","buildkit","containerd","runc","cni","binfmt","dnsmasq","hamnd"]}' \
     >"$MANIFEST"
-printf '{}\n' >"$K3S"
-printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGuestImageContractTestKey hamn-release\n' >"$KEY"
-printf 'signature fixture\n' >"$K3S.sig"
 
 run_contract() {
     local mode=${1:-qemu}
@@ -43,9 +38,6 @@ run_contract() {
     PATH="$BIN:/usr/bin:/bin" \
     HAMN_GUEST_ARCH=aarch64 \
     HAMN_GUEST_IMAGE_MANIFEST="$MANIFEST" \
-    HAMN_K3S_MANIFEST="$K3S" \
-    HAMN_K3S_MANIFEST_SIGNATURE="$K3S.sig" \
-    HAMN_K3S_PUBLIC_KEY="$KEY" \
     HAMN_CNI_SOURCE_DIR="$CNI" \
     HAMN_HAMND_BIN="$HAMND" \
     HAMN_BINFMT_MODE="$mode" \
