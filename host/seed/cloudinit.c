@@ -40,7 +40,7 @@ static const char USER_DATA_HEADER[] =
     "users:\n"
     "  - name: hamn\n"
     "    primary_group: hamn\n"
-    "    groups: [sudo, hamn]\n"
+    "    groups: [sudo, hamn, docker]\n"
     "    sudo: \"ALL=(ALL) NOPASSWD:ALL\"\n"
     "    shell: /bin/bash\n"
     "    lock_passwd: true\n"

@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "core/control.h"
+#include "core/guest_deployment.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/mutation_lock.h"
@@ -122,6 +123,19 @@ int retirement_run(struct profile *profile, const char *ip)
             logerr("cannot safely retire profile-local Kubernetes state: %s", path);
             return -1;
         }
+    }
+    /* Refresh the SSH session's supplementary groups and all socket forwards
+     * before publishing completion. A listening host socket alone is not proof
+     * that the guest permits Docker API access. */
+    struct vm_state state;
+    if (state_load(profile, &state) != 0)
+        return -1;
+    snprintf(state.ip, sizeof(state.ip), "%s", ip);
+    ssh_master_exit(profile);
+    if (ssh_master_start(profile, ip, 15) != 0 ||
+        guest_deployment_repair_locked(profile, &state) != 0) {
+        logerr("guest retirement finished but Docker reconnection failed; retry required");
+        return -1;
     }
     profile->legacy_k3s = 0;
     profile->legacy_k3s_enabled = 0;

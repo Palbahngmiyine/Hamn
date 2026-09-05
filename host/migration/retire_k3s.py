@@ -222,3 +222,5 @@ def replace_helpers(payload):
         raise RuntimeError('invalid retirement helper payload')
     for name, content in payload['helpers'].items():
         atomic(Path('/usr/local/libexec/hamn') / name, content.encode(), 0o755)
+    # Existing users are not necessarily updated by cloud-init on later boots.
+    run('usermod', '--append', '--groups', 'docker', 'hamn')

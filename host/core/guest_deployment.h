@@ -16,6 +16,7 @@ int guest_deployment_configure_runtime(const struct profile *profile,
                                        const char *ip);
 int guest_deployment_forward_sockets(const struct profile *profile,
                                      const char *ip);
+int guest_deployment_docker_ready(const struct profile *profile);
 int guest_deployment_runtime_ready(const struct profile *profile,
                                    const char *ip, int timeout_sec);
 

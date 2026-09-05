@@ -150,7 +150,12 @@ $(PROFILE_READ_TEST): tests/host/test_profile_read.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) $(LDFLAGS) -o $@
 
-test-control: host $(PROFILE_READ_TEST)
+$(BUILD)/tests/test_docker_readiness: tests/host/test_docker_readiness.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) $(LDFLAGS) -o $@
+
+test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness
+	python3 tests/host/test_docker_readiness.py
 	cargo test --locked
 	@test "$$(cargo tree --locked --prefix none --format '{p}' | sed -n '/^crossterm v/p' | cut -d ' ' -f 1,2 | sort -u | wc -l | tr -d ' ')" = 1
 	$(PROFILE_READ_TEST)
