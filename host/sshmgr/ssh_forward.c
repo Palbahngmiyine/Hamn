@@ -8,9 +8,8 @@ static int run_forward_command(const char *const argv[],
                                ssh_forward_completion_fn completion,
                                void *context)
 {
-    return completion ?
-        proc_run_supervised_callback(argv, completion, context) :
-        proc_run_supervised(argv);
+    return proc_run_bounded(argv, NULL, 0, SSH_CONTROL_TIMEOUT_MS,
+                            completion, context);
 }
 
 static int forward_ctl(const struct profile *p, const char *ip,
