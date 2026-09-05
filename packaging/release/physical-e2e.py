@@ -9,6 +9,7 @@ legacy binary after creating Docker sentinel objects and K3s data. No user VM
 or kubeconfig is changed; all profile disks are cloned into an isolated HOME.
 """
 import hashlib
+import argparse
 import json
 import os
 from pathlib import Path
@@ -71,6 +72,8 @@ def fixture(source, destination, state, legacy_hash):
 
 
 def main():
+    parser = argparse.ArgumentParser(prog='physical-e2e.sh', description=__doc__)
+    parser.parse_args()
     required = ['HAMN_CANDIDATE_DIR', 'HAMN_E2E_OUTPUT', 'HAMN_E2E_CONTEXT', 'HAMN_E2E_KUBECONFIG',
                 'HAMN_LEGACY_BINARY', 'HAMN_LEGACY_BINARY_SHA256', 'HAMN_LEGACY_RUNNING_FIXTURE', 'HAMN_LEGACY_STOPPED_FIXTURE']
     if any(not os.environ.get(key) for key in required):

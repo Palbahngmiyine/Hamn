@@ -192,3 +192,23 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "executed in a PTY by tests/host/test_tui.py; intentionally panics"]
+    fn panic_restores_terminal_fixture() {
+        let mut terminal = ratatui::init();
+        let _restore = Restore;
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new("Hamn panic fixture"),
+                    frame.area(),
+                )
+            })
+            .unwrap();
+        panic!("intentional terminal restoration fault");
+    }
+}
