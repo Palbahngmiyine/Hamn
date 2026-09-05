@@ -1,156 +1,84 @@
 # 아키텍처
 
-이 문서는 Hamn 0.0.1 아키텍처의 한국어 번역입니다. 기준 영문 문서는
-[ARCHITECTURE.md](ARCHITECTURE.md)입니다.
+Hamn은 Rust 제어 계층과 정적으로 링크한 C/Objective-C 가상화 코어를 하나의 macOS
+실행 파일로 제공합니다. 공개 요청은 [API](API.ko.md)를 참고하세요.
 
-## 설계 경계
-
-Hamn은 프로필별 Linux VM과 host ↔ guest 사이의 좁은 전송 계층을 소유하는 macOS
-CLI입니다. Container engine, Docker CLI 대체품, Desktop application, host containerd
-distribution이 아닙니다.
-
-macOS XNU에는 Linux container process가 요구하는 Linux kernel ABI가 없습니다. 여기에는
-Linux namespace, cgroup, overlay filesystem이 포함됩니다. 따라서 제품 경계는 macOS에서
-Linux container를 직접 실행하는 것이 아니라 Apple Virtualization.framework로 만드는 Linux
-guest VM입니다. Apple의 [Creating and Running a Linux Virtual
-Machine](https://developer.apple.com/documentation/virtualization/creating-and-running-a-linux-virtual-machine)은
-이를 위해 architecture에 맞는 Linux image와 VM device configuration이 필요함을 설명합니다.
+## 공통 제어 서비스
 
 ```text
-macOS, profile <name>                         Ubuntu 24.04 arm64 guest
-────────────────────────────────────────────  ─────────────────────────────────
-hamn CLI                                       Linux kernel
-  lifecycle lock                               hamnd (작은 guest-control agent)
-  VZ VM owner                                  dockerd
-  SSH ControlMaster                             system containerd + CRI plugin
-  Docker socket forward                         runc, CNI, BuildKit, binfmt
-  port observer / TCP forward / UDP relay       선택형 K3s + kubelet
-  virtiofs mount 설정
+Ratatui/Crossterm TUI ─┐
+                      ├─ 타입화된 요청 → 공통 서비스 → 결과 / 이벤트
+Clap 헤드리스 CLI ────┘                       │
+                         ┌───────────────────┼───────────────────┐
+                         ▼                   ▼                   ▼
+                    C worker             Bollard             kube-rs
+                   같은 실행 파일      Docker Engine     외부 Kubernetes
+                         │               Unix 소켓           kubeconfig
+                         ▼
+                   프로필 VM 수명주기
+                Virtualization.framework
 ```
 
-Guest는 release가 선택한 preconfigured image입니다. Runtime binary,
-`hamnd.service`, guest helper script, K3s compatibility manifest, public key를
-포함합니다. Boot 시 Hamn은 Docker daemon JSON, Rosetta 선택처럼 profile이 제어하는
-configuration만 reconcile합니다. 실행 중인 VM에 source code를 rsync하거나 첫 boot에
-guest runtime을 compile하지 않습니다.
+`control/`은 두 프런트엔드, 작업 검증, JSON 응답, API 클라이언트, 제한된 로그 큐와
+취소를 담당합니다. TUI와 헤드리스는 같은 서비스를 사용합니다. 화면 전환 시 이전
+대상의 늦은 응답을 버리고, 네트워크 요청은 비동기로 실행합니다.
 
-## Process 및 socket 소유권
+`host/core/control.h`의 C 함수는 새 `__core-worker` 프로세스에서만 호출합니다.
+진입점은 Tokio·터미널 초기화 전에 내부 C 모드로 분기합니다. C 전역 상태·fork·exit가
+Rust 다중 스레드 프로세스에 영향을 주지 않도록 분리한 구조입니다. worker JSON은
+C 상태에서 직접 생성하며 기존 CLI 텍스트를 파싱하지 않습니다.
+반환 메모리는 호출자가 `hamn_control_free`로 해제합니다.
 
-프로필 하나는 private state directory 하나를 소유합니다.
+## VM과 소켓 소유권
 
-```text
-~/.hamn/<profile>/
-  config.yaml               strict profile configuration
-  disk.img                  guest data disk
-  docker.sock (0600)        forward된 guest Docker Engine API
-  agent.sock                forward된 Hamn guest-agent control socket
-  state.json, VM PID, lock, log, SSH control path, port record
-  kubeconfig                K3s를 명시적으로 활성화한 경우에만 생성
-```
+C는 프로필 설정, VM 식별 검증, 수명주기·변경 잠금, SSH ControlMaster, 포트 관찰기,
+이미지 검증, 프로필 상태를 소유합니다. Objective-C 구현은 `host/vz/`에 유지합니다.
 
-기본 프로필 Docker context는 `hamn`, 이름 있는 프로필은 `hamn-<profile>`입니다.
-프로필별 Docker socket만이 Hamn이 host에 노출하는 container API입니다. SSH를 통해
-guest 내부 `/var/run/docker.sock`으로 forward합니다. Host `/var/run/docker.sock`은
-Hamn이 만들거나 교체하거나 사용하지 않습니다.
+프로필은 `~/.hamn/<profile>/` 아래의 디스크, SSH 키, vmrun 식별 기록, `vmrun.sock`,
+`ssh.sock`, `docker.sock`, `agent.sock`을 소유합니다. VM 소유자는 같은 실행 파일의
+별도 프로세스입니다. TUI 종료는 프런트엔드 작업을 취소하지만 VM을 정지하지 않습니다.
+C supervisor는 worker가 사라져도 잠금을 유지하며 하위 프로세스를 정리합니다.
 
-System containerd socket `/run/containerd/containerd.sock`은 guest 내부에만 남습니다.
-이는 native containerd endpoint이며 Docker Engine endpoint나 지원되는 host API가
-아닙니다. `status --json`은 이 socket을 노출하는 대신 Docker API readiness와 CRI
-readiness를 분리해 출력합니다.
+Docker API는 SSH로 전달한 프로필 Unix 소켓을 통해 게스트 dockerd에 도달합니다.
+Docker는 공용 containerd의 `moby` 네임스페이스를 사용하며, C 포트 관찰기는 공개
+TCP·UDP 포트를 계속 조정합니다. 외부 Docker CLI·Compose·buildx·SDK·Testcontainers도
+같은 소켓을 사용합니다. Hamn은 외부 도구의 현재 context를 바꾸지 않습니다.
+레지스트리 자격 증명은 외부 클라이언트가 관리하고 홈 공유는 자격 증명 격리 경계가 아닙니다.
 
-## Docker 경로
+Kubernetes는 선택한 외부 context에 kube-rs로 접속합니다. Hamn VM, 게스트 CRI,
+Hamn API 포워딩은 사용하지 않습니다. kubeconfig·자격 증명은 로컬에서 읽고 원본
+파일은 바꾸지 않습니다. 변경은 객체 식별자·resourceVersion 사전 조건으로 보호하고,
+변경 요청이 반복되지 않도록 자동 HTTP 재시도를 끕니다.
 
-```text
-macOS Docker CLI / Compose / buildx / SDK
-  │  Docker Engine API
-  ▼
-~/.hamn/<profile>/docker.sock  (0600, SSH Unix-socket forward)
-  ▼
-guest /var/run/docker.sock
-  ▼
-guest dockerd --containerd=/run/containerd/containerd.sock
-  │  native containerd API, namespace moby
-  ▼
-guest system containerd
-  ▼
-runc -> Linux kernel
-```
+## 게스트 설정과 구형 설치 전환
 
-Docker는 [dockerd 문서](https://docs.docker.com/reference/cli/dockerd/)에서 별도로
-시작한 containerd를 `--containerd`로 지정할 수 있고 기본 containerd namespace가
-`moby`라고 설명합니다. Docker의 logical state는 Docker가(`/var/lib/docker`와
-`moby`) 소유하고, containerd native store는 guest system service가 소유합니다.
+서명된 Ubuntu 24.04 arm64 이미지가 hamnd, Docker, 공용 containerd, runc, CNI,
+binfmt와 일반 게스트 helper를 소유합니다. 서명 없는 이미지 대체 경로나 시작 시
+게스트 코드를 빌드하기 위한 호스트 소스 마운트는 없습니다.
 
-Hamn은 임의의 Docker request를 자체 proxy하지 않습니다. Internal Docker observer는
-published port 동기화에 한정됩니다. Docker event와 inspect data를 읽고 자신이 만든
-macOS forwarding resource만 소유합니다.
+구형 프로필은 SSH 준비 직후 일반 provisioning보다 먼저 K3s 전환을 시작합니다.
+기존 EFI 부팅을 유지하므로 SSH 준비 전에는 구 K3s가 잠시 실행될 수 있습니다.
+고정 Python payload와 새 검증기·트랜잭션 helper는 서명된 호스트에 내장합니다.
+이는 기존 디스크를 위한 한정된 일회성 교체이며 호스트 체크아웃을 일반 게스트
+설정의 원본으로 사용하지 않습니다.
 
-Registry credential은 host Docker client의 책임으로 남습니다. Host Docker CLI/SDK는
-구성된 credential helper를 해석하고 profile socket을 거쳐 individual Docker API request에
-registry authorization을 넣습니다. Hamn은 `docker login`을 실행하거나 credential helper를
-복사하거나 guest `/home/hamn/.docker` credential store를 만들지 않습니다. 기본 home
-virtiofs share는 사용자가 노출한 filesystem이지 credential isolation boundary가 아니므로
-그렇게 취급하면 안 됩니다.
+게스트의 root 소유 기록은 소유권 검증, 서비스 정지·mask, `k8s.io` 리소스 정리,
+전용 파일 삭제, helper 갱신, Docker 준비 확인 단계를 저장합니다. 중단된 단계는
+재시도합니다. 공용 content, Docker 객체, 사용자 마운트, 원본 kubeconfig는 보존합니다.
+K3s 데이터 삭제는 이전 바이너리로 복구되지 않습니다. C는 게스트 전환과 프로필의
+API 포워딩 정리가 성공한 뒤 새 프로필 형식을 게시합니다.
 
-## Kubernetes 경로
+일반 게스트 트랜잭션은 변경 전 런타임 설정·서비스 상태를 저장하고 복구합니다.
+commit과 Docker·containerd 준비 확인 후 배포 fingerprint를 기록합니다.
+K3s 전환은 이 rollback과 분리되어 런타임 설정 복원이 K3s 데이터를 되살리지 않습니다.
 
-```text
-macOS kubectl
-  │  HTTPS Kubernetes API, profile-local kubeconfig
-  ▼
-SSH loopback forward -> guest K3s API server
-  ▼
-guest kubelet
-  │  CRI gRPC
-  ▼
-guest system containerd, namespace k8s.io
-  ▼
-runc -> Linux kernel
-```
+## 단일 실행 파일 빌드
 
-CRI는 kubelet과 runtime 사이의 protocol이며 Docker containerd API가 아닙니다.
-[Kubernetes CRI 문서](https://kubernetes.io/docs/concepts/containers/cri/)가 이
-경계를 정의합니다. Host `kubectl`은 CRI 또는 containerd socket에 직접 연결하지
-않습니다.
-
-새 프로필의 K3s는 비활성입니다. 사용자가 `hamn kubernetes start`를 실행하면 guest가
-signed compatibility manifest와 checksum을 검증하고, 고정된 K3s artifact를 설치한 뒤
-기존 system containerd를 사용하도록 설정합니다. 이어서 node와 CoreDNS readiness를
-기다립니다. K3s는 `k8s.io` namespace와 K3s state directory를 소유합니다. Docker의
-`moby` namespace는 분리됩니다.
-
-프로필 전용 kubeconfig context는 기본 프로필에서 `hamn`, 다른 프로필에서
-`hamn-<profile>`입니다. Foreign context와 충돌하면 실패하며 덮어쓰지 않습니다.
-`hamn kubectl`은 `--kubeconfig` override를 거부하므로 다른 cluster에 조용히 동작할 수
-없습니다.
-
-containerd는 native CLI/API와 CRI를 구분하고 CRI plugin이 containerd에 내장됨을
-문서화합니다. [getting
-started](https://github.com/containerd/containerd/blob/main/docs/getting-started.md)를
-참조하세요.
-
-## Lifecycle 및 rollback
-
-`start`는 profile mutation을 직렬화하고 immutable image input, disk, SSH key,
-cloud-init seed, mount, VM state를 준비한 뒤 VZ VM owner를 시작합니다. Shared NAT는
-DHCP lease로 guest address를 찾습니다. Hamn에는 non-shared network attachment나 별도의
-guest address reporting 경로가 없으며, container runtime은 항상 guest VM 내부에 남습니다.
-
-SSH가 준비된 뒤 provisioning stage 실행 순서는 다음과 같습니다.
-
-```text
-system -> user -> guest configuration transaction -> after-boot -> ready
-```
-
-Guest transaction은 managed configuration을 바꾸기 전 runtime 관련 file과 service
-state를 snapshot합니다. Docker/containerd/K3s helper step이 실패하면 그 snapshot을
-복구합니다. Host는 transaction이 commit되고 Docker 및 containerd readiness check가
-성공한 뒤에만 configuration fingerprint를 기록합니다.
-
-`stop`과 `delete`는 profile이 소유한 SSH forward, Docker observer, TCP listener,
-UDP relay, VM process state를 닫습니다. Soft `delete`는 disk를 보존합니다.
-`delete --data`는 profile directory를 제거하기 전 interactive standard input에서
-정확히 `y`를 요구합니다.
+`make host`는 C/Objective-C 정적 아카이브와 Rust를 링크하고, 임시 후보 파일을 서명·검사한
+뒤 `build/hamn`에 원자적으로 게시합니다. Cargo.lock과 rust-toolchain.toml로 의존성과
+컴파일러를 고정합니다. macOS 시스템 라이브러리, SSH, 게스트 이미지·실행 파일,
+kubeconfig 인증 플러그인은 허용합니다. 별도 호스트 코어나 전용 동적 라이브러리는
+실행 시 필요하지 않습니다.
 
 ## Mount 및 network 경계
 
@@ -177,5 +105,5 @@ Nested virtualization도 opt-in입니다. macOS 15 이상에서 Hamn은 Apple의
 문서화합니다.
 
 이 release에는 Intel Mac backend, Linux host backend, Incus runtime, GPU/AI integration,
-external kubeconfig catalog, managed kind cluster, public containerd socket, Desktop app,
+managed kind cluster, public containerd socket, Desktop app,
 XPC service, Homebrew Cask, DMG, notarization, Docker shim이 없습니다.
