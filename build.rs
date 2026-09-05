@@ -19,11 +19,15 @@ fn main() {
     // Objective-C @available uses Apple's compiler-rt availability helpers.
     let runtime = Command::new("clang")
         .arg("--print-file-name=libclang_rt.osx.a")
-        .output().expect("cannot locate Apple compiler runtime");
+        .output()
+        .expect("cannot locate Apple compiler runtime");
     assert!(runtime.status.success());
     let runtime = PathBuf::from(String::from_utf8(runtime.stdout).unwrap().trim());
     assert!(runtime.is_file(), "Apple compiler runtime is missing");
-    println!("cargo:rustc-link-search=native={}", runtime.parent().unwrap().display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        runtime.parent().unwrap().display()
+    );
     println!("cargo:rustc-link-lib=static=clang_rt.osx");
     println!("cargo:rustc-env=HAMN_VERSION={version}");
     for path in ["host", "vendor", "Makefile"] {
