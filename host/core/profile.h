@@ -62,6 +62,9 @@ const char *hamn_home(char *buf, size_t cap);
 /* Create the profile directory (0700), then load config.yaml or defaults. */
 int profile_load(struct profile *profile, const char *name);
 
+/* Read an existing profile without creating directories or a configuration. */
+int profile_read_existing(struct profile *profile, const char *name);
+
 /* Save config.yaml atomically. Legacy hamn.conf configurations are never
  * converted in place and return EPROTONOSUPPORT. */
 int profile_save(const struct profile *profile);

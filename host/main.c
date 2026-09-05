@@ -50,7 +50,7 @@ static int requests_json_output(int argc, char **argv)
     return 0;
 }
 
-int main(int argc, char **argv)
+int hamn_core_main(int argc, char **argv)
 {
     cli_set_invocation_path(argc > 0 ? argv[0] : NULL);
     if (argc < 2)

@@ -788,7 +788,7 @@ static int profile_open_config(const struct profile *profile, FILE **file_out)
     return 1;
 }
 
-int profile_load(struct profile *profile, const char *name)
+static int profile_read(struct profile *profile, const char *name, int create)
 {
     if (!profile || !profile_name_valid(name)) {
         errno = EINVAL;
@@ -806,8 +806,17 @@ int profile_load(struct profile *profile, const char *name)
         errno = ENAMETOOLONG;
         return -1;
     }
-    if (fs_mkdirs(profile->dir, 0700) != 0)
+    if (create && fs_mkdirs(profile->dir, 0700) != 0)
         return -1;
+    if (!create) {
+        struct stat status;
+        if (lstat(profile->dir, &status) != 0)
+            return -1;
+        if (!S_ISDIR(status.st_mode) || status.st_uid != geteuid()) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
     int legacy = profile_legacy_config_state(profile);
     if (legacy == 1) {
         errno = EPROTONOSUPPORT;
@@ -817,8 +826,11 @@ int profile_load(struct profile *profile, const char *name)
         return -1;
     FILE *file = NULL;
     int opened = profile_open_config(profile, &file);
-    if (opened == 0)
-        return 0;
+    if (opened == 0) {
+        if (!create)
+            errno = ENOENT;
+        return create ? 0 : -1;
+    }
     if (opened < 0)
         return -1;
     int rc = profile_parse_yaml(file, profile);
@@ -828,6 +840,16 @@ int profile_load(struct profile *profile, const char *name)
     if (rc != 0)
         errno = saved ? saved : EINVAL;
     return rc;
+}
+
+int profile_load(struct profile *profile, const char *name)
+{
+    return profile_read(profile, name, 1);
+}
+
+int profile_read_existing(struct profile *profile, const char *name)
+{
+    return profile_read(profile, name, 0);
 }
 
 static int text_append(struct yaml_text *text, const char *format, ...)
