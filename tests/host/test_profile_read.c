@@ -5,6 +5,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "core/profile.h"
+#include "core/control.h"
+#include "cjson/cJSON.h"
 
 int main(void)
 {
@@ -17,11 +19,24 @@ int main(void)
     char root[1024];
     assert(hamn_home(root, sizeof(root)));
     assert(access(root, F_OK) == -1);
+    char *json = NULL;
+    assert(hamn_control_query(NULL, &json) == 0);
+    cJSON *items = cJSON_Parse(json);
+    assert(cJSON_IsArray(items) && cJSON_GetArraySize(items) == 0);
+    cJSON_Delete(items);
+    hamn_control_free(json);
+    assert(access(root, F_OK) == -1);
     assert(profile_read_existing(&profile, "../escape") == -1);
     assert(errno == EINVAL);
     assert(profile_load(&profile, "existing") == 0);
     assert(profile_save(&profile) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
+    assert(hamn_control_query("existing", &json) == 0);
+    items = cJSON_Parse(json);
+    assert(cJSON_IsObject(items));
+    assert(cJSON_IsNumber(cJSON_GetObjectItem(items, "cpus")));
+    cJSON_Delete(items);
+    hamn_control_free(json);
     char config[1024];
     assert(profile_path(&profile, "config.yaml", config, sizeof(config)));
     assert(unlink(config) == 0);
