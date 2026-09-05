@@ -12,6 +12,30 @@ spec.loader.exec_module(contract)
 
 
 class PhysicalEvidence(unittest.TestCase):
+    def test_candidate_hashes_exact_file_set_and_source_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = ['hamn-v1.0.0-darwin-arm64.tar.gz', 'hamn-v1.0.0-ubuntu-24.04-arm64.img', 'hamn-v1.0.0.spdx.json', 'install.sh']
+            for name in names:
+                (root / name).write_text('fixture')
+            candidate = {'schemaVersion': 1, 'kind': 'hamn-release-candidate', 'tag': 'v1.0.0-rc.1',
+                'version': 'v1.0.0', 'commit': 'a' * 40, 'sourceTree': 'b' * 40,
+                'artifacts': [{'name': name, 'sha256': contract.sha256(root / name)} for name in names]}
+            (root / 'candidate.json').write_text(json.dumps(candidate))
+            checksums = ''.join(contract.sha256(root / name) + '  ' + name + '\n' for name in names + ['candidate.json'])
+            (root / 'SHA256SUMS').write_text(checksums)
+            args = [root, 'v1.0.0-rc.1', 'a' * 40, 'b' * 40]
+            contract.validate_candidate(*args)
+            with self.assertRaises(ValueError): contract.validate_candidate(root, 'v1.0.0-rc.2', *args[2:])
+            (root / 'extra').write_text('unbound')
+            with self.assertRaises(ValueError): contract.validate_candidate(*args)
+            (root / 'extra').unlink()
+            (root / 'install.sh').write_text('tampered')
+            with self.assertRaises(ValueError): contract.validate_candidate(*args)
+            (root / 'install.sh').write_text('fixture')
+            (root / 'SHA256SUMS').write_text(checksums + '0' * 64 + '  ../outside\n')
+            with self.assertRaises(ValueError): contract.validate_candidate(*args)
+
     def test_missing_false_foreign_and_changed_preservation_evidence_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
