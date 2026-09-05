@@ -110,7 +110,7 @@ class Retirement(unittest.TestCase):
                 listings += 1
                 return subprocess.CompletedProcess(args, int(listings == 1), b'')
             return subprocess.CompletedProcess(args, 0, b'')
-        with patch.object(r, 'ctr', side_effect=invoke):
+        with patch.object(r, 'ctr', side_effect=invoke), patch.object(r, 'retire_pods'):
             r.resources()
         self.assertEqual([c[-1] for c in commands if c[:2] == ('snapshots', 'remove')],
                          ['parent', 'child', 'parent'])
@@ -118,6 +118,56 @@ class Retirement(unittest.TestCase):
             r.ctr('tasks', 'list')
             self.assertIn('k8s.io', run.call_args.args)
             self.assertNotIn('moby', run.call_args.args)
+
+    def test_snapshot_disappearing_during_containerd_gc_is_already_retired(self):
+        listings = iter([b'KEY PARENT KIND\nremoved Committed\n', b'KEY PARENT KIND\n'])
+        def invoke(*args, **kwargs):
+            if args[:2] == ('snapshots', 'list'):
+                return subprocess.CompletedProcess(args, 0, next(listings))
+            return subprocess.CompletedProcess(args, int(args[:2] == ('snapshots', 'remove')), b'')
+        with patch.object(r, 'ctr', side_effect=invoke), patch.object(r, 'retire_pods'):
+            r.resources()
+
+    def test_cri_cleanup_persists_only_valid_pod_uids_and_preserves_backing_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = root / 'inventory'
+            pod_root = root / 'pod'
+            pod_root.mkdir()
+            outside = root / 'volume-data'
+            outside.write_text('preserved')
+            (pod_root / 'volume-link').symlink_to(outside)
+            uid = '12345678-abcd-abcd-abcd-123456789abc'
+            pod = {'id': 'a' * 64, 'metadata': {'uid': uid}}
+            replies = iter([{'items': [pod]}, {'items': []}])
+            commands = []
+            def run(*args, **kwargs):
+                commands.append(args)
+                output = json.dumps(next(replies)).encode() if 'pods' in args else b''
+                return subprocess.CompletedProcess(args, 0, output)
+            def safe(path):
+                if str(path).startswith('/var/lib/kubelet/pods/'):
+                    self.assertEqual(str(path).split('/')[-1], uid)
+                    return pod_root
+                if str(path) == '/usr/local/bin/k3s':
+                    return outside
+                return Path(path)
+            with patch.object(r, 'PODS', inventory), patch.object(r, 'safe', side_effect=safe), \
+                    patch.object(r, 'mountpoints', return_value=[]), \
+                    patch.object(r, 'run', side_effect=run):
+                r.retire_pods()
+                self.assertEqual(json.loads(inventory.read_bytes()), [uid])
+                self.assertFalse(pod_root.exists())
+                self.assertEqual(outside.read_text(), 'preserved')
+                self.assertTrue(any('stopp' in command for command in commands))
+                self.assertTrue(any('rmp' in command for command in commands))
+                self.assertTrue(all('unix:///run/containerd/containerd.sock' in command for command in commands))
+                inventory.write_text('["../../docker"]')
+                replies = iter([{'items': []}])
+                commands.clear()
+                with self.assertRaises(RuntimeError):
+                    r.retire_pods()
+                self.assertFalse(any('rmp' in command for command in commands))
 
     def test_mounts_and_child_symlinks_preserve_foreign_data(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -135,6 +185,33 @@ class Retirement(unittest.TestCase):
                 with patch.object(Path, 'read_text', return_value=''):
                     r.remove_data()
             self.assertEqual(outside.read_text(), 'Docker volume sentinel')
+
+    def test_pod_unmount_failure_preserves_directory_and_retry_inventory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            uid = '12345678-abcd-abcd-abcd-123456789abc'
+            inventory = root / 'inventory'
+            inventory.write_text(json.dumps([uid]))
+            pod = root / 'pod'
+            volume = pod / 'volume'
+            volume.mkdir(parents=True)
+            sentinel = volume / 'sentinel'
+            sentinel.write_text('preserved')
+            def safe(path):
+                return pod if str(path).startswith('/var/lib/kubelet/pods/') else \
+                    inventory if str(path) == '/usr/local/bin/k3s' else Path(path)
+            def run(*args, **kwargs):
+                if args[0] == 'umount':
+                    self.assertEqual(args, ('umount', '--', str(volume)))
+                    raise RuntimeError('busy mount')
+                return subprocess.CompletedProcess(args, 0, b'{"items":[]}')
+            with patch.object(r, 'PODS', inventory), patch.object(r, 'safe', side_effect=safe), \
+                    patch.object(r, 'mountpoints', return_value=[str(volume), '/run/docker/netns/foreign']), \
+                    patch.object(r, 'run', side_effect=run):
+                with self.assertRaisesRegex(RuntimeError, 'busy mount'):
+                    r.retire_pods()
+            self.assertEqual(sentinel.read_text(), 'preserved')
+            self.assertEqual(json.loads(inventory.read_bytes()), [uid])
 
     def test_symlink_parent_and_option_identifier_are_rejected(self):
         with self.assertRaises(RuntimeError):
