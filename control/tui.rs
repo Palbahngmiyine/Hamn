@@ -84,6 +84,8 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     let mut terminal = ratatui::init();
     let _restore = Restore;
     let (sender, mut responses) = mpsc::channel(16);
+    let (migration_sender, mut migrations) = mpsc::channel(16);
+    let _migration = crate::migration::Startup::new(migration_sender);
     let mut job = Job {
         generation: 0,
         cancel: CancellationToken::new(),
@@ -100,6 +102,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     loop {
         terminal.draw(|frame| tui_state::draw(frame, &state))?;
         tokio::select! {
+            Some(message) = migrations.recv() => state.message = message,
             _ = terminate.recv() => break,
             _ = interrupt.recv() => break,
             _ = suspend.recv() => {
