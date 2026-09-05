@@ -249,7 +249,8 @@ mod tests {
         job.cancel(&mut state);
         assert!(job.cancel.is_cancelled());
         assert_eq!(job.generation, 8);
-        state.view("k8s pods list --context new-context").unwrap();
+        state.view("vm").unwrap();
+        state.request.context = Some("new-context".into());
         state.accept(Ok(serde_json::json!([])));
         assert_eq!(state.uncertain[0]["target"]["context"], "old-context");
         assert_eq!(state.uncertain[0]["uid"], "old-uid");
