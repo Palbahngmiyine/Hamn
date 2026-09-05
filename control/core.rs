@@ -150,6 +150,10 @@ fn execute(request: &Request) -> Result<Value> {
     }
 }
 
+fn protocol_descriptor(fd: i32) -> i32 {
+    unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) }
+}
+
 pub fn worker() -> i32 {
     let mut input = Vec::new();
     let request = std::io::stdin()
@@ -163,7 +167,9 @@ pub fn worker() -> i32 {
             serde_json::from_slice::<Request>(&input).map_err(|e| Failure::new("coreProtocol", e))
         });
     // Keep C printf/logging out of the machine protocol; never parse CLI text.
-    let saved = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    // A VM supervisor outlives the worker. Its exec must close this protocol
+    // descriptor, otherwise the frontend never observes EOF after completion.
+    let saved = protocol_descriptor(libc::STDOUT_FILENO);
     if saved < 0 || unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
         return 1;
     }
@@ -254,4 +260,34 @@ async fn call_executable(request: &Request, executable: &std::ffi::OsStr) -> Res
         ));
     }
     serde_json::from_slice(&output).map_err(|e| Failure::new("coreProtocol", e))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn background_exec_cannot_keep_worker_protocol_open() {
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        let saved = protocol_descriptor(writer.as_raw_fd());
+        assert!(saved >= 0);
+        let saved = unsafe { OwnedFd::from_raw_fd(saved) };
+        let mut child = std::process::Command::new("/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(writer);
+        drop(saved);
+        reader.set_nonblocking(true).unwrap();
+        let result = std::io::Read::read(&mut reader, &mut [0]);
+        let alive = child.try_wait().unwrap().is_none();
+        drop(child.stdin.take());
+        child.wait().unwrap();
+        assert!(alive);
+        assert_eq!(result.unwrap(), 0, "EOF must not depend on daemon exit");
+    }
 }
