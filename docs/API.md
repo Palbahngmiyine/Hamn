@@ -16,7 +16,8 @@ process exit means failure. Parse errors and missing-terminal errors also use
 JSON. `--help` and `--version` print text.
 
 `--watch` repeats queries every two seconds. `--follow` streams Docker container
-or Pod logs. Log queries use NDJSON even without `--follow`. Each NDJSON record carries the response fields plus `type` and
+or Pod logs. Log queries use NDJSON even without `--follow`. Each NDJSON record
+carries the response fields plus `type` and
 `sequence`; log records precede the final result. Streams apply bounded
 backpressure. Log lines and one-shot log responses are limited to 1 MiB;
 `--tail` accepts 0 through 10000. The default tail is 200.
@@ -63,9 +64,11 @@ Docker-published ports. External Docker tools may connect to this same socket.
 
 Kubernetes loads an explicit `--kubeconfig`, otherwise `KUBECONFIG`, otherwise
 `~/.kube/config`. Context and namespace selection never write those files.
-Certificates, tokens, and exec authentication plugins are handled by kube-rs.
-Interactive authentication is rejected so a plugin cannot consume TUI input or
-block headless automation waiting for a prompt.
+Certificates and tokens are handled by kube-rs. Hamn resolves exec credentials
+asynchronously before constructing the client. Interactive authentication is
+rejected. Exec credentials run without terminal input, with bounded output and operation
+deadlines. Hamn resolves them again for each operation or watch snapshot.
+Legacy `auth-provider` configurations must be replaced with exec credentials.
 
 C VM operations run inside a fresh process of the same executable. The
 `host/core/control.h` ABI borrows input strings. Returned UTF-8 JSON belongs to

@@ -805,10 +805,12 @@ dependencies = [
 name = "hamn"
 version = "0.0.1"
 dependencies = [
+ "base64",
  "bollard",
  "clap",
  "crossterm",
  "futures-util",
+ "jiff",
  "k8s-openapi",
  "kube",
  "libc",
