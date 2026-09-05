@@ -5,12 +5,10 @@
 
 ## 프로필 선택 및 위치
 
-프로필의 모든 사용자 state는 ~/.hamn/<profile>/ 아래에 있으며 directory는 mode
-0700으로 생성됩니다. 프로필 선택 우선순위는 항상 다음과 같습니다.
-
-~~~text
---profile/-p  ->  positional profile  ->  HAMN_PROFILE  ->  default
-~~~
+프로필 상태는 `~/.hamn/<profile>/`에 저장하며 디렉터리 권한은 `0700`입니다.
+헤드리스 VM·Docker 작업에는 명시적 `--profile`이 필요하고 `vm list`만 예외입니다.
+TUI는 초기값 `default`인 자체 선택을 유지합니다. 공개 API에는 위치 인자 프로필이나
+`HAMN_PROFILE` 대체 선택이 없습니다.
 
 프로필 이름에는 영문자, 숫자, _, -만 쓸 수 있습니다. cache, ., ..은 유효한
 프로필 이름이 아닙니다.
@@ -21,22 +19,16 @@ fail closed합니다. Hamn은 legacy runtime data를 제자리에서 변환하�
 
 ## 설정 편집
 
-반복 가능한 변경에는 flag를, YAML 편집에는 생성된 template을 사용합니다.
+```sh
+hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
+hamn --headless vm configure --profile work --cpu 6 --memory 8 --disk 80 --yes
+hamn --headless vm start --profile work --yes
+```
 
-~~~sh
-hamn template
-hamn start --edit --profile work
-hamn start --template=false --profile scratch
-
-hamn configure --profile work --cpu 6 --memory 8 --disk 80
-hamn configure --profile work --mount-home true --home-read-only false
-hamn configure --profile work --docker-daemon-json '{"log-level":"warn"}'
-~~~
-
-configure는 중지된 VM만 변경할 수 있습니다. Disk는 커질 수 있지만 줄일 수
-없습니다. start도 --cpu, --memory, --disk를 받을 수 있고 profile template이
-활성화된 경우 그 값을 저장합니다. start --edit는 필요하면 template을 저장하고
-$EDITOR를 실행합니다. EDITOR는 argument 없는 executable 이름 하나여야 합니다.
+`configure`는 정지된 프로필만 변경하며 기존 VM 디스크를 축소하지 않습니다.
+고급 설정은 VM이 정지된 상태에서 `~/.hamn/<profile>/config.yaml`을 편집하세요.
+리소스 설정 변경은 기존 마운트·Docker daemon 설정·Rosetta·provisioning hook을
+보존합니다. TUI는 임의 셸 명령이나 외부 편집기를 실행하지 않습니다.
 
 ## YAML schema
 
@@ -51,9 +43,6 @@ homeReadOnly: false
 mountInotify: false
 docker:
   daemonJson: ""
-kubernetes:
-  enabled: false
-  version: "v1.36.2+k3s1"
 rosetta: false
 nestedVirtualization: false
 sshAgent: false
@@ -74,8 +63,6 @@ alias, anchor, tag, merge key, plain이 아닌 boolean/integer, 잘못된 collec
 | homeReadOnly | boolean, false | home share를 read-only로 설정. mountHome이 false면 유효하지 않음 |
 | mountInotify | boolean, false | writable virtiofs share의 기존 file만 대상으로 하는 실험적 best-effort bridge. writable share가 하나 이상 필요 |
 | docker.daemonJson | JSON object 하나를 담은 string, 빈 string | Hamn 관리 경계를 바꾸지 않는 Docker daemon 설정 |
-| kubernetes.enabled | boolean, false | 이 프로필의 선택형 K3s desired state marker |
-| kubernetes.version | 정확히 v1.36.2+k3s1 | Manifest와 호환되는 고정 K3s version |
 | rosetta | boolean, false | Host가 지원할 때 Apple Linux Rosetta translation 요청 |
 | nestedVirtualization | boolean, false | macOS 15 이상, M3 칩 이상 Mac 및 framework capability check가 지원할 때 nested virtualization 요청 |
 | sshAgent | boolean, false | Hamn SSH session에만 사용자의 SSH agent forward |
@@ -143,20 +130,18 @@ host.hamn.internal은 0.0.1 compatibility alias입니다. Guest Docker configura
 
 ## Kubernetes
 
-YAML의 kubernetes.enabled 값만으로는 cluster가 생성되지 않습니다. VM이 실행된
-다음 명시 lifecycle command를 사용하세요.
+Kubernetes는 Hamn VM과 독립적인 외부 kubeconfig context를 사용합니다.
 
-~~~sh
-hamn start --profile work
-hamn kubernetes start --profile work
-hamn kubernetes status --profile work
-hamn kubernetes stop --profile work
-hamn kubernetes delete --profile work
-~~~
+```sh
+hamn --headless k8s contexts list
+hamn --headless k8s pods list --context dev --namespace default
+```
 
-Guest는 signed compatibility manifest를 통해서만 K3s를 설치합니다. Host kubeconfig는
-프로필별입니다. 기본 context는 hamn, 이름 있는 profile의 context는 hamn-<profile>입니다.
-Foreign context와 충돌하면 overwrite 대신 error가 납니다.
+`--kubeconfig`, `KUBECONFIG`, 기본 `~/.kube/config` 순서로 설정을 선택하며 원본 파일을
+바꾸지 않습니다. 인증과 변경 대상 지정은 [API](API.ko.md)를 참고하세요.
+구형 YAML의 `kubernetes` 항목은 K3s 전환을 위해서만 읽고 정리 성공 후 제거합니다.
+신규 프로필 설정이 아닙니다. K3s 클러스터 데이터·전용 볼륨은 삭제하고
+Docker 데이터·원본 kubeconfig는 보존합니다.
 
 ## Provisioning hook
 
@@ -180,19 +165,17 @@ ready는 guest root 권한으로 실행하고 user는 guest hamn user로 실행�
 warn은 failure를 기록하고 계속합니다. Log에는 hook command/output 대신 redacted
 metadata만 남습니다.
 
-## Docker context 및 SDK 환경
+## Docker context와 SDK 환경
 
-Host Docker CLI가 있으면 hamn start가 owned context를 생성하거나 재사용하고
-활성화합니다. 같은 이름의 context가 다른 Docker endpoint를 가리키면 거부합니다.
-이전 context는 Hamn이 변경했을 때만 기록하며 profile lifecycle은 여전히 그
-activation을 Hamn이 소유할 때만 복원합니다.
+Hamn은 외부 Docker context를 생성·활성화·복원하지 않습니다.
+`hamn --headless vm env --profile work`에서 접속 정보를 읽거나 프로필 소켓을
+직접 지정하세요.
 
-SDK와 Testcontainers에는 host default socket을 가정하지 말고 profile별 환경을
-사용하세요.
+```sh
+export DOCKER_HOST="unix://$HOME/.hamn/work/docker.sock"
+export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
+export TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal
+```
 
-~~~sh
-eval "$(hamn env --profile work)"
-~~~
-
-이 명령은 DOCKER_HOST=unix://~/.hamn/work/docker.sock, Testcontainers Docker socket
-override, TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal을 출력합니다.
+Docker CLI·Compose·buildx·SDK는 같은 Docker 소켓을 사용합니다.
+공개 containerd 소켓은 제공하지 않습니다.
