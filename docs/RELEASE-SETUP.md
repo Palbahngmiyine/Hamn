@@ -48,7 +48,9 @@ HOME sharing and clones fixture disks; it never boots the originals.
 `expected.json` records `k3sState` (`running` or `stopped`) and a `docker`
 snapshot captured from that fixture, including container/image/volume/network
 identities and sentinel volume content hashes. See `physical_runtime.py` for
-the snapshot schema. Capture real populated fixtures; empty or invented
+the snapshot schema. Docker recreates its built-in bridge identity on daemon
+restart: check built-in networks by name and user-created networks by ID.
+Capture real populated fixtures; empty or invented
 snapshots are not evidence. The running fixture enables K3s before shutdown;
 the stopped fixture contains K3s data but has K3s disabled.
 

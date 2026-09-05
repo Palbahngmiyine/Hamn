@@ -44,7 +44,9 @@ HAMN_LEGACY_STOPPED_FIXTURE='/absolute/path/fixtures/stopped'
 않습니다. `expected.json`에는 `k3sState`(`running` 또는 `stopped`)와 해당 fixture에서
 실제로 수집한 `docker` 스냅샷을 기록합니다. 컨테이너·이미지·볼륨·네트워크 식별자와
 검증용 볼륨 데이터 해시를 포함합니다. 정확한 스키마는 `physical_runtime.py`에
-정의합니다. 실제 객체가 있는 fixture를 수집하며 빈 값이나 작성한 예상값을 증거로
+정의합니다. Docker 기본 bridge의 ID는 데몬 재시작 때 바뀌므로 기본 네트워크는
+이름으로, 사용자가 만든 네트워크는 ID로 비교합니다. 실제 객체가 있는 fixture를
+수집하며 빈 값이나 작성한 예상값을 증거로
 쓰지 않습니다. running fixture는 K3s를 활성화한 뒤 VM을 정지하고, stopped
 fixture는 K3s 데이터를 유지하되 K3s를 비활성화한 상태입니다.
 

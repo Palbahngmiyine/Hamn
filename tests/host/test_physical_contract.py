@@ -45,6 +45,7 @@ class PhysicalEvidence(unittest.TestCase):
             (root / 'checksums').write_text('fixture checksums')
             snapshot = {key: ['owned-object'] for key in ['containers', 'images', 'volumes', 'networks']}
             snapshot['volumeSha256'] = 'e' * 64
+            snapshot['builtinNetworks'] = ['bridge', 'host', 'none']
             legacy = {'before': snapshot, 'after': snapshot, 'k3sRemoved': True, 'journalComplete': True, 'sourceSha256': 'd' * 64}
             evidence = {'schemaVersion': 2, 'kind': 'hamn-physical-validation-evidence', 'validationMode': 'physical-apple-silicon',
                 **{key: candidate[key] for key in ['tag', 'commit', 'sourceTree']},

@@ -90,8 +90,10 @@ def validate(candidate_path, checksums_path, evidence_path, run, attempt):
         if state['before'] != state['after'] or state['k3sRemoved'] is not True or state['journalComplete'] is not True:
             raise ValueError('legacy retirement did not preserve Docker data')
         snapshot = state['before']
-        if not isinstance(snapshot, dict) or set(snapshot) != {'containers', 'images', 'volumes', 'networks', 'volumeSha256'}:
+        if not isinstance(snapshot, dict) or set(snapshot) != {'containers', 'images', 'volumes', 'networks', 'builtinNetworks', 'volumeSha256'}:
             raise ValueError('Docker preservation snapshot is invalid')
+        if snapshot['builtinNetworks'] != ['bridge', 'host', 'none']:
+            raise ValueError('Docker built-in networks were not preserved')
         for group in ['containers', 'images', 'volumes', 'networks']:
             values = snapshot[group]
             if not isinstance(values, list) or not values or any(not isinstance(value, str) or not value for value in values):

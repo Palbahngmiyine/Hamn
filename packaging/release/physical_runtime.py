@@ -65,6 +65,12 @@ class Runtime:
         result = {}
         for group, key in [('containers', 'Id'), ('images', 'Id'), ('volumes', 'Name'), ('networks', 'Id')]:
             rows = self.call('docker', group, 'list', profile=profile)
+            if group == 'networks':
+                builtin = {'bridge', 'host', 'none'}
+                result['builtinNetworks'] = sorted(row['Name'] for row in rows if row['Name'] in builtin)
+                if set(result['builtinNetworks']) != builtin:
+                    raise RuntimeError('Docker built-in networks are missing')
+                rows = [row for row in rows if row['Name'] not in builtin]
             result[group] = sorted(row[key] for row in rows)
         result['volumeSha256'] = self.engine('run', '--rm', '--pull=never', '--network=none',
             '--mount', 'type=volume,src=hamn-retirement-data,dst=/data,readonly',

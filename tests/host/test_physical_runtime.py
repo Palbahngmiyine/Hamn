@@ -18,6 +18,22 @@ spec.loader.exec_module(physical)
 
 
 class PhysicalRuntime(unittest.TestCase):
+    def test_snapshot_preserves_user_network_ids_and_requires_builtin_networks(self):
+        runtime = Runtime('/tmp/hamn', '/tmp/home', 'docker')
+        networks = [{'Name': name, 'Id': name + '-id'} for name in ['bridge', 'host', 'none', 'user']]
+        def call(*words, **kwargs):
+            return networks if words[1] == 'networks' else []
+        with patch.object(runtime, 'call', side_effect=call), patch.object(runtime, 'engine', return_value='hash /data/sentinel'):
+            before = runtime.snapshot('fixture')
+            networks[0]['Id'] = 'recreated-bridge'
+            self.assertEqual(runtime.snapshot('fixture'), before)
+            self.assertEqual(before['networks'], ['user-id'])
+            networks[-1]['Id'] = 'changed-user-network'
+            self.assertNotEqual(runtime.snapshot('fixture'), before)
+            del networks[0]
+            with self.assertRaises(RuntimeError):
+                runtime.snapshot('fixture')
+
     def test_invalid_network_mode_is_rejected_before_any_runtime_action(self):
         for value in ['true', '', '2']:
             with patch('sys.argv', ['physical-e2e.sh']), \
