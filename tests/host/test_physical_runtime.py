@@ -2,6 +2,7 @@
 import importlib.util
 import io
 import json
+import shutil
 import contextlib
 from pathlib import Path
 import sys
@@ -18,6 +19,16 @@ spec.loader.exec_module(physical)
 
 
 class PhysicalRuntime(unittest.TestCase):
+    def test_workspace_keeps_profile_sockets_below_darwin_path_limit(self):
+        with patch.dict('os.environ', {'TMPDIR': '/var/folders/' + 'x' * 80}):
+            work = physical.workspace()
+        try:
+            socket = work / 'home/.hamn/retire-stopped/docker.sock'
+            self.assertLess(len(str(socket).encode()), 104)
+            self.assertEqual(work.stat().st_mode & 0o777, 0o700)
+        finally:
+            shutil.rmtree(work)
+
     def test_legacy_config_fixture_never_overwrites_an_existing_home_config(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

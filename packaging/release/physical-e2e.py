@@ -85,6 +85,12 @@ def legacy_kubeconfig(home):
     path.chmod(0o600)
 
 
+def workspace():
+    # macOS TMPDIR normally lives under a long /var/folders path. Profile
+    # control sockets must fit sockaddr_un.sun_path (104 bytes on Darwin).
+    return Path(tempfile.mkdtemp(prefix='hamn-e2e-', dir='/private/tmp'))
+
+
 def main():
     parser = argparse.ArgumentParser(prog='physical-e2e.sh', description=__doc__)
     parser.parse_args()
@@ -116,7 +122,7 @@ def main():
     output = Path(os.environ['HAMN_E2E_OUTPUT']).absolute()
     if output.exists():
         raise ValueError('physical evidence output already exists')
-    work = Path(tempfile.mkdtemp(prefix='hamn-physical-e2e-'))
+    work = workspace()
     runtime, profiles = None, []
     checks, legacy_results = set(), {}
     try:
