@@ -1,117 +1,113 @@
-# Public release repository setup
+# Release repository and physical validator
 
-This is the canonical maintainer procedure for the public
-`Palbahngmiyine/Hamn` repository. See
-[RELEASE-SETUP.ko.md](RELEASE-SETUP.ko.md) for Korean.
+See [RELEASE-SETUP.ko.md](RELEASE-SETUP.ko.md) for Korean. This procedure
+applies to `Palbahngmiyine/Hamn`; it describes required configuration, not a
+claim that a particular repository or runner has passed validation.
 
-## 1. Protect the repository
+## Repository protection
 
-Keep the repository public and enable private vulnerability reporting, secret
-scanning, and push protection. Permit only GitHub-owned Actions, Release
-Please, and the pinned Nix installer action. Require full commit-SHA pins and
-keep the default `GITHUB_TOKEN` permission read-only.
+Keep the repository public with private vulnerability reporting, secret
+scanning, push protection, and immutable releases enabled. Require pull
+requests, linear history, and portable/macOS checks on `main`; protect `v*`
+tags against deletion and non-fast-forward changes. Pin Actions to full commit
+SHAs and keep the default GITHUB_TOKEN read-only. Allow only the Actions
+owners checked by `preflight-release-repository.sh`.
 
-Protect `main` with pull requests, linear history, and the portable and macOS
-status checks. Protect `v*` tags from deletion and non-fast-forward updates.
-Enable immutable releases in **Settings -> General -> Releases**.
+Create both `hamn-promotion` and `hamn-validation` environments. Disable admin
+bypass and allow deployments only from `main`. Neither environment has secrets
+or variables. `RELEASE_PLEASE_TOKEN` is the only repository secret; it is used
+for Release Please PRs, not release signing or validation.
 
-## 2. Configure keyless promotion
+## Physical runner
 
-Use one GitHub Environment named `hamn-promotion`. Disable administrator
-bypass and configure a custom deployment branch policy that permits only
-`main`. Do not add secrets or variables to this environment.
+Register one online macOS runner with labels `self-hosted`, `macOS`, `ARM64`,
+and `hamn-validator`. It must be a physical Apple Silicon machine with
+Virtualization.framework available, macOS development tools, Python 3.12 or
+later, Docker CLI, kubectl, and access to an explicitly designated disposable
+Kubernetes test environment. Do not assign public pull-request jobs to it.
+The release validation job has no release write permission.
 
-Do not register a self-hosted runner for release automation. The release uses
-GitHub-hosted Ubuntu arm64 and macOS arm64 runners exclusively. The repository
-needs no guest-image URL, release public key, validator identity, validator
-key, or release signing key.
+Provide `$HOME/.config/hamn/physical-validator.env` as an owned regular file
+with mode 0600 and one hard link. The workflow sources this file as shell code;
+only the validator administrator may edit it. Define absolute paths:
 
-`RELEASE_PLEASE_TOKEN` remains the only repository secret. It is used only to
-let Release Please update its release pull request through the normal
-repository checks. It is not used to build, sign, attest, or publish release
-artifacts.
+```sh
+HAMN_E2E_CONTEXT='dedicated-test-context'
+HAMN_E2E_KUBECONFIG='/absolute/path/test-kubeconfig'
+HAMN_LEGACY_BINARY='/absolute/path/legacy/hamn'
+HAMN_LEGACY_BINARY_SHA256='64-lowercase-hex-digest'
+HAMN_LEGACY_RUNNING_FIXTURE='/absolute/path/fixtures/running'
+HAMN_LEGACY_STOPPED_FIXTURE='/absolute/path/fixtures/stopped'
+```
 
-## 3. Pin build inputs in source
+Each fixture directory contains a stopped, isolated legacy profile's
+`disk.img`, `config.yaml`, `id_ed25519`, `id_ed25519.pub`, `efi-vars.bin`,
+`machine-id.bin`, `mac-addr`, and `expected.json`. Never commit these files.
+The config must have empty `mounts` and `provision` lists. The harness disables
+HOME sharing and clones fixture disks; it never boots the originals.
+`expected.json` records `k3sState` (`running` or `stopped`) and a `docker`
+snapshot captured from that fixture, including container/image/volume/network
+identities and sentinel volume content hashes. See `physical_runtime.py` for
+the snapshot schema. Capture real populated fixtures; empty or invented
+snapshots are not evidence. The running fixture enables K3s before shutdown;
+the stopped fixture contains K3s data but has K3s disabled.
 
-`guest/image/release-inputs.json` records the HTTPS URLs and SHA-256 digests of
-the Ubuntu base image and K3s inputs. Review changes to that file like source
-changes. The hosted Linux job rejects a download whose digest differs.
+The harness starts the running fixture with the pinned legacy binary before
+launching the candidate TUI. It starts the stopped fixture with the candidate
+headless interface. Both must finish retirement, preserve Docker snapshots,
+and leave no live test VM. The Kubernetes harness creates and removes a
+unique test namespace and verifies the source kubeconfig is unchanged.
+The standalone Kubernetes harness also supports `--host-network` for
+separate API checks when Pod CNI is unavailable. The full release gate uses
+the cluster Pod network; a standalone check does not replace its evidence.
 
-The Linux job creates an ephemeral Ed25519 key only to bind the K3s
-compatibility manifest embedded in that one guest image. It deletes the
-private and public key files before the job ends. This key is not a stable
-release identity and is not stored in GitHub.
+## Inputs and release authority
 
-GitHub artifact attestations provide release provenance. Each attestation uses
-the job's short-lived OIDC identity and is verified against this repository,
-`.github/workflows/release.yml`, the release commit, and a GitHub-hosted runner
-before promotion.
+`guest/image/release-inputs.json` pins the Ubuntu base HTTPS URL and SHA-256.
+There are no K3s download inputs or compatibility signing keys for new images.
+GitHub artifact attestations bind built artifacts to repository, workflow,
+source commit, and run. Build provenance must come from hosted runners;
+physical proof comes from the designated self-hosted validator.
 
-## 4. Verify repository readiness
-
-Run the read-only preflight after the GitHub settings are complete:
+Run the read-only settings check after configuration:
 
 ```sh
 HAMN_RELEASE_REPOSITORY=Palbahngmiyine/Hamn \
   bash packaging/release/preflight-release-repository.sh
 ```
 
-It verifies repository ownership and visibility, active workflows, Actions
-permissions, the absence of self-hosted runners and release variables, the
-secret-name boundary, the `main`-only promotion environment, rulesets,
-immutable releases, and private vulnerability reporting. It never reads a
-secret value or changes GitHub state.
+It checks protections, both environments, runner labels, secret/variable names,
+Actions permissions, and immutable releases. It does not modify GitHub state
+or read secret values.
 
-## 5. Publish `v0.0.1`
+Before assembling a candidate, complete [the review checklist](RELEASE-REVIEW.md)
+and rerun `make test-local-macos`. A local contract test is not physical proof.
+The release workflow then:
 
-Merging the Release Please pull request updates the release manifest. That
-change starts the release workflow. If the automatic run needs recovery, a
-maintainer may manually dispatch the workflow on the exact current `main`
-commit; arbitrary tags, commits, and earlier workflow runs are not accepted.
+1. Builds and attests the guest image on hosted Linux arm64.
+2. Verifies it on hosted macOS arm64, runs local gates, assembles the exact
+   candidate, and attests candidate bytes and hosted evidence.
+3. Verifies those attestations on the physical runner and executes the harness
+   extracted from that candidate. It attests `physical-validation-evidence.json`.
+4. Requires both hosted and physical evidence in promotion, verifies provenance
+   and hashes, and uploads the same bytes to an immutable GitHub Release.
 
-The workflow performs these steps without rebuilding promoted bytes:
+`make release-gate` takes `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, and an
+empty `OUTPUT_DIR`, plus the validator inputs above. Checkout must be clean
+and match the candidate source. It never rebuilds the RC. If source changes
+after validation, assemble and validate a new candidate; do not reuse evidence.
+Missing physical checks or changed artifact bytes prevent publication.
 
-1. A GitHub-hosted Ubuntu arm64 job downloads pinned inputs, builds the
-   completed guest image, attests it, and transfers it as a workflow artifact.
-2. A GitHub-hosted macOS arm64 job verifies that attestation, runs the local
-   source and packaging gates, builds the exact candidate, records hosted
-   validation evidence, and attests every candidate artifact.
-3. The `hamn-promotion` job verifies the candidate and evidence attestations,
-   creates the stable manifest, uploads the exact candidate bytes to a draft
-   GitHub Release, and then publishes it.
-4. The job requires the release to report `isImmutable: true`, verifies every
-   downloaded asset against GitHub's recorded digest, and verifies the release
-   attestation.
+## Installation and compatibility
 
-The evidence explicitly records `physicalE2E`, `vmLifecycle`, `dockerE2E`, and
-`k3sE2E` as false. The release does not claim a live Hamn VM test. The retained
-physical E2E harness is optional maintainer tooling and is not part of the
-automated release authority.
+Download the published `install.sh`, verify its GitHub attestation against
+this repository and release workflow with `--deny-self-hosted-runners`, then
+execute it. The installer validates pinned host/guest digests and publishes
+atomically. Installed versions supporting the new manifest can run
+`hamn --headless system update --yes`. Older updater versions that reject
+`physical-apple-silicon` manifests must use the new verified installer.
 
-## 6. Install
-
-The shortest supported installation is:
-
-```sh
-curl -fsSL --proto '=https' --tlsv1.2 \
-  https://github.com/Palbahngmiyine/Hamn/releases/latest/download/install.sh \
-  | /bin/bash
-```
-
-This convenience path initially trusts GitHub HTTPS and repository control for
-the installer bytes. After it starts, the version-pinned installer verifies the
-embedded SHA-256 digests before atomically installing the host and guest
-artifacts.
-
-For an independently verified bootstrap, download first and verify its GitHub
-attestation before execution:
-
-```sh
-curl -fsSLO --proto '=https' --tlsv1.2 \
-  https://github.com/Palbahngmiyine/Hamn/releases/latest/download/install.sh
-gh attestation verify install.sh \
-  --repo Palbahngmiyine/Hamn \
-  --signer-workflow Palbahngmiyine/Hamn/.github/workflows/release.yml \
-  --deny-self-hosted-runners
-/bin/bash install.sh
-```
+This release breaks CLI/JSON compatibility and automatically removes managed
+K3s cluster data and dedicated local volumes. Docker objects and volumes,
+user mounts, and original kubeconfig are preserved. Binary rollback cannot
+recover K3s data. Include this warning in release notes before publication.
