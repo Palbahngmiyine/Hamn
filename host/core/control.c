@@ -60,7 +60,13 @@ static cJSON *profiles_snapshot(void)
         return NULL;
     }
     struct dirent *entry;
-    while ((entry = readdir(directory))) {
+    for (;;) {
+        errno = 0;
+        entry = readdir(directory);
+        if (!entry) {
+            if (errno) goto fail;
+            break;
+        }
         if (!profile_name_valid(entry->d_name))
             continue;
         char path[PROFILE_PATH_CAP];

@@ -138,6 +138,15 @@ const char *hamn_home(char *buf, size_t cap)
     if (!home || !home[0] || snprintf(buf, cap, "%s/.hamn", home) >=
         (int)cap)
         return NULL;
+    struct stat st;
+    if (lstat(buf, &st) == 0) {
+        if (!S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 0022)) {
+            errno = EPERM;
+            return NULL;
+        }
+    } else if (errno != ENOENT) {
+        return NULL;
+    }
     return buf;
 }
 
@@ -808,11 +817,11 @@ static int profile_read(struct profile *profile, const char *name, int create)
     }
     if (create && fs_mkdirs(profile->dir, 0700) != 0)
         return -1;
-    if (!create) {
+    {
         struct stat status;
         if (lstat(profile->dir, &status) != 0)
             return -1;
-        if (!S_ISDIR(status.st_mode) || status.st_uid != geteuid()) {
+        if (!S_ISDIR(status.st_mode) || status.st_uid != geteuid() || (status.st_mode & 0022)) {
             errno = EINVAL;
             return -1;
         }
