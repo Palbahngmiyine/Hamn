@@ -30,6 +30,7 @@ static cJSON *profile_snapshot(const char *name)
     cJSON *value = cJSON_CreateObject();
     if (!value || !cJSON_AddStringToObject(value, "name", profile.name) ||
         !cJSON_AddStringToObject(value, "state", live) ||
+        !cJSON_AddStringToObject(value, "migration", profile.legacy_k3s ? "pending" : "current") ||
         !cJSON_AddStringToObject(value, "directory", profile.dir) ||
         !cJSON_AddStringToObject(value, "dockerSocket", socket) ||
         !cJSON_AddNumberToObject(value, "cpus", profile.cpus) ||

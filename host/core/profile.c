@@ -345,7 +345,6 @@ static int profile_validate(const struct profile *profile)
 {
     if (!profile || !profile->cpus || !profile->mem_mib || !profile->disk_gib ||
         (profile->home_read_only && !profile->mount_home) ||
-        strcmp(profile->kubernetes_version, "v1.36.2+k3s1") != 0 ||
         !profile_docker_daemon_json_valid(profile->docker_daemon_json) ||
         profile->mount_count > PROFILE_MAX_MOUNTS ||
         profile->hook_count > PROFILE_MAX_HOOKS)
@@ -413,6 +412,7 @@ static int parse_docker(struct yaml_parse *parse, yaml_event_t *event,
 static int parse_kubernetes(struct yaml_parse *parse, yaml_event_t *event,
                             struct profile *profile)
 {
+    profile->legacy_k3s = 1;
     if (yaml_mapping_start(parse, event) != 0)
         return -1;
     char seen[PROFILE_SEEN_KEY_CAP][64] = {{0}};
@@ -902,11 +902,15 @@ static int profile_serialize(const struct profile *profile,
                     profile->mount_inotify ? "true" : "false") != 0)
         return -1;
     if (text_append(text, "docker:\n  daemonJson: ") != 0 ||
-        text_quote(text, profile->docker_daemon_json) != 0 ||
-        text_append(text, "\nkubernetes:\n  enabled: %s\n  version: ",
+        text_quote(text, profile->docker_daemon_json) != 0)
+        return -1;
+    /* Preserve migration evidence until guest cleanup and Docker readiness pass. */
+    if (profile->legacy_k3s &&
+        (text_append(text, "\nkubernetes:\n  enabled: %s\n  version: ",
                     profile->kubernetes_enabled ? "true" : "false") != 0 ||
-        text_quote(text, profile->kubernetes_version) != 0 ||
-        text_append(text,
+        text_quote(text, profile->kubernetes_version) != 0))
+        return -1;
+    if (text_append(text,
                     "\nrosetta: %s\nnestedVirtualization: %s\nsshAgent: %s\n",
                     profile->rosetta ? "true" : "false",
                     profile->nested_virtualization ? "true" : "false",

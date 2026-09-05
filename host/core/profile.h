@@ -35,6 +35,7 @@ struct profile {
     int home_read_only;
     int mount_inotify;
     char docker_daemon_json[4096];
+    int legacy_k3s; /* Migration-only: old Kubernetes mapping was present. */
     int kubernetes_enabled;
     char kubernetes_version[64];
     int rosetta;
