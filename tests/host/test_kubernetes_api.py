@@ -70,6 +70,9 @@ with tempfile.TemporaryDirectory(prefix="hamn-kubernetes-") as directory:
         return result.returncode, json.loads(result.stdout)
 
     try:
+        missing = subprocess.run([binary, '--headless', 'k8s', 'contexts', 'list'],
+            env=dict(env, KUBECONFIG=''), capture_output=True, text=True, timeout=15)
+        assert missing.returncode == 0 and json.loads(missing.stdout)['data'] == [], missing
         rc, value = run("k8s", "contexts", "list")
         assert rc == 0 and value["data"][0]["name"] == "dev", value
         assert requests == []

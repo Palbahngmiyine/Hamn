@@ -60,9 +60,11 @@ fn retired(config: &Kubeconfig, name: &str) -> bool {
 }
 
 pub fn load(request: &Request) -> Result<Kubeconfig> {
+    let environment = std::env::var_os("KUBECONFIG").filter(|p| !p.is_empty());
+    let using_default = request.kubeconfig.is_none() && environment.is_none();
     let paths: Vec<PathBuf> = if let Some(path) = &request.kubeconfig {
         vec![path.into()]
-    } else if let Some(paths) = std::env::var_os("KUBECONFIG").filter(|p| !p.is_empty()) {
+    } else if let Some(paths) = environment {
         std::env::split_paths(&paths)
             .filter(|p| !p.as_os_str().is_empty())
             .collect()
@@ -86,11 +88,7 @@ pub fn load(request: &Request) -> Result<Kubeconfig> {
     for path in paths {
         let metadata = match std::fs::metadata(&path) {
             Ok(metadata) => metadata,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    && request.kubeconfig.is_none()
-                    && std::env::var_os("KUBECONFIG").is_none() =>
-            {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && using_default => {
                 continue;
             }
             Err(_) => {

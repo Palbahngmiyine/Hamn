@@ -136,12 +136,42 @@ impl State {
         )
         .map_err(|e| Failure::new("invalidRequest", e))?;
         request.normalize()?;
+        let context_changed = request
+            .context
+            .as_ref()
+            .is_some_and(|value| Some(value) != self.request.context.as_ref())
+            || request
+                .kubeconfig
+                .as_ref()
+                .is_some_and(|value| Some(value) != self.request.kubeconfig.as_ref());
         request.profile = request.profile.or_else(|| self.request.profile.clone());
         request.context = request.context.or_else(|| self.request.context.clone());
-        request.namespace = request.namespace.or_else(|| self.request.namespace.clone());
+        if !context_changed {
+            request.namespace = request.namespace.or_else(|| self.request.namespace.clone());
+        }
         request.kubeconfig = request
             .kubeconfig
             .or_else(|| self.request.kubeconfig.clone());
+        if context_changed
+            && request.namespace.is_none()
+            && request.words.first().is_some_and(|word| word == "k8s")
+        {
+            let config = crate::kubeconfig::load(&request)?;
+            let context = config
+                .contexts
+                .iter()
+                .find(|entry| Some(&entry.name) == request.context.as_ref())
+                .and_then(|entry| entry.context.as_ref())
+                .ok_or_else(|| {
+                    Failure::new("contextNotFound", "selected context is unavailable")
+                })?;
+            request.namespace = Some(
+                context
+                    .namespace
+                    .clone()
+                    .unwrap_or_else(|| "default".into()),
+            );
+        }
         request.yes = true; // UI confirmation is mandatory before dispatch.
         request.validate()?;
         if !request.mutates() {
@@ -379,7 +409,11 @@ pub fn draw(frame: &mut Frame, state: &State) {
         "Hamn | profile: {:?}\ncontext: {:?}\nnamespace: {:?}",
         state.request.profile.as_deref().unwrap_or("-"),
         state.request.context.as_deref().unwrap_or("-"),
-        state.request.namespace.as_deref().unwrap_or("default")
+        if state.request.all_namespaces {
+            "* (all namespaces)"
+        } else {
+            state.request.namespace.as_deref().unwrap_or("default")
+        }
     );
     let header = if state.uncertain.is_empty() {
         header
@@ -455,6 +489,39 @@ pub fn draw(frame: &mut Frame, state: &State) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn switching_context_uses_its_namespace_unless_explicitly_overridden() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let path =
+            std::env::temp_dir().join(format!("hamn-tui-context-{}.json", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        let _fixture = Fixture(path.clone());
+        use std::io::Write;
+        file.write_all(br#"{"apiVersion":"v1","kind":"Config","contexts":[{"name":"new","context":{"cluster":"cluster","namespace":"new-ns"}}]}"#).unwrap();
+        let mut state = State::new(Request {
+            context: Some("old".into()),
+            namespace: Some("old-ns".into()),
+            kubeconfig: Some(path.to_str().unwrap().into()),
+            ..Default::default()
+        });
+        let request = state.view("k8s pods list --context new").unwrap();
+        assert_eq!(request.namespace.as_deref(), Some("new-ns"));
+        let request = state.view("k8s pods list --namespace explicit").unwrap();
+        assert_eq!(request.namespace.as_deref(), Some("explicit"));
+        let previous = state.request.context.clone();
+        assert!(state.view("k8s pods list --context missing").is_err());
+        assert_eq!(state.request.context, previous);
+    }
+
     #[test]
     fn command_paths_support_quotes_without_shell_expansion() {
         let mut state = State::new(Request::default());
