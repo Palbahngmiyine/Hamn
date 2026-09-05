@@ -1,8 +1,8 @@
 use crate::{
     core,
-    model::{Failure, OPERATIONS, Request, Result},
+    model::{Failure, Request, Result},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 pub async fn execute_stream(
@@ -11,11 +11,7 @@ pub async fn execute_stream(
     events: Option<crate::stream::Events>,
 ) -> Result<Value> {
     if request.operation() == "capabilities" {
-        return Ok(json!({"operations":OPERATIONS.iter().map(|(name, mutation)|
-            json!({"name":name,"mutates":mutation})).collect::<Vec<_>>(),
-            "arguments":{"profile":"string","context":"string","namespace":"string",
-                "name":"string","yes":"boolean","timeout":"seconds","replicas":"integer"},
-            "formats":["json","ndjson"]}));
+        return Ok(crate::capabilities::describe());
     }
     request.validate()?;
     if request.operation() == "k8s contexts list" {

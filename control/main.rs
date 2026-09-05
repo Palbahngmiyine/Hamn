@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::{ffi::CString, io::IsTerminal, os::unix::ffi::OsStrExt};
+mod capabilities;
 mod core;
 mod docker;
 mod headless;
