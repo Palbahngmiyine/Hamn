@@ -239,37 +239,6 @@ int vm_process_wait_spawn_transition(const struct profile *p,
     return -1;
 }
 
-/* Hamn이 이 profile context를 활성화한 경우에만 이전 context로 복원한다. */
-static int restore_docker_context(const struct profile *profile,
-                                  struct vm_state *st)
-{
-    if (!st->prev_docker_context[0])
-        return 0;
-
-    char expected[128];
-    if (profile_docker_context_name(profile, expected, sizeof(expected)) != 0)
-        return -1;
-
-    char cur[128] = "";
-    const char *show[] = { "docker", "context", "show", NULL };
-    if (proc_run_capture(show, cur, sizeof(cur)) == 0 &&
-        strcmp(cur, expected) == 0) {
-        char out[256] = "";
-        const char *use[] = { "docker", "context", "use",
-                              st->prev_docker_context, NULL };
-        if (proc_run_capture(use, out, sizeof(out)) == 0) {
-            logmsg("docker context restored to '%s'",
-                   st->prev_docker_context);
-        } else {
-            logerr("docker context restore failed: %s",
-                   out[0] ? out : "no output");
-            return -1;
-        }
-    }
-    st->prev_docker_context[0] = '\0';
-    return 0;
-}
-
 struct process_identity {
     int pid;
     uint64_t start_sec;
@@ -842,10 +811,9 @@ static int cleanup_stopped_state(const struct profile *p)
         unlink(path);
     }
 
-    if (restore_docker_context(p, &st) != 0 && rc == VM_STOP_OK)
-        rc = VM_STOP_FAILED;
-    if (kubeconfig_restore_previous(p, &st) != 0 && rc == VM_STOP_OK)
-        rc = VM_STOP_FAILED;
+    /* Preserve user-selected external Docker and Kubernetes contexts. */
+    st.prev_docker_context[0] = '\0';
+    st.prev_kube_context[0] = '\0';
     snprintf(st.state, sizeof(st.state), "stopped");
     if (state_save(p, &st) != 0) {
         logerr("cannot persist stopped state");
