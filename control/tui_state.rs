@@ -50,6 +50,9 @@ pub struct State {
     pub workspace: Workspace,
     pub docker_context: Option<String>,
     pub show_all: bool,
+    pub native: Option<crate::native::Invocation>,
+    pub environment_picker: bool,
+    pub connection_status: String,
     pub request: Request,
     pub data: Value,
     pub selected: usize,
@@ -77,6 +80,9 @@ impl State {
             workspace: Workspace::Containers,
             docker_context: None,
             show_all: false,
+            native: None,
+            environment_picker: false,
+            connection_status: String::new(),
             request,
             data: Value::Null,
             selected: 0,
@@ -120,7 +126,7 @@ impl State {
             .map(|rows| {
                 rows.iter()
                     .filter(|row| {
-                        (self.workspace != Workspace::Containers || self.show_all ||
+                        (self.native.is_some() || self.environment_picker || self.workspace != Workspace::Containers || self.show_all ||
                          self.request.operation() != "docker containers list" || row["State"] == "running") &&
                         label(row)
                             .to_lowercase()
@@ -211,6 +217,7 @@ impl State {
         request.yes = true; // UI confirmation is mandatory before dispatch.
         request.validate()?;
         if !request.mutates() {
+            self.native = None; self.environment_picker = false;
             self.request = request.clone();
             // Detail commands dispatch once; Esc and periodic refresh must
             // return to the resource list, just like keyboard detail actions.
@@ -354,6 +361,9 @@ fn label(value: &Value) -> String {
         .as_str()
         .or_else(|| value["metadata"]["name"].as_str())
         .or_else(|| value["Name"].as_str())
+        .or_else(|| value["Names"].as_str())
+        .or_else(|| value["Repository"].as_str())
+        .or_else(|| value["ID"].as_str())
         .or_else(|| value["Names"][0].as_str())
         .or_else(|| value["RepoTags"][0].as_str())
         .or_else(|| value["Id"].as_str())
@@ -364,6 +374,7 @@ fn label(value: &Value) -> String {
             value["state"]
                 .as_str()
                 .or_else(|| value["State"].as_str())
+                .or_else(|| value["Status"].as_str())
                 .or_else(|| value["status"]["phase"].as_str())
         })
         .unwrap_or("");
@@ -466,6 +477,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
             state.request.context.as_deref().unwrap_or("choose a context"),
             if state.request.all_namespaces { "all namespaces" } else { state.request.namespace.as_deref().unwrap_or("default") }),
     };
+    let header = if let Some(command) = &state.native { format!("{header}\n{}: {}", command.target, state.connection_status) } else { header };
     let header = if state.uncertain.is_empty() {
         header
     } else {
@@ -498,7 +510,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
     );
     let title = format!(
         "{} {}",
-        state.request.operation(),
+        state.native.as_ref().map(|c| format!("{} {}", c.program(), c.resource.as_deref().unwrap_or("command"))).unwrap_or_else(|| if state.environment_picker { "Container environments".into() } else { state.request.operation() }),
         if state.loading { "[loading]" } else { "" }
     );
     let operation_detail = format!("{}\n{}\n{}", state.operation_status, state.operation_log, serde_json::to_string_pretty(&state.uncertain).unwrap());
