@@ -46,7 +46,11 @@ pub fn split_command(command: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
+struct Browser {
+    native: Option<crate::native::Invocation>, data: Value, selected: usize, filter: String, scroll: u16,
+}
 pub struct State {
+    browser: Option<Browser>,
     pub workspace: Workspace,
     pub docker_context: Option<String>,
     pub docker_config: Option<String>,
@@ -80,6 +84,7 @@ impl State {
         request.profile.get_or_insert("default".into());
         request.headless = false;
         Self {
+            browser: None,
             workspace: Workspace::Containers,
             docker_context: None,
             docker_config: None,
@@ -116,8 +121,10 @@ impl State {
             if let Ok(config) = crate::kubeconfig::load(&state.request) {
                 state.request.context = state.request.context.or(config.current_context);
                 if let Some(context) = config.contexts.iter().find(|c| Some(&c.name) == state.request.context.as_ref()).and_then(|c| c.context.as_ref()) {
-                    state.request.namespace = state.request.namespace.or(context.namespace.clone());
-                    state.request.words[1] = "pods".into();
+                    if config.clusters.iter().any(|entry| entry.name == context.cluster && entry.cluster.as_ref().and_then(|c| c.server.as_ref()).is_some_and(|s| !s.is_empty())) {
+                        state.request.namespace = state.request.namespace.or(context.namespace.clone());
+                        state.request.words[1] = "pods".into();
+                    }
                 }
             }
         } else {
@@ -125,6 +132,18 @@ impl State {
             state.request.namespace = None;
         }
         state
+    }
+    pub fn save_browser(&mut self) {
+        if self.native.is_some() {
+            self.browser = Some(Browser { native: self.native.clone(), data: self.data.clone(), selected: self.selected, filter: self.filter.clone(), scroll: self.scroll });
+        }
+    }
+    pub fn return_to_browser(&mut self) {
+        self.environment_picker = false; self.detail = None;
+        self.request.words = vec!["docker".into(), "containers".into(), "list".into()];
+        if let Some(browser) = self.browser.take().filter(|b| b.native.as_ref().and_then(|i| i.hamn_profile.as_ref()) == self.request.profile.as_ref()) {
+            self.native = browser.native; self.data = browser.data; self.selected = browser.selected; self.filter = browser.filter; self.scroll = browser.scroll;
+        } else { self.native = crate::native::parse("", self).ok(); self.selected = 0; self.filter.clear(); self.scroll = 0; }
     }
     pub fn rows(&self) -> Vec<&Value> {
         self.data
@@ -575,7 +594,9 @@ pub fn draw(frame: &mut Frame, state: &State) {
             .block(Block::bordered()),
         areas[2],
     );
-    frame.render_widget(Paragraph::new(": command  / filter  Enter detail  s start  t stop  r restart  d delete  l logs  g stats  ? help  q quit"), areas[3]);
+    let keys = if state.workspace == Workspace::Kubernetes { ": command  / filter  Enter detail  l logs  g metrics  r rollout  d delete  m actions  ? help  q quit" }
+        else { ": command  / filter  Enter detail  s start  t stop  r restart  d delete  l logs  g stats  m actions  ? help  q quit" };
+    frame.render_widget(Paragraph::new(keys), areas[3]);
 }
 
 pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &str) {
@@ -674,6 +695,23 @@ mod tests {
         assert_eq!(state.request.context, previous);
     }
 
+    #[test]
+    fn runtime_panel_restores_browser_query_selection_and_filter() {
+        let mut state = State::new(Request::default());
+        state.request.profile = Some("default".into());
+        state.native = Some(crate::native::parse("ps --filter label=app", &state).unwrap());
+        state.data = serde_json::json!([{"ID":"a"}, {"ID":"b"}]);
+        state.selected = 1; state.scroll = 4; state.filter = "b".into();
+        state.save_browser();
+        state.native = None; state.selected = 0; state.filter.clear();
+        state.return_to_browser();
+        assert_eq!(state.selected, 1); assert_eq!(state.scroll, 4); assert_eq!(state.filter, "b");
+        assert!(state.native.as_ref().unwrap().args.iter().any(|a| a == "label=app"));
+        state.save_browser(); state.request.profile = Some("different".into());
+        state.return_to_browser();
+        assert_eq!(state.selected, 0); assert!(state.filter.is_empty());
+        assert_eq!(state.native.unwrap().hamn_profile.as_deref(), Some("different"));
+    }
     #[test]
     fn command_paths_support_quotes_without_shell_expansion() {
         let mut state = State::new(Request::default());

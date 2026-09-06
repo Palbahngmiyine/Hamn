@@ -214,14 +214,16 @@ pub async fn run(request: Request) -> std::io::Result<()> {
             },
             Some((generation, finished, result)) = mutation_responses.recv() => {
                 if generation == mutation_job.generation {
+                    let owner = if mutation_job.mutation.as_ref().is_some_and(|r| r.words.first().is_some_and(|w| w == "k8s")) { Workspace::Kubernetes } else { Workspace::Containers };
+                    if finished { state.quit_confirmation = false; }
+                    let progress = if state.workspace == owner { &mut state } else { &mut other };
                     if finished {
-                        state.quit_confirmation = false;
                         if let Some(request) = mutation_job.mutation.take() {
                             if result.as_ref().is_err_and(|e| e.code == "outcomeUnknown") {
-                                state.uncertain.push(uncertain(&request));
+                                progress.uncertain.push(uncertain(&request));
                             }
                         }
-                        state.operation_status = match &result {
+                        progress.operation_status = match &result {
                             Ok(_) => "Operation completed".into(),
                             Err(e) => format!("{}: {}", e.code, e.message),
                         };
@@ -230,11 +232,11 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         job.refresh(&mut state);
                     } else if let Ok(event) = result {
                         let text = event["text"].as_str().unwrap_or_default();
-                        state.operation_log.push_str(text);
-                        if state.operation_log.len() > 1024 * 1024 {
-                            let mut split = state.operation_log.len() - 1024 * 1024;
-                            while !state.operation_log.is_char_boundary(split) { split += 1; }
-                            state.operation_log.drain(..split);
+                        progress.operation_log.push_str(text);
+                        if progress.operation_log.len() > 1024 * 1024 {
+                            let mut split = progress.operation_log.len() - 1024 * 1024;
+                            while !progress.operation_log.is_char_boundary(split) { split += 1; }
+                            progress.operation_log.drain(..split);
                         }
                     }
                 }
@@ -421,8 +423,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     },
                     KeyCode::Char(',') => { choosing = true; settings = true; choice = state.workspace.index(); },
                     KeyCode::Char('a') if state.workspace == Workspace::Containers && !state.environment_picker => {
-                        state.show_all = !state.show_all; state.selected = 0;
-                        state.native = crate::native::parse(if state.show_all { "ps -a" } else { "ps" }, &state).ok(); job.refresh(&mut state);
+                        if let Some(invocation) = state.native.as_mut().filter(|i| i.resource.as_deref() == Some("containers")) {
+                            crate::native::toggle_all(invocation); state.selected = 0; job.refresh(&mut state);
+                        }
                     },
                     KeyCode::Char('c') if state.request.operation() == "vm list" && state.docker_context.is_none() => {
                         if let Some(row) = state.selected() {
@@ -430,7 +433,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         }
                     },
                     KeyCode::Char('v') if state.workspace == Workspace::Containers && state.docker_context.is_none() => {
-                        state.native = None; state.environment_picker = false;
+                        state.save_browser(); state.native = None; state.environment_picker = false;
                         let request = state.view("vm"); job.dispatch(request, &mut state);
                     },
                     KeyCode::Char('e') if state.workspace == Workspace::Containers => {
@@ -448,7 +451,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     KeyCode::Esc => {
                         state.show_operation = false; state.detail = None; state.filter.clear(); job.cancel(&mut state);
                         if state.request.operation() == "vm list" || state.environment_picker {
-                            state.environment_picker = false; state.native = crate::native::parse("", &state).ok(); job.refresh(&mut state);
+                            state.return_to_browser(); job.refresh(&mut state);
                         }
                     },
                     KeyCode::Down | KeyCode::Char('j') => state.move_by(1),
