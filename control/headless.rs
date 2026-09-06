@@ -36,7 +36,11 @@ pub async fn run(request: Request) -> i32 {
                     value["type"] = event["type"].clone();
                     value["sequence"] = sequence.into();
                     sequence += 1;
-                    if !write(&value) { listener.abort(); return 1; }
+                    if !write(&value) {
+                        cancel.cancel();
+                        let _ = execution.await; // wait for lifecycle cleanup even if the reader left
+                        listener.abort(); return 1;
+                    }
                 }
                 result = &mut execution => break result,
             }

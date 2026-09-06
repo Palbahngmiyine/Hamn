@@ -61,6 +61,7 @@ pub struct State {
     pub quit_confirmation: bool,
     pub operation_status: String,
     pub operation_log: String,
+    pub show_operation: bool,
 }
 
 impl State {
@@ -84,6 +85,7 @@ impl State {
             quit_confirmation: false,
             operation_status: String::new(),
             operation_log: String::new(),
+            show_operation: false,
         }
     }
     pub fn rows(&self) -> Vec<&Value> {
@@ -472,7 +474,8 @@ pub fn draw(frame: &mut Frame, state: &State) {
         state.request.operation(),
         if state.loading { "[loading]" } else { "" }
     );
-    if let Some(detail) = &state.detail {
+    let operation_detail = format!("{}\n{}\n{}", state.operation_status, state.operation_log, serde_json::to_string_pretty(&state.uncertain).unwrap());
+    if let Some(detail) = if state.show_operation { Some(&operation_detail) } else { state.detail.as_ref() } {
         frame.render_widget(
             Paragraph::new(clean(detail))
                 .scroll((state.scroll, 0))

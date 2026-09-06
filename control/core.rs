@@ -263,7 +263,7 @@ async fn live_error(
         let n = reader.read(&mut buffer).await?;
         if n == 0 { return Ok(saved); }
         saved.extend_from_slice(&buffer[..n.min(8192usize.saturating_sub(saved.len()))]);
-        if headless { std::io::stderr().write_all(&buffer[..n])?; }
+        if headless { let _ = std::io::stderr().write_all(&buffer[..n]); }
         if let Some(events) = events.filter(|_| !headless) {
             let _ = events.try_send(json!({"type":"log", "text":String::from_utf8_lossy(&buffer[..n])}));
         }
