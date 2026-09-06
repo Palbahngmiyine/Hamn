@@ -19,8 +19,10 @@ is the only repository secret and is used for Release Please PRs.
 
 ## Release Please and version 0.1.0
 
-Merging PR #42 is assigned `Release-As: 0.1.0` through its documented commit
-override. Release Please PR #43 updates the manifest, version.txt, Makefile,
+The automation PR squash commit uses the one-time `Release-As: 0.1.0` footer.
+Do not put a commit override on the multi-commit PR #42: it repeats the same
+message for each associated commit. GitHub-generated changelogs summarize
+merged PRs once. Release Please PR #43 updates the manifest, version.txt, Makefile,
 and Nix version to 0.1.0. Merge the hosted automation changes before merging
 that release PR. Later releases use normal Conventional Commit increments;
 there is no permanent `release-as` configuration to pin future versions.

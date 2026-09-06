@@ -18,8 +18,10 @@
 
 ## Release Please와 0.1.0 버전
 
-PR #42의 commit override에 `Release-As: 0.1.0`을 지정했습니다. Release Please
-PR #43이 manifest, version.txt, Makefile, Nix 버전을 0.1.0으로 변경합니다.
+자동화 PR의 squash commit에 일회성 `Release-As: 0.1.0`을 지정합니다. 여러
+커밋으로 구성된 PR #42에는 commit override를 적용하지 않습니다. 연결된 커밋마다
+동일한 설명이 반복되기 때문입니다. GitHub changelog 생성 방식으로 머지된 PR을
+한 번씩 요약합니다. PR #43이 manifest, version.txt, Makefile, Nix 버전을 변경합니다.
 먼저 hosted 자동화 변경을 머지하고 그 다음 릴리스 PR을 머지합니다. 이후 버전은
 Conventional Commit 규칙으로 증가합니다. 영구적인 `release-as` 설정은 없습니다.
 직접 Cargo 빌드도 HAMN_VERSION을 지정하지 않으면 version.txt를 사용합니다.
