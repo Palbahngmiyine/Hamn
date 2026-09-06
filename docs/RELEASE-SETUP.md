@@ -36,6 +36,11 @@ next release is not blocked. Use the Release Please workflow's manual dispatch
 to refresh a PR; use Release's manual dispatch only to recover an unpublished
 manifest version.
 
+While that manifest version is unpublished or still a draft, Release Please
+defers the next PR instead of requesting notes against a missing previous tag.
+A successful Release workflow runs Release Please again after publication and
+label completion. API/authentication failures still fail the check visibly.
+
 Version override semantics: [Release Please documentation](https://github.com/googleapis/release-please#how-do-i-change-the-version-number).
 
 ## Optional manual physical validation
@@ -113,6 +118,10 @@ The release workflow then:
    candidate, and attests candidate bytes and hosted evidence.
 3. Verifies hosted attestations and hashes, then uploads the same candidate
    bytes to an immutable GitHub Release without rebuilding.
+
+The ephemeral Linux builder removes optional `passt` so libguestfs consistently
+uses QEMU SLIRP networking. Image assembly checks DNS with a 30-second deadline
+before package installation; runner-image networking changes must fail visibly.
 
 `make release-gate` takes `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, and an
 empty `OUTPUT_DIR`, plus the validator inputs above. Checkout must be clean

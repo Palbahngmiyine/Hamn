@@ -33,6 +33,11 @@ Conventional Commit 규칙으로 증가합니다. 영구적인 `release-as` 설�
 수동 실행을 사용합니다. Release workflow의 수동 실행은 아직 배포하지 않은
 manifest 버전을 복구할 때만 사용합니다.
 
+Manifest의 버전이 아직 게시되지 않았거나 draft 상태라면 Release Please는
+다음 PR 생성을 보류합니다. 존재하지 않는 이전 태그로 변경 이력을 요청하지
+않습니다. Release workflow가 게시와 라벨 정리를 성공하면 Release Please를
+다시 실행합니다. API·인증 오류는 보류로 숨기지 않고 실패로 표시합니다.
+
 버전 지정 규칙: [Release Please 공식 문서](https://github.com/googleapis/release-please#how-do-i-change-the-version-number).
 
 ## 선택적 수동 물리 검증
@@ -105,6 +110,10 @@ Workflow는 다음 순서로 실행합니다.
    만들고 attest합니다.
 3. Hosted attestation과 해시를 검증한 뒤 후보를 다시 빌드하지 않고 같은 바이트를
    불변 GitHub Release에 게시합니다.
+
+임시 Linux builder에서 선택적 `passt`를 제거해 libguestfs가 QEMU SLIRP
+네트워크를 일관되게 사용하도록 합니다. 이미지 조립은 패키지 설치 전에 30초 제한으로
+DNS를 검사하며 runner 이미지의 네트워크 변경으로 발생한 실패를 숨기지 않습니다.
 
 `make release-gate`에는 `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, 빈
 `OUTPUT_DIR`와 위 검증기 입력이 필요합니다. Checkout은 깨끗해야 하며 후보 소스와

@@ -133,6 +133,7 @@ then
 fi
 "$VIRT_CUSTOMIZE" -a "$STAGE" \
     --run-command "date -u -s '@$COMMIT_EPOCH'" \
+    --run-command 'timeout 30 getent ahostsv4 ports.ubuntu.com' \
     --install "$PACKAGES" \
     --upload "$GUEST_MANIFEST:/tmp/hamn-guest-image.json" \
     --upload "$SOURCE_ARCHIVE:/tmp/hamn-guest-sources.tar.gz" \
