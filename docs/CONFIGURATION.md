@@ -13,7 +13,8 @@ There is no positional-profile or `HAMN_PROFILE` fallback in the public API.
 Profile names may contain only letters, digits, `_`, and `-`. `cache`, `.` and
 `..` are not valid profile names.
 
-`~/.hamn/<profile>/config.yaml` is the sole supported configuration file. The
+`~/.hamn/<profile>/config.yaml` stores profile configuration. The TUI default
+workspace is stored separately in `~/.hamn/tui.json`; see [TUI preferences](TUI.md). The
 file is written atomically with mode `0600`. A legacy `hamn.conf` containing
 `runtime=containerd` or `runtime=hamn` causes the profile to fail closed; Hamn
 does not convert legacy runtime data in place.
@@ -29,8 +30,8 @@ hamn --headless vm start --profile work --yes
 `configure` changes stopped profiles only. Existing VM disks are not shrunk.
 For advanced settings, edit `~/.hamn/<profile>/config.yaml` while the VM is
 stopped. Resource-only updates preserve mounts, Docker daemon settings, Rosetta,
-and existing provisioning hooks. The TUI does not execute arbitrary shell
-commands or open an external editor.
+and existing provisioning hooks. In the TUI, `v` then `c` opens the resource
+configuration command. Native `kubectl edit` uses the installed editor in the PTY.
 
 ## YAML schema
 

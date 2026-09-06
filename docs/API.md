@@ -1,7 +1,8 @@
 # Control API
 
-The public interface is `hamn --headless <operation> [arguments]`. The TUI
-calls the same service. Old CLI commands and JSON schemas are not supported.
+The public interface is `hamn --headless <operation> [arguments]`. TUI VM controls
+call the same service; native Docker/kubectl commands use the installed CLI
+through a PTY and are not additional headless operations.
 `hamn --headless capabilities` lists available operations and mutation flags.
 
 ## Response contract
@@ -23,9 +24,24 @@ backpressure. Log lines and one-shot log responses are limited to 1 MiB;
 `--tail` accepts 0 through 10000. The default tail is 200.
 
 `--timeout` is a deadline in seconds (default 600, allowed 1–3600). Ctrl-C and
-SIGTERM request cancellation. A timed-out or cancelled mutation returns
-`outcomeUnknown`: a server may already have applied it. Read the target's state
+SIGTERM request cancellation. An external mutation cancelled after dispatch can return
+`outcomeUnknown`: a server may already have applied it. Managed VM cancellation
+waits for cleanup and reports `cancelled` only when recovery is confirmed. Read the target's state
 before retrying. Hamn never claims to undo an accepted server mutation.
+
+## VM readiness and operation history
+
+VM status retains existing fields and adds `dockerStatus` (`ready`, `preparing`,
+`unavailable`, `recoveryRequired`) and `lastOperation` (null when absent).
+`state:running` describes the VM process only; `ready` requires Docker `/_ping`.
+`lastOperation` includes `schemaVersion`, `operationId`, `operation`, `status`,
+`phase`, `startedVm`, `exitCode`, and `error`. While running, exit/error may be absent.
+Ownership evidence includes PID, process start time, and executable UUID; PID alone
+never establishes ownership. Completed, failed, cancelled, and unknown outcomes
+remain in the private atomic `~/.hamn/<profile>/operation.json` record.
+An orphaned running record is reported as `outcomeUnknown` / `recoveryRequired`.
+Navigation does not cancel managed work; confirmed quit requests cancellation
+and waits for cleanup. Unknown outcomes require inspection before retry.
 
 ## Operations
 
@@ -52,7 +68,8 @@ A resource name can follow the operation or use `--name`. `--uid` prevents
 operating on a replacement Kubernetes object. Scale requires `--replicas`;
 zero is allowed. Pod logs accept `--container` and `--previous`.
 
-All mutations require `--yes`; TUI confirmation supplies it after approval.
+All headless mutations require `--yes`; TUI VM confirmation supplies it after approval.
+Typed native CLI commands retain their own confirmation and output semantics.
 Mutations cannot use `--watch`, `--follow`, or `--all-namespaces`.
 
 ## Connections and ownership
