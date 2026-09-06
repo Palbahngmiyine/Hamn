@@ -11,6 +11,7 @@ mod migration;
 mod model;
 mod service;
 mod stream;
+mod preferences;
 mod tui;
 mod tui_state;
 
