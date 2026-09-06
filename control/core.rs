@@ -126,9 +126,13 @@ fn execute(request: &Request) -> Result<Value> {
         }
     }
     if rc != 0 {
+        let unknown = operation.starts_with("vm ") && query(profile.as_ref())
+            .is_ok_and(|v| v["lastOperation"]["status"] == "outcomeUnknown");
         let message = unsafe { CStr::from_ptr(log_last_error()) }.to_string_lossy();
         return Err(Failure::new(
-            if rc == 130 {
+            if unknown {
+                "outcomeUnknown"
+            } else if rc == 130 {
                 "cancelled"
             } else if rc == 3 {
                 "restartRequired"
@@ -260,7 +264,7 @@ async fn live_error(
         if n == 0 { return Ok(saved); }
         saved.extend_from_slice(&buffer[..n.min(8192usize.saturating_sub(saved.len()))]);
         if headless { std::io::stderr().write_all(&buffer[..n])?; }
-        if let Some(events) = events {
+        if let Some(events) = events.filter(|_| !headless) {
             let _ = events.try_send(json!({"type":"log", "text":String::from_utf8_lossy(&buffer[..n])}));
         }
     }
@@ -322,6 +326,32 @@ mod tests {
     use super::*;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::net::UnixStream;
+
+    #[tokio::test]
+    async fn cancellation_waits_for_the_owned_workers_cleanup_result() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = std::env::temp_dir().join(format!("hamn-cancel-worker-{}.py", std::process::id()));
+        let mut file = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o700).open(&path).unwrap();
+        file.write_all(br#"#!/usr/bin/python3
+import json, signal, sys
+json.load(sys.stdin)
+def cleanup(*_):
+    print(json.dumps({'Ok': {'cleanup': 'completed'}}), flush=True)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, cleanup)
+print('ready', file=sys.stderr, flush=True)
+signal.pause()
+"#).unwrap();
+        drop(file);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        let request = Request { timeout: 20, ..Default::default() };
+        let call = call_executable(&request, path.as_os_str(), Some(&cancel), Some(&sender));
+        let trigger = async { assert_eq!(receiver.recv().await.unwrap()["text"], "ready\n"); cancel.cancel(); };
+        let (result, _) = tokio::time::timeout(std::time::Duration::from_secs(30), async { tokio::join!(call, trigger) }).await.unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(result.unwrap()["cleanup"], "completed");
+    }
 
     #[test]
     fn background_exec_cannot_keep_worker_protocol_open() {

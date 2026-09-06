@@ -115,8 +115,6 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     let mut terminal = ratatui::init();
     let _restore = Restore;
     let (sender, mut responses) = mpsc::channel(16);
-    let (migration_sender, mut migrations) = mpsc::channel(16);
-    let _migration = crate::migration::Startup::new(migration_sender);
     let mut job = Job {
         generation: 0,
         cancel: CancellationToken::new(),
@@ -135,10 +133,12 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut suspend =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(libc::SIGTSTP))?;
+    let mut draw_error = None;
     loop {
-        terminal.draw(|frame| tui_state::draw(frame, &state))?;
+        if let Err(error) = terminal.draw(|frame| tui_state::draw(frame, &state)) {
+            draw_error = Some(error); break;
+        }
         tokio::select! {
-            Some(message) = migrations.recv() => state.message = message,
             _ = terminate.recv() => {
                 if mutation_job.mutation.is_none() { break; }
                 mutation_job.cancel.cancel(); exit_after_cancel = true;
@@ -150,6 +150,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
             Some((generation, finished, result)) = mutation_responses.recv() => {
                 if generation == mutation_job.generation {
                     if finished {
+                        state.quit_confirmation = false;
                         if let Some(request) = mutation_job.mutation.take() {
                             if result.as_ref().is_err_and(|e| e.code == "outcomeUnknown") {
                                 state.uncertain.push(uncertain(&request));
@@ -300,7 +301,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     for outcome in &state.uncertain {
         eprintln!("{outcome}");
     }
-    Ok(())
+    match draw_error { Some(error) => Err(error), None => Ok(()) }
 }
 
 #[cfg(test)]

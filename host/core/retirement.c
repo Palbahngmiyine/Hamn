@@ -1,3 +1,4 @@
+#include "core/operation.h"
 #include "core/retirement.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -173,8 +174,11 @@ int hamn_control_migrate(const char *name)
         logerr("cannot verify VM ownership for K3s retirement");
         goto out;
     }
-    if (ssh_master_start(&profile, state.ip, 15) == 0)
+    if (operation_begin(&profile, "vm migrate") != 0) goto out;
+    if (operation_phase("retiring-k3s") == 0 &&
+        ssh_master_start(&profile, state.ip, 15) == 0)
         rc = retirement_run(&profile, state.ip) == 0 ? 0 : 1;
+    rc = operation_finish(rc, rc == 0);
 out:
     if (mutation >= 0) profile_mutation_unlock(mutation);
     vm_lifecycle_lock_release(&lock);

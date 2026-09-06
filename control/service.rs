@@ -28,8 +28,7 @@ pub async fn execute_stream(
         )?));
     }
     let managed = request.words.first().is_some_and(|word| word == "vm") && request.mutates();
-    let run = async {
-        let mut migration_error = None;
+    let mut migration_error = None;
         if request.mutates()
             && matches!(
                 request.words.first().map(String::as_str),
@@ -40,19 +39,17 @@ pub async fn execute_stream(
                 "vm create" | "vm start" | "vm migrate"
             )
         {
-            let migration = if managed {
-                let mut migrate = request.clone();
-                migrate.words = vec!["vm".into(), "migrate".into()];
-                core::call_control(&migrate, cancel, events.as_ref()).await
-            } else {
-                crate::migration::prepare(request.profile.as_deref().unwrap()).await
-            };
+            let mut migrate = request.clone();
+            migrate.words = vec!["vm".into(), "migrate".into()];
+            let migration = core::call_control(&migrate, cancel, events.as_ref()).await;
             if let Err(error) = migration {
                 // A failed retirement must never prevent stopping the owned VM.
                 // Preserve the failure in the result; its pending marker remains.
                 migration_error = retirement_failure(&request.operation(), error)?;
             }
         }
+    if cancel.is_cancelled() { return Err(Failure::new("cancelled", "operation cancelled")); }
+    let run = async {
         if request.words.first().is_some_and(|word| word == "docker") {
             let mut status_request = request.clone();
             status_request.words = vec!["vm".into(), "status".into()];

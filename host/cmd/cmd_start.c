@@ -486,6 +486,12 @@ static int cmd_start_execute(const struct start_options *options,
             goto out;
         }
         if (running_state.ip[0]) {
+            /* A healthy socket does not prove an interrupted transaction was
+             * committed. Validate and recover its backup before early success. */
+            start_trace_stage(&trace, "recovering-deployment");
+            if (ssh_master_start(&p, running_state.ip, 15) != 0 ||
+                retirement_recover(&p, running_state.ip) != 0)
+                goto out;
             if (p.legacy_k3s &&
                 (ssh_master_start(&p, running_state.ip, 15) != 0 ||
                  retirement_run(&p, running_state.ip) != 0))
@@ -495,7 +501,12 @@ static int cmd_start_execute(const struct start_options *options,
                 logerr("cannot refresh the running VM guest deployment");
                 goto out;
             }
-            if (running_start_ready(&running_profile)) {
+            if (!running_start_ready(&running_profile) && !proc_cancelled()) {
+                start_trace_stage(&trace, "repairing-forwarding");
+                if (guest_deployment_forward_sockets(&p, running_state.ip) != 0)
+                    logerr("cannot restore the running VM socket forwards");
+            }
+            if (running_start_ready(&running_profile) && !proc_cancelled()) {
                 if (docker_observer_start(&p, &running_state) != 0) {
                     logerr("cannot start the Docker port observer");
                     goto out;

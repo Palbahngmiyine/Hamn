@@ -4,6 +4,7 @@
 #include "util/proc.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -47,8 +48,23 @@ cJSON *operation_snapshot(const struct profile *profile)
     close(fd);
     if (count < 0 || count != st.st_size) { errno = EINVAL; return NULL; }
     text[count] = '\0';
-    cJSON *value = cJSON_Parse(text);
+    cJSON *value = cJSON_ParseWithLengthOpts(text, (size_t)count + 1, NULL, 1);
     if (!cJSON_IsObject(value)) { cJSON_Delete(value); errno = EINVAL; return NULL; }
+    const cJSON *item, *other;
+    cJSON_ArrayForEach(item, value) {
+        for (other = item->next; other; other = other->next) {
+            if (!strcmp(item->string, other->string)) {
+                cJSON_Delete(value); errno = EINVAL; return NULL;
+            }
+        }
+    }
+    const cJSON *version = cJSON_GetObjectItemCaseSensitive(value, "schemaVersion");
+    const cJSON *id = cJSON_GetObjectItemCaseSensitive(value, "operationId");
+    if (!cJSON_IsNumber(version) || version->valuedouble != 1 ||
+        !cJSON_IsString(id) || strlen(id->valuestring) != 32 ||
+        strspn(id->valuestring, "0123456789abcdef") != 32) {
+        cJSON_Delete(value); errno = EINVAL; return NULL;
+    }
     const cJSON *status = cJSON_GetObjectItemCaseSensitive(value, "status");
     const cJSON *pid = cJSON_GetObjectItemCaseSensitive(value, "pid");
     const cJSON *sec = cJSON_GetObjectItemCaseSensitive(value, "startSec");
@@ -56,7 +72,14 @@ cJSON *operation_snapshot(const struct profile *profile)
     const cJSON *uuid = cJSON_GetObjectItemCaseSensitive(value, "executableUuid");
     if (!cJSON_IsString(status) || !cJSON_IsNumber(pid) || !cJSON_IsNumber(sec) ||
         !cJSON_IsNumber(usec) || !cJSON_IsString(uuid) || pid->valuedouble < 1 ||
-        pid->valuedouble > INT_MAX || sec->valuedouble < 0 || usec->valuedouble < 0) {
+        pid->valuedouble > INT_MAX || floor(pid->valuedouble) != pid->valuedouble ||
+        sec->valuedouble < 0 || sec->valuedouble > 9007199254740991.0 ||
+        floor(sec->valuedouble) != sec->valuedouble || usec->valuedouble < 0 ||
+        usec->valuedouble >= 1000000 || floor(usec->valuedouble) != usec->valuedouble ||
+        strlen(uuid->valuestring) != 32 || strspn(uuid->valuestring, "0123456789abcdef") != 32 ||
+        (strcmp(status->valuestring, "running") && strcmp(status->valuestring, "completed") &&
+         strcmp(status->valuestring, "failed") && strcmp(status->valuestring, "cancelled") &&
+         strcmp(status->valuestring, "outcomeUnknown"))) {
         cJSON_Delete(value); errno = EINVAL; return NULL;
     }
     if (strcmp(status->valuestring, "running") == 0) {
