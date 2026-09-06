@@ -10,8 +10,9 @@ use `hamn --headless` for JSON and NDJSON automation.
 - A signed Hamn guest image for VM and Docker operations.
 - A kubeconfig for Kubernetes operations. These work independently of the VM.
 
-The built-in Docker client does not require Docker CLI or Docker Desktop.
-External Docker CLI, Compose, buildx, and SDKs can use the profile socket.
+TUI container browsing requires Docker CLI; Kubernetes browsing requires kubectl.
+Headless SDK operations do not require these CLIs. Compose, buildx, and plugins
+remain external installations. Docker Desktop is not required.
 
 ## Install
 
@@ -30,11 +31,12 @@ Signed release installation is described in [release setup](docs/RELEASE-SETUP.m
 
 ## Terminal interface
 
-Use `:vm`, `:containers`, `:images`, `:volumes`, `:networks`, `:contexts`, `:ns`,
-and `:pods` to select a resource view. `/` filters, arrows or `j/k` select,
-Enter opens details, Esc returns, and `?` shows help. The selected profile,
-context and namespace appear in the header. Changes require confirmation.
-Closing the interface leaves running VMs running.
+Choose Containers or Kubernetes on first launch. Tab switches workspace; `,`
+changes the saved default. Enter `:ps`, `:docker ps -a`, `:images`, `:get pods -A`,
+or `:kubectl get deployments -n dev`. Ordinary lists become selectable tables;
+other commands run in the embedded terminal with their original CLI semantics.
+`e` selects the environment/context; `v` opens VM controls only for Hamn profiles.
+See [workspace and command guide](docs/TUI.md) for actions, settings, and cancellation.
 
 ## Headless interface
 
@@ -62,16 +64,16 @@ docker compose up -d
 docker buildx build --load -t example .
 ```
 
-Hamn does not change Docker's current context or kubeconfig `current-context`.
-Kubernetes supports `--kubeconfig`, `KUBECONFIG`, or `~/.kube/config` and uses only
-the explicitly selected context. Interactive authentication must be completed
-outside Hamn before using that context.
+UI selection does not change Docker's current context or kubeconfig `current-context`.
+Explicit `docker context use` and `kubectl config` commands retain their normal
+write semantics. Headless authentication remains noninteractive; native CLI
+authentication runs according to the installed CLI in the embedded terminal.
 
 ## Migration and data
 
 This revision replaces the old CLI and JSON format. Managed K3s is removed.
-The first TUI session retires running legacy profiles; stopped profiles retire
-on their next start. VM/Docker mutations also run the retirement preflight.
+TUI entry performs no retirement. Legacy profiles retire on their next VM/Docker
+mutation; stopped profiles can retire during their next start.
 Read-only commands report pending migration without running it.
 
 **K3s cluster data and its dedicated local volumes are permanently deleted.**
@@ -84,5 +86,6 @@ its durable journal and does not mark a failed migration complete.
 `system uninstall --yes` permanently removes all Hamn profiles and managed
 installation files. [Configuration](docs/CONFIGURATION.md) describes persistence.
 
-Container creation, Compose execution, arbitrary shell/exec, Kubernetes apply,
-port-forward, and an MCP server are outside the built-in command set.
+Container creation, Compose, exec, Kubernetes apply, and port-forward use the
+installed native CLIs in the TUI. They are not added to the headless SDK operation
+set. Hamn does not provide an MCP server.

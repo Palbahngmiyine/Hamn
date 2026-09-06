@@ -10,8 +10,9 @@ Hamn은 하나의 macOS 실행 파일로 Linux VM, VM의 Docker Engine, 외부 K
 - VM·Docker 기능에는 서명된 Hamn 게스트 이미지가 필요합니다.
 - Kubernetes에는 kubeconfig가 필요하며 Hamn VM과 독립적으로 사용할 수 있습니다.
 
-내장 Docker 관리에는 Docker CLI나 Docker Desktop이 필요하지 않습니다.
-외부 Docker CLI·Compose·buildx·SDK는 프로필 소켓을 사용할 수 있습니다.
+TUI 컨테이너 탐색에는 Docker CLI, Kubernetes 탐색에는 kubectl이 필요합니다.
+헤드리스 SDK 작업은 이 CLI들을 요구하지 않습니다. Compose·buildx·플러그인은
+외부 설치 의존성이며 Docker Desktop은 필요하지 않습니다.
 
 ## 설치
 
@@ -30,10 +31,12 @@ hamn
 
 ## 터미널 화면
 
-`:vm`, `:containers`, `:images`, `:volumes`, `:networks`, `:contexts`, `:ns`,
-`:pods`로 화면을 선택합니다. `/`는 검색, 방향키·`j/k`는 이동, Enter는 상세,
-Esc는 복귀, `?`는 도움말입니다. 선택한 프로필·context·namespace는 상단에
-표시됩니다. 변경 작업은 확인을 거치며 화면을 닫아도 VM은 계속 실행됩니다.
+처음에 컨테이너 또는 Kubernetes를 선택합니다. Tab으로 영역을 전환하고 `,`로
+기본 영역을 변경합니다. `:ps`, `:docker ps -a`, `:images`, `:get pods -A`,
+`:kubectl get deployments -n dev`를 입력할 수 있습니다. 일반 목록은 선택 가능한
+표로 표시하고 나머지는 내부 터미널에서 원래 CLI 의미대로 실행합니다.
+`e`는 환경·context 선택, `v`는 Hamn 프로필의 VM 제어입니다.
+작업·설정·취소는 [작업 영역과 명령 안내](docs/TUI.ko.md)를 참고하세요.
 
 ## 헤드리스 인터페이스
 
@@ -61,15 +64,15 @@ docker compose up -d
 docker buildx build --load -t example .
 ```
 
-Hamn은 Docker의 현재 context나 kubeconfig의 `current-context`를 바꾸지 않습니다.
-Kubernetes 설정은 `--kubeconfig`, `KUBECONFIG`, `~/.kube/config` 순서로 선택하고,
-명시한 context만 사용합니다. 대화형 인증이 필요하면 Hamn 밖에서 먼저 인증하세요.
+UI 선택은 Docker의 현재 context나 kubeconfig의 `current-context`를 바꾸지 않습니다.
+명시적 `docker context use`·`kubectl config`는 원래 설정 변경 의미를 유지합니다.
+헤드리스 인증은 비대화형이며, 네이티브 CLI 인증은 내부 터미널에서 해당 CLI 규칙을 따릅니다.
 
 ## 기존 설치 전환과 데이터
 
 이번 변경은 기존 CLI·JSON 형식을 대체하고 매니지드 K3s를 제거합니다.
-첫 TUI 실행에서 실행 중인 구형 프로필을 정리하고, 정지된 프로필은 다음 시작 때
-정리합니다. VM·Docker 변경 작업도 전환을 선행하며, 조회는 전환 대기 상태만 표시합니다.
+TUI 진입은 정리를 실행하지 않습니다. 구형 프로필은 다음 VM·Docker 변경 작업에서
+정리하며, 정지된 프로필은 다음 시작 때 정리할 수 있습니다. 조회는 대기 상태만 표시합니다.
 
 **K3s 클러스터 데이터와 전용 로컬 볼륨은 영구 삭제됩니다.** 실행 파일을 이전 버전으로
 되돌려도 복구되지 않습니다. Docker의 `moby` 네임스페이스, Docker 볼륨, 공용
@@ -80,5 +83,5 @@ containerd content 저장소, 사용자 마운트, 원본 kubeconfig는 보존�
 `system uninstall --yes`는 모든 Hamn 프로필과 관리 설치 파일을 영구 삭제합니다.
 저장 형식은 [설정](docs/CONFIGURATION.ko.md)을 참고하세요.
 
-컨테이너 생성, Compose 실행, 임의 셸·exec, Kubernetes apply·port-forward,
-MCP 서버는 내장 명령 범위에 포함하지 않습니다.
+컨테이너 생성·Compose·exec·Kubernetes apply·port-forward는 TUI에서 외부 CLI로
+실행하며 헤드리스 SDK 작업 집합에는 추가하지 않습니다. MCP 서버는 제공하지 않습니다.

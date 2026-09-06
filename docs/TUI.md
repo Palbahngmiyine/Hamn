@@ -1,0 +1,115 @@
+# Workspaces and native commands
+
+Run `hamn` in a terminal. Choose **Containers** or **Kubernetes** on first launch;
+subsequent launches open the saved workspace. Tab switches workspace and `,`
+changes the saved default. Each workspace retains its target and browsing state.
+
+Install Docker CLI for container browsing and kubectl for Kubernetes browsing.
+Compose, buildx, kubectl plugins, and any exec credential helpers remain external
+installations. Hamn still ships as one executable. Headless SDK operations retain
+their existing contract and do not require these CLI installations.
+
+## Navigation
+
+| Key | Action |
+| --- | --- |
+| `:` | Enter a Docker or kubectl command |
+| `/`, arrows or `j/k` | Filter visible rows and select a resource |
+| Enter, `l`, `g` | Inspect, logs, statistics where supported |
+| `s`, `t`, `r`, `d` | Resource start, stop, restart, delete where supported |
+| `m` or `?` | Actions and command help |
+| Tab, `,` | Switch workspace; change default workspace |
+| `e` | Choose Hamn profile / external Docker context, or Kubernetes context |
+| `n` | Choose Kubernetes namespace |
+| `a` | Toggle all containers while preserving the current query filters |
+| `v` | Open the selected Hamn environment's VM panel |
+| `c` in VM panel | Edit CPU, memory (GiB), and disk (GiB) configuration command |
+| `!` | Show the active lifecycle operation log |
+| Esc, `q` | Return; quit |
+
+Containers opens with running containers. A stopped Hamn environment offers
+start; listing never boots a VM. The VM panel shows VM state separately from
+Docker readiness. External Docker contexts have no Hamn VM controls.
+Kubernetes opens Pods in the current valid context, otherwise the context picker.
+Entering Kubernetes neither starts a VM nor migrates a Hamn profile.
+Selecting contexts or namespaces does not write kubeconfig or Docker configuration.
+
+## Commands
+
+The `docker` / `kubectl` prefix is optional in its workspace. Full prefixes also
+switch to the corresponding workspace. Examples:
+
+```text
+ps
+ps -a --filter label=app=api
+docker images
+volume ls
+network ls
+pods
+get pods -A
+kubectl get deployments -n dev --sort-by=.metadata.name
+```
+
+Ordinary supported list queries use the installed CLI's JSON output to populate
+selectable tables. CLI filtering, scope, and sorting run in the CLI. Explicit
+output options such as `--format`, `-q`, and `-o yaml` are preserved and displayed
+in the terminal. Other commands are passed to the installed CLI, including
+Compose, buildx, `exec -it`, `attach`, `logs -f`, `stats`, `apply`, `edit`, and
+`port-forward`. Compatibility aliases such as `containers` remain available.
+
+Typed commands run once, with no additional Hamn confirmation or command deadline.
+Changes selected through the action menu retain confirmation. Quotes and escaped
+arguments are supported; shell pipes, redirection, variable expansion, and shell
+aliases are not interpreted. Run a shell explicitly inside `exec` if required.
+Structured query output is limited to 16 MiB; larger output reports an error.
+
+UI selections supply connection defaults. Explicit Docker `--context` / `--host`
+and kubectl `--context`, `--kubeconfig`, `--namespace` / `-n` take precedence;
+`-A` retains its all-namespace scope. Place Docker global flags before its command,
+as required by Docker CLI. The header shows the effective invocation target.
+`docker context use` and `kubectl config` execute with their normal configuration
+write semantics; Hamn reloads selection information after the terminal closes.
+
+Installed kubectl plugins own their argument grammar. Hamn passes their original
+arguments without injecting UI context/namespace flags, because kubectl rejects
+flags before plugin names and plugins may not accept them. The header explicitly
+shows **Plugin-defined target / inherited CLI configuration**. Specify a plugin's
+connection options according to that plugin. This exception prevents accidental
+argument rewriting; plugin support does not imply every plugin targets the UI selection.
+
+The connection rules are based on the official [Docker CLI reference](https://docs.docker.com/reference/cli/docker/),
+[kubectl reference](https://kubernetes.io/docs/reference/kubectl/), and
+[kubectl plugin contract](https://kubernetes.io/docs/tasks/extend-kubectl/kubectl-plugins/).
+
+## Embedded terminal and lifecycle operations
+
+The embedded PTY supplies terminal input/output and resizes with the window.
+Ctrl-C goes to the CLI; Docker's default Ctrl-P Ctrl-Q detach sequence is passed
+through. After the command exits, its exit code remains visible. Enter or Esc
+returns to the previous browser and refreshes its resources.
+
+VM start/stop/recovery runs independently of list queries. Navigation, refresh,
+and ordinary Esc do not cancel it. Quitting during a lifecycle mutation asks to
+cancel and exit, then waits for child termination and cleanup. A cancelled start
+only stops a VM it created. The operation log remains available while it runs.
+External changes are not described as rolled back merely because their CLI exited.
+
+A running VM is not proof of Docker availability. Readiness distinguishes ready,
+preparing, unavailable, and recovery required; successful start requires the host
+socket and a real Docker `/_ping` response. An interrupted operation retains its
+identity and outcome for inspection on the next launch. See [API](API.md).
+
+Completed K3s retirement and unfinished Docker deployment are checked separately.
+A complete, owned backup with matching helper contract and retirement provenance
+can be rolled back and retried. Legacy backups require trusted helper identities
+and full metadata validation. Ambiguous, partial, or altered backups are preserved
+with an error. Recovery never deletes Docker containers, images, or volumes.
+
+## Preferences
+
+`~/.hamn/tui.json` stores `{"version":1,"defaultWorkspace":"containers"}` or
+`"kubernetes"`. Writes use a private temporary file, file synchronization, atomic
+rename, directory synchronization, and mode `0600`. Invalid versions, malformed
+JSON, unsafe permissions, and symlink reads show an error and return to selection.
+Choosing again writes a valid preference file. Workspace connection selections
+are session-local; this file only persists the default workspace.
