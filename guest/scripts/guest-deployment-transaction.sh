@@ -200,7 +200,7 @@ begin_transaction() {
             fail "cannot secure service metadata"
     done
     python3 - "$ROOT" "$TRANSACTION" <<'PY' || fail "cannot record deployment provenance"
-import hashlib, json, os, pathlib, sys
+import hashlib, json, os, pathlib, stat, sys
 root, transaction = pathlib.Path(sys.argv[1] or '/'), pathlib.Path(sys.argv[2])
 journal = root / 'var/lib/hamn/k3s-retirement-v1.json'
 helpers = transaction / 'data/libexec_hamn'
@@ -212,10 +212,34 @@ with (transaction / 'provenance.json').open('x') as output:
     json.dump(value, output, sort_keys=True)
     output.flush()
     os.fsync(output.fileno())
+# Publish ready only after every regular backup file and directory is durable.
+# Do not follow CNI symlinks into the live runtime while syncing the backup.
+for directory, _, files in os.walk(transaction, topdown=False, followlinks=False):
+    for name in files:
+        path = pathlib.Path(directory) / name
+        if stat.S_ISREG(path.lstat().st_mode):
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+with (transaction / '.phase').open('x') as output:
+    output.write('ready\n')
+    output.flush()
+    os.fsync(output.fileno())
+os.replace(transaction / '.phase', transaction / 'phase')
+for directory in (transaction, transaction.parent):
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 PY
-    printf 'ready\n' >"$TRANSACTION/phase" ||
-        fail "cannot complete transaction backup"
-    chmod 0600 "$TRANSACTION/phase" || fail "cannot secure transaction phase"
     cleanup_incomplete=0
     trap - EXIT
 }

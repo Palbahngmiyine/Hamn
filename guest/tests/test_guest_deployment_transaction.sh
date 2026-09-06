@@ -97,6 +97,13 @@ TRANSACTION="$TRANSACTION_ROOT/$TOKEN"
 [ -d "$TRANSACTION" ] || fail "transaction was not created"
 [ "$(file_mode "$TRANSACTION")" = 700 ] || fail "transaction mode"
 [ "$(cat "$TRANSACTION/phase")" = ready ] || fail "transaction phase"
+[ "$(file_mode "$TRANSACTION/phase")" = 600 ] || fail "phase mode"
+[ ! -e "$TRANSACTION/.phase" ] || fail "unpublished phase remains"
+python3 - "$TRANSACTION/provenance.json" <<'PY_CHECK'
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value == {'version': 1, 'retirement': None, 'helpers': {}}
+PY_CHECK
 for key in hamnd libexec_hamn hamnd_unit etc_hamn containerd_config \
     docker_config docker_dropin host_dns_config host_dns_unit modules_config \
     sysctl_config cni_bin; do
@@ -178,5 +185,35 @@ fi
 grep -Fq 'refusing symlink parent: /etc/docker' "$WORK/symlink.err"
 rm "$ROOT/etc/docker"
 mv "$ROOT/etc/docker-real" "$ROOT/etc/docker"
+
+# A failed durability barrier must never publish a recoverable ready backup.
+export REAL_PYTHON
+REAL_PYTHON=$(command -v python3)
+cat >"$BIN/python3" <<'PY_WRAPPER'
+#!/bin/bash
+exec "$REAL_PYTHON" -c 'import os, sys
+script = sys.stdin.read()
+sys.argv.pop(1)
+original = os.fsync
+count = 0
+def sync(fd):
+    global count
+    count += 1
+    if count == int(os.environ["FAIL_SYNC_AT"]):
+        raise OSError("injected durability failure")
+    original(fd)
+os.fsync = sync
+exec(compile(script, "<transaction>", "exec"))' "$@"
+PY_WRAPPER
+chmod +x "$BIN/python3"
+for failure in 1 3; do
+    if FAIL_SYNC_AT="$failure" bash "$SCRIPT" begin \
+        4123456789abcdef0123456789abcdef >"$WORK/sync.out" 2>"$WORK/sync.err"; then
+        fail "accepted a failed durability barrier"
+    fi
+    grep -Fq 'injected durability failure' "$WORK/sync.err"
+    test ! -e "$TRANSACTION_ROOT/4123456789abcdef0123456789abcdef"
+    assert_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
+done
 
 echo "PASS: Docker/CRI guest deployment transactions roll back atomically"
