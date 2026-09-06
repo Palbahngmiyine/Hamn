@@ -67,7 +67,7 @@ repos/example/hamn/actions/runners)
     if [ "${HAMN_TEST_RUNNER:-0}" = 1 ]; then
         printf '%s\n' '{"runners":[{"name":"unsafe-runner"}]}'
     else
-        printf '%s\n' '{"runners":[{"name":"physical","os":"osx","status":"online","labels":[{"name":"self-hosted"},{"name":"macOS"},{"name":"ARM64"},{"name":"hamn-validator"}]}]}'
+        printf '%s\n' '{"runners":[]}'
     fi
     ;;
 repos/example/hamn/actions/variables)
@@ -85,22 +85,22 @@ repos/example/hamn/actions/secrets)
     fi
     ;;
 repos/example/hamn/environments)
-    printf '%s\n' '{"environments":[{"name":"hamn-promotion"},{"name":"hamn-validation"}]}'
+    printf '%s\n' '{"environments":[{"name":"hamn-promotion"}]}'
     ;;
-repos/example/hamn/environments/hamn-promotion|repos/example/hamn/environments/hamn-validation)
-    printf '%s\n' '{"id":7,"name":"'"${2##*/}"'","can_admins_bypass":false,"protection_rules":[{"id":8,"type":"branch_policy"}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
+repos/example/hamn/environments/hamn-promotion)
+    printf '%s\n' '{"id":7,"name":"hamn-promotion","can_admins_bypass":false,"protection_rules":[{"id":8,"type":"branch_policy"}],"deployment_branch_policy":{"protected_branches":false,"custom_branch_policies":true}}'
     ;;
-repos/example/hamn/environments/hamn-*/secrets)
+repos/example/hamn/environments/hamn-promotion/secrets)
     if [ "${HAMN_TEST_SECRET:-0}" = 1 ]; then
         printf '%s\n' '{"secrets":[{"name":"HAMN_RELEASE_SIGNING_KEY"}]}'
     else
         printf '%s\n' '{"secrets":[]}'
     fi
     ;;
-repos/example/hamn/environments/hamn-*/variables)
+repos/example/hamn/environments/hamn-promotion/variables)
     printf '%s\n' '{"variables":[]}'
     ;;
-repos/example/hamn/environments/hamn-*/deployment-branch-policies)
+repos/example/hamn/environments/hamn-promotion/deployment-branch-policies)
     if [ "${HAMN_TEST_BRANCH_POLICY:-0}" = 1 ]; then
         printf '%s\n' '{"branch_policies":[{"name":"release/*","type":"branch"}]}'
     else
@@ -114,7 +114,7 @@ repos/example/hamn/rulesets/1)
     if [ "${HAMN_TEST_WEAK_RULESET:-0}" = 1 ]; then
         printf '%s\n' '{"target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"required_linear_history"},{"type":"pull_request","parameters":{"required_approving_review_count":1,"dismiss_stale_reviews_on_push":true,"required_reviewers":[],"require_code_owner_review":false,"require_last_push_approval":true,"required_review_thread_resolution":true,"allowed_merge_methods":["squash","rebase"]}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":false,"required_status_checks":[]}}],"bypass_actors":[]}'
     else
-        printf '%s\n' '{"target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"required_linear_history"},{"type":"pull_request","parameters":{"required_approving_review_count":0,"dismiss_stale_reviews_on_push":false,"required_reviewers":[],"require_code_owner_review":false,"require_last_push_approval":false,"required_review_thread_resolution":true,"allowed_merge_methods":["squash","rebase"]}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"Portable source gates"},{"context":"macOS build and regression gates"}]}}],"bypass_actors":[]}'
+        printf '%s\n' '{"target":"branch","enforcement":"active","conditions":{"ref_name":{"include":["~DEFAULT_BRANCH"],"exclude":[]}},"rules":[{"type":"deletion"},{"type":"non_fast_forward"},{"type":"required_linear_history"},{"type":"pull_request","parameters":{"require_extra_approval_for_unattributed_changes":true,"required_approving_review_count":0,"dismiss_stale_reviews_on_push":false,"required_reviewers":[],"require_code_owner_review":false,"require_last_push_approval":false,"required_review_thread_resolution":true,"allowed_merge_methods":["squash","rebase"]}},{"type":"required_status_checks","parameters":{"strict_required_status_checks_policy":true,"required_status_checks":[{"context":"Portable source gates"},{"context":"macOS build and regression gates"}]}}],"bypass_actors":[]}'
     fi
     ;;
 repos/example/hamn/rulesets/2)
@@ -160,7 +160,7 @@ assert_failure HAMN_TEST_UNSAFE_ACTION \
 assert_failure HAMN_TEST_RELEASE_PLEASE_SECRET \
     'repository secrets must contain only RELEASE_PLEASE_TOKEN' release-please-secret
 assert_failure HAMN_TEST_RUNNER \
-    'one online dedicated Apple Silicon hamn-validator runner is required' runner
+    'keyless hosted releases must not use repository self-hosted runners' runner
 assert_failure HAMN_TEST_VARIABLE \
     'keyless hosted releases must not depend on repository variables' variable
 assert_failure HAMN_TEST_SECRET \
