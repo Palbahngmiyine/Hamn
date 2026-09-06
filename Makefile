@@ -271,6 +271,7 @@ test-release-publish: host
 
 test-release-version:
 	bash tests/host/test_release_version.sh
+	python3 tests/host/test_release_completion.py
 
 test-release-request:
 	bash tests/host/test_release_request.sh

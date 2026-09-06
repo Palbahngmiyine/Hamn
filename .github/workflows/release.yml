@@ -257,6 +257,7 @@ jobs:
     permissions:
       attestations: write
       contents: write
+      pull-requests: write
       id-token: write
     steps:
       - name: Check out exact release commit
@@ -381,3 +382,9 @@ jobs:
             gh release verify-asset "$STABLE_TAG" "$file"
           done
           gh release verify "$STABLE_TAG"
+      - name: Complete published Release Please PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
+        run: python3 packaging/release/complete-release-pr.py "$STABLE_TAG" "$GITHUB_SHA"
