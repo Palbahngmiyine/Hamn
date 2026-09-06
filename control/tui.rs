@@ -261,7 +261,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     },
                     KeyCode::Char(':') => state.input = Some((':', String::new())),
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
-                    KeyCode::Esc => { state.detail = None; state.filter.clear(); job.cancel(&mut state); },
+                    KeyCode::Esc => { state.show_operation = false; state.detail = None; state.filter.clear(); job.cancel(&mut state); },
                     KeyCode::Down | KeyCode::Char('j') => state.move_by(1),
                     KeyCode::Up | KeyCode::Char('k') => state.move_by(-1),
                     KeyCode::Enter => match state.enter() {
@@ -269,7 +269,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         Err(error) => state.message = error.message,
                         _ => {}
                     },
-                    KeyCode::Char('!') => state.detail = Some(format!("{}\n{}\n{}", state.operation_status, state.operation_log, serde_json::to_string_pretty(&state.uncertain).unwrap())),
+                    KeyCode::Char('!') => state.show_operation = !state.show_operation,
                     KeyCode::Char('?') => state.detail = Some("Commands: :vm :containers :images :volumes :networks :contexts :ns :pods :deployments :sts :ds :services :nodes :events :jobs :cronjobs :ingresses :pvcs\n\nUse a full headless operation after ':' for configuration and scaling.\nExample: :vm create --profile work --cpu 2 --memory 4\nExample: :k8s deployments scale api --replicas 3 --namespace default\n\nEnter selects context/namespace/profile. Mutations require y confirmation. Esc returns to the list. Ctrl-Z suspends; q exits without stopping VMs.".into()),
                     KeyCode::Char(c) if "strdlg".contains(c) => {
                         let action = match c { 's'=>"start", 't'=>"stop", 'r'=>"restart", 'd'=>"delete", 'l'=>"logs", _=>"stats" };
