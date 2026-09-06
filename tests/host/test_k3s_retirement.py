@@ -78,6 +78,9 @@ class Retirement(unittest.TestCase):
                 r.recovery_identity(entry, payload)
                 def recovered(*args, **kwargs):
                     import shutil
+                    if args[:2] == ('systemctl', 'reset-failed'):
+                        self.assertIn('docker.socket', args)
+                        return
                     self.assertEqual(args[-2:], ('rollback', 'b' * 32))
                     self.assertEqual(args[:4], ('flock', '--wait', '120', '/run/hamn-deployment.lock'))
                     self.assertEqual(kwargs['timeout'], 190)
@@ -85,7 +88,7 @@ class Retirement(unittest.TestCase):
                 run.side_effect = recovered
                 r.recover_deployment(payload)
                 r.recover_deployment(payload)
-                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_count, 2)
                 self.assertEqual(sentinel.read_text(), 'preserve')
 
     def test_only_exact_distribution_cni_links_are_recoverable(self):
@@ -190,6 +193,7 @@ class Retirement(unittest.TestCase):
                     r.recover_deployment()  # reported success without cleanup is rejected
                 self.assertEqual(run.call_args.args[-2:], ('rollback', 'a' * 32))
                 def recovered(*_args, **_kwargs):
+                    if _args[0] == 'systemctl': return
                     phase.unlink()
                     entry.rmdir()
                 run.side_effect = recovered

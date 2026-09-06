@@ -309,6 +309,10 @@ def recover_deployment(payload=None):
         expected = hashlib.sha256(payload['helpers']['guest-deployment-transaction'].encode()).hexdigest()
         if digest not in (expected, LEGACY_HELPERS['guest-deployment-transaction']):
             raise RuntimeError('installed recovery helper does not match the signed contract')
+    # Explicit recovery retries must not inherit systemd's previous start-limit failure.
+    # Validation above completes before any service state is changed.
+    run('systemctl', 'reset-failed', 'docker.service', 'docker.socket', 'containerd.service',
+        'hamnd.service', 'hamn-host-dns.service')
     run('flock', '--wait', '120', '/run/hamn-deployment.lock',
         'timeout', '--kill-after=5s', '60s', 'bash', str(helper), 'rollback', entry.name, timeout=190)
     if entry.exists():
