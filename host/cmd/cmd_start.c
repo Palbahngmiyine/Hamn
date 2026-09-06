@@ -21,6 +21,7 @@
 #include "core/guest_deployment.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
+#include "core/operation.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
 #include "core/retirement.h"
@@ -214,6 +215,7 @@ static void start_trace_init(struct start_trace *trace)
 
 static void start_trace_stage(struct start_trace *trace, const char *stage)
 {
+    if (operation_phase(stage) != 0) proc_request_cancel();
     if (!trace->enabled)
         return;
     struct timespec now;
@@ -400,7 +402,9 @@ int hamn_test_start_ensure_signed_guest_image(char *image, size_t capacity,
 }
 #endif
 
-static int cmd_start_locked(const struct start_options *options,
+static int start_spawned, start_restored;
+
+static int cmd_start_execute(const struct start_options *options,
                             const char *profile_name)
 {
     struct start_trace trace;
@@ -433,6 +437,10 @@ static int cmd_start_locked(const struct start_options *options,
     int mutation_fd = profile_mutation_lock(&p);
     if (mutation_fd < 0) {
         logerr("another %s profile mutation is running", p.name);
+        return 1;
+    }
+    if (operation_begin(&p, "vm start") != 0) {
+        profile_mutation_unlock(mutation_fd);
         return 1;
     }
     if (vm_process_wait_spawn_transition(&p, 50) != 0) {
@@ -503,6 +511,7 @@ static int cmd_start_locked(const struct start_options *options,
             }
         }
         logmsg("running VM is not ready; recovering the incomplete start");
+        if (proc_cancelled()) goto out;
         if (rollback_incomplete_start(&running_profile) != 0)
             goto out;
     } else if (vm_cleanup_stale(&running_profile) != 0) {
@@ -674,6 +683,8 @@ static int cmd_start_locked(const struct start_options *options,
         spawn_guard_fd = -1;
         goto rollback;
     }
+    start_spawned = 1;
+    operation_started_vm();
     if (vm_spawn_guard_release(&p, spawn_guard_fd, 0) != 0) {
         logerr("cannot hand off vmrun spawn guard");
         spawn_guard_fd = -1;
@@ -818,10 +829,20 @@ static int cmd_start_locked(const struct start_options *options,
     return 0;
 
 rollback:
-    rollback_incomplete_start(&p);
+    proc_cleanup_begin();
+    if (start_spawned)
+        start_restored = rollback_incomplete_start(&p) == 0;
+    proc_cleanup_end();
 out:
     profile_mutation_unlock(mutation_fd);
     return 1;
+}
+
+static int cmd_start_locked(const struct start_options *options, const char *profile)
+{
+    start_spawned = start_restored = 0;
+    int rc = cmd_start_execute(options, profile);
+    return operation_finish(rc, start_restored);
 }
 
 int hamn_control_start(const char *profile, unsigned cpus,

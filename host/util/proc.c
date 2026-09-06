@@ -22,6 +22,27 @@ extern char **environ;
 
 static const int forwarded_signals[] = { SIGINT, SIGTERM, SIGHUP };
 static volatile sig_atomic_t supervised_process_group = -1;
+static volatile sig_atomic_t cancellation_requested;
+static volatile sig_atomic_t cancellation_enabled;
+static int cleanup_depth;
+static void request_cancellation(int number)
+{
+    (void)number;
+    cancellation_requested = 1;
+}
+int proc_cancel_install(void)
+{
+    cancellation_enabled = 1;
+    struct sigaction action = { .sa_handler = request_cancellation };
+    sigemptyset(&action.sa_mask);
+    for (size_t i = 0; i < sizeof(forwarded_signals) / sizeof(forwarded_signals[0]); i++)
+        if (sigaction(forwarded_signals[i], &action, NULL) != 0) return -1;
+    return 0;
+}
+int proc_cancelled(void) { return cancellation_requested && !cleanup_depth; }
+void proc_request_cancel(void) { cancellation_requested = 1; }
+void proc_cleanup_begin(void) { cleanup_depth++; }
+void proc_cleanup_end(void) { if (cleanup_depth <= 0) abort(); cleanup_depth--; }
 
 struct signal_forwarding {
     struct sigaction previous[3];
@@ -161,6 +182,7 @@ static pid_t terminal_wait(pid_t supervisor, int *status,
 
 static void forward_supervised_signal(int signal_number)
 {
+    if (cancellation_enabled) cancellation_requested = 1;
     pid_t process_group = (pid_t)supervised_process_group;
     if (process_group > 0)
         (void)kill(-process_group, signal_number);
@@ -545,6 +567,7 @@ static int run_supervised(const char *const argv[], char *out, size_t cap,
                           int *truncated, proc_completion_fn completion,
                           void *context, int terminal_mode, unsigned timeout_ms)
 {
+    if (proc_cancelled()) { errno = ECANCELED; return 130; }
     if ((out && cap == 0) || (out && terminal_mode))
         return -1;
     struct terminal_state terminal;
@@ -747,6 +770,7 @@ int proc_run_bounded(const char *const argv[], char *out, size_t cap,
 
 pid_t proc_spawn_daemon(const char *const argv[], const char *logfile)
 {
+    if (proc_cancelled()) { errno = ECANCELED; return -1; }
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY,

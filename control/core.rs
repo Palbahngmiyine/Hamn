@@ -8,6 +8,7 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 unsafe extern "C" {
+    fn proc_cancel_install() -> i32;
     fn hamn_control_query(profile: *const libc::c_char, result: *mut *mut libc::c_char) -> i32;
     fn hamn_control_free(result: *mut libc::c_char);
     fn hamn_control_start(profile: *const libc::c_char, cpu: u32, memory: u32, disk: u32) -> i32;
@@ -127,7 +128,9 @@ fn execute(request: &Request) -> Result<Value> {
     if rc != 0 {
         let message = unsafe { CStr::from_ptr(log_last_error()) }.to_string_lossy();
         return Err(Failure::new(
-            if rc == 3 {
+            if rc == 130 {
+                "cancelled"
+            } else if rc == 3 {
                 "restartRequired"
             } else if rc == 4 {
                 "conflict"
@@ -155,6 +158,7 @@ fn protocol_descriptor(fd: i32) -> i32 {
 }
 
 pub fn worker() -> i32 {
+    if unsafe { proc_cancel_install() } != 0 { return 1; }
     let mut input = Vec::new();
     let request = std::io::stdin()
         .take(65537)

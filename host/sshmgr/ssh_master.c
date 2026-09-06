@@ -124,6 +124,7 @@ int ssh_master_start(const struct profile *p, const char *ip, int timeout_sec)
         return 0;
     long delay_ms = 100;
     for (;;) {
+        if (proc_cancelled()) return -1;
         if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
             return -1;
         long long budget = deadline - ((long long)now.tv_sec * 1000 +
