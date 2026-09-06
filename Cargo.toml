@@ -29,3 +29,4 @@ bollard = "0.21.1"
 kube = { version = "4.2.0", features = ["client", "config", "rustls-tls"] }
 k8s-openapi = { version = "0.28", features = ["v1_34"] }
 serde_yaml = "0.9"
+vt100 = "0.16.2"
