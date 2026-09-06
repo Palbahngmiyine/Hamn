@@ -28,8 +28,8 @@ pass. See [Korean](RELEASE-REVIEW.ko.md).
   backup/recovery reviewed; release notes explicitly say K3s deletion cannot
   be reversed by binary rollback.
 - [ ] Validation: full `make test-local-macos` passed for candidate source;
-  physical evidence binds exact RC artifacts and includes external Kubernetes
-  and Docker data preservation; no rebuilt bytes substituted after testing.
-- [ ] Publication: protected environments/runner verified; attestations match
+  hosted-only validation limits disclosed; any separately claimed physical
+  evidence binds exact RC artifacts; no rebuilt bytes substituted after testing.
+- [ ] Publication: protected promotion environment and hosted runners verified; attestations match
   repository/workflow/source/run; exact artifact hashes accepted; immutable
   release enabled; unresolved findings prevent promotion.

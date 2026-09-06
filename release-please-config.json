@@ -22,5 +22,7 @@
         }
       ]
     }
-  }
+  },
+  "changelog-type": "github",
+  "pull-request-header": "Hamn release version and release notes."
 }

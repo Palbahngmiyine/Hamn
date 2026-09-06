@@ -167,16 +167,6 @@ if not isinstance(checks, dict) or checks.get("testLocalMacOS") is not True or \
     raise SystemExit("hosted validation capabilities are invalid")
 PY
 
-physical=$INPUT_DIR/hamn-physical-evidence/physical-validation-evidence.json
-safe_regular "$physical" || fail "physical validation evidence is required"
-python3 - "$ROOT" "$candidate" "$checksums" "$physical" \
-    "$EXPECTED_WORKFLOW_RUN" "$EXPECTED_WORKFLOW_ATTEMPT" <<'PY'
-import sys
-sys.path.insert(0, sys.argv[1] + '/packaging/release')
-from physical_contract import validate
-validate(*sys.argv[2:])
-PY
-
 HOST_HASH=$(sha256_file "$CANDIDATE_DIR/$HOST_FILE")
 GUEST_HASH=$(sha256_file "$CANDIDATE_DIR/$GUEST_FILE")
 MANIFEST=$OUTPUT_DIR/hamn-update-manifest.json
@@ -193,7 +183,7 @@ value = {
     "version": "v" + version,
     "repository": repository,
     "commit": commit,
-    "validationMode": "physical-apple-silicon",
+    "validationMode": "github-hosted-no-vm",
     "compatibility": {
         "os": "darwin", "architecture": "arm64", "minimumMacOS": "13.0"},
     "artifacts": {
@@ -208,7 +198,6 @@ PY
 cp "$candidate" "$OUTPUT_DIR/candidate.json"
 cp "$checksums" "$OUTPUT_DIR/SHA256SUMS"
 cp "$evidence" "$OUTPUT_DIR/hosted-validation-evidence.json"
-cp "$physical" "$OUTPUT_DIR/physical-validation-evidence.json"
 printf '%s\n' "$RC_TAG" >"$OUTPUT_DIR/promoted-from-rc"
 chmod 0644 "$OUTPUT_DIR"/*
-echo "verified hosted and physical candidate ${RC_TAG}; publish exact bytes without rebuilding"
+echo "verified hosted candidate ${RC_TAG}; publish exact bytes without rebuilding"

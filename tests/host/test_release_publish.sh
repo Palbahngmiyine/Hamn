@@ -47,39 +47,6 @@ host=$candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 host_hash=$(sha256 "$host")
 publish=$WORK/publish
 mkdir "$publish"
-if HAMN_RELEASE_REPOSITORY="$repository" \
-    HAMN_EXPECTED_WORKFLOW_RUN="$workflow_run" \
-    HAMN_EXPECTED_WORKFLOW_ATTEMPT="$workflow_attempt" \
-    bash "$ROOT/packaging/release/publish-release.sh" \
-    v0.0.1 v0.0.1-rc.417123456 "$release_ref" "$input" "$publish" \
-    >"$WORK/no-physical.out" 2>"$WORK/no-physical.err"; then
-    echo 'FAIL: promotion accepted hosted-only evidence' >&2
-    exit 1
-fi
-grep -Fq 'physical validation evidence is required' "$WORK/no-physical.err"
-python3 - "$ROOT" "$candidate" "$input/hamn-physical-evidence" "$workflow_run" "$workflow_attempt" <<'PY'
-import json
-from pathlib import Path
-import sys
-sys.path.insert(0, sys.argv[1] + '/packaging/release')
-from physical_contract import CHECKS, sha256
-candidate_dir, output, run, attempt = Path(sys.argv[2]), Path(sys.argv[3]), *sys.argv[4:]
-output.mkdir()
-candidate = json.loads((candidate_dir / 'candidate.json').read_bytes())
-snapshot = {key: ['fixture-object'] for key in ['containers', 'images', 'volumes', 'networks']}
-snapshot['volumeSha256'] = 'e' * 64
-snapshot['builtinNetworks'] = ['bridge', 'host', 'none']
-legacy = {'before': snapshot, 'after': snapshot, 'k3sRemoved': True, 'journalComplete': True, 'sourceSha256': 'd' * 64}
-evidence = {'schemaVersion': 2, 'kind': 'hamn-physical-validation-evidence', 'validationMode': 'physical-apple-silicon',
-    **{key: candidate[key] for key in ['tag', 'commit', 'sourceTree']},
-    'workflow': {'run': run, 'attempt': attempt}, 'checks': dict.fromkeys(CHECKS, True),
-    'candidate': {'candidateJsonSha256': sha256(candidate_dir / 'candidate.json'),
-                  'checksumsSha256': sha256(candidate_dir / 'SHA256SUMS'),
-                  'artifacts': {entry['name']: entry['sha256'] for entry in candidate['artifacts']}},
-    'legacy': {'running': legacy, 'stopped': legacy},
-    'kubernetes': {'kind': 'hamn-external-kubernetes-e2e', 'passed': True, 'namespaceRemoved': True, 'kubeconfigUnchanged': True}}
-(output / 'physical-validation-evidence.json').write_text(json.dumps(evidence))
-PY
 HAMN_RELEASE_REPOSITORY="$repository" \
 HAMN_EXPECTED_WORKFLOW_RUN="$workflow_run" \
 HAMN_EXPECTED_WORKFLOW_ATTEMPT="$workflow_attempt" \
@@ -101,7 +68,7 @@ with open(manifest_path, encoding="utf-8") as source:
 if manifest.get("schemaVersion") != 2 or manifest.get("version") != "v0.0.1" or \
         manifest.get("repository") != "example/hamn" or \
         manifest.get("commit") != commit or \
-        manifest.get("validationMode") != "physical-apple-silicon":
+        manifest.get("validationMode") != "github-hosted-no-vm":
     raise SystemExit("keyless update manifest identity is invalid")
 if not manifest["artifacts"]["host"]["url"].startswith(
         "https://github.com/example/hamn/releases/download/v0.0.1/"):

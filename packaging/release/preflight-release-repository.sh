@@ -51,12 +51,14 @@ fetch "repos/$REPOSITORY/actions/runners" runners "repository runners"
 fetch "repos/$REPOSITORY/actions/variables" variables "repository variables"
 fetch "repos/$REPOSITORY/actions/secrets" repository-secrets "repository secrets"
 fetch "repos/$REPOSITORY/environments" environments "repository environments"
-for stage in promotion validation; do
-    fetch "repos/$REPOSITORY/environments/hamn-$stage" "$stage" "$stage environment"
-    fetch "repos/$REPOSITORY/environments/hamn-$stage/secrets" "$stage-secrets" "$stage secret names"
-    fetch "repos/$REPOSITORY/environments/hamn-$stage/variables" "$stage-variables" "$stage variables"
-    fetch "repos/$REPOSITORY/environments/hamn-$stage/deployment-branch-policies" "$stage-branches" "$stage branch policies"
-done
+fetch "repos/$REPOSITORY/environments/hamn-promotion" promotion \
+    "promotion environment"
+fetch "repos/$REPOSITORY/environments/hamn-promotion/secrets" promotion-secrets \
+    "promotion environment secret names"
+fetch "repos/$REPOSITORY/environments/hamn-promotion/variables" promotion-variables \
+    "promotion environment variables"
+fetch "repos/$REPOSITORY/environments/hamn-promotion/deployment-branch-policies" \
+    promotion-branches "promotion branch policies"
 fetch "repos/$REPOSITORY/rulesets" rulesets "repository rulesets"
 fetch "repos/$REPOSITORY/immutable-releases" immutable-releases \
     "immutable release policy"
@@ -195,10 +197,8 @@ require(isinstance(workflow, dict) and
         "default GITHUB_TOKEN permissions must be read-only")
 require(read("fork-approval") == {"approval_policy": "all_external_contributors"},
         "all external fork workflows must require approval")
-runners = entries("runners", "runners")
-require(len(runners) == 1 and runners[0].get("os") == "osx" and runners[0].get("status") == "online" and
-        {label.get("name") for label in runners[0].get("labels", [])} == {"self-hosted", "macOS", "ARM64", "hamn-validator"},
-        "one online dedicated Apple Silicon hamn-validator runner is required")
+require(entries("runners", "runners") == [],
+        "keyless hosted releases must not use repository self-hosted runners")
 
 variable_names = {item.get("name") for item in entries("variables", "variables")
                   if isinstance(item, dict)}
@@ -212,40 +212,42 @@ require(repository_secret_names == {"RELEASE_PLEASE_TOKEN"},
 
 environment_names = {item.get("name") for item in entries("environments", "environments")
                      if isinstance(item, dict)}
-require(environment_names == {"hamn-promotion", "hamn-validation"},
-        "promotion and physical validation environments are required")
-for stage in ["promotion", "validation"]:
-    promotion = read(stage)
-    require(isinstance(promotion, dict) and promotion.get("name") == "hamn-" + stage and
-            promotion.get("can_admins_bypass") is False and
-            promotion.get("deployment_branch_policy") == {
-                "protected_branches": False,
-                "custom_branch_policies": True,
-            }, "hamn-" + stage + " must be fail-closed and use custom branch policies")
-    protection_rules = promotion.get("protection_rules")
-    require(isinstance(protection_rules, list) and len(protection_rules) == 1 and
-            protection_rules[0].get("type") == "branch_policy",
-            "hamn-" + stage + " must enforce its branch policy")
-    promotion_branches = entries(stage + "-branches", "branch_policies")
-    require(len(promotion_branches) == 1 and
-            promotion_branches[0].get("name") == "main" and
-            promotion_branches[0].get("type") == "branch",
-            "hamn-" + stage + " must allow only the main branch")
-    promotion_secret_names = {item.get("name")
-                              for item in entries(stage + "-secrets", "secrets")
-                              if isinstance(item, dict)}
-    promotion_variable_names = {item.get("name")
-                                for item in entries(stage + "-variables", "variables")
-                                if isinstance(item, dict)}
-    require(promotion_secret_names == set() and promotion_variable_names == set(),
-            "hamn-" + stage + " must not contain secrets or variables")
+require(environment_names == {"hamn-promotion"},
+        "hamn-promotion must be the only release environment")
+promotion = read("promotion")
+require(isinstance(promotion, dict) and promotion.get("name") == "hamn-promotion" and
+        promotion.get("can_admins_bypass") is False and
+        promotion.get("deployment_branch_policy") == {
+            "protected_branches": False,
+            "custom_branch_policies": True,
+        }, "hamn-promotion must be fail-closed and use custom branch policies")
+protection_rules = promotion.get("protection_rules")
+require(isinstance(protection_rules, list) and len(protection_rules) == 1 and
+        protection_rules[0].get("type") == "branch_policy",
+        "hamn-promotion must enforce its branch policy")
+promotion_branches = entries("promotion-branches", "branch_policies")
+require(len(promotion_branches) == 1 and
+        promotion_branches[0].get("name") == "main" and
+        promotion_branches[0].get("type") == "branch",
+        "hamn-promotion must allow only the main branch")
+promotion_secret_names = {item.get("name")
+                          for item in entries("promotion-secrets", "secrets")
+                          if isinstance(item, dict)}
+promotion_variable_names = {item.get("name")
+                            for item in entries("promotion-variables", "variables")
+                            if isinstance(item, dict)}
+require(promotion_secret_names == set() and promotion_variable_names == set(),
+        "hamn-promotion must not contain secrets or variables")
 
 main_rules = check_ruleset("main", "branch", ["~DEFAULT_BRANCH"],
                            {"deletion", "non_fast_forward", "required_linear_history",
                             "pull_request", "required_status_checks"}, [])
 pull = next(rule for rule in main_rules if rule.get("type") == "pull_request")
 parameters = pull.get("parameters")
-require(isinstance(parameters, dict) and parameters == {
+require(isinstance(parameters, dict) and
+        isinstance(parameters.get("require_extra_approval_for_unattributed_changes", False), bool) and
+        {key: value for key, value in parameters.items()
+         if key != "require_extra_approval_for_unattributed_changes"} == {
             "required_approving_review_count": 0,
             "dismiss_stale_reviews_on_push": False,
             "required_reviewers": [],
