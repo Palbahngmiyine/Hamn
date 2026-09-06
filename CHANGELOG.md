@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0 (2026-09-06)
+
+## What's Changed
+* feat!: unify Hamn TUI and headless control in a single Rust/C binary by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/42
+* fix: automate hosted releases and prepare Hamn 0.1.0 by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/44
+
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.0.1...v0.1.0
+
 ## 0.0.1 (2026-08-18)
 
 
