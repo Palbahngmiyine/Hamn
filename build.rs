@@ -16,7 +16,12 @@ fn main() {
         println!("cargo:rustc-link-arg=-isysroot");
         println!("cargo:rustc-link-arg={}", sdk.display());
     }
-    let version = env::var("HAMN_VERSION").unwrap_or_else(|_| "0.0.1".into());
+    let version = env::var("HAMN_VERSION").unwrap_or_else(|_| {
+        std::fs::read_to_string(root.join("version.txt"))
+            .expect("release version.txt is missing")
+            .trim()
+            .to_owned()
+    });
     let native = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("core");
     let mut make = Command::new("make");
     make.current_dir(&root).args([
@@ -55,6 +60,7 @@ fn main() {
         "host",
         "vendor",
         "Makefile",
+        "version.txt",
         "scripts/embed-retirement.py",
         "guest/scripts",
     ] {
