@@ -149,7 +149,6 @@ for requirement in 'dockerWithoutCli' 'k3sRunningRetirement' 'k3sStoppedRetireme
         fail "physical release contract is incomplete: $requirement"
 done
 grep -Fq 'environment: hamn-promotion' "$ROOT/.github/workflows/release.yml" || fail 'promotion environment missing'
-grep -Fq 'environment: hamn-validation' "$ROOT/.github/workflows/release.yml" || fail 'physical environment missing'
 grep -Fqx '  contents: read' "$ROOT/.github/workflows/release.yml" ||
     fail "release workflow must default to read-only repository contents"
 grep -Fqx '      contents: write' "$ROOT/.github/workflows/release.yml" ||
@@ -306,8 +305,10 @@ fi
 if grep -Eq '^[[:space:]]+tags:|rc_run_id:|inputs\.rc_' "$release_workflow"; then
     fail "release workflow exposes an arbitrary tag or cross-run input"
 fi
-grep -Fq 'runs-on: [self-hosted, macOS, ARM64, hamn-validator]' "$release_workflow" || fail 'dedicated physical validator missing'
-grep -Fq 'Verify physical validation attestation' "$release_workflow" || fail 'physical attestation verification missing'
+
+if grep -Eq "runs-on:.*self-hosted|environment: hamn-validation" "$release_workflow"; then
+    fail "automatic releases must use GitHub-hosted runners only"
+fi
 
 guest_job=$(awk '
     /^  guest-image:$/ { capture = 1 }
@@ -372,7 +373,7 @@ publish_job=$(awk '
 ' "$release_workflow")
 for requirement in \
     '    name: Publish immutable keyless release' \
-    '    needs: [prepare, candidate, physical]' \
+    '    needs: [prepare, candidate]' \
     '    environment: hamn-promotion' \
     '      attestations: write' \
     '      contents: write' \

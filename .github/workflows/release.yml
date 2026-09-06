@@ -247,67 +247,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  physical:
-    if: needs.prepare.outputs.should_release == 'true'
-    name: Validate exact candidate on physical Apple Silicon
-    needs: [prepare, candidate]
-    runs-on: [self-hosted, macOS, ARM64, hamn-validator]
-    environment: hamn-validation
-    timeout-minutes: 120
-    permissions:
-      artifact-metadata: write
-      attestations: write
-      contents: read
-      id-token: write
-    steps:
-      - name: Check out exact release commit
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Download exact candidate bytes
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: hamn-candidate-${{ github.sha }}
-          path: ${{ runner.temp }}/hamn-physical-candidate
-      - name: Verify candidate provenance and run physical validation
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
-        run: |
-          set -euo pipefail
-          candidate="$RUNNER_TEMP/hamn-physical-candidate"
-          while read -r digest name; do
-            gh attestation verify "$candidate/$name" \
-              --repo "$GITHUB_REPOSITORY" \
-              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-              --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
-          done < "$candidate/SHA256SUMS"
-          config="$HOME/.config/hamn/physical-validator.env"
-          [ -f "$config" ] && [ ! -L "$config" ]
-          [ "$(stat -f '%u:%l:%Lp' "$config")" = "$(id -u):1:600" ]
-          set -a
-          source "$config"
-          set +a
-          make release-gate RELEASE_REF="$GITHUB_SHA" RELEASE_TAG="$RELEASE_TAG" \
-            CANDIDATE_DIR="$candidate" OUTPUT_DIR="$RUNNER_TEMP/hamn-physical-evidence"
-      - name: Attest physical validation evidence
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-        with:
-          subject-path: ${{ runner.temp }}/hamn-physical-evidence/physical-validation-evidence.json
-      - name: Upload physical validation evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: hamn-physical-evidence-${{ github.sha }}
-          path: ${{ runner.temp }}/hamn-physical-evidence
-          if-no-files-found: error
-          retention-days: 14
-
   publish:
     if: needs.prepare.outputs.should_release == 'true'
     name: Publish immutable keyless release
-    needs: [prepare, candidate, physical]
+    needs: [prepare, candidate]
     runs-on: macos-15
     environment: hamn-promotion
     timeout-minutes: 30
@@ -331,11 +274,6 @@ jobs:
         with:
           name: hamn-evidence-${{ github.sha }}
           path: ${{ runner.temp }}/hamn-release-input/hamn-evidence
-      - name: Download physical validation evidence
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: hamn-physical-evidence-${{ github.sha }}
-          path: ${{ runner.temp }}/hamn-release-input/hamn-physical-evidence
       - name: Verify keyless build provenance
         shell: bash
         env:
@@ -357,18 +295,7 @@ jobs:
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
-      - name: Verify physical validation attestation
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          gh attestation verify \
-            "$RUNNER_TEMP/hamn-release-input/hamn-physical-evidence/physical-validation-evidence.json" \
-            --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
-            --source-digest "$GITHUB_SHA"
-      - name: Verify hosted and physical evidence and generate immutable manifest
+      - name: Verify hosted evidence and generate immutable manifest
         shell: bash
         env:
           HAMN_RELEASE_REPOSITORY: ${{ github.repository }}
@@ -406,13 +333,12 @@ jobs:
             "$candidate/install.sh" \
             "$publish/hamn-update-manifest.json" \
             "$publish/hosted-validation-evidence.json" \
-            "$publish/physical-validation-evidence.json" \
             "$publish/candidate.json" \
             "$publish/SHA256SUMS" \
             "$publish/promoted-from-rc" \
             --draft --target "$GITHUB_SHA" --title "Hamn $STABLE_TAG" \
             --generate-notes \
-            --notes "Built on GitHub-hosted runners and validated on physical Apple Silicon using these exact RC bytes. Legacy managed K3s data and local volumes are permanently deleted; Docker data is preserved. Binary rollback cannot recover K3s data."
+            --notes "Built and statically validated on GitHub-hosted runners using these exact RC bytes; this release does not claim physical VM end-to-end validation. Legacy managed K3s data and local volumes are permanently deleted; Docker data is preserved. Binary rollback cannot recover K3s data."
           gh release view "$STABLE_TAG" --json tagName,targetCommitish,isDraft,isPrerelease,assets \
             > "$RUNNER_TEMP/hamn-draft-release.json"
           python3 - "$RUNNER_TEMP/hamn-draft-release.json" "$STABLE_TAG" "$GITHUB_SHA" <<'PY'
@@ -427,7 +353,7 @@ jobs:
               "hamn-" + tag + "-ubuntu-24.04-arm64.img",
               "hamn-" + tag + ".spdx.json",
               "install.sh", "hamn-update-manifest.json",
-              "hosted-validation-evidence.json", "physical-validation-evidence.json", "candidate.json",
+              "hosted-validation-evidence.json", "candidate.json",
               "SHA256SUMS", "promoted-from-rc",
           }
           names = {asset.get("name") for asset in release.get("assets", [])}
