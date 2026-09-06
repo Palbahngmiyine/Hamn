@@ -13,6 +13,7 @@ mod service;
 mod stream;
 mod preferences;
 mod native;
+mod environments;
 mod tui;
 mod tui_state;
 

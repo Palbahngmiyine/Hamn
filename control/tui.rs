@@ -91,6 +91,31 @@ impl Job {
             let _ = sender.send((generation, true, result)).await;
         }));
     }
+    fn refresh(&mut self, state: &mut State) {
+        if state.environment_picker {
+            self.start_query(None, state);
+        } else if let Some(invocation) = state.native.clone() {
+            self.start_query(Some(invocation), state);
+        } else { self.start(state.request.clone(), state); }
+    }
+    fn start_query(&mut self, invocation: Option<crate::native::Invocation>, state: &mut State) {
+        self.cancel(state);
+        self.cancel = CancellationToken::new();
+        let generation = self.generation;
+        let sender = self.sender.clone();
+        let cancel = self.cancel.clone();
+        state.loading = true;
+        self.task = Some(tokio::spawn(async move {
+            let result = tokio::select! {
+                _ = cancel.cancelled() => return,
+                result = async { match invocation {
+                    Some(invocation) => crate::native::query(&invocation).await,
+                    None => crate::environments::containers().await,
+                }} => result,
+            };
+            let _ = sender.send((generation, true, result)).await;
+        }));
+    }
     fn dispatch(&mut self, request: Result<Request>, state: &mut State) {
         match request {
             Ok(request) if request.mutates() => state.pending = Some(request),
@@ -125,7 +150,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     let mut mutation_job = Job { generation: 0, cancel: CancellationToken::new(),
         task: None, sender: mutation_sender, mutation: None };
     let mut exit_after_cancel = false;
-    if !choosing { job.start(state.request.clone(), &mut state); }
+    if state.request.operation() != "k8s contexts list" { state.native = crate::native::parse("", &state).ok(); }
+    if other.request.operation() != "k8s contexts list" { other.native = crate::native::parse("", &other).ok(); }
+    if !choosing { job.refresh(&mut state); }
     let mut events = EventStream::new();
     let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -161,7 +188,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         };
                         if let Some(task) = mutation_job.task.take() { let _ = task.await; }
                         if exit_after_cancel { break; }
-                        job.start(state.request.clone(), &mut state);
+                        job.refresh(&mut state);
                     } else if let Ok(event) = result {
                         let text = event["text"].as_str().unwrap_or_default();
                         state.operation_log.push_str(text);
@@ -187,12 +214,15 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             }
                         }
                     }
+                    if finished && state.native.is_some() {
+                        state.connection_status = if result.is_ok() { "Available" } else if state.workspace == Workspace::Containers && state.docker_context.is_none() { "Connection failed; e environments, v VM controls" } else { "Connection failed; e selects the connection target" }.into();
+                    }
                     state.accept(result);
                 }
             }
             _ = refresh.tick() => {
                 if !choosing && !state.loading && state.pending.is_none() && state.input.is_none() && state.detail.is_none() {
-                    job.start(state.request.clone(), &mut state);
+                    job.refresh(&mut state);
                 }
             }
             event = events.next() => {
@@ -229,7 +259,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                 Ok(()) => {
                                     choosing = false; settings = false; settings_error.clear();
                                     if state.workspace != workspace { std::mem::swap(&mut state, &mut other); }
-                                    job.start(state.request.clone(), &mut state);
+                                    job.refresh(&mut state);
                                 },
                                 Err(error) => settings_error = error.to_string(),
                             }
@@ -294,12 +324,17 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     },
                     KeyCode::Tab => {
                         job.cancel(&mut state); std::mem::swap(&mut state, &mut other);
-                        job.start(state.request.clone(), &mut state);
+                        job.refresh(&mut state);
                     },
                     KeyCode::Char(',') => { choosing = true; settings = true; choice = state.workspace.index(); },
                     KeyCode::Char('a') if state.workspace == Workspace::Containers => { state.show_all = !state.show_all; state.selected = 0; },
                     KeyCode::Char('v') if state.workspace == Workspace::Containers && state.docker_context.is_none() => {
+                        state.native = None; state.environment_picker = false;
                         let request = state.view("vm"); job.dispatch(request, &mut state);
+                    },
+                    KeyCode::Char('e') if state.workspace == Workspace::Containers => {
+                        state.environment_picker = true; state.native = None; state.detail = None; state.selected = 0;
+                        job.refresh(&mut state);
                     },
                     KeyCode::Char('e') if state.workspace == Workspace::Kubernetes => {
                         let request = state.view("contexts"); job.dispatch(request, &mut state);
@@ -312,6 +347,19 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     KeyCode::Esc => { state.show_operation = false; state.detail = None; state.filter.clear(); job.cancel(&mut state); },
                     KeyCode::Down | KeyCode::Char('j') => state.move_by(1),
                     KeyCode::Up | KeyCode::Char('k') => state.move_by(-1),
+                    KeyCode::Enter if state.environment_picker => {
+                        if let Some(row) = state.selected().filter(|r| r["disabled"] != true) {
+                            if row["environmentKind"] == "docker" {
+                                state.docker_context = row["name"].as_str().map(String::from);
+                                state.request.profile = None;
+                            } else {
+                                state.docker_context = None;
+                                state.request.profile = row["name"].as_str().map(String::from);
+                            }
+                            state.environment_picker = false; state.selected = 0;
+                            state.native = crate::native::parse("ps", &state).ok(); job.refresh(&mut state);
+                        }
+                    },
                     KeyCode::Enter => match state.enter() {
                         Ok(Some(request)) => job.dispatch(Ok(request), &mut state),
                         Err(error) => state.message = error.message,
