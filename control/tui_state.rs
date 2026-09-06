@@ -9,7 +9,7 @@ use ratatui::{
 };
 use serde_json::Value;
 
-fn split_command(command: &str) -> Result<Vec<String>> {
+pub fn split_command(command: &str) -> Result<Vec<String>> {
     let (mut words, mut word, mut quote, mut escaped, mut started) =
         (Vec::new(), String::new(), None, false, false);
     for c in command.chars() {
