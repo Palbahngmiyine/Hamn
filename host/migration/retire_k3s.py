@@ -72,9 +72,9 @@ def atomic(path, data, mode=0o600):
             os.unlink(name)
 
 
-def run(*args, check=True):
+def run(*args, check=True, timeout=60):
     result = subprocess.run(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, timeout=60, check=False,
+                            stderr=subprocess.PIPE, timeout=timeout, check=False,
                             env={'PATH': '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
                                  'LC_ALL': 'C'})
     if check and result.returncode:
@@ -289,7 +289,8 @@ def recover_deployment(payload=None):
         expected = hashlib.sha256(payload['helpers']['guest-deployment-transaction'].encode()).hexdigest()
         if digest not in (expected, LEGACY_HELPERS['guest-deployment-transaction']):
             raise RuntimeError('installed recovery helper does not match the signed contract')
-    run('bash', str(helper), 'rollback', entry.name)
+    run('flock', '--wait', '120', '/run/hamn-deployment.lock',
+        'timeout', '--kill-after=5s', '60s', 'bash', str(helper), 'rollback', entry.name, timeout=190)
     if entry.exists():
         raise RuntimeError('deployment recovery did not remove its backup')
 

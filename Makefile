@@ -179,6 +179,7 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(B
 	HAMN=$(HOST_BIN) python3 tests/host/test_exec_auth.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_navigation.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui_workspaces.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py
 	python3 tests/host/test_k3s_retirement.py
 	python3 tests/host/test_build_publish.py

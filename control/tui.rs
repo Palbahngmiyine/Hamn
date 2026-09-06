@@ -289,6 +289,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     }
                     continue;
                 }
+                if let Event::Paste(text) = &event {
+                    if let Some((_, input)) = state.input.as_mut() { input.push_str(text); }
+                    continue;
+                }
                 let Event::Key(key) = event else { continue; };
                 if key.kind != KeyEventKind::Press { continue; }
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {

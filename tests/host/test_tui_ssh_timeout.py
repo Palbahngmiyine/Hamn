@@ -15,6 +15,7 @@ import tempfile
 import termios
 import threading
 import time
+from terminal_screen import Screen
 
 binary = Path(os.environ.get('HAMN', 'target/debug/hamn')).resolve()
 with tempfile.TemporaryDirectory(prefix='hamn-tui-ssh-', dir='/tmp') as directory:
@@ -45,18 +46,22 @@ with tempfile.TemporaryDirectory(prefix='hamn-tui-ssh-', dir='/tmp') as director
     child = subprocess.Popen([binary], env=env, stdin=slave, stdout=slave, stderr=slave,
                              start_new_session=True)
     output = bytearray()
+    screen = Screen(40, 160)
     ansi = re.compile(rb'\x1b\[[0-?]*[ -/]*[@-~]')
 
     def until(marker, timeout=10):
         deadline = time.monotonic() + timeout
-        while marker not in re.sub(rb'\s+', b'', ansi.sub(b'', bytes(output))):
+        while marker not in re.sub(rb'\s+', b'', screen.text().encode()):
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
                 raise AssertionError((marker, bytes(output[-2000:])))
-            output.extend(os.read(master, 65536))
+            data = os.read(master, 65536)
+            output.extend(data); screen.feed(data)
 
     try:
-        until(b'test')
+        until(b'Hamn')
+        os.write(master, b'1\r')
+        until(b'[Containers]')
         os.write(master, b':vm stop --profile test\r')
         until(b'Impact:')
         output.clear()
