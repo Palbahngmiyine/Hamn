@@ -17,6 +17,7 @@
 #include "core/state.h"
 #include "sshmgr/ssh.h"
 #include "util/fs.h"
+#include "util/proc.h"
 #include "k3s_retirement.h"
 
 int retirement_context(const struct profile *profile)
@@ -87,8 +88,12 @@ static int retire_forward(const struct profile *profile, const char *ip)
     return unlink(path);
 }
 
+static int cancel_recovered;
+int retirement_cancel_recovered(void) { return cancel_recovered; }
+
 int retirement_recover(const struct profile *profile, const char *ip)
 {
+    cancel_recovered = 0;
     const char *command[] = { "sudo", "timeout", "--kill-after=5s", "780s",
         "flock", "--wait", "600", "/run/hamn-retirement.lock",
         "timeout", "--kill-after=5s", "600s", "python3", "-c", retirement_payload,
@@ -98,6 +103,21 @@ int retirement_recover(const struct profile *profile, const char *ip)
     int rc = ssh_exec_capture_checked(profile, ip, command, reason, sizeof(reason), &truncated);
     if (rc != 0)
         logerr("deployment recovery failed: %s%s", reason[0] ? reason : "guest connection or recovery interrupted", truncated ? " (truncated)" : "");
+    if (rc != 0 && proc_cancelled()) {
+        /* The remote process can outlive its SSH client. Acquire its same lock
+         * before recovery, then wait for rollback and actual readiness. */
+        proc_cleanup_begin();
+        (void)operation_phase("recovering-after-cancel");
+        logmsg("waiting for remote deployment recovery and cleanup");
+        reason[0] = '\0';
+        int recovered = ssh_exec_capture_checked(profile, ip, command, reason, sizeof(reason), &truncated);
+        cancel_recovered = recovered == 0 &&
+            guest_deployment_forward_sockets(profile, ip) == 0 &&
+            guest_deployment_runtime_ready(profile, ip, 30) == 0;
+        if (!cancel_recovered)
+            logerr("cancelled deployment still needs recovery: %s", reason[0] ? reason : "Docker readiness could not be confirmed");
+        proc_cleanup_end();
+    }
     return rc;
 }
 

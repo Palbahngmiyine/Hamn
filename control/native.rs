@@ -59,7 +59,7 @@ fn resource(args: &[String], workspace: Workspace) -> Option<String> {
             _ => None,
         }
     } else {
-        if has(args, &["--output", "-o", "--watch", "-w", "--watch-only", "--raw", "--output-watch-events"]) { return None; }
+        if has(args, &["--output", "-o", "--watch", "-w", "--watch-only", "--raw", "--output-watch-events", "--no-headers", "--show-labels", "--label-columns", "-L", "--show-kind"]) { return None; }
         match words.as_slice() {
             ["get", resource, ..] if ["pods", "po", "pod", "deployments", "deploy", "deployment", "services", "svc", "service", "namespaces", "ns", "nodes", "no", "statefulsets", "sts", "daemonsets", "ds", "events", "jobs", "cronjobs", "ingresses", "pvcs"].contains(resource) => Some((*resource).into()),
             _ => None,
@@ -83,23 +83,31 @@ fn installed_kubectl_plugin(args: &[String], index: Option<usize>) -> bool {
     }
     false
 }
+pub fn command_workspace(text: &str, fallback: Workspace) -> Workspace {
+    match split_command(text).ok().and_then(|words| words.first().cloned()).as_deref() {
+        Some("docker" | "vm") => Workspace::Containers,
+        Some("kubectl" | "k8s" | "contexts" | "ctx") => Workspace::Kubernetes,
+        _ => fallback,
+    }
+}
 pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     let mut args = split_command(text)?;
+    let explicit_program = args.first().is_some_and(|s| s == "docker" || s == "kubectl");
     let workspace = match args.first().map(String::as_str) {
         Some("docker") => { args.remove(0); Workspace::Containers },
         Some("kubectl") => { args.remove(0); Workspace::Kubernetes },
         _ => state.workspace,
     };
-    if args.is_empty() { args.push(if workspace == Workspace::Containers { "ps" } else { "get" }.into());
+    if args.is_empty() && !explicit_program { args.push(if workspace == Workspace::Containers { "ps" } else { "get" }.into());
         if workspace == Workspace::Kubernetes { args.push("pods".into()); } }
     if workspace == Workspace::Containers {
-        match args[0].as_str() {
+        match args.first().map(String::as_str).unwrap_or("") {
             "containers" => args[0] = "ps".into(),
             "volumes" => args.splice(0..1, ["volume".into(), "ls".into()]).for_each(drop),
             "networks" => args.splice(0..1, ["network".into(), "ls".into()]).for_each(drop),
             _ => {},
         }
-    } else if ["pods", "po", "deployments", "deploy", "services", "svc", "nodes", "namespaces", "ns", "statefulsets", "sts", "daemonsets", "ds", "events", "jobs", "cronjobs", "ingresses", "pvcs"].contains(&args[0].as_str()) {
+    } else if ["pods", "po", "deployments", "deploy", "services", "svc", "nodes", "namespaces", "ns", "statefulsets", "sts", "daemonsets", "ds", "events", "jobs", "cronjobs", "ingresses", "pvcs"].contains(&args.first().map(String::as_str).unwrap_or("")) {
         args.insert(0, "get".into());
     }
     let index = command_index(&args, workspace);
@@ -137,7 +145,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     for (i, arg) in defaults.iter().enumerate() {
         for name in ["--context", "-c", "--host", "-H", "--config", "--namespace", "-n", "--kubeconfig", "--server", "-s"] {
             if arg == name { target.push(format!("{name} {}", defaults.get(i + 1).map(String::as_str).unwrap_or(""))); }
-            else if arg.starts_with(&format!("{name}=")) { target.push(arg.clone()); }
+            else if arg.starts_with(&format!("{name}=")) || (name.len() == 2 && arg.starts_with(name) && arg.len() > 2) { target.push(arg.clone()); }
         }
     }
     if has(&defaults, &["--all-namespaces", "-A"]) { target.push("all namespaces".into()); }
@@ -176,6 +184,10 @@ mod tests {
     #[test]
     fn native_arguments_preserve_scope_output_and_plugin_semantics() {
         let mut state = State::new(Default::default());
+        assert_eq!(command_workspace("  kubectl\tget pods", Workspace::Containers), Workspace::Kubernetes);
+        assert_eq!(command_workspace("docker", Workspace::Kubernetes), Workspace::Containers);
+        assert!(parse("docker", &state).unwrap().resource.is_none());
+        assert!(parse("kubectl", &state).unwrap().resource.is_none());
         state.docker_context = Some("ui-selected".into());
         for command in ["ps", "docker ps -a --filter 'label=app=api'", "images", "volume ls", "network ls"] {
             let invocation = parse(command, &state).unwrap();
