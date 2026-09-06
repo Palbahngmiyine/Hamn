@@ -383,9 +383,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                     state.quit_confirmation = true; continue;
                                 }
                                 let legacy = input == "vm" || input.starts_with("vm ") || input.starts_with("k8s ") || input.starts_with("docker containers ") || ["contexts", "ctx"].contains(&input.as_str());
-                                let target = if input.starts_with("k8s ") || input.starts_with("kubectl ") || ["contexts", "ctx"].contains(&input.as_str()) { Workspace::Kubernetes }
-                                    else if input == "vm" || input.starts_with("vm ") || input.starts_with("docker ") { Workspace::Containers }
-                                    else { state.workspace };
+                                let target = crate::native::command_workspace(&input, state.workspace);
                                 if state.workspace != target { job.cancel(&mut state); std::mem::swap(&mut state, &mut other); }
                                 if legacy {
                                     let request = state.view(&input); job.dispatch(request, &mut state);

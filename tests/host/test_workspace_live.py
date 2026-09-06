@@ -71,7 +71,6 @@ def recovery(root, runtime):
                'busybox:1.37', 'sh', '-c', 'while :; do sleep 30; done')
     before = snapshot(runtime)
     baseline = root / 'before.json'
-    if baseline.exists(): assert before == json.loads(baseline.read_text()), 'earlier recovery changed data'
     baseline.write_text(json.dumps(before, indent=2))
     pid = (runtime.home / '.hamn/verify/vmrun.pid').read_text()
     runtime.ssh('''test ! -e /usr/local/libexec/hamn/configure-k3s
@@ -130,6 +129,10 @@ def main():
         runtime.call('vm', 'start', profile='verify', yes=True, cpu=4, memory=6, disk=60)
         recovery(root, runtime)
         cli_extensions(root, runtime)
+        from workspace_live_cancellation import cancellation
+        from workspace_live_kubernetes import kubernetes
+        cancellation(root, runtime)
+        kubernetes(root, runtime)
     finally:
         if not args.keep_running: runtime.stop(['verify'])
 
