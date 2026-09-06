@@ -268,6 +268,12 @@ done
 
 release_please_workflow=$ROOT/.github/workflows/release-please.yml
 for requirement in \
+    '    workflows: [Release]' \
+    '    types: [completed]' \
+    "    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'" \
+    '          ref: main' \
+    '        run: python3 packaging/release/release-pr-ready.py' \
+    "        if: steps.publication.outputs.ready == 'true'" \
     '  contents: read' \
     '        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0' \
     '      - name: Require dedicated Release Please token' \

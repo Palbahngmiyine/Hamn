@@ -36,6 +36,11 @@ next release is not blocked. Use the Release Please workflow's manual dispatch
 to refresh a PR; use Release's manual dispatch only to recover an unpublished
 manifest version.
 
+While that manifest version is unpublished or still a draft, Release Please
+defers the next PR instead of requesting notes against a missing previous tag.
+A successful Release workflow runs Release Please again after publication and
+label completion. API/authentication failures still fail the check visibly.
+
 Version override semantics: [Release Please documentation](https://github.com/googleapis/release-please#how-do-i-change-the-version-number).
 
 ## Optional manual physical validation
