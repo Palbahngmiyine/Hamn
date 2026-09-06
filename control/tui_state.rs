@@ -61,6 +61,7 @@ pub struct State {
     pub message: String,
     pub detail: Option<String>,
     pub pending: Option<Request>,
+    pub pending_native: Option<crate::native_actions::Action>,
     pub loading: bool,
     pub scroll: u16,
     pub stale: bool,
@@ -91,6 +92,7 @@ impl State {
             message: String::new(),
             detail: None,
             pending: None,
+            pending_native: None,
             loading: false,
             scroll: 0,
             stale: false,
@@ -448,7 +450,19 @@ pub fn confirmation_visible(request: &Request, area: ratatui::layout::Rect) -> b
         && confirmation(request, area.width - 2).len() <= usize::from(area.height - 2)
 }
 
+fn native_confirmation(action: &crate::native_actions::Action) -> String {
+    format!("Confirm {}\n\nThis changes the selected resource through the installed CLI.\nCancellation does not undo an applied change.\n\ny = execute; n / Esc = cancel", action.description)
+}
+pub fn native_confirmation_visible(action: &crate::native_actions::Action, area: ratatui::layout::Rect) -> bool {
+    area.width >= 20 && area.height >= 8 && wrap_lines(&native_confirmation(action), area.width - 2).len() <= usize::from(area.height - 2)
+}
 pub fn draw(frame: &mut Frame, state: &State) {
+    if let Some(action) = &state.pending_native {
+        let text = if native_confirmation_visible(action, frame.area()) { native_confirmation(action) }
+            else { "Resize terminal to review the full target. Execution disabled. Esc cancels.".into() };
+        frame.render_widget(Paragraph::new(clean(&text)).wrap(Wrap { trim: false }).block(Block::bordered().title("Hamn confirmation")), frame.area());
+        return;
+    }
     if state.quit_confirmation {
         frame.render_widget(Paragraph::new("Cancel the active operation and exit?\nHamn will wait for rollback and resource cleanup.\ny = cancel then exit; n / Esc = keep working")
             .wrap(Wrap { trim: false }).block(Block::bordered().title("Active operation")), frame.area());
