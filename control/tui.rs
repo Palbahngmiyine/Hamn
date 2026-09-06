@@ -1,4 +1,5 @@
 use crate::preferences::{self, Workspace};
+use crate::terminal_session::{Session, Event as TerminalEvent};
 use crate::{
     model::{Request, Result},
     service,
@@ -13,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 struct Restore;
 impl Drop for Restore {
     fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         ratatui::restore();
     }
 }
@@ -138,6 +140,8 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     let mut other = State::for_workspace(request, if state.workspace == Workspace::Containers { Workspace::Kubernetes } else { Workspace::Containers });
     let mut terminal = ratatui::init();
     let _restore = Restore;
+    crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
+    let mut cli: Option<Session> = None;
     let (sender, mut responses) = mpsc::channel(16);
     let mut job = Job {
         generation: 0,
@@ -161,15 +165,29 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(libc::SIGTSTP))?;
     let mut draw_error = None;
     loop {
-        if let Err(error) = terminal.draw(|frame| if choosing { tui_state::draw_choice(frame, choice, settings, &settings_error) } else { tui_state::draw(frame, &state) }) {
+        if let Err(error) = terminal.draw(|frame| if let Some(session) = &cli { session.draw(frame); } else if choosing { tui_state::draw_choice(frame, choice, settings, &settings_error) } else { tui_state::draw(frame, &state) }) {
             draw_error = Some(error); break;
         }
         tokio::select! {
+            event = async { match cli.as_mut() { Some(session) => session.next().await, None => std::future::pending().await } } => {
+                match event {
+                    Ok(TerminalEvent::Output(bytes)) => {
+                        let session = cli.as_mut().unwrap(); session.parser.process(&bytes);
+                        let replies = std::mem::take(&mut session.parser.callbacks_mut().0);
+                        if !replies.is_empty() { let _ = session.write(&replies).await; }
+                    },
+                    Ok(TerminalEvent::Exited(code)) => state.message = format!("CLI exit code {code}; Enter returns to the list"),
+                    Ok(TerminalEvent::Ended) => {},
+                    Err(error) => { state.message = error.to_string(); cli.take(); job.refresh(&mut state); },
+                }
+            },
             _ = terminate.recv() => {
+                if let Some(session) = &mut cli { let _ = session.signal(libc::SIGTERM); continue; }
                 if mutation_job.mutation.is_none() { break; }
                 mutation_job.cancel.cancel(); exit_after_cancel = true;
             },
             _ = interrupt.recv() => {
+                if let Some(session) = &mut cli { let _ = session.signal(libc::SIGINT); continue; }
                 if mutation_job.mutation.is_none() { break; }
                 state.quit_confirmation = true;
             },
@@ -221,12 +239,33 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 }
             }
             _ = refresh.tick() => {
-                if !choosing && !state.loading && state.pending.is_none() && state.input.is_none() && state.detail.is_none() {
+                if cli.is_none() && !choosing && !state.loading && state.pending.is_none() && state.input.is_none() && state.detail.is_none() {
                     job.refresh(&mut state);
                 }
             }
             event = events.next() => {
                 let Some(Ok(event)) = event else { break; };
+                if let Some(session) = &mut cli {
+                    match event {
+                        Event::Resize(width, height) => { if let Err(e) = session.resize(width, height) { state.message = e.to_string(); } },
+                        Event::Paste(text) if session.exit.is_none() => {
+                            let bytes = if session.parser.screen().bracketed_paste() { format!("\x1b[200~{text}\x1b[201~").into_bytes() } else { text.into_bytes() };
+                            let _ = session.write(&bytes).await;
+                        },
+                        Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            if session.exit.is_some() && matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
+                                let completed = cli.take().unwrap();
+                                if completed.invocation.reset_selection { state.message = "CLI configuration changed; use e to choose the refreshed target".into(); }
+                                job.refresh(&mut state);
+                            } else if session.exit.is_none() {
+                                let bytes = crate::terminal_io::key_bytes(key, session.parser.screen().application_cursor());
+                                let _ = session.write(&bytes).await;
+                            }
+                        },
+                        _ => {},
+                    }
+                    continue;
+                }
                 let Event::Key(key) = event else { continue; };
                 if key.kind != KeyEventKind::Press { continue; }
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -300,17 +339,30 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                     if mutation_job.mutation.is_none() { break; }
                                     state.quit_confirmation = true; continue;
                                 }
-                                let target = if input.starts_with("k8s ") || ["contexts", "ctx", "pods", "po", "ns", "deployments", "services"].contains(&input.as_str()) {
-                                    Workspace::Kubernetes
-                                } else if input.starts_with("vm ") || input == "vm" || input.starts_with("docker ") || ["containers", "images", "volumes", "networks"].contains(&input.as_str()) {
-                                    Workspace::Containers
-                                } else { state.workspace };
-                                if state.workspace != target {
-                                    job.cancel(&mut state);
-                                    std::mem::swap(&mut state, &mut other);
+                                let legacy = input == "vm" || input.starts_with("vm ") || input.starts_with("k8s ") || input.starts_with("docker containers ") || ["contexts", "ctx"].contains(&input.as_str());
+                                let target = if input.starts_with("k8s ") || input.starts_with("kubectl ") || ["contexts", "ctx"].contains(&input.as_str()) { Workspace::Kubernetes }
+                                    else if input == "vm" || input.starts_with("vm ") || input.starts_with("docker ") { Workspace::Containers }
+                                    else { state.workspace };
+                                if state.workspace != target { job.cancel(&mut state); std::mem::swap(&mut state, &mut other); }
+                                if legacy {
+                                    let request = state.view(&input); job.dispatch(request, &mut state);
+                                } else {
+                                    match crate::native::parse(&input, &state) {
+                                        Ok(invocation) if invocation.resource.is_some() => {
+                                            state.native = Some(invocation); state.environment_picker = false;
+                                            state.selected = 0; state.filter.clear(); state.detail = None; state.data = Value::Null;
+                                            job.refresh(&mut state);
+                                        },
+                                        Ok(invocation) => {
+                                            job.cancel(&mut state);
+                                            let area = terminal.get_frame().area();
+                                            match Session::start(invocation, area.width, area.height) {
+                                                Ok(session) => cli = Some(session), Err(error) => state.message = format!("CLI unavailable: {error}"),
+                                            }
+                                        },
+                                        Err(error) => state.message = error.message,
+                                    }
                                 }
-                                let request = state.view(&input);
-                                job.dispatch(request, &mut state);
                             }
                         }
                         _ => {}
@@ -327,7 +379,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         job.refresh(&mut state);
                     },
                     KeyCode::Char(',') => { choosing = true; settings = true; choice = state.workspace.index(); },
-                    KeyCode::Char('a') if state.workspace == Workspace::Containers => { state.show_all = !state.show_all; state.selected = 0; },
+                    KeyCode::Char('a') if state.workspace == Workspace::Containers && !state.environment_picker => {
+                        state.show_all = !state.show_all; state.selected = 0;
+                        state.native = crate::native::parse(if state.show_all { "ps -a" } else { "ps" }, &state).ok(); job.refresh(&mut state);
+                    },
                     KeyCode::Char('v') if state.workspace == Workspace::Containers && state.docker_context.is_none() => {
                         state.native = None; state.environment_picker = false;
                         let request = state.view("vm"); job.dispatch(request, &mut state);
@@ -360,6 +415,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             state.native = crate::native::parse("ps", &state).ok(); job.refresh(&mut state);
                         }
                     },
+                    KeyCode::Enter if state.native.is_some() => { state.detail = state.selected().map(|row| serde_json::to_string_pretty(&row).unwrap()); },
                     KeyCode::Enter => match state.enter() {
                         Ok(Some(request)) => job.dispatch(Ok(request), &mut state),
                         Err(error) => state.message = error.message,
@@ -377,6 +433,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
             }
         }
     }
+    cli.take();
     job.cancel(&mut state);
     if mutation_job.mutation.is_some() {
         mutation_job.cancel.cancel();
