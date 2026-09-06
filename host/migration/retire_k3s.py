@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 
 JOURNAL = Path('/var/lib/hamn/k3s-retirement-v1.json')
@@ -25,6 +26,12 @@ LINKS = {
     '/opt/cni/bin/bandwidth': '/var/lib/rancher/k3s/data/cni/bandwidth',
 }
 HELPERS = ('verify-image-contract', 'guest-deployment-transaction', 'configure-docker')
+# Reviewed helper identities shipped before transaction provenance was recorded.
+LEGACY_HELPERS = {
+    'verify-image-contract': '4c9f43fceca8c52710cef6252d0db9216b3dde1f765454ab8ee979d17995dc67',
+    'guest-deployment-transaction': '912bfb92669467768ae7eecae07ef2f405d4f6d0308eb81431595b101dd9c901',
+    'configure-docker': '22f4a83728959ebba1e6a56a41efb9910c656067e7a6ff544bda09c9d8ce43ca',
+}
 STAGES = ('verified', 'stopped', 'resources', 'removed', 'helpers', 'complete')
 
 
@@ -198,7 +205,43 @@ def remove_data():
             path.unlink()
 
 
-def recover_deployment():
+def recovery_identity(entry, payload):
+    """Only restore a complete, owned backup of the same deployment contract."""
+    journal = json.loads(safe(JOURNAL).read_bytes()) if JOURNAL.exists() else None
+    expected = {name: hashlib.sha256(content.encode()).hexdigest()
+                for name, content in payload['helpers'].items()}
+    actual = {}
+    # Validate the entire restore tree, including nested paths cp -a will visit.
+    for directory, directories, files in os.walk(entry, followlinks=False):
+        for name in directories + files:
+            path = safe(Path(directory) / name)
+            info = path.lstat()
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+                raise RuntimeError('unsafe deployment backup entry')
+    for name in HELPERS:
+        helper = safe(entry / 'data/libexec_hamn' / name)
+        if not helper.is_file():
+            raise RuntimeError('deployment backup helper is missing')
+        actual[name] = hashlib.sha256(helper.read_bytes()).hexdigest()
+    provenance = safe(entry / 'provenance.json')
+    if provenance.exists():
+        saved = json.loads(provenance.read_bytes())
+        if saved != {'version': 1, 'retirement': journal, 'helpers': actual} or actual != expected:
+            raise RuntimeError('deployment backup belongs to a different contract or retirement stage')
+    elif actual != expected and actual != LEGACY_HELPERS:
+        raise RuntimeError('legacy deployment backup helper identity is not trusted')
+    if journal is not None:
+        if journal != {'version': 1, 'stage': 'complete'}:
+            raise RuntimeError('deployment backup conflicts with unfinished retirement')
+        forbidden = ('data/libexec_hamn/configure-k3s', 'data/libexec_hamn/install-k3s',
+                     'data/etc_hamn/k3s-compatibility.json',
+                     'data/etc_hamn/k3s-compatibility.json.sig',
+                     'data/cni_bin/flannel', 'data/cni_bin/bandwidth')
+        if any((entry / name).exists() or (entry / name).is_symlink() for name in forbidden):
+            raise RuntimeError('deployment backup could restore retired K3s files')
+
+
+def recover_deployment(payload=None):
     """Resolve an old rollback backup before it can restore retired K3s helpers."""
     root = safe(TRANSACTIONS)
     if not root.exists():
@@ -206,7 +249,7 @@ def recover_deployment():
     entries = list(root.iterdir())
     if not entries:
         return
-    if JOURNAL.exists() or len(entries) != 1:
+    if len(entries) != 1:
         raise RuntimeError('deployment backup conflicts with retirement; recovery is required')
     entry = safe(entries[0])
     if not entry.is_dir() or not re.fullmatch(r'[0-9a-f]{32}', entry.name):
@@ -214,6 +257,10 @@ def recover_deployment():
     phase = safe(entry / 'phase')
     if not phase.is_file() or phase.stat().st_size > 32 or phase.read_text().strip() != 'ready':
         raise RuntimeError('incomplete deployment backup; recover it before K3s retirement')
+    if payload is not None:
+        recovery_identity(entry, payload)
+    elif JOURNAL.exists():
+        raise RuntimeError('deployment recovery requires the signed helper contract')
     helper = safe('/usr/local/libexec/hamn/guest-deployment-transaction')
     run('bash', str(helper), 'rollback', entry.name)
     if entry.exists():
@@ -231,7 +278,10 @@ def migrate(payload):
     if os.geteuid() != 0:
         raise RuntimeError('guest retirement requires root')
     safe(JOURNAL)
-    recover_deployment()
+    recover_deployment(payload)
+    if sys.argv[1:] == ['recover-only']:
+        replace_helpers(payload)
+        return
     JOURNAL.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if JOURNAL.exists():
         state = json.loads(JOURNAL.read_bytes())
@@ -266,6 +316,7 @@ def migrate(payload):
         actions[index]()
         atomic(JOURNAL, json.dumps({'version': 1, 'stage': STAGES[index]}).encode())
     if stage == len(STAGES) - 1:
+        replace_helpers(payload)
         docker_ready()  # A retry must not publish a ready profile while Docker is down.
 
 

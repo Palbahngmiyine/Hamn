@@ -15,6 +15,7 @@
 
 #include "cli.h"
 #include "core/log.h"
+#include "core/retirement.h"
 #include "sshmgr/ssh.h"
 #include "util/fs.h"
 #include "util/proc.h"
@@ -395,6 +396,7 @@ static int deployment_refresh_locked(const struct profile *profile,
     logmsg("guest image configuration %s; applying helpers and forwards ...",
            force ? "failed readiness" : "fingerprint changed");
     if (ssh_master_start(profile, state->ip, 15) != 0 ||
+        retirement_recover(profile, state->ip) != 0 ||
         guest_deployment_wait_cloud_init(profile, state->ip, 600) != 0)
         return -1;
 

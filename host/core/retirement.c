@@ -86,6 +86,13 @@ static int retire_forward(const struct profile *profile, const char *ip)
     return unlink(path);
 }
 
+int retirement_recover(const struct profile *profile, const char *ip)
+{
+    const char *command[] = { "sudo", "python3", "-c", retirement_payload,
+                              "recover-only", NULL };
+    return ssh_exec(profile, ip, command, 0);
+}
+
 int retirement_run(struct profile *profile, const char *ip)
 {
     if (!profile->legacy_k3s)
