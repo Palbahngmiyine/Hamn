@@ -13,6 +13,8 @@ mod service;
 mod stream;
 mod preferences;
 mod native;
+mod terminal_io;
+mod terminal_session;
 mod environments;
 mod tui;
 mod tui_state;
