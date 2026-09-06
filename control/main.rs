@@ -12,6 +12,7 @@ mod model;
 mod service;
 mod stream;
 mod preferences;
+mod native;
 mod tui;
 mod tui_state;
 
