@@ -220,24 +220,64 @@ async fn capture(
 
 pub async fn call(request: &Request) -> Result<Value> {
     let executable = std::env::current_exe().map_err(|e| Failure::new("coreUnavailable", e))?;
-    let result = call_executable(request, executable.as_os_str()).await;
+    let result = call_executable(request, executable.as_os_str(), None, None).await;
     if request.operation() == "vm start"
         && result.as_ref().is_err_and(|e| e.code == "restartRequired")
     {
         let invocation = std::env::args_os().next().unwrap_or_default();
-        return call_executable(request, &invocation).await;
+        return call_executable(request, &invocation, None, None).await;
     }
     result
 }
 
-async fn call_executable(request: &Request, executable: &std::ffi::OsStr) -> Result<Value> {
+pub async fn call_control(
+    request: &Request,
+    cancel: &tokio_util::sync::CancellationToken,
+    events: Option<&crate::stream::Events>,
+) -> Result<Value> {
+    if cancel.is_cancelled() { return Err(Failure::new("cancelled", "operation cancelled before dispatch")); }
+    let executable = std::env::current_exe().map_err(|e| Failure::new("coreUnavailable", e))?;
+    let result = call_executable(request, executable.as_os_str(), Some(cancel), events).await;
+    if request.operation() == "vm start"
+        && result.as_ref().is_err_and(|e| e.code == "restartRequired")
+        && !cancel.is_cancelled()
+    {
+        let invocation = std::env::args_os().next().unwrap_or_default();
+        return call_executable(request, &invocation, Some(cancel), events).await;
+    }
+    result
+}
+
+async fn live_error(
+    mut reader: impl AsyncRead + Unpin,
+    events: Option<&crate::stream::Events>,
+    headless: bool,
+) -> std::io::Result<Vec<u8>> {
+    let mut saved = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let n = reader.read(&mut buffer).await?;
+        if n == 0 { return Ok(saved); }
+        saved.extend_from_slice(&buffer[..n.min(8192usize.saturating_sub(saved.len()))]);
+        if headless { std::io::stderr().write_all(&buffer[..n])?; }
+        if let Some(events) = events {
+            let _ = events.try_send(json!({"type":"log", "text":String::from_utf8_lossy(&buffer[..n])}));
+        }
+    }
+}
+
+async fn call_executable(
+    request: &Request, executable: &std::ffi::OsStr,
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    events: Option<&crate::stream::Events>,
+) -> Result<Value> {
     let mut child = tokio::process::Command::new(executable)
         .arg("__core-worker")
         .arg(std::env::args_os().next().unwrap_or_default())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
+        .kill_on_drop(cancel.is_none())
         .spawn()
         .map_err(|e| Failure::new("coreUnavailable", e))?;
     let mut input = child.stdin.take().unwrap();
@@ -248,19 +288,30 @@ async fn call_executable(request: &Request, executable: &std::ffi::OsStr) -> Res
     drop(input);
     let output = child.stdout.take().unwrap();
     let error = child.stderr.take().unwrap();
+    let wait = async {
+        if let Some(cancel) = cancel {
+            tokio::select! {
+                status = child.wait() => return status,
+                _ = cancel.cancelled() => {},
+                _ = tokio::time::sleep(std::time::Duration::from_secs(request.timeout)) => {},
+            }
+            // try_wait reaps an exited child. Otherwise its PID cannot be reused
+            // before our wait, so SIGTERM targets this exact owned worker.
+            if let Some(status) = child.try_wait()? { return Ok(status); }
+            if let Some(pid) = child.id() { unsafe { libc::kill(pid as i32, libc::SIGTERM); } }
+        }
+        child.wait().await
+    };
     let (status, output, error) = tokio::try_join!(
-        child.wait(),
+        wait,
         capture(output, 1024 * 1024, false),
-        capture(error, 8192, true)
+        live_error(error, events, request.headless)
     )
     .map_err(|e| Failure::new("coreProtocol", e))?;
-    if request.headless && !error.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&error));
-    }
     if !status.success() {
         return Err(Failure::new(
             "outcomeUnknown",
-            String::from_utf8_lossy(&error),
+            format!("worker {status}: {}", String::from_utf8_lossy(&error)),
         ));
     }
     serde_json::from_slice(&output).map_err(|e| Failure::new("coreProtocol", e))?

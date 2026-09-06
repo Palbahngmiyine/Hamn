@@ -33,8 +33,8 @@ fn uncertain(request: &Request) -> Value {
 impl Drop for Job {
     fn drop(&mut self) {
         self.cancel.cancel();
-        if let Some(task) = &self.task {
-            task.abort();
+        if self.mutation.is_none() {
+            if let Some(task) = &self.task { task.abort(); }
         }
         if let Some(request) = &self.mutation {
             ratatui::restore();
@@ -45,6 +45,7 @@ impl Drop for Job {
 
 impl Job {
     fn cancel(&mut self, state: &mut State) {
+        if self.mutation.is_some() { return; }
         self.cancel.cancel();
         if let Some(task) = self.task.take() {
             task.abort();
@@ -56,6 +57,10 @@ impl Job {
         state.loading = false;
     }
     fn start(&mut self, request: Request, state: &mut State) {
+        if self.mutation.is_some() {
+            state.message = "A change is already running; ! shows its log".into();
+            return;
+        }
         self.cancel(state);
         self.mutation = request.mutates().then(|| request.clone());
         self.cancel = CancellationToken::new();
@@ -119,6 +124,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         sender,
         mutation: None,
     };
+    let (mutation_sender, mut mutation_responses) = mpsc::channel(64);
+    let mut mutation_job = Job { generation: 0, cancel: CancellationToken::new(),
+        task: None, sender: mutation_sender, mutation: None };
+    let mut exit_after_cancel = false;
     job.start(state.request.clone(), &mut state);
     let mut events = EventStream::new();
     let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
@@ -130,8 +139,40 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         terminal.draw(|frame| tui_state::draw(frame, &state))?;
         tokio::select! {
             Some(message) = migrations.recv() => state.message = message,
-            _ = terminate.recv() => break,
-            _ = interrupt.recv() => break,
+            _ = terminate.recv() => {
+                if mutation_job.mutation.is_none() { break; }
+                mutation_job.cancel.cancel(); exit_after_cancel = true;
+            },
+            _ = interrupt.recv() => {
+                if mutation_job.mutation.is_none() { break; }
+                state.quit_confirmation = true;
+            },
+            Some((generation, finished, result)) = mutation_responses.recv() => {
+                if generation == mutation_job.generation {
+                    if finished {
+                        if let Some(request) = mutation_job.mutation.take() {
+                            if result.as_ref().is_err_and(|e| e.code == "outcomeUnknown") {
+                                state.uncertain.push(uncertain(&request));
+                            }
+                        }
+                        state.operation_status = match &result {
+                            Ok(_) => "Operation completed".into(),
+                            Err(e) => format!("{}: {}", e.code, e.message),
+                        };
+                        if let Some(task) = mutation_job.task.take() { let _ = task.await; }
+                        if exit_after_cancel { break; }
+                        job.start(state.request.clone(), &mut state);
+                    } else if let Ok(event) = result {
+                        let text = event["text"].as_str().unwrap_or_default();
+                        state.operation_log.push_str(text);
+                        if state.operation_log.len() > 1024 * 1024 {
+                            let mut split = state.operation_log.len() - 1024 * 1024;
+                            while !state.operation_log.is_char_boundary(split) { split += 1; }
+                            state.operation_log.drain(..split);
+                        }
+                    }
+                }
+            },
             _ = suspend.recv() => {
                 ratatui::restore();
                 unsafe { libc::raise(libc::SIGSTOP); }
@@ -158,7 +199,19 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 let Some(Ok(event)) = event else { break; };
                 let Event::Key(key) = event else { continue; };
                 if key.kind != KeyEventKind::Press { continue; }
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') { break; }
+                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                    if mutation_job.mutation.is_none() { break; }
+                    state.quit_confirmation = true; continue;
+                }
+                if state.quit_confirmation {
+                    match key.code {
+                        KeyCode::Char('y') => { mutation_job.cancel.cancel(); exit_after_cancel = true;
+                            state.quit_confirmation = false; state.operation_status = "Cancelling; waiting for recovery and cleanup".into(); },
+                        KeyCode::Esc | KeyCode::Char('n') => state.quit_confirmation = false,
+                        _ => {}
+                    }
+                    continue;
+                }
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('z') {
                     ratatui::restore();
                     unsafe { libc::raise(libc::SIGSTOP); }
@@ -168,7 +221,12 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 if state.pending.is_some() {
                     match key.code {
                         KeyCode::Char('y') if tui_state::confirmation_visible(state.pending.as_ref().unwrap(), terminal.get_frame().area()) => {
-                            let request = state.pending.take().unwrap(); job.start(request, &mut state);
+                            let request = state.pending.take().unwrap();
+                            if mutation_job.mutation.is_none() {
+                                state.operation_log.clear();
+                                state.operation_status = format!("{} in progress; ! shows logs", request.operation());
+                                mutation_job.start(request, &mut state);
+                            } else { state.message = "A change is already running".into(); }
                         },
                         KeyCode::Esc | KeyCode::Char('n') => state.pending = None,
                         _ => {}
@@ -183,7 +241,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         KeyCode::Enter => {
                             let (prefix, input) = state.input.take().unwrap();
                             if prefix == ':' {
-                                if input == "q" { break; }
+                                if input == "q" {
+                                    if mutation_job.mutation.is_none() { break; }
+                                    state.quit_confirmation = true; continue;
+                                }
                                 let request = state.view(&input);
                                 job.dispatch(request, &mut state);
                             }
@@ -193,7 +254,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('q') => {
+                        if mutation_job.mutation.is_none() { break; }
+                        state.quit_confirmation = true;
+                    },
                     KeyCode::Char(':') => state.input = Some((':', String::new())),
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
                     KeyCode::Esc => { state.detail = None; state.filter.clear(); job.cancel(&mut state); },
@@ -204,7 +268,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         Err(error) => state.message = error.message,
                         _ => {}
                     },
-                    KeyCode::Char('!') => state.detail = Some(serde_json::to_string_pretty(&state.uncertain).unwrap()),
+                    KeyCode::Char('!') => state.detail = Some(format!("{}\n{}\n{}", state.operation_status, state.operation_log, serde_json::to_string_pretty(&state.uncertain).unwrap())),
                     KeyCode::Char('?') => state.detail = Some("Commands: :vm :containers :images :volumes :networks :contexts :ns :pods :deployments :sts :ds :services :nodes :events :jobs :cronjobs :ingresses :pvcs\n\nUse a full headless operation after ':' for configuration and scaling.\nExample: :vm create --profile work --cpu 2 --memory 4\nExample: :k8s deployments scale api --replicas 3 --namespace default\n\nEnter selects context/namespace/profile. Mutations require y confirmation. Esc returns to the list. Ctrl-Z suspends; q exits without stopping VMs.".into()),
                     KeyCode::Char(c) if "strdlg".contains(c) => {
                         let action = match c { 's'=>"start", 't'=>"stop", 'r'=>"restart", 'd'=>"delete", 'l'=>"logs", _=>"stats" };
@@ -217,6 +281,21 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         }
     }
     job.cancel(&mut state);
+    if mutation_job.mutation.is_some() {
+        mutation_job.cancel.cancel();
+        // Keep draining progress so the worker can finish rollback before exit.
+        while let Some((_, finished, result)) = mutation_responses.recv().await {
+            if finished {
+                if let Some(request) = mutation_job.mutation.take() {
+                    if result.as_ref().is_err_and(|e| e.code == "outcomeUnknown") {
+                        state.uncertain.push(uncertain(&request));
+                    }
+                }
+                break;
+            }
+        }
+    }
+    if let Some(task) = mutation_job.task.take() { let _ = task.await; }
     drop(_restore);
     for outcome in &state.uncertain {
         eprintln!("{outcome}");
@@ -228,35 +307,22 @@ pub async fn run(request: Request) -> std::io::Result<()> {
 mod tests {
     use super::*;
     #[test]
-    fn cancelled_mutation_retains_its_target_across_navigation_and_refresh() {
-        let request = Request {
-            words: vec!["k8s".into(), "pods".into(), "delete".into()],
-            context: Some("old-context".into()),
-            namespace: Some("old-namespace".into()),
-            name: Some("pod".into()),
-            uid: Some("old-uid".into()),
-            ..Default::default()
-        };
+    fn navigation_cannot_cancel_or_replace_a_mutation() {
+        let request = Request { words: vec!["vm".into(), "start".into()],
+            profile: Some("owned".into()), ..Default::default() };
         let (sender, _receiver) = mpsc::channel(1);
-        let mut job = Job {
-            generation: 7,
-            cancel: CancellationToken::new(),
-            task: None,
-            sender,
-            mutation: Some(request),
-        };
+        let mut job = Job { generation: 7, cancel: CancellationToken::new(),
+            task: None, sender, mutation: Some(request) };
         let mut state = State::new(Request::default());
         job.cancel(&mut state);
-        assert!(job.cancel.is_cancelled());
-        assert_eq!(job.generation, 8);
-        state.view("vm").unwrap();
-        state.request.context = Some("new-context".into());
-        state.accept(Ok(serde_json::json!([])));
-        assert_eq!(state.uncertain[0]["target"]["context"], "old-context");
-        assert_eq!(state.uncertain[0]["uid"], "old-uid");
-        assert_eq!(state.uncertain[0]["code"], "outcomeUnknown");
+        job.start(Request::default(), &mut state);
+        assert!(!job.cancel.is_cancelled());
+        assert_eq!(job.generation, 7);
+        assert!(state.uncertain.is_empty());
+        assert_eq!(job.mutation.as_ref().unwrap().profile.as_deref(), Some("owned"));
+        job.mutation = None;
         job.cancel(&mut state);
-        assert_eq!(state.uncertain.len(), 1); // read cancellation cannot add a mutation
+        assert!(job.cancel.is_cancelled());
     }
 
     #[test]

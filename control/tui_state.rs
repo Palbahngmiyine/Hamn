@@ -58,6 +58,9 @@ pub struct State {
     pub scroll: u16,
     pub stale: bool,
     pub uncertain: Vec<Value>,
+    pub quit_confirmation: bool,
+    pub operation_status: String,
+    pub operation_log: String,
 }
 
 impl State {
@@ -78,6 +81,9 @@ impl State {
             scroll: 0,
             stale: false,
             uncertain: Vec::new(),
+            quit_confirmation: false,
+            operation_status: String::new(),
+            operation_log: String::new(),
         }
     }
     pub fn rows(&self) -> Vec<&Value> {
@@ -401,6 +407,11 @@ pub fn confirmation_visible(request: &Request, area: ratatui::layout::Rect) -> b
 }
 
 pub fn draw(frame: &mut Frame, state: &State) {
+    if state.quit_confirmation {
+        frame.render_widget(Paragraph::new("Cancel the active operation and exit?\nHamn will wait for rollback and resource cleanup.\ny = cancel then exit; n / Esc = keep working")
+            .wrap(Wrap { trim: false }).block(Block::bordered().title("Active operation")), frame.area());
+        return;
+    }
     if let Some(pending) = &state.pending {
         let area = frame.area();
         let text = if confirmation_visible(pending, area) {
@@ -434,6 +445,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
             state.uncertain.len()
         )
     };
+    let header = format!("{header}\n{}", state.operation_status);
     let header = wrap_lines(&header, frame.area().width.saturating_sub(2));
     let header_height = header.len().saturating_add(2).min(u16::MAX as usize) as u16;
     if frame.area().width < 20 || header_height.saturating_add(6) > frame.area().height {
