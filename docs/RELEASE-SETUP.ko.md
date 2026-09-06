@@ -1,4 +1,4 @@
-# 릴리스 저장소와 물리 검증기
+# 자동 릴리스와 선택적 물리 검증
 
 영문 기준 문서는 [RELEASE-SETUP.md](RELEASE-SETUP.md)입니다.
 `Palbahngmiyine/Hamn`에 필요한 설정 절차이며 특정 저장소나 runner가 검증을
@@ -12,20 +12,36 @@
 기본 GITHUB_TOKEN은 읽기 전용으로 둡니다. 허용하는 Action 소유자는
 `preflight-release-repository.sh` 검사와 일치해야 합니다.
 
-`hamn-promotion`, `hamn-validation` 환경을 만들고 관리자 우회를 끄며 `main`에서만
-배포를 허용합니다. 두 환경에 secret이나 variable을 두지 않습니다. 저장소 secret은
-`RELEASE_PLEASE_TOKEN`만 두며 Release Please PR에만 사용합니다.
+`hamn-promotion` 환경을 만들고 관리자 우회를 끄며 `main`에서만 배포를
+허용합니다. 환경에 secret이나 variable을 두지 않습니다. 저장소 secret은
+`RELEASE_PLEASE_TOKEN`만 두며 Release Please PR에 사용합니다.
 
-## 물리 runner
+## Release Please와 0.1.0 버전
 
-`self-hosted`, `macOS`, `ARM64`, `hamn-validator` 라벨을 가진 온라인 macOS runner
-하나를 등록합니다. Virtualization.framework를 사용할 수 있는 실제 Apple Silicon과
-macOS 개발 도구, Python 3.12 이상, Docker CLI, kubectl, 명시적으로 지정한 테스트용
-Kubernetes 환경이 필요합니다. 공개 PR 작업을 이 runner에 배정하지 않습니다.
-릴리스 검증 job에는 릴리스 쓰기 권한이 없습니다.
+PR #42의 commit override에 `Release-As: 0.1.0`을 지정했습니다. Release Please
+PR #43이 manifest, version.txt, Makefile, Nix 버전을 0.1.0으로 변경합니다.
+먼저 hosted 자동화 변경을 머지하고 그 다음 릴리스 PR을 머지합니다. 이후 버전은
+Conventional Commit 규칙으로 증가합니다. 영구적인 `release-as` 설정은 없습니다.
+직접 Cargo 빌드도 HAMN_VERSION을 지정하지 않으면 version.txt를 사용합니다.
+
+릴리스 PR이 머지되면 GitHub-hosted Linux/macOS runner가 산출물을 빌드·검증하고
+같은 바이트를 배포합니다. self-hosted runner와 `hamn-validation` 환경은 필요하지
+않습니다. 불변 릴리스 게시를 확인한 뒤 해당 PR의 `autorelease: pending` 라벨을
+제거하여 다음 릴리스가 막히지 않도록 합니다. PR 갱신은 Release Please workflow의
+수동 실행을 사용합니다. Release workflow의 수동 실행은 아직 배포하지 않은
+manifest 버전을 복구할 때만 사용합니다.
+
+버전 지정 규칙: [Release Please 공식 문서](https://github.com/googleapis/release-please#how-do-i-change-the-version-number).
+
+## 선택적 수동 물리 검증
+
+실제 VM·Docker·Kubernetes·전환 검증은 `make release-gate`로 별도 실행할 수
+있으며 자동 배포의 필수 조건은 아닙니다. 격리된 Apple Silicon 장비에 macOS 개발
+도구, Python 3.12 이상, Docker CLI, kubectl과 테스트용 Kubernetes context가
+필요합니다. 이 선택적 로컬 검사를 위해 저장소 runner를 등록하지 않습니다.
 
 `$HOME/.config/hamn/physical-validator.env`를 현재 사용자 소유의 일반 파일로 만들고
-권한 0600, hard link 하나를 유지합니다. Workflow가 셸 코드로 읽으므로 검증기
+권한 0600, hard link 하나를 유지합니다. 수동 로컬 검증에서만 셸 코드로 읽으며 검증기
 관리자만 편집할 수 있어야 합니다. 절대 경로를 지정합니다.
 
 ```sh
@@ -64,8 +80,9 @@ namespace를 만들고 제거하며 원본 kubeconfig가 동일한지 확인합�
 `guest/image/release-inputs.json`은 Ubuntu 기반 이미지 HTTPS URL과 SHA-256을
 고정합니다. 신규 이미지에는 K3s 다운로드 입력이나 호환성 서명 키가 없습니다.
 GitHub artifact attestation은 산출물을 저장소·workflow·소스 commit·실행과
-연결합니다. 빌드 증명은 hosted runner에서, 물리 검증 증거는 지정한 self-hosted
-검증기에서 생성합니다.
+연결합니다. 자동 배포 증명은 hosted runner에서 생성합니다. Manifest에는
+`validationMode: github-hosted-no-vm`, hosted 증거에는 `physicalE2E: false`를
+기록하며 실제 VM이나 전환 E2E를 검증했다고 주장하지 않습니다.
 
 설정 후 읽기 전용 검사를 실행합니다.
 
@@ -74,7 +91,7 @@ HAMN_RELEASE_REPOSITORY=Palbahngmiyine/Hamn \
   bash packaging/release/preflight-release-repository.sh
 ```
 
-보호 정책, 두 환경, runner 라벨, secret/variable 이름, Actions 권한, 불변 릴리스를
+보호 정책, 배포 환경, 저장소 runner 부재, secret/variable 이름, Actions 권한, 불변 릴리스를
 검사합니다. GitHub 상태를 바꾸거나 secret 값을 읽지 않습니다.
 
 후보 생성 전에 [검토 체크리스트](RELEASE-REVIEW.ko.md)를 작성하고
@@ -84,15 +101,14 @@ Workflow는 다음 순서로 실행합니다.
 1. Hosted Linux arm64에서 게스트 이미지를 빌드하고 attest합니다.
 2. Hosted macOS arm64에서 검증하고 로컬 검사를 거쳐 정확한 후보와 hosted 증거를
    만들고 attest합니다.
-3. 물리 runner에서 attestation을 검증하고 후보에서 추출한 검증기를 실행합니다.
-   `physical-validation-evidence.json`을 attest합니다.
-4. 배포 단계는 hosted·물리 증거를 모두 요구하고 출처·해시를 검증한 뒤 같은
-   바이트를 불변 GitHub Release에 게시합니다.
+3. Hosted attestation과 해시를 검증한 뒤 후보를 다시 빌드하지 않고 같은 바이트를
+   불변 GitHub Release에 게시합니다.
 
 `make release-gate`에는 `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, 빈
 `OUTPUT_DIR`와 위 검증기 입력이 필요합니다. Checkout은 깨끗해야 하며 후보 소스와
 같아야 합니다. RC를 다시 빌드하지 않습니다. 검증 후 소스가 바뀌면 새 후보를 만들고
-검증합니다. 물리 검사가 빠지거나 산출물 바이트가 바뀌면 배포를 거부합니다.
+검증합니다. 물리 검사가 빠지면 수동 gate가 실패합니다. 산출물 바이트가 바뀌면
+hosted 검사가 통과했더라도 자동 배포를 거부합니다.
 
 ## 설치와 호환성
 
@@ -100,8 +116,8 @@ Workflow는 다음 순서로 실행합니다.
 `--deny-self-hosted-runners`를 지정해 GitHub attestation을 검증한 뒤 실행합니다.
 설치기는 고정한 host/guest digest를 검증하고 원자적으로 게시합니다. 새 manifest를
 지원하는 설치 버전은 `hamn --headless system update --yes`를 사용할 수 있습니다.
-`physical-apple-silicon` manifest를 거부하는 구형 updater는 새 검증된 설치기로
-업데이트해야 합니다.
+Hosted manifest는 0.0.1 릴리스에서 사용한 `github-hosted-no-vm` 검증 모드를
+유지합니다.
 
 이 릴리스는 CLI·JSON 호환성을 깨고 매니지드 K3s 클러스터 데이터·전용 로컬 볼륨을
 자동 삭제합니다. Docker 객체·볼륨·사용자 마운트·원본 kubeconfig는 보존합니다.

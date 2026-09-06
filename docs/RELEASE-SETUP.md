@@ -1,4 +1,4 @@
-# Release repository and physical validator
+# Automated releases and optional physical validation
 
 See [RELEASE-SETUP.ko.md](RELEASE-SETUP.ko.md) for Korean. This procedure
 applies to `Palbahngmiyine/Hamn`; it describes required configuration, not a
@@ -13,22 +13,39 @@ tags against deletion and non-fast-forward changes. Pin Actions to full commit
 SHAs and keep the default GITHUB_TOKEN read-only. Allow only the Actions
 owners checked by `preflight-release-repository.sh`.
 
-Create both `hamn-promotion` and `hamn-validation` environments. Disable admin
-bypass and allow deployments only from `main`. Neither environment has secrets
-or variables. `RELEASE_PLEASE_TOKEN` is the only repository secret; it is used
-for Release Please PRs, not release signing or validation.
+Create the `hamn-promotion` environment. Disable admin bypass and allow
+only `main`, without environment secrets or variables. `RELEASE_PLEASE_TOKEN`
+is the only repository secret and is used for Release Please PRs.
 
-## Physical runner
+## Release Please and version 0.1.0
 
-Register one online macOS runner with labels `self-hosted`, `macOS`, `ARM64`,
-and `hamn-validator`. It must be a physical Apple Silicon machine with
-Virtualization.framework available, macOS development tools, Python 3.12 or
-later, Docker CLI, kubectl, and access to an explicitly designated disposable
-Kubernetes test environment. Do not assign public pull-request jobs to it.
-The release validation job has no release write permission.
+Merging PR #42 is assigned `Release-As: 0.1.0` through its documented commit
+override. Release Please PR #43 updates the manifest, version.txt, Makefile,
+and Nix version to 0.1.0. Merge the hosted automation changes before merging
+that release PR. Later releases use normal Conventional Commit increments;
+there is no permanent `release-as` configuration to pin future versions.
+Direct Cargo builds also read version.txt unless HAMN_VERSION is supplied.
+
+After the release PR merges, GitHub-hosted Linux/macOS runners build and
+validate the artifacts, then publish those same bytes. No self-hosted runner
+or `hamn-validation` environment is required. Publication verifies the immutable
+release before clearing its release PR's `autorelease: pending` label, so the
+next release is not blocked. Use the Release Please workflow's manual dispatch
+to refresh a PR; use Release's manual dispatch only to recover an unpublished
+manifest version.
+
+Version override semantics: [Release Please documentation](https://github.com/googleapis/release-please#how-do-i-change-the-version-number).
+
+## Optional manual physical validation
+
+Physical VM, Docker, Kubernetes and migration E2E checks remain available through
+`make release-gate`. They are not an automatic publication prerequisite. To run
+them manually, use an isolated Apple Silicon machine with macOS development
+tools, Python 3.12+, Docker CLI, kubectl and a disposable Kubernetes context.
+Do not register a repository runner for this optional local check.
 
 Provide `$HOME/.config/hamn/physical-validator.env` as an owned regular file
-with mode 0600 and one hard link. The workflow sources this file as shell code;
+with mode 0600 and one hard link. Source this file only for the optional local gate;
 only the validator administrator may edit it. Define absolute paths:
 
 ```sh
@@ -70,8 +87,9 @@ Kubernetes harness accepts the equivalent `--host-network` option.
 `guest/image/release-inputs.json` pins the Ubuntu base HTTPS URL and SHA-256.
 There are no K3s download inputs or compatibility signing keys for new images.
 GitHub artifact attestations bind built artifacts to repository, workflow,
-source commit, and run. Build provenance must come from hosted runners;
-physical proof comes from the designated self-hosted validator.
+source commit, and run. Automated release provenance comes from hosted runners.
+The manifest records `validationMode: github-hosted-no-vm`; hosted evidence
+records `physicalE2E: false` and does not claim real VM or migration E2E.
 
 Run the read-only settings check after configuration:
 
@@ -80,7 +98,7 @@ HAMN_RELEASE_REPOSITORY=Palbahngmiyine/Hamn \
   bash packaging/release/preflight-release-repository.sh
 ```
 
-It checks protections, both environments, runner labels, secret/variable names,
+It checks protections, the promotion environment, absence of repository runners, secret/variable names,
 Actions permissions, and immutable releases. It does not modify GitHub state
 or read secret values.
 
@@ -91,16 +109,15 @@ The release workflow then:
 1. Builds and attests the guest image on hosted Linux arm64.
 2. Verifies it on hosted macOS arm64, runs local gates, assembles the exact
    candidate, and attests candidate bytes and hosted evidence.
-3. Verifies those attestations on the physical runner and executes the harness
-   extracted from that candidate. It attests `physical-validation-evidence.json`.
-4. Requires both hosted and physical evidence in promotion, verifies provenance
-   and hashes, and uploads the same bytes to an immutable GitHub Release.
+3. Verifies hosted attestations and hashes, then uploads the same candidate
+   bytes to an immutable GitHub Release without rebuilding.
 
 `make release-gate` takes `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, and an
 empty `OUTPUT_DIR`, plus the validator inputs above. Checkout must be clean
 and match the candidate source. It never rebuilds the RC. If source changes
 after validation, assemble and validate a new candidate; do not reuse evidence.
-Missing physical checks or changed artifact bytes prevent publication.
+Missing physical checks prevent a successful manual gate. Changed artifact bytes
+prevent automatic publication, even when hosted tests passed.
 
 ## Installation and compatibility
 
@@ -108,8 +125,8 @@ Download the published `install.sh`, verify its GitHub attestation against
 this repository and release workflow with `--deny-self-hosted-runners`, then
 execute it. The installer validates pinned host/guest digests and publishes
 atomically. Installed versions supporting the new manifest can run
-`hamn --headless system update --yes`. Older updater versions that reject
-`physical-apple-silicon` manifests must use the new verified installer.
+`hamn --headless system update --yes`. The hosted manifest retains the `github-hosted-no-vm` validation mode used by
+the 0.0.1 release.
 
 This release breaks CLI/JSON compatibility and automatically removes managed
 K3s cluster data and dedicated local volumes. Docker objects and volumes,
