@@ -9,6 +9,7 @@ pub struct Invocation {
     pub args: Vec<String>,
     pub target: String,
     pub resource: Option<String>,
+    pub hamn_profile: Option<String>,
     pub reset_selection: bool,
 }
 impl Invocation {
@@ -89,11 +90,13 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     let explicit = if workspace == Workspace::Containers { has(&args[..index.unwrap_or(args.len())], &["--context", "-c", "--host", "-H", "--config"]) }
         else { has(&args, &["--context", "--kubeconfig"]) };
     let mut defaults = Vec::new();
+    let mut hamn_profile = None;
     if !config_command && !explicit {
         if workspace == Workspace::Containers {
             if let Some(context) = &state.docker_context { defaults.extend(["--context".into(), context.clone()]); }
             else {
                 let home = std::env::var("HOME").map_err(|e| Failure::new("configurationInvalid", e))?;
+                hamn_profile = Some(state.request.profile.clone().unwrap_or_else(|| "default".into()));
                 defaults.extend(["--host".into(), format!("unix://{home}/.hamn/{}/docker.sock", state.request.profile.as_deref().unwrap_or("default"))]);
             }
         } else {
@@ -106,18 +109,21 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     if workspace == Workspace::Kubernetes && !has(&args, &["--kubeconfig"]) {
         if let Some(config) = &state.request.kubeconfig { defaults.extend(["--kubeconfig".into(), config.clone()]); }
     }
+    if workspace == Workspace::Containers && !config_command && !has(&args, &["--config"]) {
+        if let Some(config) = &state.docker_config { defaults.splice(0..0, ["--config".into(), config.clone()]); }
+    }
     defaults.extend(args);
     let resource = resource(&defaults, workspace);
     // Display all connection/scope arguments exactly; credentials are never included in the header.
     let mut target = Vec::new();
     for (i, arg) in defaults.iter().enumerate() {
-        for name in ["--context", "-c", "--host", "-H", "--namespace", "-n", "--kubeconfig", "--server", "-s"] {
+        for name in ["--context", "-c", "--host", "-H", "--config", "--namespace", "-n", "--kubeconfig", "--server", "-s"] {
             if arg == name { target.push(format!("{name} {}", defaults.get(i + 1).map(String::as_str).unwrap_or(""))); }
             else if arg.starts_with(&format!("{name}=")) { target.push(arg.clone()); }
         }
     }
     if has(&defaults, &["--all-namespaces", "-A"]) { target.push("all namespaces".into()); }
-    Ok(Invocation { workspace, args: defaults, target: if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
+    Ok(Invocation { workspace, hamn_profile, args: defaults, target: if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
 }
 pub async fn query(invocation: &Invocation) -> Result<Value> {
     let mut command = invocation.command(true);

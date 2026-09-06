@@ -111,7 +111,15 @@ impl Job {
             let result = tokio::select! {
                 _ = cancel.cancelled() => return,
                 result = async { match invocation {
-                    Some(invocation) => crate::native::query(&invocation).await,
+                    Some(invocation) => {
+                        if let Some(profile) = &invocation.hamn_profile {
+                            let request = Request { words: vec!["vm".into(), "status".into()], profile: Some(profile.clone()), timeout: 30, ..Default::default() };
+                            let (result, status) = tokio::join!(crate::native::query(&invocation), crate::core::call(&request));
+                            let data = status.unwrap_or_else(|_| serde_json::json!({"state":"not created", "dockerStatus":"unavailable"}));
+                            let _ = sender.send((generation, false, Ok(serde_json::json!({"type":"runtimeStatus", "data":data})))).await;
+                            result
+                        } else { crate::native::query(&invocation).await }
+                    },
                     None => crate::environments::containers().await,
                 }} => result,
             };
@@ -268,7 +276,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
                             if session.exit.is_some() && matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
                                 let completed = cli.take().unwrap();
-                                if completed.invocation.reset_selection { state.message = "CLI configuration changed; use e to choose the refreshed target".into(); }
+                                if completed.invocation.reset_selection {
+                                    if let Err(error) = crate::environments::reload(&completed.invocation, &mut state).await { state.message = error.message; }
+                                }
                                 job.refresh(&mut state);
                             } else if session.exit.is_none() {
                                 let bytes = crate::terminal_io::key_bytes(key, session.parser.screen().application_cursor());
@@ -410,6 +420,11 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         state.show_all = !state.show_all; state.selected = 0;
                         state.native = crate::native::parse(if state.show_all { "ps -a" } else { "ps" }, &state).ok(); job.refresh(&mut state);
                     },
+                    KeyCode::Char('c') if state.request.operation() == "vm list" && state.docker_context.is_none() => {
+                        if let Some(row) = state.selected() {
+                            state.input = Some((':', format!("vm configure --profile {} --cpu {} --memory {} --disk {}", row["name"].as_str().unwrap_or("default"), row["cpus"], row["memoryMiB"].as_u64().unwrap_or(4096) / 1024, row["diskGiB"])));
+                        }
+                    },
                     KeyCode::Char('v') if state.workspace == Workspace::Containers && state.docker_context.is_none() => {
                         state.native = None; state.environment_picker = false;
                         let request = state.view("vm"); job.dispatch(request, &mut state);
@@ -426,7 +441,12 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     },
                     KeyCode::Char(':') => state.input = Some((':', String::new())),
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
-                    KeyCode::Esc => { state.show_operation = false; state.detail = None; state.filter.clear(); job.cancel(&mut state); },
+                    KeyCode::Esc => {
+                        state.show_operation = false; state.detail = None; state.filter.clear(); job.cancel(&mut state);
+                        if state.request.operation() == "vm list" || state.environment_picker {
+                            state.environment_picker = false; state.native = crate::native::parse("", &state).ok(); job.refresh(&mut state);
+                        }
+                    },
                     KeyCode::Down | KeyCode::Char('j') => state.move_by(1),
                     KeyCode::Up | KeyCode::Char('k') => state.move_by(-1),
                     KeyCode::Enter if state.environment_picker => {
@@ -444,6 +464,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     },
                     KeyCode::Enter if state.native.is_some() => resource_action("inspect", &mut state, &mut job, &mut cli, terminal.get_frame().area()),
                     KeyCode::Enter => match state.enter() {
+                        Ok(Some(request)) if request.operation() == "k8s pods list" => {
+                            state.native = crate::native::parse("", &state).ok(); job.refresh(&mut state);
+                        },
                         Ok(Some(request)) => job.dispatch(Ok(request), &mut state),
                         Err(error) => state.message = error.message,
                         _ => {}
@@ -452,7 +475,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     KeyCode::Char('?') | KeyCode::Char('m') => state.detail = Some("Commands: use : to enter Docker or kubectl commands.\nContainers: ps, ps -a, images, volume ls, network ls\nKubernetes: pods, deployments, services, get pods -A\nExplicit docker / kubectl prefixes are also accepted.\nOutput options are preserved; other commands run in the internal terminal.\n\nSelected resource: Enter detail, l logs, g stats, s start, t stop, r restart, d delete.\nChanges from this menu require confirmation; typed CLI commands run directly.\n\nTab switches workspace; , changes the default workspace.\ne chooses the environment/context; n chooses a namespace.\nv opens Hamn VM controls for a Hamn environment.\n! shows active operation logs. Esc returns. q exits.\nCLI terminal: Ctrl-C interrupts, Docker Ctrl-P Ctrl-Q detaches.\nAfter CLI exit, Enter returns and refreshes the list.\nShell pipelines, redirections and aliases are not interpreted.".into()),
                     KeyCode::Char(c) if "strdlg".contains(c) => {
                         let action = match c { 's'=>"start", 't'=>"stop", 'r'=>"restart", 'd'=>"delete", 'l'=>"logs", _=>"stats" };
-                        if state.native.is_some() {
+                        if action == "start" && state.native.as_ref().is_some_and(|i| i.hamn_profile.is_some()) && state.runtime["dockerStatus"] != "ready" {
+                            state.pending = Some(Request { words: vec!["vm".into(), "start".into()], profile: state.native.as_ref().unwrap().hamn_profile.clone(), yes: true, timeout: 600, ..Default::default() });
+                        } else if state.native.is_some() {
                             resource_action(action, &mut state, &mut job, &mut cli, terminal.get_frame().area());
                         } else {
                             let request = state.action(action); job.dispatch(request, &mut state);
