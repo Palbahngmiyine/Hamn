@@ -13,6 +13,7 @@ mod service;
 mod stream;
 mod preferences;
 mod native;
+mod resource_table;
 mod native_actions;
 mod terminal_io;
 mod terminal_session;

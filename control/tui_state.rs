@@ -49,10 +49,12 @@ pub fn split_command(command: &str) -> Result<Vec<String>> {
 pub struct State {
     pub workspace: Workspace,
     pub docker_context: Option<String>,
+    pub docker_config: Option<String>,
     pub show_all: bool,
     pub native: Option<crate::native::Invocation>,
     pub environment_picker: bool,
     pub connection_status: String,
+    pub runtime: Value,
     pub request: Request,
     pub data: Value,
     pub selected: usize,
@@ -80,10 +82,12 @@ impl State {
         Self {
             workspace: Workspace::Containers,
             docker_context: None,
+            docker_config: None,
             show_all: false,
             native: None,
             environment_picker: false,
             connection_status: String::new(),
+            runtime: Value::Null,
             request,
             data: Value::Null,
             selected: 0,
@@ -274,6 +278,7 @@ impl State {
     }
     pub fn accept(&mut self, result: Result<Value>) {
         if let Ok(value) = &result {
+            if value["type"] == "runtimeStatus" { self.runtime = value["data"].clone(); return; }
             if value["type"] == "log" {
                 let text = self.detail.get_or_insert_with(String::new);
                 text.push_str(value["text"].as_str().unwrap_or_default());
@@ -340,7 +345,7 @@ impl State {
             }
             "vm list" => {
                 self.request.profile = row["name"].as_str().map(String::from);
-                self.detail = Some(serde_json::to_string_pretty(&row).unwrap());
+                self.detail = Some(format!("Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers", row["name"], row["state"], row["dockerStatus"], row["cpus"], row["memoryMiB"], row["diskGiB"]));
                 Ok(None)
             }
             "docker images list" | "docker volumes list" | "docker networks list" => {
@@ -491,6 +496,12 @@ pub fn draw(frame: &mut Frame, state: &State) {
             state.request.context.as_deref().unwrap_or("choose a context"),
             if state.request.all_namespaces { "all namespaces" } else { state.request.namespace.as_deref().unwrap_or("default") }),
     };
+    let header = if state.workspace == Workspace::Containers && state.native.as_ref().is_some_and(|i| i.hamn_profile.is_some()) && !state.runtime.is_null() {
+        let ready = match state.runtime["dockerStatus"].as_str().unwrap_or("unavailable") {
+            "ready" => "Available", "preparing" => "Docker connection preparing", "recoveryRequired" => "Recovery required", _ => "Connection unavailable",
+        };
+        format!("{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment", state.runtime["state"].as_str().unwrap_or("not created"))
+    } else { header };
     let header = if let Some(command) = &state.native { format!("{header}\n{}: {}", command.target, state.connection_status) } else { header };
     let header = if state.uncertain.is_empty() {
         header
@@ -536,6 +547,8 @@ pub fn draw(frame: &mut Frame, state: &State) {
                 .block(Block::bordered().title(title)),
             areas[1],
         );
+    } else if state.native.is_some() {
+        crate::resource_table::draw(frame, areas[1], state, title);
     } else {
         let rows: Vec<_> = state
             .rows()
