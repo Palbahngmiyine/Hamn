@@ -218,6 +218,28 @@ def recovery_identity(entry, payload):
             info = path.lstat()
             if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
                 raise RuntimeError('unsafe deployment backup entry')
+    # Validate every item before rollback can replace any live file.
+    directories = {'libexec_hamn', 'etc_hamn', 'docker_dropin', 'cni_bin'}
+    items = directories | {'hamnd', 'hamnd_unit', 'containerd_config', 'docker_config',
+                           'host_dns_config', 'host_dns_unit', 'modules_config', 'sysctl_config'}
+    for name in items:
+        metadata = safe(entry / 'meta' / name)
+        if not metadata.is_file() or metadata.stat().st_size > 16:
+            raise RuntimeError(f'missing deployment backup metadata: {name}')
+        state = metadata.read_text().strip()
+        data = entry / 'data' / name
+        if state not in ('present', 'absent') or (state == 'absent' and data.exists()):
+            raise RuntimeError(f'invalid deployment backup metadata: {name}')
+        if state == 'present' and not (data.is_dir() if name in directories else data.is_file()):
+            raise RuntimeError(f'incomplete deployment backup data: {name}')
+    for service in ('hamnd', 'containerd', 'docker', 'hamn-host-dns'):
+        for suffix, allowed in [('active', {'active', 'inactive'}),
+                                ('enabled', {'enabled', 'enabled-runtime', 'disabled', 'masked',
+                                             'masked-runtime', 'static', 'indirect', 'generated',
+                                             'transient', 'not-found'})]:
+            metadata = safe(entry / 'meta' / f'{service}.service.{suffix}')
+            if not metadata.is_file() or metadata.stat().st_size > 32 or metadata.read_text().strip() not in allowed:
+                raise RuntimeError(f'invalid deployment service metadata: {service}.{suffix}')
     for name in HELPERS:
         helper = safe(entry / 'data/libexec_hamn' / name)
         if not helper.is_file():
@@ -262,6 +284,11 @@ def recover_deployment(payload=None):
     elif JOURNAL.exists():
         raise RuntimeError('deployment recovery requires the signed helper contract')
     helper = safe('/usr/local/libexec/hamn/guest-deployment-transaction')
+    if payload is not None:
+        digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+        expected = hashlib.sha256(payload['helpers']['guest-deployment-transaction'].encode()).hexdigest()
+        if digest not in (expected, LEGACY_HELPERS['guest-deployment-transaction']):
+            raise RuntimeError('installed recovery helper does not match the signed contract')
     run('bash', str(helper), 'rollback', entry.name)
     if entry.exists():
         raise RuntimeError('deployment recovery did not remove its backup')

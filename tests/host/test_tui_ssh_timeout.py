@@ -65,7 +65,13 @@ with tempfile.TemporaryDirectory(prefix='hamn-tui-ssh-', dir='/tmp') as director
         # Input must remain responsive while the C worker waits on SSH.
         os.write(master, b'?')
         until(b'Commands:', timeout=2)
-        until(b'"state":"stopped"')
+        until(b'Operationcompleted')
+        # A background completion must not replace the help/navigation screen.
+        status = subprocess.run([binary, '--headless', 'vm', 'status', '--profile', 'test'],
+            env=env, capture_output=True, timeout=10, check=True)
+        snapshot = json.loads(status.stdout)['data']
+        assert snapshot['state'] == 'stopped', snapshot
+        assert snapshot['lastOperation']['status'] == 'completed', snapshot
         os.write(master, b'q')
         assert child.wait(timeout=5) == 0
         restored = termios.tcgetattr(slave)

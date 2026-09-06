@@ -27,16 +27,25 @@ class Retirement(unittest.TestCase):
             for name, content in payload['helpers'].items():
                 (helpers / name).write_text(content)
             (entry / 'phase').write_text('ready\n')
+            metadata = entry / 'meta'
+            metadata.mkdir()
+            for name in ('hamnd', 'libexec_hamn', 'hamnd_unit', 'etc_hamn', 'containerd_config',
+                         'docker_config', 'docker_dropin', 'host_dns_config', 'host_dns_unit',
+                         'modules_config', 'sysctl_config', 'cni_bin'):
+                (metadata / name).write_text('present' if name == 'libexec_hamn' else 'absent')
+            for service in ('hamnd', 'containerd', 'docker', 'hamn-host-dns'):
+                (metadata / f'{service}.service.active').write_text('inactive')
+                (metadata / f'{service}.service.enabled').write_text('disabled')
             sentinel = root / 'docker-volume'
             sentinel.write_text('preserve')
             identity = {'version': 1, 'retirement': json.loads(journal.read_text()),
                         'helpers': {name: hashlib.sha256(content.encode()).hexdigest()
                                     for name, content in payload['helpers'].items()}}
             with patch.object(r, 'TRANSACTIONS', transactions), patch.object(r, 'JOURNAL', journal), \
-                 patch.object(r, 'safe', side_effect=Path), patch.object(r, 'run') as run:
+                 patch.object(r, 'safe', side_effect=lambda p: helpers / 'guest-deployment-transaction' if str(p) == '/usr/local/libexec/hamn/guest-deployment-transaction' else Path(p)), patch.object(r, 'run') as run:
                 (entry / 'provenance.json').write_text(json.dumps(identity))
                 r.recovery_identity(entry, payload)
-                for bad in ('different-contract', 'unfinished-retirement', 'retired-file', 'symlink'):
+                for bad in ('different-contract', 'unfinished-retirement', 'retired-file', 'symlink', 'bad-metadata', 'missing-data', 'multiple'):
                     with self.subTest(bad=bad):
                         if bad == 'different-contract':
                             (helpers / r.HELPERS[0]).write_text('altered')
@@ -44,12 +53,22 @@ class Retirement(unittest.TestCase):
                             journal.write_text('{"version":1,"stage":"helpers"}')
                         elif bad == 'retired-file':
                             (helpers / 'configure-k3s').write_text('old')
-                        else:
+                        elif bad == 'symlink':
                             (helpers / 'outside').symlink_to(sentinel)
+                        elif bad == 'bad-metadata':
+                            (metadata / 'docker_config').write_text('corrupt')
+                        elif bad == 'missing-data':
+                            (metadata / 'hamnd').write_text('present')
+                        else:
+                            (transactions / ('c' * 32)).mkdir()
                         with self.assertRaises(RuntimeError):
                             r.recover_deployment(payload)
                         run.assert_not_called()
                         self.assertTrue(entry.exists())
+                        (metadata / 'docker_config').write_text('absent')
+                        (metadata / 'hamnd').write_text('absent')
+                        extra = transactions / ('c' * 32)
+                        if extra.exists(): extra.rmdir()
                         (helpers / r.HELPERS[0]).write_text(payload['helpers'][r.HELPERS[0]])
                         journal.write_text(json.dumps(identity['retirement']))
                         for name in ('configure-k3s', 'outside'):

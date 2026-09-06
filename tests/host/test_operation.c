@@ -5,8 +5,8 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-static int alive = 1;
-int proc_cancelled(void) { return 0; }
+static int alive = 1, cancelled;
+int proc_cancelled(void) { return cancelled; }
 int proc_start_identity(pid_t pid, uint64_t *sec, uint64_t *usec)
 { (void)pid; *sec = 123; *usec = 456; return alive ? 0 : -1; }
 int proc_executable_identity(pid_t pid, unsigned char uuid[16])
@@ -28,6 +28,16 @@ int main(void)
     assert(operation_finish(0, 1) == 0);
     value = operation_snapshot(&p);
     assert(!strcmp(cJSON_GetObjectItem(value, "status")->valuestring, "completed")); cJSON_Delete(value);
+    alive = 1;
+    assert(operation_begin(&p, "vm stop") == 0);
+    cancelled = 1;
+    assert(operation_finish(1, 1) == 130);
+    value = operation_snapshot(&p);
+    assert(!strcmp(cJSON_GetObjectItem(value, "status")->valuestring, "cancelled")); cJSON_Delete(value);
+    assert(operation_begin(&p, "vm start") == 0);
+    assert(operation_finish(1, 0) == 1);
+    value = operation_snapshot(&p);
+    assert(!strcmp(cJSON_GetObjectItem(value, "status")->valuestring, "outcomeUnknown")); cJSON_Delete(value);
     profile_path(&p, "operation.json", path, sizeof(path)); assert(chmod(path, 0644) == 0);
     assert(!operation_snapshot(&p)); assert(unlink(path) == 0); assert(rmdir(directory) == 0);
     puts("PASS: operation ownership, completion and unsafe record handling");
