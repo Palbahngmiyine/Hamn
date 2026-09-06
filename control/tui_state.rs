@@ -1,3 +1,4 @@
+use crate::preferences::Workspace;
 use crate::model::{Failure, Request, Result};
 use clap::Parser;
 use ratatui::{
@@ -46,6 +47,9 @@ fn split_command(command: &str) -> Result<Vec<String>> {
 }
 
 pub struct State {
+    pub workspace: Workspace,
+    pub docker_context: Option<String>,
+    pub show_all: bool,
     pub request: Request,
     pub data: Value,
     pub selected: usize,
@@ -66,10 +70,13 @@ pub struct State {
 
 impl State {
     pub fn new(mut request: Request) -> Self {
-        request.words = vec!["vm".into(), "list".into()];
+        request.words = vec!["docker".into(), "containers".into(), "list".into()];
         request.profile.get_or_insert("default".into());
         request.headless = false;
         Self {
+            workspace: Workspace::Containers,
+            docker_context: None,
+            show_all: false,
             request,
             data: Value::Null,
             selected: 0,
@@ -88,12 +95,33 @@ impl State {
             show_operation: false,
         }
     }
+    pub fn for_workspace(request: Request, workspace: Workspace) -> Self {
+        let mut state = Self::new(request);
+        state.workspace = workspace;
+        if workspace == Workspace::Kubernetes {
+            state.request.profile = None;
+            state.request.words = vec!["k8s".into(), "contexts".into(), "list".into()];
+            if let Ok(config) = crate::kubeconfig::load(&state.request) {
+                state.request.context = state.request.context.or(config.current_context);
+                if let Some(context) = config.contexts.iter().find(|c| Some(&c.name) == state.request.context.as_ref()).and_then(|c| c.context.as_ref()) {
+                    state.request.namespace = state.request.namespace.or(context.namespace.clone());
+                    state.request.words[1] = "pods".into();
+                }
+            }
+        } else {
+            state.request.context = None;
+            state.request.namespace = None;
+        }
+        state
+    }
     pub fn rows(&self) -> Vec<&Value> {
         self.data
             .as_array()
             .map(|rows| {
                 rows.iter()
                     .filter(|row| {
+                        (self.workspace != Workspace::Containers || self.show_all ||
+                         self.request.operation() != "docker containers list" || row["State"] == "running") &&
                         label(row)
                             .to_lowercase()
                             .contains(&self.filter.to_lowercase())
@@ -339,7 +367,8 @@ fn label(value: &Value) -> String {
                 .or_else(|| value["status"]["phase"].as_str())
         })
         .unwrap_or("");
-    clean(&format!("{name}  {status}"))
+    let docker = value["dockerStatus"].as_str().unwrap_or("");
+    clean(&format!("{name}  {status}  {docker}"))
 }
 
 fn confirmation(request: &Request, width: u16) -> Vec<String> {
@@ -429,16 +458,14 @@ pub fn draw(frame: &mut Frame, state: &State) {
         );
         return;
     }
-    let header = format!(
-        "Hamn | profile: {:?}\ncontext: {:?}\nnamespace: {:?}",
-        state.request.profile.as_deref().unwrap_or("-"),
-        state.request.context.as_deref().unwrap_or("-"),
-        if state.request.all_namespaces {
-            "* (all namespaces)"
-        } else {
-            state.request.namespace.as_deref().unwrap_or("default")
-        }
-    );
+    let header = match state.workspace {
+        Workspace::Containers => format!("Hamn | [Containers]   Kubernetes   Tab switch   , settings\nEnvironment: {}\n{}",
+            state.docker_context.as_ref().map(|c| format!("Docker context {c}")).unwrap_or_else(|| format!("Hamn profile {}", state.request.profile.as_deref().unwrap_or("default"))),
+            if state.docker_context.is_none() { "e environments   v VM settings   a running/all" } else { "e environments   a running/all" }),
+        Workspace::Kubernetes => format!("Hamn | Containers   [Kubernetes]   Tab switch   , settings\nContext: {}   Namespace: {}\ne contexts   n namespaces",
+            state.request.context.as_deref().unwrap_or("choose a context"),
+            if state.request.all_namespaces { "all namespaces" } else { state.request.namespace.as_deref().unwrap_or("default") }),
+    };
     let header = if state.uncertain.is_empty() {
         header
     } else {
@@ -512,9 +539,39 @@ pub fn draw(frame: &mut Frame, state: &State) {
     frame.render_widget(Paragraph::new(": command  / filter  Enter detail  s start  t stop  r restart  d delete  l logs  g stats  ? help  q quit"), areas[3]);
 }
 
+pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &str) {
+    let text = format!("{}\n\n{} Containers — Docker containers, images, volumes and networks\n{} Kubernetes — resources in your kubeconfig context\n\n1 / 2 or arrows to select, Enter to save\n{}\n\n{}",
+        if settings { "Choose the workspace to open by default" } else { "Choose your default workspace" },
+        if selected == 0 { ">" } else { " " }, if selected == 1 { ">" } else { " " },
+        if settings { "Esc returns without changing the default" } else { "q exits" }, clean(error));
+    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false })
+        .block(Block::bordered().title("Hamn settings")), frame.area());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn workspaces_keep_selection_and_do_not_show_vm_controls_in_kubernetes() {
+        let mut containers = State::for_workspace(Request::default(), Workspace::Containers);
+        containers.data = serde_json::json!([{"Names":["running"],"State":"running"}, {"Names":["stopped"],"State":"exited"}]);
+        assert_eq!(containers.rows().len(), 1);
+        containers.show_all = true;
+        containers.selected = 1;
+        let mut kubernetes = State::for_workspace(Request { kubeconfig: Some("/no-such-hamn-test-config".into()), ..Default::default() }, Workspace::Kubernetes);
+        assert_eq!(kubernetes.request.operation(), "k8s contexts list");
+        assert!(kubernetes.request.profile.is_none());
+        std::mem::swap(&mut containers, &mut kubernetes);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|f| draw(f, &containers)).unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains("[Kubernetes]"));
+        assert!(!text.contains("VM settings") && !text.contains("Hamn profile"));
+        std::mem::swap(&mut containers, &mut kubernetes);
+        assert_eq!(containers.selected, 1);
+        assert_eq!(containers.rows().len(), 2);
+    }
+
     #[test]
     fn direct_details_keep_a_clean_list_request_for_escape_and_refresh() {
         for command in [
@@ -539,7 +596,7 @@ mod tests {
             state.request.validate().unwrap();
             state.accept(Ok(serde_json::json!({"yaml":"detail"})));
             state.detail = None; // Esc clears the detail before the next refresh.
-            state.accept(Ok(serde_json::json!([{"metadata":{"name":"sample", "uid":"original", "namespace":"work"}, "Id":"sample", "name":"default"}])));
+            state.accept(Ok(serde_json::json!([{"metadata":{"name":"sample", "uid":"original", "namespace":"work"}, "Id":"sample", "name":"default", "State":"running"}])));
             assert_eq!(state.rows().len(), 1);
             assert!(state.action(if state.request.words[0] == "vm" {"status"} else {"inspect"}).is_ok());
         }
@@ -644,7 +701,7 @@ mod tests {
     #[test]
     fn renders_small_terminal_and_filters_unicode_without_panicking() {
         let mut state = State::new(Request::try_parse_from(["hamn"]).unwrap());
-        state.data = serde_json::json!([{"name":"작업"},{"name":"other"}]);
+        state.data = serde_json::json!([{"name":"작업", "State":"running"},{"name":"other", "State":"running"}]);
         state.filter = "작".into();
         assert_eq!(state.rows().len(), 1);
         state.move_by(100);

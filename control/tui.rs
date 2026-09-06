@@ -1,3 +1,4 @@
+use crate::preferences::{self, Workspace};
 use crate::{
     model::{Request, Result},
     service,
@@ -100,18 +101,16 @@ impl Job {
 }
 
 pub async fn run(request: Request) -> std::io::Result<()> {
-    let mut state = State::new(request);
-    if let Ok(config) = crate::kubeconfig::load(&state.request) {
-        state.request.context = state.request.context.or(config.current_context);
-        if state.request.namespace.is_none() {
-            state.request.namespace = config
-                .contexts
-                .iter()
-                .find(|entry| Some(&entry.name) == state.request.context.as_ref())
-                .and_then(|entry| entry.context.as_ref())
-                .and_then(|context| context.namespace.clone());
-        }
-    }
+    let preferences_path = preferences::path()?;
+    let mut settings_error = String::new();
+    let saved = match preferences::load(&preferences_path) {
+        Ok(value) => value, Err(error) => { settings_error = error.to_string(); None }
+    };
+    let mut choosing = saved.is_none();
+    let mut settings = false;
+    let mut choice = saved.unwrap_or(Workspace::Containers).index();
+    let mut state = State::for_workspace(request.clone(), saved.unwrap_or(Workspace::Containers));
+    let mut other = State::for_workspace(request, if state.workspace == Workspace::Containers { Workspace::Kubernetes } else { Workspace::Containers });
     let mut terminal = ratatui::init();
     let _restore = Restore;
     let (sender, mut responses) = mpsc::channel(16);
@@ -126,7 +125,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     let mut mutation_job = Job { generation: 0, cancel: CancellationToken::new(),
         task: None, sender: mutation_sender, mutation: None };
     let mut exit_after_cancel = false;
-    job.start(state.request.clone(), &mut state);
+    if !choosing { job.start(state.request.clone(), &mut state); }
     let mut events = EventStream::new();
     let mut refresh = tokio::time::interval(std::time::Duration::from_secs(2));
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -135,7 +134,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(libc::SIGTSTP))?;
     let mut draw_error = None;
     loop {
-        if let Err(error) = terminal.draw(|frame| tui_state::draw(frame, &state)) {
+        if let Err(error) = terminal.draw(|frame| if choosing { tui_state::draw_choice(frame, choice, settings, &settings_error) } else { tui_state::draw(frame, &state) }) {
             draw_error = Some(error); break;
         }
         tokio::select! {
@@ -192,7 +191,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 }
             }
             _ = refresh.tick() => {
-                if !state.loading && state.pending.is_none() && state.input.is_none() && state.detail.is_none() {
+                if !choosing && !state.loading && state.pending.is_none() && state.input.is_none() && state.detail.is_none() {
                     job.start(state.request.clone(), &mut state);
                 }
             }
@@ -217,6 +216,31 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     ratatui::restore();
                     unsafe { libc::raise(libc::SIGSTOP); }
                     terminal = ratatui::init();
+                    continue;
+                }
+                if choosing {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Down | KeyCode::Tab => choice = 1 - choice,
+                        KeyCode::Char('1') => choice = 0,
+                        KeyCode::Char('2') => choice = 1,
+                        KeyCode::Enter => {
+                            let workspace = if choice == 0 { Workspace::Containers } else { Workspace::Kubernetes };
+                            match preferences::save(&preferences_path, workspace) {
+                                Ok(()) => {
+                                    choosing = false; settings = false; settings_error.clear();
+                                    if state.workspace != workspace { std::mem::swap(&mut state, &mut other); }
+                                    job.start(state.request.clone(), &mut state);
+                                },
+                                Err(error) => settings_error = error.to_string(),
+                            }
+                        },
+                        KeyCode::Esc if settings => { choosing = false; settings = false; },
+                        KeyCode::Char('q') => {
+                            if mutation_job.mutation.is_none() { break; }
+                            choosing = false; state.quit_confirmation = true;
+                        },
+                        _ => {},
+                    }
                     continue;
                 }
                 if state.pending.is_some() {
@@ -246,6 +270,15 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                     if mutation_job.mutation.is_none() { break; }
                                     state.quit_confirmation = true; continue;
                                 }
+                                let target = if input.starts_with("k8s ") || ["contexts", "ctx", "pods", "po", "ns", "deployments", "services"].contains(&input.as_str()) {
+                                    Workspace::Kubernetes
+                                } else if input.starts_with("vm ") || input == "vm" || input.starts_with("docker ") || ["containers", "images", "volumes", "networks"].contains(&input.as_str()) {
+                                    Workspace::Containers
+                                } else { state.workspace };
+                                if state.workspace != target {
+                                    job.cancel(&mut state);
+                                    std::mem::swap(&mut state, &mut other);
+                                }
                                 let request = state.view(&input);
                                 job.dispatch(request, &mut state);
                             }
@@ -258,6 +291,21 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     KeyCode::Char('q') => {
                         if mutation_job.mutation.is_none() { break; }
                         state.quit_confirmation = true;
+                    },
+                    KeyCode::Tab => {
+                        job.cancel(&mut state); std::mem::swap(&mut state, &mut other);
+                        job.start(state.request.clone(), &mut state);
+                    },
+                    KeyCode::Char(',') => { choosing = true; settings = true; choice = state.workspace.index(); },
+                    KeyCode::Char('a') if state.workspace == Workspace::Containers => { state.show_all = !state.show_all; state.selected = 0; },
+                    KeyCode::Char('v') if state.workspace == Workspace::Containers && state.docker_context.is_none() => {
+                        let request = state.view("vm"); job.dispatch(request, &mut state);
+                    },
+                    KeyCode::Char('e') if state.workspace == Workspace::Kubernetes => {
+                        let request = state.view("contexts"); job.dispatch(request, &mut state);
+                    },
+                    KeyCode::Char('n') if state.workspace == Workspace::Kubernetes => {
+                        let request = state.view("ns"); job.dispatch(request, &mut state);
                     },
                     KeyCode::Char(':') => state.input = Some((':', String::new())),
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
