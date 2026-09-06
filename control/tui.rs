@@ -127,6 +127,19 @@ impl Job {
     }
 }
 
+fn resource_action(action: &str, state: &mut State, job: &mut Job, cli: &mut Option<Session>, area: ratatui::layout::Rect) {
+    let result = if state.stale { Err(crate::model::Failure::new("staleData", "refresh before acting on previous data")) }
+        else { state.selected().ok_or_else(|| crate::model::Failure::new("noSelection", "select a resource first"))
+            .and_then(|row| crate::native_actions::selected(state.native.as_ref().unwrap(), &row, action)) };
+    match result {
+        Ok(action) if action.changes => state.pending_native = Some(action),
+        Ok(action) => { job.cancel(state); match Session::start(action.invocation, area.width, area.height) {
+            Ok(session) => *cli = Some(session), Err(error) => state.message = error.to_string(),
+        }},
+        Err(error) => state.message = error.message,
+    }
+}
+
 pub async fn run(request: Request) -> std::io::Result<()> {
     let preferences_path = preferences::path()?;
     let mut settings_error = String::new();
@@ -239,7 +252,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 }
             }
             _ = refresh.tick() => {
-                if cli.is_none() && !choosing && !state.loading && state.pending.is_none() && state.input.is_none() && state.detail.is_none() {
+                if cli.is_none() && !choosing && !state.loading && state.pending.is_none() && state.pending_native.is_none() && state.input.is_none() && state.detail.is_none() {
                     job.refresh(&mut state);
                 }
             }
@@ -308,6 +321,20 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             if mutation_job.mutation.is_none() { break; }
                             choosing = false; state.quit_confirmation = true;
                         },
+                        _ => {},
+                    }
+                    continue;
+                }
+                if let Some(action) = &state.pending_native {
+                    let area = terminal.get_frame().area();
+                    match key.code {
+                        KeyCode::Char('y') if tui_state::native_confirmation_visible(action, area) => {
+                            let action = state.pending_native.take().unwrap(); job.cancel(&mut state);
+                            match Session::start(action.invocation, area.width, area.height) {
+                                Ok(session) => cli = Some(session), Err(error) => state.message = error.to_string(),
+                            }
+                        },
+                        KeyCode::Esc | KeyCode::Char('n') => state.pending_native = None,
                         _ => {},
                     }
                     continue;
@@ -415,18 +442,21 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             state.native = crate::native::parse("ps", &state).ok(); job.refresh(&mut state);
                         }
                     },
-                    KeyCode::Enter if state.native.is_some() => { state.detail = state.selected().map(|row| serde_json::to_string_pretty(&row).unwrap()); },
+                    KeyCode::Enter if state.native.is_some() => resource_action("inspect", &mut state, &mut job, &mut cli, terminal.get_frame().area()),
                     KeyCode::Enter => match state.enter() {
                         Ok(Some(request)) => job.dispatch(Ok(request), &mut state),
                         Err(error) => state.message = error.message,
                         _ => {}
                     },
                     KeyCode::Char('!') => state.show_operation = !state.show_operation,
-                    KeyCode::Char('?') => state.detail = Some("Commands: :vm :containers :images :volumes :networks :contexts :ns :pods :deployments :sts :ds :services :nodes :events :jobs :cronjobs :ingresses :pvcs\n\nUse a full headless operation after ':' for configuration and scaling.\nExample: :vm create --profile work --cpu 2 --memory 4\nExample: :k8s deployments scale api --replicas 3 --namespace default\n\nEnter selects context/namespace/profile. Mutations require y confirmation. Esc returns to the list. Ctrl-Z suspends; q exits without stopping VMs.".into()),
+                    KeyCode::Char('?') | KeyCode::Char('m') => state.detail = Some("Commands: use : to enter Docker or kubectl commands.\nContainers: ps, ps -a, images, volume ls, network ls\nKubernetes: pods, deployments, services, get pods -A\nExplicit docker / kubectl prefixes are also accepted.\nOutput options are preserved; other commands run in the internal terminal.\n\nSelected resource: Enter detail, l logs, g stats, s start, t stop, r restart, d delete.\nChanges from this menu require confirmation; typed CLI commands run directly.\n\nTab switches workspace; , changes the default workspace.\ne chooses the environment/context; n chooses a namespace.\nv opens Hamn VM controls for a Hamn environment.\n! shows active operation logs. Esc returns. q exits.\nCLI terminal: Ctrl-C interrupts, Docker Ctrl-P Ctrl-Q detaches.\nAfter CLI exit, Enter returns and refreshes the list.\nShell pipelines, redirections and aliases are not interpreted.".into()),
                     KeyCode::Char(c) if "strdlg".contains(c) => {
                         let action = match c { 's'=>"start", 't'=>"stop", 'r'=>"restart", 'd'=>"delete", 'l'=>"logs", _=>"stats" };
-                        let request = state.action(action);
-                        job.dispatch(request, &mut state);
+                        if state.native.is_some() {
+                            resource_action(action, &mut state, &mut job, &mut cli, terminal.get_frame().area());
+                        } else {
+                            let request = state.action(action); job.dispatch(request, &mut state);
+                        }
                     }
                     _ => {}
                 }
