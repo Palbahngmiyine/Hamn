@@ -129,7 +129,9 @@ void operation_started_vm(void)
 int operation_finish(int result, int restored)
 {
     if (!record) return result;
-    field("status", result == 0 ? "completed" : restored ? "failed" : "outcomeUnknown");
+    if (result != 0 && restored && proc_cancelled()) result = 130;
+    field("status", result == 0 ? "completed" : !restored ? "outcomeUnknown" :
+          result == 130 ? "cancelled" : "failed");
     field("error", result == 0 ? "" : log_last_error());
     cJSON_AddNumberToObject(record, "exitCode", result);
     int saved = save_record();

@@ -5,6 +5,7 @@
 #include "core/control.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
+#include "core/operation.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
 
@@ -48,14 +49,18 @@ static int cmd_stop_locked(const char *profile_name)
         return 1;
     }
 
-    int was_running = 0;
-    if (vm_stop(&profile, &was_running) != 0) {
+    if (operation_begin(&profile, "vm stop") != 0) {
         profile_mutation_unlock(mutation_fd);
         return 1;
     }
+    int was_running = 0;
+    if (vm_stop(&profile, &was_running) != 0) {
+        profile_mutation_unlock(mutation_fd);
+        return operation_finish(1, 0);
+    }
     profile_mutation_unlock(mutation_fd);
     logmsg(was_running ? "stopped" : "not running");
-    return 0;
+    return operation_finish(0, 1);
 }
 
 int cmd_stop(int argc, char **argv)

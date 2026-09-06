@@ -11,6 +11,8 @@
 #include "core/guest_status.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
+#include "core/operation.h"
+#include "core/guest_deployment.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
 #include "core/state.h"
@@ -41,6 +43,24 @@ static cJSON *profile_snapshot(const char *name)
         cJSON_Delete(value);
         return NULL;
     }
+    cJSON *operation = operation_snapshot(&profile);
+    const char *docker_status = "unavailable";
+    if (!operation) {
+        operation = cJSON_CreateObject();
+        cJSON_AddStringToObject(operation, "status", "outcomeUnknown");
+        cJSON_AddStringToObject(operation, "error", "cannot validate operation record");
+        docker_status = "recoveryRequired";
+    } else {
+        const cJSON *status = cJSON_GetObjectItem(operation, "status");
+        if (cJSON_IsString(status) && !strcmp(status->valuestring, "outcomeUnknown"))
+            docker_status = "recoveryRequired";
+        else if (!strcmp(live, "running"))
+            docker_status = guest_deployment_docker_ready(&profile) ? "ready" :
+                cJSON_IsString(status) && !strcmp(status->valuestring, "running") ?
+                "preparing" : "unavailable";
+    }
+    cJSON_AddStringToObject(value, "dockerStatus", docker_status);
+    cJSON_AddItemToObject(value, "lastOperation", operation);
     return value;
 }
 

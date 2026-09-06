@@ -8,6 +8,11 @@
 typedef int (*proc_completion_fn)(int rc, void *context);
 
 #define PROC_RUN_TIMEOUT 124
+int proc_cancel_install(void);
+int proc_cancelled(void);
+void proc_request_cancel(void);
+void proc_cleanup_begin(void);
+void proc_cleanup_end(void);
 /* Finite synchronous command; reap the exact child before returning timeout.
  * Optional completion still runs under the inherited supervisor locks. */
 int proc_run_bounded(const char *const argv[], char *out, size_t cap,

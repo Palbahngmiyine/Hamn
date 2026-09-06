@@ -16,6 +16,7 @@
 #include "cli.h"
 #include "core/log.h"
 #include "core/retirement.h"
+#include "core/operation.h"
 #include "sshmgr/ssh.h"
 #include "util/fs.h"
 #include "util/proc.h"
@@ -408,12 +409,15 @@ static int deployment_refresh_locked(const struct profile *profile,
     }
 
     int forward_attempted = 0;
-    if (guest_deployment_configure_runtime(profile, state->ip) != 0)
+    if (operation_phase("configuring") != 0 ||
+        guest_deployment_configure_runtime(profile, state->ip) != 0)
         goto rollback;
     forward_attempted = 1;
-    if (guest_deployment_forward_sockets(profile, state->ip) != 0)
+    if (operation_phase("forwarding") != 0 ||
+        guest_deployment_forward_sockets(profile, state->ip) != 0)
         goto rollback;
-    if (guest_deployment_runtime_ready(profile, state->ip, 30) != 0) {
+    if (operation_phase("verifying") != 0 ||
+        guest_deployment_runtime_ready(profile, state->ip, 30) != 0) {
         logerr("guest agent, Docker, or system containerd did not become ready");
         goto rollback;
     }
@@ -432,10 +436,13 @@ static int deployment_refresh_locked(const struct profile *profile,
     return 0;
 
 rollback:
+    proc_cleanup_begin();
+    (void)operation_phase("recovering");
     logerr("guest deployment failed; restoring the previous guest runtime");
     if (deployment_transaction(profile, state->ip, "rollback", token) != 0) {
         logerr("guest deployment rollback failed for operation %s; "
                "the guest backup was retained for manual recovery", token);
+        proc_cleanup_end();
         return -1;
     }
     logmsg("previous guest runtime restored after failed deployment");
@@ -443,6 +450,7 @@ rollback:
         guest_deployment_forward_sockets(profile, state->ip) != 0)
         logerr("guest runtime was restored but its host socket forwards "
                "could not be re-established");
+    proc_cleanup_end();
     return -1;
 }
 
@@ -485,15 +493,19 @@ int guest_deployment_reconcile_runtime_locked(
         return -1;
     }
 
+    proc_cleanup_begin();
+    (void)operation_phase("recovering");
     logerr("warm start reconciliation failed; restoring the previous guest runtime");
     if (deployment_transaction(profile, state->ip, "rollback", token) != 0) {
         logerr("guest runtime reconciliation rollback failed for operation %s; "
                "the guest backup was retained for manual recovery", token);
+        proc_cleanup_end();
         return -1;
     }
     if (guest_deployment_forward_sockets(profile, state->ip) != 0)
         logerr("guest runtime was restored but its host socket forwards "
                "could not be re-established");
+    proc_cleanup_end();
     return -1;
 }
 
