@@ -66,6 +66,23 @@ fn resource(args: &[String], workspace: Workspace) -> Option<String> {
         }
     }
 }
+fn installed_kubectl_plugin(args: &[String], index: Option<usize>) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(index) = index else { return false; };
+    // These are kubectl's built-in command roots, not an implementation of their flags.
+    if ["annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "certificate", "cluster-info", "completion", "config", "cordon", "cp", "create", "debug", "delete", "describe", "diff", "drain", "edit", "events", "exec", "explain", "expose", "get", "help", "kustomize", "label", "logs", "options", "patch", "plugin", "port-forward", "proxy", "replace", "rollout", "run", "scale", "set", "taint", "top", "uncordon", "version", "wait"].contains(&args[index].as_str()) { return false; }
+    let Some(path) = std::env::var_os("PATH") else { return false; };
+    let mut candidate = String::from("kubectl");
+    for part in &args[index..] {
+        if part.starts_with('-') || part.contains('/') { break; }
+        candidate.push('-'); candidate.push_str(&part.replace('-', "_"));
+        // kubectl also accepts literal hyphens for plugin subcommands.
+        for name in [candidate.clone(), candidate.replace('_', "-")] {
+            if std::env::split_paths(&path).any(|dir| std::fs::metadata(dir.join(&name)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)) { return true; }
+        }
+    }
+    false
+}
 pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     let mut args = split_command(text)?;
     let workspace = match args.first().map(String::as_str) {
@@ -86,12 +103,13 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
         args.insert(0, "get".into());
     }
     let index = command_index(&args, workspace);
+    let plugin = workspace == Workspace::Kubernetes && installed_kubectl_plugin(&args, index);
     let config_command = index.is_some_and(|i| args[i] == if workspace == Workspace::Containers { "context" } else { "config" });
     let explicit = if workspace == Workspace::Containers { has(&args[..index.unwrap_or(args.len())], &["--context", "-c", "--host", "-H", "--config"]) }
         else { has(&args, &["--context", "--kubeconfig"]) };
     let mut defaults = Vec::new();
     let mut hamn_profile = None;
-    if !config_command && !explicit {
+    if !config_command && !explicit && !plugin {
         if workspace == Workspace::Containers {
             if let Some(context) = &state.docker_context { defaults.extend(["--context".into(), context.clone()]); }
             else {
@@ -106,7 +124,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
             }
         }
     }
-    if workspace == Workspace::Kubernetes && !has(&args, &["--kubeconfig"]) {
+    if workspace == Workspace::Kubernetes && !plugin && !has(&args, &["--kubeconfig"]) {
         if let Some(config) = &state.request.kubeconfig { defaults.extend(["--kubeconfig".into(), config.clone()]); }
     }
     if workspace == Workspace::Containers && !config_command && !has(&args, &["--config"]) {
@@ -123,7 +141,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
         }
     }
     if has(&defaults, &["--all-namespaces", "-A"]) { target.push("all namespaces".into()); }
-    Ok(Invocation { workspace, hamn_profile, args: defaults, target: if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
+    Ok(Invocation { workspace, hamn_profile, args: defaults, target: if plugin { format!("Plugin-defined target / inherited CLI configuration {}", target.join("  ")) } else if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
 }
 pub async fn query(invocation: &Invocation) -> Result<Value> {
     let mut command = invocation.command(true);

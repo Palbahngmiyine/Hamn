@@ -42,6 +42,8 @@ else:
     for name in ('docker', 'kubectl'):
         (tools / name).write_text(fixture)
         (tools / name).chmod(0o755)
+    plugin = tools / 'kubectl-hamnfixture'
+    plugin.write_text('#!/bin/sh\nexit 0\n'); plugin.chmod(0o755)
     config = root / 'kubeconfig'
     config.write_text(json.dumps({'apiVersion':'v1','kind':'Config','current-context':'dev',
         'contexts':[{'name':'dev','context':{'cluster':'dev','namespace':'test'}}],
@@ -84,6 +86,9 @@ else:
                 until(b'Exit code 0')
                 send(b'\r', b'fixture-container')
                 send(b'\t', b'fixture-pod')
+                send(b':hamnfixture --custom-option value\r', b'CLI_PASSTHROUGH')
+                until(b'Exit code 0')
+                send(b'\r', b'fixture-pod')
                 send(b',', b'Choose the workspace')
                 send(b'2\r', b'fixture-pod')
                 assert json.loads(prefs.read_text())['defaultWorkspace'] == 'kubernetes'
@@ -101,6 +106,7 @@ else:
     calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
     assert sum('-q' in args for _, args in calls) == 1, calls
     assert sum('exec' in args for _, args in calls) == 1, calls
+    assert [args for _, args in calls if 'hamnfixture' in args] == [['hamnfixture', '--custom-option', 'value']], calls
     assert all('--format' not in args for _, args in calls if '-q' in args or 'exec' in args)
     assert sorted(p.name for p in (root / '.hamn').iterdir()) == ['tui.json'], 'TUI entry created VM state'
 print('PASS: workspace persistence, isolated scopes, native output, PTY input/detach and exact-once CLI dispatch')

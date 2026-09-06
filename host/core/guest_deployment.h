@@ -10,6 +10,7 @@
  * unreadable marker.
  */
 int guest_deployment_is_current(const struct profile *profile);
+int guest_deployment_recovery_complete(void);
 int guest_deployment_mark_current(const struct profile *profile);
 
 int guest_deployment_configure_runtime(const struct profile *profile,

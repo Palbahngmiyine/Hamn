@@ -853,7 +853,7 @@ static int cmd_start_locked(const struct start_options *options, const char *pro
 {
     start_spawned = start_restored = 0;
     int rc = cmd_start_execute(options, profile);
-    return operation_finish(rc, start_restored);
+    return operation_finish(rc, start_restored || (!start_spawned && guest_deployment_recovery_complete()));
 }
 
 int hamn_control_start(const char *profile, unsigned cpus,

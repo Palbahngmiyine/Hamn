@@ -1,6 +1,7 @@
 #include "core/guest_deployment.h"
 
 #include <CommonCrypto/CommonDigest.h>
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -180,6 +181,29 @@ static int guest_deployment_wait_cloud_init(const struct profile *profile,
     return -1;
 }
 
+/* SSH cancellation does not prove a remote command has exited. Every guest
+ * writer and rollback shares this guest lock, with a remote operation deadline. */
+static int deployment_exec_locked(const struct profile *profile, const char *ip,
+                                   const char *const command[])
+{
+    assert(command && command[0] && !strcmp(command[0], "sudo"));
+    const char *wrapped[64] = { "sudo", "timeout", "--kill-after=5s", "180s",
+        "flock", "--wait", "120", "/run/hamn-deployment.lock",
+        "timeout", "--kill-after=5s", "60s" };
+    size_t count = 11;
+    for (size_t i = 1; command[i]; i++) {
+        if (count + 1 >= sizeof(wrapped) / sizeof(wrapped[0])) {
+            errno = E2BIG; return -1;
+        }
+        wrapped[count++] = command[i];
+    }
+    wrapped[count] = NULL;
+    return ssh_exec(profile, ip, wrapped, 0);
+}
+
+static int recovery_complete;
+int guest_deployment_recovery_complete(void) { return recovery_complete; }
+
 static int guest_deployment_configure_docker(const struct profile *profile,
                                              const char *ip)
 {
@@ -195,7 +219,7 @@ static int guest_deployment_configure_docker(const struct profile *profile,
         "sudo", "env", daemon_json_env,
         "/usr/local/libexec/hamn/configure-docker", NULL
     };
-    if (ssh_exec(profile, ip, configure_docker, 0) != 0) {
+    if (deployment_exec_locked(profile, ip, configure_docker) != 0) {
         logerr("Docker daemon configuration failed; "
                "the guest image must contain Docker Engine");
         return -1;
@@ -210,7 +234,7 @@ static int guest_deployment_configure_rosetta(const struct profile *profile,
     const char *configure_rosetta[] = {
         "sudo", "/usr/local/libexec/hamn/configure-rosetta", action, NULL
     };
-    if (ssh_exec(profile, ip, configure_rosetta, 0) != 0) {
+    if (deployment_exec_locked(profile, ip, configure_rosetta) != 0) {
         logerr("cannot configure %s x86_64 translation",
                profile->rosetta ? "Rosetta" : "qemu");
         return -1;
@@ -249,7 +273,7 @@ int guest_deployment_configure_runtime(const struct profile *profile,
     const char *configure_containerd[] = {
         "sudo", "/usr/local/libexec/hamn/configure-containerd", NULL
     };
-    if (ssh_exec(profile, ip, configure_containerd, 0) != 0) {
+    if (deployment_exec_locked(profile, ip, configure_containerd) != 0) {
         logerr("system containerd CRI configuration failed; "
                "the existing VM may need reprovisioning");
         return -1;
@@ -374,12 +398,13 @@ static int deployment_transaction(const struct profile *profile,
         "sudo", "bash", GUEST_DEPLOYMENT_TRANSACTION_SCRIPT, action, token,
         NULL
     };
-    return ssh_exec(profile, ip, command, 0);
+    return deployment_exec_locked(profile, ip, command);
 }
 
 static int deployment_refresh_locked(const struct profile *profile,
                                      const struct vm_state *state, int force)
 {
+    recovery_complete = 0;
     int current = guest_deployment_is_current(profile);
     if (current == 1 && !force)
         return 0;
@@ -450,6 +475,7 @@ rollback:
         guest_deployment_forward_sockets(profile, state->ip) != 0)
         logerr("guest runtime was restored but its host socket forwards "
                "could not be re-established");
+    recovery_complete = guest_deployment_runtime_ready(profile, state->ip, 30) == 0;
     proc_cleanup_end();
     return -1;
 }
@@ -463,6 +489,7 @@ int guest_deployment_refresh_locked(const struct profile *profile,
 int guest_deployment_reconcile_runtime_locked(
     const struct profile *profile, const struct vm_state *state)
 {
+    recovery_complete = 0;
     if (guest_deployment_is_current(profile) != 1) {
         errno = ESTALE;
         logerr("cannot reconcile a stale guest deployment");

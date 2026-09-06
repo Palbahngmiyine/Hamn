@@ -89,8 +89,10 @@ static int retire_forward(const struct profile *profile, const char *ip)
 
 int retirement_recover(const struct profile *profile, const char *ip)
 {
-    const char *command[] = { "sudo", "python3", "-c", retirement_payload,
-                              "recover-only", NULL };
+    const char *command[] = { "sudo", "timeout", "--kill-after=5s", "780s",
+        "flock", "--wait", "600", "/run/hamn-retirement.lock",
+        "timeout", "--kill-after=5s", "600s", "python3", "-c", retirement_payload,
+        "recover-only", NULL };
     return ssh_exec(profile, ip, command, 0);
 }
 
@@ -103,7 +105,9 @@ int retirement_run(struct profile *profile, const char *ip)
         return -1;
     }
     logmsg("retiring managed K3s for %s; Docker data is preserved", profile->name);
-    const char *command[] = { "sudo", "python3", "-c", retirement_payload, NULL };
+    const char *command[] = { "sudo", "timeout", "--kill-after=5s", "780s",
+        "flock", "--wait", "600", "/run/hamn-retirement.lock",
+        "timeout", "--kill-after=5s", "600s", "python3", "-c", retirement_payload, NULL };
     if (ssh_exec(profile, ip, command, 0) != 0) {
         logerr("K3s retirement is incomplete; the next mutation will resume it");
         return -1;

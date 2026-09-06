@@ -76,9 +76,11 @@ class Retirement(unittest.TestCase):
                 # A verified legacy backup (without provenance) is also safe.
                 (entry / 'provenance.json').unlink()
                 r.recovery_identity(entry, payload)
-                def recovered(*args):
+                def recovered(*args, **kwargs):
                     import shutil
                     self.assertEqual(args[-2:], ('rollback', 'b' * 32))
+                    self.assertEqual(args[:4], ('flock', '--wait', '120', '/run/hamn-deployment.lock'))
+                    self.assertEqual(kwargs['timeout'], 190)
                     shutil.rmtree(entry)
                 run.side_effect = recovered
                 r.recover_deployment(payload)
@@ -155,7 +157,7 @@ class Retirement(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     r.recover_deployment()  # reported success without cleanup is rejected
                 self.assertEqual(run.call_args.args[-2:], ('rollback', 'a' * 32))
-                def recovered(*_args):
+                def recovered(*_args, **_kwargs):
                     phase.unlink()
                     entry.rmdir()
                 run.side_effect = recovered

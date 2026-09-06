@@ -14,6 +14,7 @@ import tempfile
 import termios
 import threading
 import time
+from terminal_screen import Screen
 
 binary = Path(os.environ.get('HAMN', 'target/debug/hamn')).resolve()
 
@@ -58,17 +59,21 @@ def exercise(action):
                 env=dict(os.environ, HOME=directory, KUBECONFIG=str(config), TERM='xterm-256color'),
                 start_new_session=True)
             output = bytearray()
+            screen = Screen(40, 160)
 
             def until(marker):
                 deadline = time.monotonic() + 10
-                while marker not in output:
+                while marker not in (output if marker.startswith(b"\x1b") else screen.text().encode()):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
                         raise AssertionError((action, marker, requests, bytes(output[-3000:])))
-                    output.extend(os.read(master, 65536))
+                    data = os.read(master, 65536)
+                    output.extend(data); screen.feed(data)
 
             try:
                 until(b'Hamn')
+                os.write(master, b'2\r')
+                until(b'k8s contexts list')
                 os.write(master, f':k8s pods {action} sample --context dev --namespace default\r'.encode())
                 until(b'detail-response-seen')
                 original = list(requests)
@@ -84,7 +89,7 @@ def exercise(action):
                 os.write(master, b'q')
                 until(b'\x1b[?1049l')
                 assert child.wait(timeout=5) == 0
-                assert not (Path(directory) / '.hamn').exists()
+                assert sorted(p.name for p in (Path(directory) / '.hamn').iterdir()) == ['tui.json']
             finally:
                 if child.poll() is None:
                     os.killpg(child.pid, signal.SIGKILL)

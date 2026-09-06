@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import termios
 import time
+from terminal_screen import Screen
 
 binary = Path(os.environ.get("HAMN", "target/debug/hamn")).resolve()
 
@@ -34,19 +35,24 @@ def exercise(exit_mode, command=None):
                                    env=dict(os.environ, HOME=directory, TERM="xterm-256color"),
                                    start_new_session=True)
         output = bytearray()
+        screen = Screen(40, 160)
 
         def until(marker):
             deadline = time.monotonic() + 10
-            while marker not in output:
+            while marker not in (output if marker.startswith(b"\x1b") else screen.text().encode()):
                 remaining = deadline - time.monotonic()
                 assert remaining > 0, (exit_mode, bytes(output))
                 ready, _, _ = select.select([master], [], [], remaining)
-                assert ready, (exit_mode, "TUI output deadline exceeded", bytes(output[-5000:]))
-                output.extend(os.read(master, 65536))
+                assert ready, (exit_mode, "TUI output deadline exceeded", screen.text())
+                data = os.read(master, 65536)
+                output.extend(data); screen.feed(data)
 
         try:
             until(b"Hamn")
             assert b"\x1b[?1049h" in output
+            if exit_mode != "panic":
+                os.write(master, b"1\r")
+                until(b"[Containers]")
             if exit_mode == "q":
                 os.write(master, b":contexts\r")
                 until(b"k8s contexts list")
@@ -68,8 +74,8 @@ def exercise(exit_mode, command=None):
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
                 os.kill(process.pid, signal.SIGWINCH)
                 os.write(master, b":contexts\r")
-                until(b"contexts")
-                assert not (Path(directory) / ".hamn").exists(), "hidden confirmation executed a mutation"
+                until(b"k8s contexts list")
+                assert sorted(p.name for p in (Path(directory) / ".hamn").iterdir()) == ["tui.json"], "hidden confirmation executed a mutation"
                 os.write(master, b"q")
             elif exit_mode == "interrupt":
                 os.write(master, b"\x03")
@@ -102,7 +108,7 @@ def exercise(exit_mode, command=None):
             until(b"\x1b[?1049l")
             assert process.wait(timeout=5) == (101 if exit_mode == "panic" else 0)
             assert terminal_settings(slave) == before, ("terminal settings were not restored", before, terminal_settings(slave), bytes(output[-3000:]))
-            assert not (Path(directory) / ".hamn").exists(), "TUI observation changed profile state"
+            assert not (Path(directory) / ".hamn").exists() or sorted(p.name for p in (Path(directory) / ".hamn").iterdir()) == ["tui.json"], "TUI observation changed profile state"
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
