@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fault-inject the embedded payload without root, a VM, or user state."""
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -14,6 +15,58 @@ spec.loader.exec_module(r)
 
 
 class Retirement(unittest.TestCase):
+    def test_completed_retirement_can_recover_same_contract_without_deleting_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            journal, transactions = root / 'journal', root / 'transactions'
+            journal.write_text('{"version":1,"stage":"complete"}')
+            entry = transactions / ('b' * 32)
+            helpers = entry / 'data/libexec_hamn'
+            helpers.mkdir(parents=True)
+            payload = {'helpers': {name: '# trusted ' + name for name in r.HELPERS}}
+            for name, content in payload['helpers'].items():
+                (helpers / name).write_text(content)
+            (entry / 'phase').write_text('ready\n')
+            sentinel = root / 'docker-volume'
+            sentinel.write_text('preserve')
+            identity = {'version': 1, 'retirement': json.loads(journal.read_text()),
+                        'helpers': {name: hashlib.sha256(content.encode()).hexdigest()
+                                    for name, content in payload['helpers'].items()}}
+            with patch.object(r, 'TRANSACTIONS', transactions), patch.object(r, 'JOURNAL', journal), \
+                 patch.object(r, 'safe', side_effect=Path), patch.object(r, 'run') as run:
+                (entry / 'provenance.json').write_text(json.dumps(identity))
+                r.recovery_identity(entry, payload)
+                for bad in ('different-contract', 'unfinished-retirement', 'retired-file', 'symlink'):
+                    with self.subTest(bad=bad):
+                        if bad == 'different-contract':
+                            (helpers / r.HELPERS[0]).write_text('altered')
+                        elif bad == 'unfinished-retirement':
+                            journal.write_text('{"version":1,"stage":"helpers"}')
+                        elif bad == 'retired-file':
+                            (helpers / 'configure-k3s').write_text('old')
+                        else:
+                            (helpers / 'outside').symlink_to(sentinel)
+                        with self.assertRaises(RuntimeError):
+                            r.recover_deployment(payload)
+                        run.assert_not_called()
+                        self.assertTrue(entry.exists())
+                        (helpers / r.HELPERS[0]).write_text(payload['helpers'][r.HELPERS[0]])
+                        journal.write_text(json.dumps(identity['retirement']))
+                        for name in ('configure-k3s', 'outside'):
+                            (helpers / name).unlink(missing_ok=True)
+                # A verified legacy backup (without provenance) is also safe.
+                (entry / 'provenance.json').unlink()
+                r.recovery_identity(entry, payload)
+                def recovered(*args):
+                    import shutil
+                    self.assertEqual(args[-2:], ('rollback', 'b' * 32))
+                    shutil.rmtree(entry)
+                run.side_effect = recovered
+                r.recover_deployment(payload)
+                r.recover_deployment(payload)
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(sentinel.read_text(), 'preserve')
+
     def test_embedded_helper_allowlist_includes_only_the_migration_contract(self):
         helpers = {name: '# fixed ' + name for name in r.HELPERS}
         self.assertEqual(set(helpers), {'verify-image-contract', 'guest-deployment-transaction', 'configure-docker'})
@@ -63,7 +116,7 @@ class Retirement(unittest.TestCase):
                     self.assertEqual(calls, list(range(failed_stage_saved, len(r.STAGES))))
                     calls.clear()
                     r.migrate({})
-                    self.assertEqual(calls, [5])  # readiness is always rechecked
+                    self.assertEqual(calls, [4, 5])  # refresh trusted helpers, then readiness
 
     def test_old_deployment_backup_is_recovered_before_retirement(self):
         with tempfile.TemporaryDirectory() as directory:

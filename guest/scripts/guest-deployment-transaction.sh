@@ -199,6 +199,20 @@ begin_transaction() {
             "$TRANSACTION/meta/$service.active" ||
             fail "cannot secure service metadata"
     done
+    python3 - "$ROOT" "$TRANSACTION" <<'PY' || fail "cannot record deployment provenance"
+import hashlib, json, os, pathlib, sys
+root, transaction = pathlib.Path(sys.argv[1] or '/'), pathlib.Path(sys.argv[2])
+journal = root / 'var/lib/hamn/k3s-retirement-v1.json'
+helpers = transaction / 'data/libexec_hamn'
+names = ('verify-image-contract', 'guest-deployment-transaction', 'configure-docker')
+value = {'version': 1, 'retirement': json.loads(journal.read_bytes()) if journal.exists() else None,
+         'helpers': {name: hashlib.sha256((helpers / name).read_bytes()).hexdigest()
+                     for name in names if (helpers / name).is_file()}}
+with (transaction / 'provenance.json').open('x') as output:
+    json.dump(value, output, sort_keys=True)
+    output.flush()
+    os.fsync(output.fileno())
+PY
     printf 'ready\n' >"$TRANSACTION/phase" ||
         fail "cannot complete transaction backup"
     chmod 0600 "$TRANSACTION/phase" || fail "cannot secure transaction phase"
