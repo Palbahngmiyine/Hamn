@@ -13,9 +13,11 @@ SOURCE=$ROOT
 ROOT=$WORK/repo
 mkdir -p "$ROOT/packaging/release"
 cp "$SOURCE/packaging/release/resolve-release-request.sh" "$ROOT/packaging/release/"
-for name in .release-please-manifest.json version.txt Makefile flake.nix; do
-    cp "$SOURCE/$name" "$ROOT/$name"
-done
+# Recovery fixtures must not depend on the checkout's current release version.
+printf '%s\n' '{".":"0.1.0"}' >"$ROOT/.release-please-manifest.json"
+printf '0.1.0\n' >"$ROOT/version.txt"
+printf 'VERSION ?= 0.1.0\n' >"$ROOT/Makefile"
+printf 'hamnVersion = "0.1.0"; # x-release-please-version\n' >"$ROOT/flake.nix"
 git -C "$ROOT" init -q
 git -C "$ROOT" add .
 git -C "$ROOT" -c user.name=Hamn-test -c user.email=test@example.invalid \
@@ -31,9 +33,9 @@ GITHUB_OUTPUT="$output" \
     bash "$ROOT/packaging/release/resolve-release-request.sh" >/dev/null
 for expected in \
     'should_release=true' \
-    'version=0.0.1' \
-    'stable_tag=v0.0.1' \
-    'candidate_tag=v0.0.1-rc.417123456' \
+    'version=0.1.0' \
+    'stable_tag=v0.1.0' \
+    'candidate_tag=v0.1.0-rc.417123456' \
     "commit=$commit"; do
     grep -Fxq "$expected" "$output"
 done
@@ -49,7 +51,7 @@ if GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/feature \
 fi
 grep -Fq 'release recovery must run from main' "$WORK/wrong-ref.err"
 
-git -C "$ROOT" tag v0.0.1
+git -C "$ROOT" tag v0.1.0
 : >"$output"
 if GITHUB_EVENT_NAME=workflow_dispatch GITHUB_REF=refs/heads/main \
     GITHUB_SHA="$commit" GITHUB_RUN_ID=417123456 GITHUB_OUTPUT="$output" \
