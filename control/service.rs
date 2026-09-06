@@ -27,6 +27,7 @@ pub async fn execute_stream(
             request,
         )?));
     }
+    let managed = request.words.first().is_some_and(|word| word == "vm") && request.mutates();
     let run = async {
         let mut migration_error = None;
         if request.mutates()
@@ -39,8 +40,14 @@ pub async fn execute_stream(
                 "vm create" | "vm start" | "vm migrate"
             )
         {
-            if let Err(error) = crate::migration::prepare(request.profile.as_deref().unwrap()).await
-            {
+            let migration = if managed {
+                let mut migrate = request.clone();
+                migrate.words = vec!["vm".into(), "migrate".into()];
+                core::call_control(&migrate, cancel, events.as_ref()).await
+            } else {
+                crate::migration::prepare(request.profile.as_deref().unwrap()).await
+            };
+            if let Err(error) = migration {
                 // A failed retirement must never prevent stopping the owned VM.
                 // Preserve the failure in the result; its pending marker remains.
                 migration_error = retirement_failure(&request.operation(), error)?;
@@ -59,13 +66,16 @@ pub async fn execute_stream(
         } else if request.words.first().is_some_and(|word| word == "k8s") {
             crate::kubernetes::execute(request, events.as_ref()).await
         } else {
-            let mut result = core::call(request).await?;
+            let mut result = if managed {
+                core::call_control(request, cancel, events.as_ref()).await?
+            } else { core::call(request).await? };
             if let Some(error) = migration_error {
                 result["migrationError"] = serde_json::json!(error);
             }
             Ok(result)
         }
     };
+    if managed { return run.await; }
     tokio::select! {
         _ = cancel.cancelled() => Err(Failure::new(if request.mutates() {"outcomeUnknown"} else {"cancelled"}, "operation cancelled")),
         result = tokio::time::timeout(std::time::Duration::from_secs(request.timeout), run) => {
