@@ -65,6 +65,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual
+          # libguestfs auto-selects passt when runner images preinstall it.
+          # Keep the QEMU SLIRP backend used by the appliance DNS contract.
+          sudo apt-get purge --yes passt
+          if command -v passt >/dev/null 2>&1; then
+            echo 'unexpected passt executable would override QEMU networking' >&2
+            exit 1
+          fi
           multiarch=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
           guestfs_supermin="/usr/lib/$multiarch/guestfs/supermin.d"
           [ -d "$guestfs_supermin" ] && [ ! -L "$guestfs_supermin" ]

@@ -119,6 +119,10 @@ The release workflow then:
 3. Verifies hosted attestations and hashes, then uploads the same candidate
    bytes to an immutable GitHub Release without rebuilding.
 
+The ephemeral Linux builder removes optional `passt` so libguestfs consistently
+uses QEMU SLIRP networking. Image assembly checks DNS with a 30-second deadline
+before package installation; runner-image networking changes must fail visibly.
+
 `make release-gate` takes `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, and an
 empty `OUTPUT_DIR`, plus the validator inputs above. Checkout must be clean
 and match the candidate source. It never rebuilds the RC. If source changes

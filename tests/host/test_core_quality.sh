@@ -328,6 +328,8 @@ for requirement in \
     '      contents: read' \
     '      id-token: write' \
     '            dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual' \
+    '          sudo apt-get purge --yes passt' \
+    '          if command -v passt >/dev/null 2>&1; then' \
     '            printf '\''dhcpcd-base\n'\'' | sudo tee -a "$guestfs_packages" >/dev/null' \
     '          printf '\''nameserver 169.254.2.3\n'\'' > "$resolver_overlay/etc/resolv.conf"' \
     '            "$guestfs_supermin/zz-hamn-resolver.tar.gz"' \

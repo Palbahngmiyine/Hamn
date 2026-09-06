@@ -111,6 +111,10 @@ Workflow는 다음 순서로 실행합니다.
 3. Hosted attestation과 해시를 검증한 뒤 후보를 다시 빌드하지 않고 같은 바이트를
    불변 GitHub Release에 게시합니다.
 
+임시 Linux builder에서 선택적 `passt`를 제거해 libguestfs가 QEMU SLIRP
+네트워크를 일관되게 사용하도록 합니다. 이미지 조립은 패키지 설치 전에 30초 제한으로
+DNS를 검사하며 runner 이미지의 네트워크 변경으로 발생한 실패를 숨기지 않습니다.
+
 `make release-gate`에는 `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, 빈
 `OUTPUT_DIR`와 위 검증기 입력이 필요합니다. Checkout은 깨끗해야 하며 후보 소스와
 같아야 합니다. RC를 다시 빌드하지 않습니다. 검증 후 소스가 바뀌면 새 후보를 만들고

@@ -188,12 +188,13 @@ awk -v expected="$EXPECTED_CLOCK_COMMAND" '
     $0 == "--run-command" {
         getline
         if ($0 == expected && clock == 0) clock = NR
+        if ($0 == "timeout 30 getent ahostsv4 ports.ubuntu.com") dns = NR
         next
     }
     $0 == "--install" { install = NR }
-    END { exit !(clock > 0 && install > clock) }
+    END { exit !(clock > 0 && dns > clock && install > dns) }
 ' "$VIRT_ARGUMENTS" || {
-    echo "FAIL: guest image builder did not set the source clock before package installation" >&2
+    echo "FAIL: guest image builder must set its clock and check DNS before package installation" >&2
     exit 1
 }
 
