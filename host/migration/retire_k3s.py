@@ -205,6 +205,26 @@ def remove_data():
             path.unlink()
 
 
+def backup_path(entry, path):
+    # configure-containerd installs precisely these distribution-owned CNI links.
+    # cp -a preserves the link itself; never follow arbitrary backup links.
+    relative = path.relative_to(entry)
+    plugins = {'bridge', 'firewall', 'host-local', 'loopback', 'portmap', 'tuning'}
+    if path.is_symlink() and relative.parent == Path('data/cni_bin') and path.name in plugins:
+        safe(path, leaf_link=True)
+        target = Path('/usr/lib/cni') / path.name
+        if os.readlink(path) != str(target):
+            raise RuntimeError(f'altered CNI backup link: {path}')
+        target = safe(target)
+        info = target.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o022 or not info.st_mode & 0o111:
+            raise RuntimeError(f'unsafe CNI executable: {target}')
+        return path
+    if path.is_symlink():
+        raise RuntimeError(f'unsafe deployment backup link: {path}')
+    return safe(path)
+
+
 def recovery_identity(entry, payload):
     """Only restore a complete, owned backup of the same deployment contract."""
     journal = json.loads(safe(JOURNAL).read_bytes()) if JOURNAL.exists() else None
@@ -214,9 +234,9 @@ def recovery_identity(entry, payload):
     # Validate the entire restore tree, including nested paths cp -a will visit.
     for directory, directories, files in os.walk(entry, followlinks=False):
         for name in directories + files:
-            path = safe(Path(directory) / name)
+            path = backup_path(entry, Path(directory) / name)
             info = path.lstat()
-            if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)):
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)):
                 raise RuntimeError('unsafe deployment backup entry')
     # Validate every item before rollback can replace any live file.
     directories = {'libexec_hamn', 'etc_hamn', 'docker_dropin', 'cni_bin'}

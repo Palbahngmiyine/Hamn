@@ -88,6 +88,38 @@ class Retirement(unittest.TestCase):
                 self.assertEqual(run.call_count, 1)
                 self.assertEqual(sentinel.read_text(), 'preserve')
 
+    def test_only_exact_distribution_cni_links_are_recoverable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            entry = Path(directory)
+            links = entry / 'data/cni_bin'
+            links.mkdir(parents=True)
+            binary = entry / 'binary'
+            binary.write_text('executable')
+            binary.chmod(0o755)
+            def owned(path, **kwargs):
+                if str(path).startswith('/usr/lib/cni/'):
+                    return binary
+                if Path(path).is_symlink() and not kwargs.get('leaf_link'):
+                    raise RuntimeError('unsafe link')
+                return Path(path)
+            with patch.object(r, 'safe', side_effect=owned):
+                for name in ('bridge', 'firewall', 'host-local', 'loopback', 'portmap', 'tuning'):
+                    link = links / name
+                    link.symlink_to('/usr/lib/cni/' + name)
+                    self.assertEqual(r.backup_path(entry, link), link)
+                    link.unlink()
+                    link.symlink_to('/var/lib/rancher/k3s/data/cni/' + name)
+                    with self.assertRaisesRegex(RuntimeError, 'altered CNI'):
+                        r.backup_path(entry, link)
+                    link.unlink()
+                (links / 'flannel').symlink_to('/usr/lib/cni/flannel')
+                with self.assertRaises(RuntimeError):
+                    r.backup_path(entry, links / 'flannel')
+                (links / 'bridge').symlink_to('/usr/lib/cni/bridge')
+                binary.chmod(0o777)
+                with self.assertRaisesRegex(RuntimeError, 'unsafe CNI executable'):
+                    r.backup_path(entry, links / 'bridge')
+
     def test_embedded_helper_allowlist_includes_only_the_migration_contract(self):
         helpers = {name: '# fixed ' + name for name in r.HELPERS}
         self.assertEqual(set(helpers), {'verify-image-contract', 'guest-deployment-transaction', 'configure-docker'})

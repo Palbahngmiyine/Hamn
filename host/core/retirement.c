@@ -93,7 +93,12 @@ int retirement_recover(const struct profile *profile, const char *ip)
         "flock", "--wait", "600", "/run/hamn-retirement.lock",
         "timeout", "--kill-after=5s", "600s", "python3", "-c", retirement_payload,
         "recover-only", NULL };
-    return ssh_exec(profile, ip, command, 0);
+    char reason[4096] = {0};
+    int truncated = 0;
+    int rc = ssh_exec_capture_checked(profile, ip, command, reason, sizeof(reason), &truncated);
+    if (rc != 0)
+        logerr("deployment recovery failed: %s%s", reason[0] ? reason : "guest connection or recovery interrupted", truncated ? " (truncated)" : "");
+    return rc;
 }
 
 int retirement_run(struct profile *profile, const char *ip)

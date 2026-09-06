@@ -143,12 +143,19 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     if has(&defaults, &["--all-namespaces", "-A"]) { target.push("all namespaces".into()); }
     Ok(Invocation { workspace, hamn_profile, args: defaults, target: if plugin { format!("Plugin-defined target / inherited CLI configuration {}", target.join("  ")) } else if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
 }
+pub fn toggle_all(invocation: &mut Invocation) {
+    let showing_all = invocation.args.iter().any(|s| s == "-a" || s == "--all" || s == "--all=true");
+    invocation.args.retain(|s| s != "-a" && s != "--all" && !s.starts_with("--all="));
+    if !showing_all { invocation.args.push("--all".into()); }
+}
 pub async fn query(invocation: &Invocation) -> Result<Value> {
     let mut command = invocation.command(true);
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true)
         .spawn().map_err(|e| Failure::new("cliUnavailable", format!("{}: {e}", invocation.program())))?;
     async fn read(reader: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
-        let mut bytes = Vec::new(); reader.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes).await?; Ok(bytes)
+        let mut bytes = Vec::new(); reader.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes).await?;
+        if bytes.len() > 16 * 1024 * 1024 { return Err(std::io::Error::other("CLI output exceeds 16 MiB")); }
+        Ok(bytes)
     }
     let stdout = child.stdout.take().unwrap(); let stderr = child.stderr.take().unwrap();
     let (status, out, err) = tokio::try_join!(child.wait(), read(stdout), read(stderr)).map_err(|e| Failure::new("cliError", e))?;
@@ -180,6 +187,12 @@ mod tests {
             assert_eq!(&invocation.args[..2], ["--context", "ui-selected"]);
             assert!(invocation.resource.is_none());
         }
+        let mut filtered = parse("ps -a --filter 'label=app=api'", &state).unwrap();
+        toggle_all(&mut filtered);
+        assert!(!filtered.args.iter().any(|s| s == "-a" || s == "--all"));
+        assert!(filtered.args.iter().any(|s| s == "label=app=api"));
+        toggle_all(&mut filtered);
+        assert_eq!(filtered.args.last().unwrap(), "--all");
         let invocation = parse("docker --host unix:///explicit ps -a", &state).unwrap();
         assert_eq!(invocation.args, ["--host", "unix:///explicit", "ps", "-a"]);
         assert_eq!(parse("docker context use external", &state).unwrap().args, ["context", "use", "external"]);

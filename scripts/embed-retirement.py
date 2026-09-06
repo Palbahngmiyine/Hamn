@@ -11,7 +11,7 @@ payload = {'unitSha256': hashlib.sha256(unit.read_bytes()).hexdigest(),
            'helpers': {name: (root / f'guest/scripts/{name}.sh').read_text()
                        for name in ('verify-image-contract', 'guest-deployment-transaction', 'configure-docker')}}
 script = (root / 'host/migration/retire_k3s.py').read_text()
-script += '\nmigrate(json.loads(' + repr(json.dumps(payload)) + '))\n'
+script += '\ntry:\n    migrate(json.loads(' + repr(json.dumps(payload)) + '))\nexcept Exception as error:\n    print(str(error)[-2048:], flush=True)\n    sys.exit(1)\n'
 # The SSH command argument stays well below macOS ARG_MAX including quoting.
 assert len(script.encode()) < 100000
 text = '/* Generated fixed retirement payload. */\nstatic const char retirement_payload[] =\n'

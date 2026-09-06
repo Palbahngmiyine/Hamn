@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 pub enum Workspace { Containers, Kubernetes }
 impl Workspace {
     pub fn index(self) -> usize { if self == Self::Containers { 0 } else { 1 } }
-    pub fn title(self) -> &'static str { if self == Self::Containers { "Containers" } else { "Kubernetes" } }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
