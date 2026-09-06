@@ -13,7 +13,8 @@ TUI는 초기값 `default`인 자체 선택을 유지합니다. 공개 API에는
 프로필 이름에는 영문자, 숫자, _, -만 쓸 수 있습니다. cache, ., ..은 유효한
 프로필 이름이 아닙니다.
 
-~/.hamn/<profile>/config.yaml만 지원되는 설정 파일입니다. 이 파일은 mode 0600으로
+`~/.hamn/<profile>/config.yaml`은 프로필 설정 파일입니다. TUI 기본 작업 영역은
+별도 `~/.hamn/tui.json`에 저장합니다. [TUI 환경설정](TUI.ko.md)을 참고하세요. 이 파일은 mode 0600으로
 atomic write됩니다. runtime=containerd 또는 runtime=hamn이 있는 legacy hamn.conf는
 fail closed합니다. Hamn은 legacy runtime data를 제자리에서 변환하지 않습니다.
 
@@ -28,7 +29,8 @@ hamn --headless vm start --profile work --yes
 `configure`는 정지된 프로필만 변경하며 기존 VM 디스크를 축소하지 않습니다.
 고급 설정은 VM이 정지된 상태에서 `~/.hamn/<profile>/config.yaml`을 편집하세요.
 리소스 설정 변경은 기존 마운트·Docker daemon 설정·Rosetta·provisioning hook을
-보존합니다. TUI는 임의 셸 명령이나 외부 편집기를 실행하지 않습니다.
+보존합니다. TUI의 `v` → `c`로 리소스 설정 명령을 편집할 수 있습니다.
+네이티브 `kubectl edit`는 내부 터미널에서 설치된 편집기를 실행합니다.
 
 ## YAML schema
 

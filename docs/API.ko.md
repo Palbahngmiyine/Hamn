@@ -1,7 +1,8 @@
 # 제어 API
 
-공개 인터페이스는 `hamn --headless <operation> [인자]`입니다. TUI도 같은 서비스를
-호출합니다. 기존 CLI·JSON 형식은 지원하지 않습니다.
+공개 인터페이스는 `hamn --headless <operation> [인자]`입니다. TUI VM 제어도 같은 서비스를
+호출합니다. 네이티브 Docker·kubectl 명령은 PTY를 통해 외부 CLI를 실행하며
+헤드리스 작업을 추가하지 않습니다.
 `hamn --headless capabilities`가 지원 작업과 변경 여부를 반환합니다.
 
 ## 응답 계약
@@ -20,9 +21,23 @@
 로그 응답은 최대 1 MiB입니다. `--tail`은 0–10000, 기본값은 200입니다.
 
 `--timeout`은 초 단위 제한 시간이며 기본값 600, 범위 1–3600입니다. Ctrl-C·SIGTERM은
-취소를 요청합니다. 변경 작업의 취소·시간 초과는 `outcomeUnknown`을 반환합니다.
+취소를 요청합니다. 전달 후 취소한 외부 변경은 `outcomeUnknown`을 반환할 수 있습니다.
+매니지드 VM 취소는 정리를 기다리고 복구가 확인된 경우에만 `cancelled`로 표시합니다.
 서버가 이미 변경을 반영했을 수 있으므로 재시도 전에 대상 상태를 조회하세요.
 Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
+
+## VM 준비 상태와 작업 기록
+
+기존 VM 상태 필드를 유지하며 `dockerStatus`(`ready`, `preparing`, `unavailable`,
+`recoveryRequired`)와 `lastOperation`(기록이 없으면 null)을 추가합니다.
+`state:running`은 VM 프로세스 상태이며 `ready`에는 Docker `/_ping` 확인이 필요합니다.
+`lastOperation`에는 `schemaVersion`, `operationId`, `operation`, `status`, `phase`,
+`startedVm`, `exitCode`, `error`가 포함됩니다. 실행 중에는 종료·오류 필드가 없을 수 있습니다.
+소유권은 PID·프로세스 시작 시각·실행 파일 UUID를 함께 검사하며 PID만 신뢰하지 않습니다.
+완료·실패·취소·결과 불명 상태는 사용자 전용 원자적 파일
+`~/.hamn/<profile>/operation.json`에 남습니다. 소유 프로세스가 사라진 실행 기록은
+`outcomeUnknown`·`recoveryRequired`로 표시합니다. 화면 이동은 작업을 취소하지 않으며
+종료 확인 후 취소와 정리를 기다립니다. 결과가 불명이면 재시도 전에 상태를 확인하세요.
 
 ## 지원 작업
 
@@ -49,7 +64,8 @@ Kubernetes는 context 목록을 제외하고 `--context`가 필요합니다. 네
 객체에 대한 조작을 방지합니다. 스케일에는 `--replicas`가 필요하고 0도 허용합니다.
 Pod 로그에는 `--container`·`--previous`를 사용할 수 있습니다.
 
-모든 변경에는 `--yes`가 필요하며 TUI는 확인 후 이를 전달합니다. 변경에는
+모든 헤드리스 변경에는 `--yes`가 필요하며 TUI VM 제어는 확인 후 이를 전달합니다.
+입력한 네이티브 CLI 명령은 자체 확인·출력 의미를 유지합니다. 변경에는
 `--watch`, `--follow`, `--all-namespaces`를 사용할 수 없습니다.
 
 ## 연결과 소유권
