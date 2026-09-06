@@ -94,3 +94,26 @@ Internal worker dispatch runs before terminal or asynchronous runtime setup.
 Keep C process-global state and fork/exit behavior in the worker. TUI exit
 must not terminate the independently owned VM supervisor. When changing an
 interface, update English and Korean references and success/failure tests.
+
+## Workspace integration on Apple Silicon
+
+Run deterministic TUI/guest checks with `make test-control` and
+`make test-guest-deployment`, and the local release regression with
+`make test-local-macos`. Keep HEAD fixed throughout the latter: artifact tests
+bind the candidate to the source tree at their start.
+
+For real VM, Docker, Compose, buildx, and disposable kind/Kubernetes validation:
+
+```sh
+python3 tests/host/test_workspace_live.py --binary build/hamn --cache "$HOME/.hamn/cache"
+```
+
+Install Docker CLI, its Compose/buildx plugins, kubectl, and kind first. The cache
+must contain the selected signed guest image and verification marker. The harness
+creates an owned `/tmp` HOME, uses only its explicit Docker socket, and records
+binary/image hashes and results there. It checks backup/socket recovery, data
+preservation, cancellation/forced worker exit, native PTY commands, and Kubernetes
+apply/exec/port-forward. It deletes the kind cluster and stops its VMs; the test
+HOME remains available for inspection. `--root` resumes only an owned test root;
+`--keep-running` retains the main test VM for additional diagnosis. Remove that
+owned test directory after reviewing evidence. Never use a user profile as a fixture.

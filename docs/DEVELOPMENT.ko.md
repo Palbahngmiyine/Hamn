@@ -91,3 +91,24 @@ packaging/release/physical-e2e.sh --help
 fork/exit 동작은 worker에 격리합니다. TUI 종료가 별도 소유 VM supervisor를
 종료하면 안 됩니다. 인터페이스 변경 시 영문·한국어 문서와 성공·실패 테스트를
 함께 갱신합니다.
+
+## Apple Silicon 작업 영역 통합 검증
+
+결정적 TUI·게스트 검증은 `make test-control`, `make test-guest-deployment`,
+로컬 릴리스 회귀 검증은 `make test-local-macos`로 실행합니다. 마지막 명령을
+실행하는 동안 HEAD를 고정하세요. 아티팩트 테스트는 시작 시 소스 트리에 후보를 연결합니다.
+
+실제 VM·Docker·Compose·buildx·폐기용 kind/Kubernetes 검증 명령입니다.
+
+```sh
+python3 tests/host/test_workspace_live.py --binary build/hamn --cache "$HOME/.hamn/cache"
+```
+
+Docker CLI·Compose/buildx 플러그인·kubectl·kind를 먼저 설치합니다. 캐시에는 선택한
+서명된 게스트 이미지와 검증 마커가 필요합니다. 검증기는 `/tmp`에 소유권을 기록한
+HOME을 만들고 그 환경의 명시적 Docker 소켓만 사용하며 실행 파일·이미지 해시와 결과를
+저장합니다. 백업·소켓 복구, 데이터 보존, 취소·worker 강제 종료, 네이티브 PTY 명령,
+Kubernetes apply·exec·port-forward를 확인합니다. kind 클러스터를 삭제하고 테스트 VM을
+정지하며 HOME은 검사할 수 있게 남깁니다. `--root`는 소유한 테스트 환경만 재사용하고
+`--keep-running`은 추가 진단을 위해 주 테스트 VM을 유지합니다. 증거 확인 후 해당
+테스트 디렉터리를 정리하세요. 사용자 프로필을 테스트 fixture로 쓰면 안 됩니다.

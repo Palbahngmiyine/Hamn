@@ -34,6 +34,8 @@ elif 'exec' in args:
     data = b''
     while len(data) < 2: data += os.read(0, 2 - len(data))
     print('DETACH_BYTES:' + data.hex(), flush=True)
+elif 'context' in args:
+    print(json.dumps({'Name':'external','DockerEndpoint':'unix:///external/docker.sock','Current':True}))
 elif 'get' in args:
     print(json.dumps({'items':[{'metadata':{'name':'fixture-pod','namespace':'test','uid':'uid1'}}]}))
 else:
@@ -50,7 +52,7 @@ else:
         'clusters':[{'name':'dev','cluster':{'server':'http://127.0.0.1:1'}}]}))
     env = dict(os.environ, HOME=directory, PATH=f'{tools}:/usr/bin:/bin', TERM='xterm-256color',
                KUBECONFIG=str(config), CLI_RECORD=str(root / 'calls'))
-    def run(saved=False):
+    def run(saved=False, terminate_cli=False):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 140, 0, 0))
         before = termios.tcgetattr(slave)
@@ -71,6 +73,11 @@ else:
                 until(b'fixture-pod')
                 assert b'Choose your default' not in output
                 assert b'Hamn profile' not in output and b'VM settings' not in output
+                if terminate_cli:
+                    send(b':docker exec -it fixture-container sh\r', b'INPUT_READY')
+                    if terminate_cli == 'exited':
+                        send(b'xy', b'DETACH_BYTES:7879'); until(b'Exit code 0')
+                    os.kill(child.pid, signal.SIGTERM)
             else:
                 until(b'Choose your default workspace')
                 assert not (root / '.hamn').exists()
@@ -78,6 +85,10 @@ else:
                 prefs = root / '.hamn/tui.json'
                 assert json.loads(prefs.read_text()) == {'version':1,'defaultWorkspace':'containers'}
                 assert prefs.stat().st_mode & 0o777 == 0o600
+                send(b'e', b'external')
+                send(b'\r', b'Docker context external')
+                until(b'fixture-container')
+                os.write(master, b'v')
                 send(b':docker ps -q\r', b'RAW_OUTPUT')
                 until(b'Exit code 7')
                 send(b'\r', b'fixture-container')
@@ -92,7 +103,7 @@ else:
                 send(b',', b'Choose the workspace')
                 send(b'2\r', b'fixture-pod')
                 assert json.loads(prefs.read_text())['defaultWorkspace'] == 'kubernetes'
-            os.write(master, b'q')
+            if not terminate_cli: os.write(master, b'q')
             assert child.wait(timeout=5) == 0
             after = termios.tcgetattr(slave)
             for modes in (before, after): modes[3] &= ~getattr(termios, 'PENDIN', 0)
@@ -109,4 +120,6 @@ else:
     assert [args for _, args in calls if 'hamnfixture' in args] == [['hamnfixture', '--custom-option', 'value']], calls
     assert all('--format' not in args for _, args in calls if '-q' in args or 'exec' in args)
     assert sorted(p.name for p in (root / '.hamn').iterdir()) == ['tui.json'], 'TUI entry created VM state'
+    run(saved=True, terminate_cli=True)
+    run(saved=True, terminate_cli='exited')
 print('PASS: workspace persistence, isolated scopes, native output, PTY input/detach and exact-once CLI dispatch')

@@ -101,6 +101,7 @@ impl Job {
         } else { self.start(state.request.clone(), state); }
     }
     fn start_query(&mut self, invocation: Option<crate::native::Invocation>, state: &mut State) {
+        let docker_config = state.docker_config.clone();
         self.cancel(state);
         self.cancel = CancellationToken::new();
         let generation = self.generation;
@@ -120,7 +121,7 @@ impl Job {
                             result
                         } else { crate::native::query(&invocation).await }
                     },
-                    None => crate::environments::containers().await,
+                    None => crate::environments::containers(docker_config.as_deref()).await,
                 }} => result,
             };
             let _ = sender.send((generation, true, result)).await;
@@ -197,13 +198,25 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         let replies = std::mem::take(&mut session.parser.callbacks_mut().0);
                         if !replies.is_empty() { let _ = session.write(&replies).await; }
                     },
-                    Ok(TerminalEvent::Exited(code)) => state.message = format!("CLI exit code {code}; Enter returns to the list"),
+                    Ok(TerminalEvent::Exited(code)) => {
+                        if exit_after_cancel {
+                            cli.take();
+                            if mutation_job.mutation.is_none() { break; }
+                        }
+                        state.message = format!("CLI exit code {code}; Enter returns to the list");
+                    },
                     Ok(TerminalEvent::Ended) => {},
                     Err(error) => { state.message = error.to_string(); cli.take(); job.refresh(&mut state); },
                 }
             },
             _ = terminate.recv() => {
-                if let Some(session) = &mut cli { let _ = session.signal(libc::SIGTERM); continue; }
+                if let Some(session) = &mut cli {
+                    let completed = session.exit.is_some();
+                    let _ = session.signal(libc::SIGTERM);
+                    mutation_job.cancel.cancel(); exit_after_cancel = true;
+                    if completed { cli.take(); if mutation_job.mutation.is_none() { break; } }
+                    continue;
+                }
                 if mutation_job.mutation.is_none() { break; }
                 mutation_job.cancel.cancel(); exit_after_cancel = true;
             },
@@ -256,7 +269,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         }
                     }
                     if finished && state.native.is_some() {
-                        state.connection_status = if result.is_ok() { "Available" } else if state.workspace == Workspace::Containers && state.docker_context.is_none() { "Connection failed; e environments, v VM controls" } else { "Connection failed; e selects the connection target" }.into();
+                        state.connection_status = if result.is_ok() { "Available" } else if state.hamn_environment() { "Connection failed; e environments, v VM controls" } else { "Connection failed; e selects the connection target" }.into();
                     }
                     state.accept(result);
                 }
@@ -291,6 +304,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     }
                     continue;
                 }
+                if exit_after_cancel { continue; }
                 if let Event::Paste(text) = &event {
                     if let Some((_, input)) = state.input.as_mut() { input.push_str(text); }
                     continue;
@@ -430,7 +444,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             state.input = Some((':', format!("vm configure --profile {} --cpu {} --memory {} --disk {}", row["name"].as_str().unwrap_or("default"), row["cpus"], row["memoryMiB"].as_u64().unwrap_or(4096) / 1024, row["diskGiB"])));
                         }
                     },
-                    KeyCode::Char('v') if state.workspace == Workspace::Containers && state.docker_context.is_none() => {
+                    KeyCode::Char('v') if state.hamn_environment() => {
                         state.save_browser(); state.native = None; state.environment_picker = false;
                         let request = state.view("vm"); job.dispatch(request, &mut state);
                     },

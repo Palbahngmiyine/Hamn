@@ -133,6 +133,10 @@ impl State {
         }
         state
     }
+    pub fn hamn_environment(&self) -> bool {
+        self.workspace == Workspace::Containers && self.docker_context.is_none() &&
+            self.native.as_ref().is_none_or(|command| command.hamn_profile.is_some())
+    }
     pub fn save_browser(&mut self) {
         if self.native.is_some() {
             self.browser = Some(Browser { native: self.native.clone(), data: self.data.clone(), selected: self.selected, filter: self.filter.clone(), scroll: self.scroll });
@@ -509,8 +513,9 @@ pub fn draw(frame: &mut Frame, state: &State) {
     }
     let header = match state.workspace {
         Workspace::Containers => format!("Hamn | [Containers]   Kubernetes   Tab switch   , settings\nEnvironment: {}\n{}",
-            state.docker_context.as_ref().map(|c| format!("Docker context {c}")).unwrap_or_else(|| format!("Hamn profile {}", state.request.profile.as_deref().unwrap_or("default"))),
-            if state.docker_context.is_none() { "e environments   v VM settings   a running/all" } else { "e environments   a running/all" }),
+            if state.hamn_environment() { format!("Hamn profile {}", state.request.profile.as_deref().unwrap_or("default")) }
+            else { state.docker_context.as_ref().map(|c| format!("Docker context {c}")).unwrap_or_else(|| "Explicit Docker CLI target".into()) },
+            if state.hamn_environment() { "e environments   v VM settings   a running/all" } else { "e environments   a running/all" }),
         Workspace::Kubernetes => format!("Hamn | Containers   [Kubernetes]   Tab switch   , settings\nContext: {}   Namespace: {}\ne contexts   n namespaces",
             state.request.context.as_deref().unwrap_or("choose a context"),
             if state.request.all_namespaces { "all namespaces" } else { state.request.namespace.as_deref().unwrap_or("default") }),
@@ -695,6 +700,19 @@ mod tests {
         assert_eq!(state.request.context, previous);
     }
 
+    #[test]
+    fn explicit_external_query_hides_hamn_controls_without_changing_ui_default() {
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("docker --context external ps", &state).unwrap());
+        assert!(!state.hamn_environment());
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let text = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>();
+        assert!(!text.contains("Hamn profile")); assert!(!text.contains("v VM settings"));
+        assert!(text.contains("--context external"));
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        assert!(state.hamn_environment());
+    }
     #[test]
     fn runtime_panel_restores_browser_query_selection_and_filter() {
         let mut state = State::new(Request::default());

@@ -106,3 +106,26 @@ def cancellation(root, runtime):
         if child.poll() is None: child.terminate(); child.wait(timeout=15)
     (root / 'cancellation-results.json').write_text(json.dumps(results, indent=2))
     print('PASS: forced worker death retains outcomeUnknown; retry repairs without terminating the existing VM', flush=True)
+
+
+def owned_start_cancellation(root, runtime):
+    profile = 'cancel-owned'
+    path = runtime.home / '.hamn' / profile / 'operation.json'
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    previous = json.loads(path.read_text()).get('operationId') if path.exists() else None
+    child = subprocess.Popen([runtime.binary, '--headless', 'vm', 'start', '--profile', profile,
+        '--cpu', '2', '--memory', '2', '--disk', '60', '--yes'], env=runtime.environment,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        wait_record(path, lambda value: value.get('operationId') != previous and value.get('startedVm') is True, timeout=180)
+        child.send_signal(signal.SIGINT)
+        stdout, stderr = child.communicate(timeout=180)
+        status = runtime.call('vm', 'status', profile=profile)
+        assert status['state'] == 'stopped', status
+        assert status['lastOperation']['status'] == 'cancelled', status
+        (root / 'owned-cancel-result.json').write_text(json.dumps(status, indent=2))
+        print('PASS: cancelled start stops only its newly created VM', flush=True)
+    finally:
+        if child.poll() is None:
+            child.send_signal(signal.SIGINT); child.communicate(timeout=180)
+        runtime.stop([profile])

@@ -1,10 +1,12 @@
 use crate::{core, model::{Request, Result}, native::{self, Invocation}, preferences::Workspace};
 use serde_json::{Value, json};
 
-pub async fn containers() -> Result<Value> {
+pub async fn containers(config: Option<&str>) -> Result<Value> {
     let profile_query = Request { words: vec!["vm".into(), "list".into()], timeout: 30, ..Default::default() };
     let profiles = core::call(&profile_query);
-    let context_query = Invocation { workspace: Workspace::Containers, args: vec!["context".into(), "ls".into()],
+    let mut args = config.map(|path| vec!["--config".into(), path.into()]).unwrap_or_default();
+    args.extend(["context".into(), "ls".into()]);
+    let context_query = Invocation { workspace: Workspace::Containers, args,
         hamn_profile: None, resource: Some("contexts".into()), target: "Docker configuration".into(), reset_selection: false };
     let (profiles, contexts) = tokio::join!(profiles, native::query(&context_query));
     let mut rows = Vec::new();

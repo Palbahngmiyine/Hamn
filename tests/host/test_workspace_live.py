@@ -33,16 +33,21 @@ def prepare(binary, cache, existing):
         target.mkdir(parents=True, mode=0o700)
         manifest = json.loads((cache / 'guest-image.json').read_text())
         # Copy only the selected, locally verified signed cache; start verifies it again.
-        images = list(cache.glob('hamn-guest-*.img.verified'))
-        assert len(images) == 1, 'provide a cache containing one signed guest image'
-        image = Path(str(images[0])[:-len('.verified')])
-        for source in (image, images[0], cache / 'guest-image.json'):
+        expected = manifest['sha256']
+        assert len(expected) == 64 and all(c in '0123456789abcdef' for c in expected)
+        image = cache / ('hamn-guest-' + expected + '.img')
+        marker = image.with_suffix('.img.verified')
+        assert manifest['file'] == image.name and digest(image) == expected and marker.is_file()
+        for source in (image, marker, cache / 'guest-image.json'):
             run(['/bin/cp', '-c', source, target / source.name])
         owner = {'owner':'Codex workspace integration test', 'workspace':str(REPO),
                  'profile':'verify', 'home':str(home), 'guestImageSha256':digest(image)}
         (root / 'ownership.json').write_text(json.dumps(owner, indent=2))
-    (root / 'binary-sha256.txt').write_text(digest(binary) + '\n')
-    runtime = Runtime(binary, root / 'home', shutil.which('docker'))
+    frozen = root / 'hamn-under-test'
+    if binary.resolve() != frozen.resolve(): shutil.copy2(binary, frozen)
+    assert digest(binary) == digest(frozen)
+    (root / 'binary-sha256.txt').write_text(digest(frozen) + '\n')
+    runtime = Runtime(frozen, root / 'home', shutil.which('docker'))
     runtime.environment['PATH'] = '/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
     runtime.environment['TERM'] = 'xterm-256color'
     docker_config = runtime.home / '.docker'
@@ -129,9 +134,10 @@ def main():
         runtime.call('vm', 'start', profile='verify', yes=True, cpu=4, memory=6, disk=60)
         recovery(root, runtime)
         cli_extensions(root, runtime)
-        from workspace_live_cancellation import cancellation
+        from workspace_live_cancellation import cancellation, owned_start_cancellation
         from workspace_live_kubernetes import kubernetes
         cancellation(root, runtime)
+        owned_start_cancellation(root, runtime)
         kubernetes(root, runtime)
     finally:
         if not args.keep_running: runtime.stop(['verify'])
