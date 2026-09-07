@@ -33,6 +33,21 @@ fn uncertain(request: &Request) -> Value {
         "message":"The operation may have changed the target. Inspect it before retrying; cancellation does not undo changes."})
 }
 
+fn mutation_progress<'a>(request: &Request, state: &'a mut State, other: &'a mut State) -> &'a mut State {
+    let owner = if request.words.first().is_some_and(|w| w == "k8s") { Workspace::Kubernetes } else { Workspace::Containers };
+    if state.workspace == owner { state } else { other }
+}
+
+fn write_outcomes(mut output: impl std::io::Write, states: &[&State]) -> std::io::Result<()> {
+    for state in states {
+        if !state.operation_status.is_empty() {
+            writeln!(output, "{}", serde_json::json!({"operationStatus":state.operation_status}))?;
+        }
+        for outcome in &state.uncertain { writeln!(output, "{outcome}")?; }
+    }
+    Ok(())
+}
+
 impl Drop for Job {
     fn drop(&mut self) {
         self.cancel.cancel();
@@ -47,6 +62,34 @@ impl Drop for Job {
 }
 
 impl Job {
+    // Normal completion and shutdown draining must consume the same result.
+    // A successful stop may carry an unresolved earlier retirement operation.
+    fn finish_mutation(&mut self, result: Result<Value>, state: &mut State, other: &mut State) {
+        let Some(request) = self.mutation.take() else { return; };
+        let progress = mutation_progress(&request, state, other);
+        let mut failed_request = request.clone();
+        let (status, error) = match result {
+            Ok(value) => match value.get("migrationError") {
+                Some(warning) => {
+                    let error = serde_json::from_value::<crate::model::Failure>(warning.clone())
+                        .unwrap_or_else(|_| crate::model::Failure::new("coreProtocol", format!("Invalid retirement result: {warning}")));
+                    failed_request.words = vec!["vm".into(), "migrate".into()];
+                    (format!("{} completed; vm migrate (profile {}): {}: {}", request.operation(),
+                        request.profile.as_deref().unwrap_or("default"), error.code, error.message), Some(error))
+                },
+                None => ("Operation completed".into(), None),
+            },
+            Err(error) => (format!("{}: {}", error.code, error.message), Some(error)),
+        };
+        if let Some(error) = error.filter(|e| e.code == "outcomeUnknown") {
+            let mut outcome = uncertain(&failed_request);
+            outcome["error"] = serde_json::json!(error);
+            progress.uncertain.push(outcome);
+        }
+        progress.operation_log.push_str(&format!("\n{status}\n"));
+        progress.operation_status = status;
+    }
+
     fn cancel(&mut self, state: &mut State) {
         if self.mutation.is_some() { return; }
         self.cancel.cancel();
@@ -227,23 +270,15 @@ pub async fn run(request: Request) -> std::io::Result<()> {
             },
             Some((generation, finished, result)) = mutation_responses.recv() => {
                 if generation == mutation_job.generation {
-                    let owner = if mutation_job.mutation.as_ref().is_some_and(|r| r.words.first().is_some_and(|w| w == "k8s")) { Workspace::Kubernetes } else { Workspace::Containers };
                     if finished { state.quit_confirmation = false; }
-                    let progress = if state.workspace == owner { &mut state } else { &mut other };
                     if finished {
-                        if let Some(request) = mutation_job.mutation.take() {
-                            if result.as_ref().is_err_and(|e| e.code == "outcomeUnknown") {
-                                progress.uncertain.push(uncertain(&request));
-                            }
-                        }
-                        progress.operation_status = match &result {
-                            Ok(_) => "Operation completed".into(),
-                            Err(e) => format!("{}: {}", e.code, e.message),
-                        };
+                        mutation_job.finish_mutation(result, &mut state, &mut other);
                         if let Some(task) = mutation_job.task.take() { let _ = task.await; }
                         if exit_after_cancel { break; }
                         job.refresh(&mut state);
                     } else if let Ok(event) = result {
+                        let Some(request) = mutation_job.mutation.as_ref() else { continue; };
+                        let progress = mutation_progress(request, &mut state, &mut other);
                         let text = event["text"].as_str().unwrap_or_default();
                         progress.operation_log.push_str(text);
                         if progress.operation_log.len() > 1024 * 1024 {
@@ -519,26 +554,97 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         // Keep draining progress so the worker can finish rollback before exit.
         while let Some((_, finished, result)) = mutation_responses.recv().await {
             if finished {
-                if let Some(request) = mutation_job.mutation.take() {
-                    if result.as_ref().is_err_and(|e| e.code == "outcomeUnknown") {
-                        state.uncertain.push(uncertain(&request));
-                    }
-                }
+                mutation_job.finish_mutation(result, &mut state, &mut other);
                 break;
             }
         }
     }
     if let Some(task) = mutation_job.task.take() { let _ = task.await; }
     drop(_restore);
-    for outcome in state.uncertain.iter().chain(&other.uncertain) {
-        eprintln!("{outcome}");
-    }
+    write_outcomes(std::io::stderr().lock(), &[&state, &other])?;
     match draw_error { Some(error) => Err(error), None => Ok(()) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn successful_stop_retains_retirement_warning_in_owner_screen_and_exit_output() {
+        for hidden in [false, true] {
+            for code in ["outcomeUnknown", "operationFailed"] {
+                let request = Request { words: vec!["vm".into(), "stop".into()],
+                    profile: Some("owned-original".into()), ..Default::default() };
+                let (sender, _receiver) = mpsc::channel(1);
+                let mut job = Job { generation: 3, cancel: CancellationToken::new(),
+                    task: None, sender, mutation: Some(request) };
+                let mut state = State::new(Default::default());
+                let mut other = State::new(Default::default());
+                other.workspace = Workspace::Kubernetes;
+                // UI selection can change while the operation runs.
+                state.request.profile = Some("new-selection".into());
+                if hidden { std::mem::swap(&mut state, &mut other); }
+                job.finish_mutation(Ok(serde_json::json!({"state":"stopped",
+                    "migrationError":{"code":code,"message":"retirement reconnect diagnostic"}})), &mut state, &mut other);
+                assert!(job.mutation.is_none());
+                let (owner, unrelated) = if hidden { (&other, &state) } else { (&state, &other) };
+                assert!(unrelated.operation_status.is_empty() && unrelated.uncertain.is_empty());
+                assert!(owner.operation_status.starts_with("vm stop completed; vm migrate (profile owned-original):"));
+                assert!(owner.operation_log.contains("retirement reconnect diagnostic"));
+                assert_eq!(owner.uncertain.len(), usize::from(code == "outcomeUnknown"));
+                if code == "outcomeUnknown" {
+                    assert_eq!(owner.uncertain[0]["operation"], "vm migrate");
+                    assert_eq!(owner.uncertain[0]["target"]["profile"], "owned-original");
+                    assert_eq!(owner.uncertain[0]["error"]["message"], "retirement reconnect diagnostic");
+                }
+                let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(180, 40)).unwrap();
+                terminal.draw(|frame| tui_state::draw(frame, owner)).unwrap();
+                let rendered: String = terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
+                assert!(rendered.contains("vm stop completed; vm migrate (profile owned-original)"), "{rendered}");
+                assert!(rendered.contains("retirement reconnect diagnostic"), "{rendered}");
+                let status = owner.operation_status.clone();
+                // Both the ordinary receiver and cancellation drain use this
+                // consuming method. A duplicate result cannot erase the warning.
+                job.finish_mutation(Ok(Value::Null), &mut state, &mut other);
+                assert_eq!(if hidden { &other } else { &state }.operation_status, status);
+                let mut output = Vec::new();
+                write_outcomes(&mut output, &[&state, &other]).unwrap();
+                let output = String::from_utf8(output).unwrap();
+                assert!(output.contains("owned-original") && output.contains(code) && output.contains("retirement reconnect diagnostic"));
+                assert_eq!(output.lines().count(), if code == "outcomeUnknown" { 2 } else { 1 });
+            }
+        }
+    }
+
+    #[test]
+    fn final_outcomes_distinguish_success_known_failure_unknown_and_invalid_warning() {
+        for (result, expected_code, count) in [
+            (Ok(Value::Null), "Operation completed", 0),
+            (Err(crate::model::Failure::new("cancelled", "before dispatch")), "cancelled", 0),
+            (Err(crate::model::Failure::new("outcomeUnknown", "request accepted\nresult lost")), "outcomeUnknown", 1),
+            (Ok(serde_json::json!({"migrationError":"invalid"})), "coreProtocol", 0),
+        ] {
+            let request = Request { words: vec!["k8s".into(), "pods".into(), "delete".into()],
+                context: Some("owned-cluster".into()), name: Some("sample".into()), ..Default::default() };
+            let (sender, _receiver) = mpsc::channel(1);
+            let mut job = Job { generation: 1, cancel: CancellationToken::new(), task: None, sender, mutation: Some(request) };
+            let mut state = State::new(Default::default());
+            let mut other = State::new(Default::default());
+            other.workspace = Workspace::Kubernetes;
+            job.finish_mutation(result, &mut state, &mut other);
+            assert!(state.operation_status.is_empty());
+            assert!(other.operation_status.contains(expected_code));
+            assert_eq!(other.uncertain.len(), count);
+            let mut output = Vec::new();
+            write_outcomes(&mut output, &[&state, &other]).unwrap();
+            let lines: Vec<Value> = String::from_utf8(output).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(lines.len(), 1 + count);
+            if count > 0 {
+                assert_eq!(lines[1]["target"]["context"], "owned-cluster");
+                assert_eq!(lines[1]["error"]["message"], "request accepted\nresult lost");
+            }
+        }
+    }
+
     #[test]
     fn navigation_cannot_cancel_or_replace_a_mutation() {
         let request = Request { words: vec!["vm".into(), "start".into()],

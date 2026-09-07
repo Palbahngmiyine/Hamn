@@ -47,6 +47,11 @@ retry start once; this handoff does not claim VM readiness or clear an earlier
 Navigation does not cancel managed work; confirmed quit requests cancellation
 and waits for cleanup. Unknown outcomes require inspection before retry.
 
+`vm stop` may succeed after its preliminary retirement failed. In that case,
+`data.migrationError` retains the earlier `{code,message}` while the stop response
+remains successful. Inspect this field separately from the stop result and the
+latest operation record, which may now describe the completed stop.
+
 ## Operations
 
 | Family | Operations |
