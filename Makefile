@@ -189,6 +189,8 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(B
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_navigation.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_workspaces.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_native_regressions.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui_tls_target.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui_backpressure.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_guarded_delete.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py
 	python3 tests/host/test_k3s_retirement.py

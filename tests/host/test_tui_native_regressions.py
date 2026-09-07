@@ -178,6 +178,34 @@ def native_events_is_not_rewritten(prefix):
         harness.close()
 
 
+def installed_plugins_own_alias_names(prefix, alias):
+    harness = Harness('kubernetes')
+    try:
+        harness.until('old-target-row')
+        plugin = harness.root / 'bin' / ('kubectl-' + alias)
+        plugin.write_text(f'#!{sys.executable}\n' + '''import json, os, sys
+from pathlib import Path
+Path(os.environ['FIXTURE_ROOT'], 'plugin-call').write_text(json.dumps(sys.argv[1:]))
+print('PLUGIN_RAN', flush=True)
+''')
+        plugin.chmod(0o755)
+        kubectl = harness.root / 'bin/kubectl'
+        original = kubectl.read_text()
+        dispatch = f'''if args and args[0] == {alias!r}:
+    plugin = root / 'bin' / {plugin.name!r}
+    os.execv(str(plugin), [str(plugin)] + args[1:])
+elif 'config' in args:'''
+        kubectl.write_text(original.replace("if 'config' in args:", dispatch))
+        harness.send(f':{prefix}{alias} review-space\r'.encode(), 'PLUGIN_RAN')
+        harness.until('Exit code 0')
+        assert json.loads((harness.root / 'plugin-call').read_text()) == ['review-space']
+        calls = [args for _, args in harness.calls() if 'review-space' in args]
+        assert calls == [[alias, 'review-space']], calls
+        assert 'Plugin-defined target' in harness.screen.text()
+    finally:
+        harness.close()
+
+
 if __name__ == '__main__':
     for workspace, command in [('kubernetes', 'kubectl config use-context new-cluster'),
                                ('containers', 'docker context use external')]:
@@ -186,4 +214,6 @@ if __name__ == '__main__':
         docker_list_options_do_not_become_action_connections(option, row)
     for prefix in ('kubectl ', ''):
         native_events_is_not_rewritten(prefix)
-    print('PASS: changed targets discard old rows; Docker action flags and native events preserve CLI semantics')
+        for alias in ('ns', 'pods'):
+            installed_plugins_own_alias_names(prefix, alias)
+    print('PASS: changed targets discard old rows; Docker flags, events and installed plugins preserve CLI semantics')

@@ -10,8 +10,8 @@ fn connections(invocation: &Invocation, row_namespace: Option<&str>) -> Vec<Stri
     while i < end {
         let arg = &invocation.args[i];
         if arg == "--" { break; }
-        let value: &[&str] = if docker { &["--context", "-c", "--host", "-H", "--config", "--tlscacert", "--tlscert", "--tlskey"] } else { &["--context", "--kubeconfig", "--namespace", "-n", "--cluster", "--user", "--server", "-s", "--token", "--certificate-authority", "--client-certificate", "--client-key", "--request-timeout", "--as", "--as-group", "--as-uid", "--cache-dir"] };
-        let boolean: &[&str] = if docker { &["--tls", "--tlsverify"] } else { &["--insecure-skip-tls-verify", "--disable-compression", "--warnings-as-errors"] };
+        let value: &[&str] = if docker { &["--context", "-c", "--host", "-H", "--config", "--tlscacert", "--tlscert", "--tlskey"] } else { crate::native::KUBE_CONNECTION_VALUES };
+        let boolean: &[&str] = if docker { &["--tls", "--tlsverify"] } else { crate::native::KUBE_CONNECTION_FLAGS };
         if let Some(name) = value.iter().find(|name| arg == **name || arg.starts_with(&format!("{name}=")) || (name.len() == 2 && arg.starts_with(**name) && arg.len() > 2)) {
             let skip = row_namespace.is_some() && ["--namespace", "-n"].contains(name);
             if !skip { args.push(arg.clone()); }
@@ -61,6 +61,25 @@ pub fn selected(invocation: &Invocation, row: &Value, action: &str) -> Result<Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_actions_preserve_tls_proxy_and_authentication_overrides() {
+        let mut state = crate::tui_state::State::new(Default::default());
+        state.workspace = Workspace::Kubernetes;
+        let row = serde_json::json!({"metadata":{"name":"pod", "namespace":"actual"}});
+        for flag in ["--tls-server-name", "--username", "--password", "--proxy-url", "--as-user-extra", "--kuberc"] {
+            for option in [format!("{flag} fixture-value"), format!("{flag}=fixture-value")] {
+                for command in [format!("{option} get pods"), format!("get pods {option}")] {
+                    let query = crate::native::parse(&command, &state).unwrap();
+                    assert_eq!(query.resource.as_deref(), Some("pods"));
+                    let action = selected(&query, &row, "inspect").unwrap();
+                    assert!(action.invocation.args.starts_with(&crate::tui_state::split_command(&option).unwrap()), "{command}");
+                }
+            }
+        }
+        let query = crate::native::parse("get pods --as-group first --as-group second --match-server-version", &state).unwrap();
+        let action = selected(&query, &row, "inspect").unwrap();
+        assert_eq!(&action.invocation.args[..5], ["--as-group", "first", "--as-group", "second", "--match-server-version"]);
+    }
     #[test]
     fn selected_actions_use_the_displayed_connection_and_rows_namespace() {
         let mut state = crate::tui_state::State::new(Default::default());
