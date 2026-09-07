@@ -62,6 +62,9 @@ def cancellation(root, runtime):
     terminal = Terminal(runtime.binary, runtime.environment, root)
     results = []
     try:
+        if not (runtime.home / '.hamn/tui.json').exists():
+            terminal.until('Choose your default workspace')
+            terminal.send(b'1\r')
         terminal.until('hamn-workspace-sentinel')
         terminal.send(b':vm start --profile verify\r', 'Confirm vm start')
         terminal.send(b'y!','recovering-deployment')
