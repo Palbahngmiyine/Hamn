@@ -18,6 +18,7 @@
 #include "core/log.h"
 #include "core/retirement.h"
 #include "core/operation.h"
+#include "core/remote_mutation.h"
 #include "sshmgr/ssh.h"
 #include "util/fs.h"
 #include "util/proc.h"
@@ -186,19 +187,8 @@ static int guest_deployment_wait_cloud_init(const struct profile *profile,
 static int deployment_exec_locked(const struct profile *profile, const char *ip,
                                    const char *const command[])
 {
-    assert(command && command[0] && !strcmp(command[0], "sudo"));
-    const char *wrapped[64] = { "sudo", "timeout", "--kill-after=5s", "180s",
-        "flock", "--wait", "120", "/run/hamn-deployment.lock",
-        "timeout", "--kill-after=5s", "60s" };
-    size_t count = 11;
-    for (size_t i = 1; command[i]; i++) {
-        if (count + 1 >= sizeof(wrapped) / sizeof(wrapped[0])) {
-            errno = E2BIG; return -1;
-        }
-        wrapped[count++] = command[i];
-    }
-    wrapped[count] = NULL;
-    return ssh_exec(profile, ip, wrapped, 0);
+    return remote_mutation_run(profile, ip, "/run/hamn-deployment.lock",
+                               120, 60, command, NULL, 0, NULL);
 }
 
 static int recovery_complete, cleanup_pending;

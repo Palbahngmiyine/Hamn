@@ -1,4 +1,5 @@
 #include "core/operation.h"
+#include "core/remote_mutation.h"
 #include "core/retirement.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -95,13 +96,12 @@ int retirement_cancel_recovered(void) { return cancel_recovered; }
 int retirement_recover(const struct profile *profile, const char *ip)
 {
     cancel_recovered = cleanup_pending = 0;
-    const char *command[] = { "sudo", "timeout", "--kill-after=5s", "780s",
-        "flock", "--wait", "600", "/run/hamn-retirement.lock",
-        "timeout", "--kill-after=5s", "600s", "python3", "-c", retirement_payload,
+    const char *command[] = { "sudo", "python3", "-c", retirement_payload,
         "recover-only", NULL };
     char reason[4096] = {0};
     int truncated = 0;
-    int rc = ssh_exec_capture_checked(profile, ip, command, reason, sizeof(reason), &truncated);
+    int rc = remote_mutation_run(profile, ip, "/run/hamn-retirement.lock", 600, 600,
+                                  command, reason, sizeof(reason), &truncated);
     if (rc != 0)
         logerr("deployment recovery failed: %s%s", reason[0] ? reason : "guest connection or recovery interrupted", truncated ? " (truncated)" : "");
     if (rc != 0 && proc_cancelled()) {
@@ -112,9 +112,10 @@ int retirement_recover(const struct profile *profile, const char *ip)
         (void)operation_phase("recovering-after-cancel");
         logmsg("waiting for remote deployment recovery and cleanup");
         reason[0] = '\0';
-        int recovered = ssh_exec_capture_checked(profile, ip, command, reason, sizeof(reason), &truncated);
+        int recovered = remote_mutation_run(profile, ip, "/run/hamn-retirement.lock", 600, 600,
+                                  command, reason, sizeof(reason), &truncated);
         if (recovered == 0) cleanup_pending = 0;
-        cancel_recovered = recovered == 0 &&
+        cancel_recovered = recovered == 0 && !remote_mutation_cleanup_pending() &&
             guest_deployment_forward_sockets(profile, ip) == 0 &&
             guest_deployment_runtime_ready(profile, ip, 30) == 0;
         if (!cancel_recovered)
@@ -133,10 +134,9 @@ static int retirement_execute(struct profile *profile, const char *ip)
         return -1;
     }
     logmsg("retiring managed K3s for %s; Docker data is preserved", profile->name);
-    const char *command[] = { "sudo", "timeout", "--kill-after=5s", "780s",
-        "flock", "--wait", "600", "/run/hamn-retirement.lock",
-        "timeout", "--kill-after=5s", "600s", "python3", "-c", retirement_payload, NULL };
-    if (ssh_exec(profile, ip, command, 0) != 0) {
+    const char *command[] = { "sudo", "python3", "-c", retirement_payload, NULL };
+    if (remote_mutation_run(profile, ip, "/run/hamn-retirement.lock", 600, 600,
+                            command, NULL, 0, NULL) != 0) {
         logerr("K3s retirement is incomplete; the next mutation will resume it");
         return -1;
     }
@@ -199,7 +199,7 @@ int retirement_run(struct profile *profile, const char *ip)
          * its journal only after that writer exits, then finish host cleanup. */
         int recovered = retirement_execute(profile, ip);
         cleanup_pending = recovered != 0;
-        cancel_recovered = recovered == 0;
+        cancel_recovered = recovered == 0 && !remote_mutation_cleanup_pending();
         if (!cancel_recovered)
             logerr("cancelled retirement needs recovery; preserving the VM");
         proc_cleanup_end();
