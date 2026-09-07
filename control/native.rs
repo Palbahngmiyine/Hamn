@@ -3,6 +3,11 @@ use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 
+// Connection and authentication options must survive both command parsing and
+// selection-derived actions. Keep one vocabulary for those two boundaries.
+pub(crate) const KUBE_CONNECTION_VALUES: &[&str] = &["--context", "--kubeconfig", "--namespace", "-n", "--cluster", "--user", "--server", "-s", "--token", "--certificate-authority", "--client-certificate", "--client-key", "--request-timeout", "--as", "--as-group", "--as-uid", "--as-user-extra", "--cache-dir", "--tls-server-name", "--username", "--password", "--proxy-url", "--kuberc"];
+pub(crate) const KUBE_CONNECTION_FLAGS: &[&str] = &["--insecure-skip-tls-verify", "--disable-compression", "--warnings-as-errors", "--match-server-version"];
+
 #[derive(Clone, Debug)]
 pub struct Invocation {
     pub workspace: Workspace,
@@ -33,15 +38,15 @@ pub(crate) fn command_index(args: &[String], workspace: Workspace) -> Option<usi
     let values = if workspace == Workspace::Containers {
         &["--context", "-c", "--host", "-H", "--config", "--log-level", "-l", "--tlscacert", "--tlscert", "--tlskey"][..]
     } else {
-        &["--context", "--kubeconfig", "--namespace", "-n", "--cluster", "--user", "--server", "-s", "--token", "--certificate-authority", "--client-certificate", "--client-key", "--request-timeout", "--as", "--as-group", "--as-uid", "--cache-dir", "--v", "-v"][..]
+        KUBE_CONNECTION_VALUES
     };
     let mut i = 0;
     while i < args.len() {
         let word = &args[i];
         if !word.starts_with('-') { return Some(i); }
-        if values.contains(&word.as_str()) { i += 2; }
+        if values.contains(&word.as_str()) || (workspace == Workspace::Kubernetes && ["--v", "-v", "--profile", "--profile-output"].contains(&word.as_str())) { i += 2; }
         else if word.contains('=') || values.iter().any(|n| n.len() == 2 && word.starts_with(n) && word.len() > 2) ||
-            ["--debug", "-D", "--tls", "--tlsverify", "--insecure-skip-tls-verify", "--disable-compression", "--warnings-as-errors"].contains(&word.as_str()) { i += 1; }
+            ["--debug", "-D", "--tls", "--tlsverify"].contains(&word.as_str()) || KUBE_CONNECTION_FLAGS.contains(&word.as_str()) { i += 1; }
         else { return None; }
     }
     None
@@ -101,6 +106,9 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     };
     if args.is_empty() && !explicit_program { args.push(if workspace == Workspace::Containers { "ps" } else { "get" }.into());
         if workspace == Workspace::Kubernetes { args.push("pods".into()); } }
+    // Installed plugins own their original argv before convenience aliases are
+    // considered; an alias must never turn a plugin into a different operation.
+    let plugin = workspace == Workspace::Kubernetes && installed_kubectl_plugin(&args, command_index(&args, workspace));
     if workspace == Workspace::Containers {
         match args.first().map(String::as_str).unwrap_or("") {
             "containers" => args[0] = "ps".into(),
@@ -108,11 +116,10 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
             "networks" => args.splice(0..1, ["network".into(), "ls".into()]).for_each(drop),
             _ => {},
         }
-    } else if ["pods", "po", "deployments", "deploy", "services", "svc", "nodes", "namespaces", "ns", "statefulsets", "sts", "daemonsets", "ds", "jobs", "cronjobs", "ingresses", "pvcs"].contains(&args.first().map(String::as_str).unwrap_or("")) {
+    } else if !plugin && ["pods", "po", "deployments", "deploy", "services", "svc", "nodes", "namespaces", "ns", "statefulsets", "sts", "daemonsets", "ds", "jobs", "cronjobs", "ingresses", "pvcs"].contains(&args.first().map(String::as_str).unwrap_or("")) {
         args.insert(0, "get".into());
     }
     let index = command_index(&args, workspace);
-    let plugin = workspace == Workspace::Kubernetes && installed_kubectl_plugin(&args, index);
     let config_command = index.is_some_and(|i| args[i] == if workspace == Workspace::Containers { "context" } else { "config" });
     let explicit = if workspace == Workspace::Containers { has(&args[..index.unwrap_or(args.len())], &["--context", "-c", "--host", "-H", "--config"]) }
         else { has(&args, &["--context", "--kubeconfig"]) };
@@ -144,7 +151,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     // Display all connection/scope arguments exactly; credentials are never included in the header.
     let mut target = Vec::new();
     for (i, arg) in defaults.iter().enumerate() {
-        for name in ["--context", "-c", "--host", "-H", "--config", "--namespace", "-n", "--kubeconfig", "--server", "-s"] {
+        for name in ["--context", "-c", "--host", "-H", "--config", "--namespace", "-n", "--kubeconfig", "--server", "-s", "--tls-server-name"] {
             if arg == name { target.push(format!("{name} {}", defaults.get(i + 1).map(String::as_str).unwrap_or(""))); }
             else if arg.starts_with(&format!("{name}=")) || (name.len() == 2 && arg.starts_with(name) && arg.len() > 2) { target.push(arg.clone()); }
         }
