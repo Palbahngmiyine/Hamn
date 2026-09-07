@@ -13,7 +13,7 @@
 
 static struct profile owner;
 static cJSON *record;
-static int persistence_failed;
+static int persistence_failed, previous_unknown;
 
 static int save_record(void)
 {
@@ -105,6 +105,7 @@ int operation_begin(const struct profile *profile, const char *name)
     if (!previous) { logerr("cannot validate previous operation record"); return -1; }
     cJSON *status = cJSON_GetObjectItemCaseSensitive(previous, "status");
     int active = cJSON_IsString(status) && !strcmp(status->valuestring, "running");
+    previous_unknown = cJSON_IsString(status) && !strcmp(status->valuestring, "outcomeUnknown");
     cJSON_Delete(previous);
     if (active) { errno = EBUSY; return -1; }
     uint64_t sec, usec;
@@ -161,4 +162,10 @@ int operation_finish(int result, int restored)
     cJSON_Delete(record);
     record = NULL;
     return saved || persistence_failed ? -1 : result;
+}
+
+/* Rejecting input cannot resolve an earlier interrupted operation. */
+int operation_finish_unchanged(int result)
+{
+    return operation_finish(result, !previous_unknown);
 }

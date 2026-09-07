@@ -88,12 +88,13 @@ static int retire_forward(const struct profile *profile, const char *ip)
     return unlink(path);
 }
 
-static int cancel_recovered;
+static int cancel_recovered, cleanup_pending;
+int retirement_cleanup_pending(void) { return cleanup_pending; }
 int retirement_cancel_recovered(void) { return cancel_recovered; }
 
 int retirement_recover(const struct profile *profile, const char *ip)
 {
-    cancel_recovered = 0;
+    cancel_recovered = cleanup_pending = 0;
     const char *command[] = { "sudo", "timeout", "--kill-after=5s", "780s",
         "flock", "--wait", "600", "/run/hamn-retirement.lock",
         "timeout", "--kill-after=5s", "600s", "python3", "-c", retirement_payload,
@@ -107,10 +108,12 @@ int retirement_recover(const struct profile *profile, const char *ip)
         /* The remote process can outlive its SSH client. Acquire its same lock
          * before recovery, then wait for rollback and actual readiness. */
         proc_cleanup_begin();
+        cleanup_pending = 1;
         (void)operation_phase("recovering-after-cancel");
         logmsg("waiting for remote deployment recovery and cleanup");
         reason[0] = '\0';
         int recovered = ssh_exec_capture_checked(profile, ip, command, reason, sizeof(reason), &truncated);
+        if (recovered == 0) cleanup_pending = 0;
         cancel_recovered = recovered == 0 &&
             guest_deployment_forward_sockets(profile, ip) == 0 &&
             guest_deployment_runtime_ready(profile, ip, 30) == 0;
@@ -121,7 +124,7 @@ int retirement_recover(const struct profile *profile, const char *ip)
     return rc;
 }
 
-int retirement_run(struct profile *profile, const char *ip)
+static int retirement_execute(struct profile *profile, const char *ip)
 {
     if (!profile->legacy_k3s)
         return 0;
@@ -184,6 +187,26 @@ int retirement_run(struct profile *profile, const char *ip)
     return 0;
 }
 
+int retirement_run(struct profile *profile, const char *ip)
+{
+    cancel_recovered = cleanup_pending = 0;
+    int result = retirement_execute(profile, ip);
+    if (result != 0 && proc_cancelled()) {
+        proc_cleanup_begin();
+        cleanup_pending = 1;
+        (void)operation_phase("retiring-after-cancel");
+        /* The original SSH session may still hold the retirement lock. Resume
+         * its journal only after that writer exits, then finish host cleanup. */
+        int recovered = retirement_execute(profile, ip);
+        cleanup_pending = recovered != 0;
+        cancel_recovered = recovered == 0;
+        if (!cancel_recovered)
+            logerr("cancelled retirement needs recovery; preserving the VM");
+        proc_cleanup_end();
+    }
+    return result;
+}
+
 int hamn_control_migrate(const char *name)
 {
     struct vm_lifecycle_lock lock;
@@ -207,7 +230,7 @@ int hamn_control_migrate(const char *name)
     if (operation_phase("retiring-k3s") == 0 &&
         ssh_master_start(&profile, state.ip, 15) == 0)
         rc = retirement_run(&profile, state.ip) == 0 ? 0 : 1;
-    rc = operation_finish(rc, rc == 0);
+    rc = operation_finish(rc, rc == 0 || retirement_cancel_recovered());
 out:
     if (mutation >= 0) profile_mutation_unlock(mutation);
     vm_lifecycle_lock_release(&lock);

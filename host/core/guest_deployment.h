@@ -11,6 +11,8 @@
  */
 int guest_deployment_is_current(const struct profile *profile);
 int guest_deployment_recovery_complete(void);
+/* A remote writer may still be active; do not stop the VM yet. */
+int guest_deployment_cleanup_pending(void);
 int guest_deployment_mark_current(const struct profile *profile);
 
 int guest_deployment_configure_runtime(const struct profile *profile,
