@@ -135,6 +135,8 @@ def main():
         recovery(root, runtime)
         from workspace_live_cancel_boundaries import cancellation_boundaries
         cancellation_boundaries(root, runtime, snapshot)
+        from workspace_live_transport import transport_failure
+        transport_failure(root, runtime, snapshot)
         cli_extensions(root, runtime)
         from workspace_live_cancellation import cancellation, owned_start_cancellation
         from workspace_live_kubernetes import kubernetes
