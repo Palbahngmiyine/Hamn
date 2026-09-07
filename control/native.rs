@@ -30,8 +30,8 @@ impl Invocation {
         command
     }
 }
-fn has(args: &[String], names: &[&str]) -> bool {
-    args.iter().take_while(|s| s.as_str() != "--").any(|s| names.iter().any(|n|
+fn has(args: &[String], names: &[&str], workspace: Workspace) -> bool {
+    crate::native_flags::options(args, workspace).iter().any(|s| names.iter().any(|n|
         s == n || s.starts_with(&format!("{n}=")) || (n.len() == 2 && s.starts_with(n) && s.len() > 2)))
 }
 fn kube_all_namespaces(inspected: &[String]) -> bool {
@@ -67,11 +67,11 @@ pub(crate) fn command_index(args: &[String], workspace: Workspace) -> Option<usi
     None
 }
 fn resource(args: &[String], workspace: Workspace) -> Option<String> {
-    if has(args, &["--help", "-h"]) || args.iter().any(|s| s == "--") { return None; }
+    if has(args, &["--help", "-h"], workspace) || crate::native_flags::options(args, workspace).iter().any(|s| s == "--") { return None; }
     let i = command_index(args, workspace)?;
     let words: Vec<_> = args[i..].iter().map(String::as_str).collect();
     if workspace == Workspace::Containers {
-        if has(&args[i..], &["--format", "--quiet", "-q"]) || args[i..].iter().any(|s| s.starts_with('-') && !s.starts_with("--") && s[1..].contains('q')) { return None; }
+        if has(&args[i..], &["--format", "--quiet", "-q"], workspace) { return None; }
         match words.as_slice() {
             ["ps", ..] | ["container", "ls" | "ps" | "list", ..] => Some("containers".into()),
             ["images", ..] | ["image", "ls" | "list", ..] => Some("images".into()),
@@ -80,7 +80,7 @@ fn resource(args: &[String], workspace: Workspace) -> Option<String> {
             _ => None,
         }
     } else {
-        if has(args, &["--output", "-o", "--watch", "-w", "--watch-only", "--raw", "--output-watch-events", "--no-headers", "--show-labels", "--label-columns", "-L", "--show-kind"]) || kube_short_output(args) { return None; }
+        if has(args, &["--output", "-o", "--watch", "-w", "--watch-only", "--raw", "--output-watch-events", "--no-headers", "--show-labels", "--label-columns", "-L", "--show-kind"], workspace) || kube_short_output(args) { return None; }
         match words.as_slice() {
             ["get", resource, ..] if ["pods", "po", "pod", "deployments", "deploy", "deployment", "services", "svc", "service", "namespaces", "ns", "nodes", "no", "statefulsets", "sts", "daemonsets", "ds", "events", "jobs", "cronjobs", "ingresses", "pvcs"].contains(resource) => Some((*resource).into()),
             _ => None,
@@ -173,8 +173,8 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     let all_namespaces = workspace == Workspace::Kubernetes && kube_all_namespaces(&inspected);
     let inspected_index = command_index(&inspected, workspace);
     let config_command = index.is_some_and(|i| args[i] == if workspace == Workspace::Containers { "context" } else { "config" });
-    let explicit = if workspace == Workspace::Containers { has(&inspected[..inspected_index.unwrap_or(inspected.len())], &["--context", "-c", "--host", "-H", "--config"]) }
-        else { has(&inspected, &["--context", "--kubeconfig"]) };
+    let explicit = if workspace == Workspace::Containers { has(&inspected[..inspected_index.unwrap_or(inspected.len())], &["--context", "-c", "--host", "-H", "--config"], workspace) }
+        else { has(&inspected, &["--context", "--kubeconfig"], workspace) };
     let mut defaults = Vec::new();
     let mut hamn_profile = None;
     if !config_command && !explicit && !plugin {
@@ -187,15 +187,15 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
             }
         } else {
             if let Some(context) = &state.request.context { defaults.extend(["--context".into(), context.clone()]); }
-            if !has(&inspected, &["--namespace", "-n"]) && !all_namespaces {
+            if !has(&inspected, &["--namespace", "-n"], workspace) && !all_namespaces {
                 if let Some(namespace) = &state.request.namespace { defaults.extend(["--namespace".into(), namespace.clone()]); }
             }
         }
     }
-    if workspace == Workspace::Kubernetes && !plugin && !has(&args, &["--kubeconfig"]) {
+    if workspace == Workspace::Kubernetes && !plugin && !has(&args, &["--kubeconfig"], workspace) {
         if let Some(config) = &state.request.kubeconfig { defaults.extend(["--kubeconfig".into(), config.clone()]); }
     }
-    if workspace == Workspace::Containers && !config_command && !has(&args, &["--config"]) {
+    if workspace == Workspace::Containers && !config_command && !has(&args[..index.unwrap_or(args.len())], &["--config"], workspace) {
         if let Some(config) = &state.docker_config { defaults.splice(0..0, ["--config".into(), config.clone()]); }
     }
     defaults.extend(args);
@@ -280,6 +280,41 @@ pub async fn query(invocation: &Invocation) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn consumed_values_cannot_override_ui_scope_or_select_output_mode() {
+        let mut state = State::new(Default::default());
+        state.workspace = Workspace::Kubernetes;
+        state.request.context = Some("ui-cluster".into());
+        state.request.namespace = Some("ui-ns".into());
+        state.request.kubeconfig = Some("/fixture/config".into());
+        for value in ["-nteam", "--namespace=team", "--context=other", "--kubeconfig=other",
+            "-oyaml", "--watch", "--help", "-A", "--"] {
+            for separator in [" ", "="] {
+                let input = format!("get pods --as reviewer --as-group{separator}{value}");
+                let invocation = parse(&input, &state).unwrap();
+                assert_eq!(&invocation.args[..6], ["--context", "ui-cluster", "--namespace", "ui-ns", "--kubeconfig", "/fixture/config"], "{input}");
+                assert!(invocation.args.ends_with(&split_command(&input).unwrap()));
+                // A literal -- value must not disable structured queries either.
+                assert_eq!(invocation.resource.as_deref(), Some("pods"), "{input}");
+                assert_eq!(invocation.target, "--context ui-cluster  --namespace ui-ns  --kubeconfig /fixture/config", "{input}");
+            }
+        }
+        state.workspace = Workspace::Containers;
+        state.docker_context = Some("ui-docker".into());
+        state.docker_config = Some("/fixture/docker".into());
+        for input in ["--tlscert -Hliteral ps", "--tlskey --config=literal ps",
+            "ps -af label=q", "ps -aflabel=q", "ps --filter -q", "ps -l"] {
+            let invocation = parse(input, &state).unwrap();
+            assert_eq!(&invocation.args[..4], ["--config", "/fixture/docker", "--context", "ui-docker"], "{input}");
+            assert_eq!(invocation.resource.as_deref(), Some("containers"), "{input}");
+            assert!(invocation.args.ends_with(&split_command(input).unwrap()));
+        }
+        for input in ["ps -aq", "ps -l --format '{{.Names}}'", "-l debug ps -q"] {
+            assert!(parse(input, &state).unwrap().resource.is_none(), "{input}");
+        }
+        let child = parse("compose --config child.yml version", &state).unwrap();
+        assert_eq!(&child.args[..2], ["--config", "/fixture/docker"]);
+    }
     #[test]
     fn namespace_defaults_and_headers_follow_the_last_all_namespaces_boolean() {
         let mut state = State::new(Default::default());
