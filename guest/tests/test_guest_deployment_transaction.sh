@@ -203,8 +203,24 @@ rm "$ROOT/etc/docker"
 mv "$ROOT/etc/docker-real" "$ROOT/etc/docker"
 
 # A failed durability barrier must never publish a recoverable ready backup.
-export REAL_PYTHON
-REAL_PYTHON=$(command -v python3)
+export REAL_PYTHON TEST_PYTHON_INTERPRETER
+TEST_PYTHON_INTERPRETER=$(python3 -c 'import sys; print(sys.executable)')
+# Model developer-tool launchers such as /usr/bin/python3: resolving their
+# command name again after installing our same-name wrapper is unsafe.
+mkdir "$WORK/python-launcher"
+cat >"$WORK/python-launcher/python3" <<'PY_LAUNCHER'
+#!/bin/bash
+if [ "$(command -v python3)" != "$0" ]; then
+    echo "error: unable to execute tool 'python3' after PATH shadowing" >&2
+    exit 92
+fi
+exec "$TEST_PYTHON_INTERPRETER" "$@"
+PY_LAUNCHER
+chmod +x "$WORK/python-launcher/python3"
+export PATH="$BIN:$WORK/python-launcher:$PATH"
+# Pin the interpreter, not the macOS developer-tool launcher. The launcher
+# fixture above makes using `command -v python3` here fail deterministically.
+REAL_PYTHON=$(python3 -c 'import sys; print(sys.executable)')
 cat >"$BIN/python3" <<'PY_WRAPPER'
 #!/bin/bash
 exec "$REAL_PYTHON" -c 'import os, sys
