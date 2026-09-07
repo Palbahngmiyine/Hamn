@@ -18,14 +18,15 @@ WRAPPER = '/usr/local/bin/flock'
 HELPERS = '/usr/local/libexec/hamn'
 
 
-def wrapper_source(directory, action):
+def wrapper_source(directory, action, before_lock=False):
     return f'''#!/usr/bin/python3
 import os, pathlib, sys
 root = pathlib.Path({directory!r})
 args = sys.argv[1:]
 action = {action!r}
+before_lock = {before_lock!r}
 lock = '/run/hamn-retirement.lock' if action == 'retirement' else '/run/hamn-deployment.lock'
-match = lock in args and ((action == 'retirement' and 'recover-only' not in args)
+match = lock in args and ((action == 'retirement' and 'recover-only' not in args and 'python3' in args)
     or (len(args) > 2 and args[-2] == action and args[-3].endswith('/guest-deployment-transaction')))
 if match:
     try:
@@ -33,6 +34,8 @@ if match:
     except FileExistsError:
         match = False
 if match:
+    if before_lock:
+        os.execv('/usr/bin/python3', ['python3', str(root / 'gate.py'), '/usr/bin/flock'] + args)
     index = args.index(lock) + 1
     args = args[:index] + ['/usr/bin/python3', str(root / 'gate.py')] + args[index:]
 os.execv('/usr/bin/flock', ['flock'] + args)
@@ -59,17 +62,19 @@ root = pathlib.Path(__file__).parent
 for number in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT):
     signal.signal(number, signal.SIG_IGN)
 (root / 'ready').write_text('LOCK_READY\\n')
-subprocess.run(['/usr/bin/python3', str(root / 'wait.py'), 'released'], check=True)
-os.execvp(sys.argv[1], sys.argv[1:])
+subprocess.run(['/usr/bin/python3', str(root / 'wait.py'), 'released'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+result = subprocess.run(sys.argv[1:])
+(root / 'done').write_text(str(result.returncode))
+sys.exit(result.returncode)
 '''
 
 
 
 class BoundaryGate:
-    def __init__(self, runtime, action):
+    def __init__(self, runtime, action, before_lock=False):
         self.runtime = runtime
         self.directory = '/var/lib/hamn-workspace-cancel-' + uuid.uuid4().hex
-        self.source = wrapper_source(self.directory, action)
+        self.source = wrapper_source(self.directory, action, before_lock)
         self.released = False
         self.observer = None
         setup = f'''test ! -e {WRAPPER}; test ! -L {WRAPPER}
@@ -125,11 +130,12 @@ def cancellation_boundaries(root, runtime, snapshot):
     before = snapshot(runtime)
     hashes = runtime.ssh(f'sha256sum {HELPERS}/verify-image-contract {HELPERS}/guest-deployment-transaction {HELPERS}/configure-docker', profile='verify')
     evidence = []
-    for mode, action in [('refresh', 'begin'), ('refresh', 'commit'),
-                         ('reconcile', 'begin'), ('reconcile', 'commit'),
-                         ('retirement', 'retirement')]:
+    cases = [('refresh', 'begin'), ('refresh', 'commit'), ('reconcile', 'begin'),
+             ('reconcile', 'commit'), ('retirement', 'retirement')]
+    for mode, action, queued in [(m, a, False) for m, a in cases] + [
+            (m, a, True) for m, a in cases if m != 'reconcile']:
         original_config = config.read_bytes()
-        gate = BoundaryGate(runtime, action)
+        gate = BoundaryGate(runtime, action, queued)
         child = None
         try:
             if mode == 'refresh':
@@ -150,15 +156,22 @@ def cancellation_boundaries(root, runtime, snapshot):
                 (mode != 'reconcile' or value.get('phase') == 'guest-deployment-reused'), timeout=180)
             gate.wait()
             child.send_signal(signal.SIGINT)
-            wait_record(path, lambda value: value.get('phase') ==
-                ('retiring-after-cancel' if mode == 'retirement' else 'recovering-after-cancel'), timeout=30)
-            lock = '/run/hamn-retirement.lock' if mode == 'retirement' else '/run/hamn-deployment.lock'
-            runtime.ssh(f'! /usr/bin/flock -n {lock} true', profile='verify')
-            assert child.poll() is None, 'frontend exited while original remote writer held its lock'
-            gate.release()
-            stdout, stderr = child.communicate(timeout=240)
+            if queued:
+                # The original dispatch has not acquired the lock. Cleanup may
+                # finish first, but its retained token must reject that dispatch.
+                stdout, stderr = child.communicate(timeout=240)
+                gate.release()
+            else:
+                wait_record(path, lambda value: value.get('phase') == 'fencing-after-cancel', timeout=30)
+                lock = '/run/hamn-retirement.lock' if mode == 'retirement' else '/run/hamn-deployment.lock'
+                runtime.ssh(f'! /usr/bin/flock -n {lock} true', profile='verify')
+                assert child.poll() is None, 'frontend exited while original writer held its lock'
+                gate.release()
+                stdout, stderr = child.communicate(timeout=240)
             record = json.loads(path.read_bytes())
             assert child.returncode != 0 and record['status'] == 'cancelled', (record, stdout, stderr)
+            if mode != 'reconcile':
+                runtime.ssh(f'python3 {gate.directory}/wait.py done; test \"$(cat {gate.directory}/done)\" = 130', profile='verify')
             if mode == 'reconcile':
                 assert runtime.call('vm', 'status', profile='verify')['state'] == 'stopped'
                 runtime.call('vm', 'start', profile='verify', yes=True)
@@ -167,8 +180,8 @@ def cancellation_boundaries(root, runtime, snapshot):
             runtime.ssh('test -z "$(ls -A /var/lib/hamn/deployment-transactions)"', profile='verify')
             assert snapshot(runtime) == before
             assert runtime.ssh(f'sha256sum {HELPERS}/verify-image-contract {HELPERS}/guest-deployment-transaction {HELPERS}/configure-docker', profile='verify') == hashes
-            evidence.append({'mode': mode, 'action': action, 'operation': record})
-            print(f'PASS: actual {mode}/{action} cancellation waits for remote writer and preserves Docker data', flush=True)
+            evidence.append({'mode': mode, 'action': action, 'queuedBeforeLock': queued, 'operation': record})
+            print(f'PASS: actual {mode}/{action} queued={queued} cancellation waits for remote writer and preserves Docker data', flush=True)
         finally:
             # Reach a running owned VM before SSH cleanup if cancellation stopped it.
             status = runtime.call('vm', 'status', profile='verify')
@@ -190,14 +203,23 @@ if __name__ == '__main__':
     compile(WAIT, '<wait>', 'exec')
     import tempfile
     from unittest.mock import patch
+    class Dispatched(Exception):
+        pass
     for action in ('begin', 'commit', 'retirement'):
-        with tempfile.TemporaryDirectory(prefix='hamn-flock-fixture-') as directory:
-            lock = '/run/hamn-retirement.lock' if action == 'retirement' else '/run/hamn-deployment.lock'
-            argv = ['flock', '--wait', '120', lock, 'bash', HELPERS + '/guest-deployment-transaction', action, 'a' * 32]
-            source = wrapper_source(directory, action)
-            with patch('sys.argv', argv), patch('os.execv') as execute:
-                exec(compile(source, '<wrapper>', 'exec'), {})
-                assert directory + '/gate.py' in execute.call_args.args[1]
-                exec(compile(source, '<wrapper>', 'exec'), {})
-                assert execute.call_args.args[1] == argv
-    print('PASS: fixture syntax and one-shot flock dispatch; physical execution is opt-in')
+        for queued in (False, True):
+            with tempfile.TemporaryDirectory(prefix='hamn-flock-fixture-') as directory:
+                lock = '/run/hamn-retirement.lock' if action == 'retirement' else '/run/hamn-deployment.lock'
+                argv = ['flock', '--wait', '120', lock, 'python3' if action == 'retirement' else 'bash', HELPERS + '/guest-deployment-transaction', action, 'a' * 32]
+                source = wrapper_source(directory, action, queued)
+                with patch('sys.argv', argv), patch('os.execv', side_effect=Dispatched) as execute:
+                    for first in (True, False):
+                        try:
+                            exec(compile(source, '<wrapper>', 'exec'), {})
+                        except Dispatched:
+                            pass
+                        args = execute.call_args.args
+                        assert args[0] == ('/usr/bin/python3' if queued and first else '/usr/bin/flock')
+                        assert (directory + '/gate.py' in args[1]) == first
+                        if not first:
+                            assert args[1] == argv
+    print('PASS: fixture syntax and holder/queued one-shot dispatch; physical execution is opt-in')
