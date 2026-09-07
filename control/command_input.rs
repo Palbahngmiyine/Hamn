@@ -1,4 +1,4 @@
-//! Unlinked, read-only command input: no named body file survives cancellation.
+//! Unlinked, private command input: no named body file survives cancellation.
 use std::{fs::{File, OpenOptions}, io::{self, Seek, SeekFrom, Write}, os::fd::AsRawFd};
 use std::os::unix::fs::OpenOptionsExt;
 
