@@ -442,10 +442,13 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                 let target = crate::native::command_workspace(&input, state.workspace);
                                 if state.workspace != target { job.cancel(&mut state); std::mem::swap(&mut state, &mut other); }
                                 if legacy {
-                                    let request = state.view(&input); job.dispatch(request, &mut state);
+                                    let request = state.view(&input);
+                                    if request.as_ref().is_ok_and(|r| !r.mutates()) { state.discard_picker(); }
+                                    job.dispatch(request, &mut state);
                                 } else {
                                     match crate::native::parse(&input, &state) {
                                         Ok(invocation) if invocation.resource.is_some() => {
+                                            state.invalidate_results();
                                             state.native = Some(invocation); state.environment_picker = false;
                                             state.selected = 0; state.filter.clear(); state.detail = None; state.data = Value::Null;
                                             job.refresh(&mut state);
@@ -491,22 +494,25 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         let request = state.view("vm"); job.dispatch(request, &mut state);
                     },
                     KeyCode::Char('e') if state.workspace == Workspace::Containers => {
-                        state.environment_picker = true; state.native = None; state.detail = None; state.selected = 0;
+                        state.open_picker(); state.environment_picker = true;
                         job.refresh(&mut state);
                     },
                     KeyCode::Char('e') if state.workspace == Workspace::Kubernetes => {
+                        state.open_picker();
                         let request = state.view("contexts"); job.dispatch(request, &mut state);
                     },
                     KeyCode::Char('n') if state.workspace == Workspace::Kubernetes => {
+                        state.open_picker();
                         let request = state.view("ns"); job.dispatch(request, &mut state);
                     },
                     KeyCode::Char(':') => state.input = Some((':', String::new())),
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
                     KeyCode::Esc => {
-                        state.show_operation = false; state.detail = None; state.filter.clear(); job.cancel(&mut state);
-                        if state.request.operation() == "vm list" || state.environment_picker {
+                        state.show_operation = false; state.detail = None; job.cancel(&mut state);
+                        if state.cancel_picker() { job.refresh(&mut state); }
+                        else if state.native.is_none() && (state.request.operation() == "vm list" || state.environment_picker) {
                             state.return_to_browser(); job.refresh(&mut state);
-                        }
+                        } else { state.filter.clear(); }
                     },
                     KeyCode::Down | KeyCode::Char('j') => state.move_by(1),
                     KeyCode::Up | KeyCode::Char('k') => state.move_by(-1),

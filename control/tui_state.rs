@@ -48,9 +48,12 @@ pub fn split_command(command: &str) -> Result<Vec<String>> {
 
 struct Browser {
     native: Option<crate::native::Invocation>, data: Value, selected: usize, filter: String, scroll: u16,
+    request: Request, environment_picker: bool, detail: Option<String>, connection_status: String,
+    stale: bool, show_operation: bool,
 }
 pub struct State {
     browser: Option<Browser>,
+    picker_return: Option<Browser>,
     pub workspace: Workspace,
     pub docker_context: Option<String>,
     pub docker_config: Option<String>,
@@ -85,6 +88,7 @@ impl State {
         request.headless = false;
         Self {
             browser: None,
+            picker_return: None,
             workspace: Workspace::Containers,
             docker_context: None,
             docker_config: None,
@@ -139,17 +143,41 @@ impl State {
     }
     pub fn save_browser(&mut self) {
         if self.native.is_some() {
-            self.browser = Some(Browser { native: self.native.clone(), data: self.data.clone(), selected: self.selected, filter: self.filter.clone(), scroll: self.scroll });
+            self.browser = Some(self.snapshot());
         }
+    }
+    fn snapshot(&self) -> Browser {
+        Browser { native: self.native.clone(), request: self.request.clone(), data: self.data.clone(),
+            selected: self.selected, filter: self.filter.clone(), scroll: self.scroll,
+            environment_picker: self.environment_picker, detail: self.detail.clone(),
+            connection_status: self.connection_status.clone(), stale: self.stale, show_operation: self.show_operation }
+    }
+    fn restore(&mut self, browser: Browser) {
+        self.native = browser.native; self.request = browser.request; self.data = browser.data;
+        self.selected = browser.selected; self.filter = browser.filter; self.scroll = browser.scroll;
+        self.environment_picker = browser.environment_picker; self.detail = browser.detail;
+        self.connection_status = browser.connection_status; self.stale = browser.stale;
+        self.show_operation = browser.show_operation;
+    }
+    pub fn open_picker(&mut self) {
+        if self.picker_return.is_none() { self.picker_return = Some(self.snapshot()); }
+        self.native = None; self.environment_picker = false; self.detail = None; self.show_operation = false;
+        self.data = Value::Null; self.selected = 0; self.filter.clear(); self.scroll = 0;
+        self.stale = true; self.connection_status = "Connecting".into();
+    }
+    pub fn discard_picker(&mut self) { self.picker_return = None; }
+    pub fn cancel_picker(&mut self) -> bool {
+        if let Some(browser) = self.picker_return.take() { self.restore(browser); true } else { false }
     }
     pub fn return_to_browser(&mut self) {
         self.environment_picker = false; self.detail = None;
         self.request.words = vec!["docker".into(), "containers".into(), "list".into()];
-        if let Some(browser) = self.browser.take().filter(|b| b.native.as_ref().and_then(|i| i.hamn_profile.as_ref()) == self.request.profile.as_ref()) {
-            self.native = browser.native; self.data = browser.data; self.selected = browser.selected; self.filter = browser.filter; self.scroll = browser.scroll;
+        if let Some(browser) = self.browser.take().filter(|b| b.request.profile == self.request.profile) {
+            self.restore(browser);
         } else { self.native = crate::native::parse("", self).ok(); self.selected = 0; self.filter.clear(); self.scroll = 0; }
     }
     pub fn invalidate_results(&mut self) {
+        self.browser = None; self.discard_picker();
         self.data = Value::Null;
         self.stale = true;
         self.selected = 0;
@@ -365,15 +393,18 @@ impl State {
                         "legacy Hamn context is unavailable",
                     ));
                 }
+                self.discard_picker(); self.browser = None;
                 self.request.context = row["name"].as_str().map(String::from);
                 self.request.namespace = row["namespace"].as_str().map(String::from);
                 self.view("pods").map(Some)
             }
             "k8s namespaces list" => {
+                self.discard_picker(); self.browser = None;
                 self.request.namespace = row["metadata"]["name"].as_str().map(String::from);
                 self.view("pods").map(Some)
             }
             "vm list" => {
+                self.discard_picker();
                 self.request.profile = row["name"].as_str().map(String::from);
                 self.detail = Some(format!("Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers", row["name"], row["state"], row["dockerStatus"], row["cpus"], row["memoryMiB"], row["diskGiB"]));
                 Ok(None)
@@ -768,6 +799,95 @@ mod tests {
         assert!(text.contains("--context external"));
         state.native = Some(crate::native::parse("ps", &state).unwrap());
         assert!(state.hamn_environment());
+    }
+    #[test]
+    fn picker_cancel_restores_exact_query_and_view_without_rewinding_operations() {
+        for (workspace, command, picker) in [
+            (Workspace::Containers, "docker --host unix:///external.sock ps --filter label=app=x", ""),
+            (Workspace::Containers, "docker --context external ps -a", ""),
+            (Workspace::Kubernetes, "get pods --context explicit --namespace chosen -l app=x", "contexts"),
+            (Workspace::Kubernetes, "get deployments -A --field-selector metadata.name=app", "ns"),
+        ] {
+            let mut state = State::new(Request::default());
+            state.workspace = workspace;
+            state.request.profile = Some("default".into());
+            state.request.context = Some("ui-default".into());
+            state.native = Some(crate::native::parse(command, &state).unwrap());
+            let original_args = state.native.as_ref().unwrap().args.clone();
+            let original_request = state.request.clone();
+            state.data = serde_json::json!([{"name":"first"}, {"name":"second"}]);
+            let original_data = state.data.clone();
+            state.selected = 1; state.filter = "row filter".into(); state.scroll = 9;
+            state.detail = Some("prior detail".into()); state.connection_status = "Available".into();
+            state.show_operation = true;
+            state.open_picker();
+            assert!(state.data.is_null()); assert!(state.selected().is_none());
+            assert!(state.native.is_none()); assert!(state.filter.is_empty());
+            assert_eq!((state.selected, state.scroll), (0, 0));
+            if !picker.is_empty() { state.view(picker).unwrap(); }
+            state.data = serde_json::json!([{"name":"picker entry"}]);
+            state.open_picker(); // Reopening must retain the original return destination.
+            state.accept(Err(Failure::new("fixture", "picker lookup failed")));
+            state.runtime = serde_json::json!({"state":"running", "dockerStatus":"ready"});
+            state.operation_status = "completed".into(); state.operation_log = "new log".into();
+            state.uncertain.push(serde_json::json!({"operationId":"unresolved"}));
+            assert!(state.cancel_picker()); assert!(!state.cancel_picker());
+            assert_eq!(state.native.as_ref().unwrap().args, original_args);
+            assert_eq!(state.request.words, original_request.words);
+            assert_eq!(state.request.context, original_request.context);
+            assert_eq!(state.request.profile, original_request.profile);
+            assert_eq!(state.data, original_data);
+            assert_eq!((state.selected, state.scroll), (1, 9));
+            assert_eq!(state.filter, "row filter"); assert_eq!(state.detail.as_deref(), Some("prior detail"));
+            assert_eq!(state.connection_status, "Available"); assert!(!state.stale);
+            assert!(state.show_operation); assert!(!state.environment_picker);
+            assert_eq!(state.runtime["dockerStatus"], "ready");
+            assert_eq!(state.operation_status, "completed"); assert_eq!(state.operation_log, "new log");
+            assert_eq!(state.uncertain[0]["operationId"], "unresolved");
+        }
+    }
+    #[test]
+    fn picker_commit_and_connection_reload_discard_cancel_destination() {
+        for picker in ["contexts", "ns"] {
+            let mut state = State::new(Request::default());
+            state.workspace = Workspace::Kubernetes;
+            state.request.context = Some("ui-default".into());
+            state.native = Some(crate::native::parse("get pods --context explicit", &state).unwrap());
+            state.open_picker(); state.view(picker).unwrap();
+            state.data = serde_json::json!([{"name":"chosen", "namespace":"chosen-ns",
+                "metadata":{"name":"chosen-ns"}}]);
+            assert_eq!(state.enter().unwrap().unwrap().operation(), "k8s pods list");
+            assert!(!state.cancel_picker());
+            assert_eq!(state.request.namespace.as_deref(), Some("chosen-ns"));
+            if picker == "contexts" { assert_eq!(state.request.context.as_deref(), Some("chosen")); }
+        }
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("ps --filter label=old", &state).unwrap());
+        state.save_browser(); state.open_picker(); state.invalidate_results();
+        assert!(!state.cancel_picker()); assert!(state.browser.is_none());
+        assert!(state.data.is_null());
+    }
+    #[test]
+    fn picker_cancel_restores_initial_selector_or_vm_panel_and_keeps_vm_profile_guard() {
+        let mut state = State::new(Request::default());
+        state.workspace = Workspace::Kubernetes;
+        state.view("contexts").unwrap();
+        state.open_picker(); assert!(state.view("ns").is_err());
+        assert!(state.cancel_picker()); assert!(state.native.is_none());
+        assert_eq!(state.request.operation(), "k8s contexts list");
+        for profile in [None, Some("default".into())] {
+            let mut state = State::new(Request { profile, ..Default::default() });
+            state.native = Some(crate::native::parse("ps --filter label=kept", &state).unwrap());
+            state.save_browser(); state.view("vm").unwrap();
+            state.open_picker(); assert!(state.cancel_picker());
+            assert!(state.native.is_none()); assert_eq!(state.request.operation(), "vm list");
+            state.return_to_browser();
+            assert!(state.native.as_ref().unwrap().args.iter().any(|a| a == "label=kept"));
+            state.save_browser(); state.view("vm").unwrap();
+            state.data = serde_json::json!([{"name":"different"}]);
+            state.enter().unwrap(); state.return_to_browser();
+            assert_eq!(state.native.unwrap().hamn_profile.as_deref(), Some("different"));
+        }
     }
     #[test]
     fn runtime_panel_restores_browser_query_selection_and_filter() {
