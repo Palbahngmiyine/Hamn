@@ -23,13 +23,18 @@ async fn input_queue_rejects_whole_overflow_and_preserves_accepted_order() {
 #[tokio::test]
 async fn failed_write_reports_all_pending_bytes_without_replaying_input() {
     use std::os::unix::net::UnixStream;
-    let (stream, peer) = UnixStream::pair().unwrap();
+    let (stream, _peer) = UnixStream::pair().unwrap();
     stream.set_nonblocking(true).unwrap();
     let fd: OwnedFd = stream.into();
     let fd = AsyncFd::new(fd).unwrap();
-    drop(peer);
+    // Cache writability before closing the endpoint; kqueue need not emit a new
+    // write event for a shut-down socket. Exercise the write error itself.
+    drop(tokio::time::timeout(std::time::Duration::from_secs(5), fd.writable()).await.unwrap().unwrap());
+    // Closing the local write side is independent of reader descriptors briefly
+    // inherited by concurrent forks, unlike relying on the last peer close.
+    assert_eq!(unsafe { libc::shutdown(fd.get_ref().as_raw_fd(), libc::SHUT_WR) }, 0);
     let mut input = VecDeque::from(Vec::from(&b"not-delivered"[..]));
-    assert!(flush_input(&fd, &mut input).await.is_err());
+    assert!(tokio::time::timeout(std::time::Duration::from_secs(5), flush_input(&fd, &mut input)).await.unwrap().is_err());
     assert_eq!(input.iter().copied().collect::<Vec<_>>(), b"not-delivered");
 }
 

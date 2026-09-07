@@ -28,15 +28,18 @@ with tempfile.TemporaryDirectory(prefix='hamn-tui-ssh-', dir='/tmp') as director
     server.listen(1)
     server.settimeout(10)
     accepted, release = threading.Event(), threading.Event()
+    notice_read, notice_write = os.pipe()
     errors = []
 
     def serve():
         try:
             with server.accept()[0]:
                 accepted.set()
+                os.write(notice_write, b'1')
                 assert release.wait(15)
         except Exception as error:
             errors.append(error)
+            os.write(notice_write, b'0')
 
     thread = threading.Thread(target=serve)
     thread.start()
@@ -66,7 +69,18 @@ with tempfile.TemporaryDirectory(prefix='hamn-tui-ssh-', dir='/tmp') as director
         until(b'Impact:')
         output.clear()
         os.write(master, b'y')
-        assert accepted.wait(5), 'VM stop did not attempt SSH cleanup'
+        # Continue draining redraws: waiting only on the server can fill the PTY
+        # and prevent the frontend from consuming confirmation or starting work.
+        deadline = time.monotonic() + 5
+        while not accepted.is_set():
+            remaining = deadline - time.monotonic()
+            assert remaining > 0, ('VM stop did not attempt SSH cleanup', errors, bytes(output[-4000:]))
+            ready = select.select([master, notice_read], [], [], remaining)[0]
+            if master in ready:
+                data = os.read(master, 65536)
+                output.extend(data); screen.feed(data)
+            if notice_read in ready:
+                assert os.read(notice_read, 1) == b'1', (errors, bytes(output[-4000:]))
         # Input must remain responsive while the C worker waits on SSH.
         os.write(master, b'?')
         until(b'Commands:', timeout=2)
@@ -93,5 +107,7 @@ with tempfile.TemporaryDirectory(prefix='hamn-tui-ssh-', dir='/tmp') as director
         child.wait(timeout=5)
         os.close(master)
         os.close(slave)
+        os.close(notice_read)
+        os.close(notice_write)
     assert not errors and not thread.is_alive(), errors
 print('PASS: TUI remains interactive and stops with a stalled SSH control socket')

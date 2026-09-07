@@ -1,4 +1,4 @@
-use crate::{core, model::{Request, Result}, native::{self, Invocation}, preferences::Workspace};
+use crate::{core, model::{Failure, Request, Result}, native::{self, Invocation}, preferences::Workspace};
 use serde_json::{Value, json};
 
 pub async fn containers(config: Option<&str>) -> Result<Value> {
@@ -27,19 +27,33 @@ pub async fn containers(config: Option<&str>) -> Result<Value> {
 }
 
 fn flag(args: &[String], name: &str) -> Option<String> {
-    args.iter().enumerate().find_map(|(i, value)| if value == name { args.get(i + 1).cloned() }
-        else { value.strip_prefix(&format!("{name}=")).map(String::from) })
+    let mut args = args.iter();
+    let mut selected = None;
+    while let Some(value) = args.next() {
+        if value == "--" { break; }
+        if value == name { selected = args.next().cloned(); }
+        else if let Some(value) = value.strip_prefix(&format!("{name}=")) { selected = Some(value.into()); }
+    }
+    selected
+}
+fn docker_context_query(invocation: &Invocation) -> Result<Invocation> {
+    let index = native::command_index(&invocation.args, Workspace::Containers)
+        .ok_or_else(|| Failure::new("cliProtocol", "Cannot locate Docker context command"))?;
+    let mut query = invocation.clone();
+    query.args.truncate(index);
+    query.args.extend(["context".into(), "ls".into()]);
+    query.resource = Some("contexts".into());
+    Ok(query)
 }
 pub async fn reload(invocation: &Invocation, state: &mut crate::tui_state::State) -> Result<()> {
     state.invalidate_results();
     let mut query = invocation.clone();
     if invocation.workspace == Workspace::Containers {
-        let index = invocation.args.iter().position(|arg| arg == "context").unwrap_or(0);
-        query.args.truncate(index); query.args.extend(["context".into(), "ls".into()]); query.resource = Some("contexts".into());
+        query = docker_context_query(invocation)?;
         let contexts = native::query(&query).await?;
         state.docker_context = contexts.as_array().into_iter().flatten().find(|row| row["Current"] == true)
             .and_then(|row| row["Name"].as_str()).map(String::from);
-        state.docker_config = flag(&invocation.args, "--config");
+        state.docker_config = flag(&query.args[..query.args.len() - 2], "--config");
         state.request.profile = None;
     } else {
         query.args = flag(&invocation.args, "--kubeconfig").map(|path| vec!["--kubeconfig".into(), path]).unwrap_or_default();
@@ -59,4 +73,26 @@ pub async fn reload(invocation: &Invocation, state: &mut crate::tui_state::State
     state.native = Some(native::parse("", state)?);
     state.environment_picker = false; state.selected = 0; state.filter.clear(); state.detail = None;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn context_reload_keeps_command_boundary_and_last_config() {
+        let state = crate::tui_state::State::new(Default::default());
+        for (command, expected, path) in [
+            ("docker --config context context show", vec!["--config", "context", "context", "ls"], "context"),
+            ("docker --config first --config last context show", vec!["--config", "first", "--config", "last", "context", "ls"], "last"),
+            ("docker --config first --config=last context use shared", vec!["--config", "first", "--config=last", "context", "ls"], "last"),
+            ("docker --config --config=literal context show", vec!["--config", "--config=literal", "context", "ls"], "--config=literal"),
+        ] {
+            let invocation = native::parse(command, &state).unwrap();
+            let query = docker_context_query(&invocation).unwrap();
+            assert_eq!(query.args, expected);
+            assert_eq!(flag(&query.args, "--config").as_deref(), Some(path));
+        }
+        let args = ["--kubeconfig", "first", "config", "view", "--kubeconfig=last"].map(String::from);
+        assert_eq!(flag(&args, "--kubeconfig").as_deref(), Some("last"));
+    }
 }

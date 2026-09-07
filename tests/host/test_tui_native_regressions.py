@@ -58,7 +58,7 @@ else:
 
 
 class Harness:
-    def __init__(self, workspace):
+    def __init__(self, workspace, prepare_preferences=None):
         self.directory = tempfile.TemporaryDirectory(prefix='hamn-native-regression-', dir='/tmp')
         self.root = Path(self.directory.name)
         (self.root / 'bin').mkdir()
@@ -66,6 +66,8 @@ class Harness:
         prefs = self.root / '.hamn/tui.json'
         prefs.write_text(json.dumps({'version': 1, 'defaultWorkspace': workspace}))
         prefs.chmod(0o600)
+        if prepare_preferences is not None:
+            prepare_preferences(prefs)
         for name in ('docker', 'kubectl'):
             path = self.root / 'bin' / name
             path.write_text(f'#!{sys.executable}\n' + FIXTURE)
@@ -86,6 +88,7 @@ class Harness:
         self.child = subprocess.Popen([BINARY], stdin=self.slave, stdout=self.slave,
                                       stderr=self.slave, env=env, start_new_session=True)
         self.screen = Screen(32, 160)
+        self.output = bytearray()
         self.notices = b''
 
     def wait(self, predicate):
@@ -99,6 +102,7 @@ class Harness:
                 data = os.read(fd, 65536)
                 assert data, 'PTY closed before the expected result'
                 if fd == self.master:
+                    self.output.extend(data)
                     self.screen.feed(data)
                 else:
                     self.notices += data
