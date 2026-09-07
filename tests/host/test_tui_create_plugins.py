@@ -86,6 +86,31 @@ with Path(os.environ['HOME'], 'native-calls').open('a') as out:
                 assert len(creates()) == before + 1 and creates()[-1][-len(args):] == args, creates()
                 harness.send(b'\r', '[Kubernetes]')
         assert (root / 'kubeconfig').read_bytes() == config_before
+        for option in ('--dry-run', '--validate'):
+            args = ['create', 'configmap', 'optional-fixture', option, '--namespace', 'explicit',
+                    '--dry-run=client', '--validate=false', '-o', 'yaml']
+            direct = subprocess.run([kubectl, '--context', 'old-cluster', '--namespace', 'ui-ns'] + args,
+                env=env, capture_output=True, text=True, timeout=10)
+            assert direct.returncode == 0 and 'namespace: explicit' in direct.stdout, direct
+            harness.send(b':' + ' '.join(args).encode() + b'\r', 'Exit code 0')
+            assert all(line.strip() in harness.screen.text() for line in direct.stdout.splitlines()), harness.screen.text()
+            assert '--namespace explicit' in harness.screen.text().split('apiVersion:')[0], harness.screen.text()
+            harness.send(b'\r', '[Kubernetes]')
+        # A config value that resembles --kubeconfig must not redirect the
+        # post-command reload to another file. Both edits own disposable files.
+        config = root / 'kubeconfig'
+        direct_config = root / 'direct-kubeconfig'
+        direct_config.write_bytes(config.read_bytes())
+        args = ['config', 'set-credentials', 'literal-user', '--exec-command=/not-executed',
+                '--exec-arg', '--kubeconfig=literal']
+        direct = subprocess.run([kubectl] + args, env=dict(env, KUBECONFIG=str(direct_config)),
+                                capture_output=True, text=True, timeout=10)
+        assert direct.returncode == 0, direct.stderr
+        harness.send(b':' + ' '.join(args).encode() + b'\r', 'Exit code 0')
+        assert direct.stdout.strip() in harness.screen.text(), harness.screen.text()
+        harness.send(b'\r', 'Namespace: test')
+        assert 'Context: old-cluster' in harness.screen.text(), harness.screen.text()
+        assert config.read_bytes() == direct_config.read_bytes()
         assert sorted(p.name for p in (root / '.hamn').iterdir()) == ['tui.json']
         print('PASS: create plugins retain exact argv/exit/count; built-ins, aliases and literal data keep UI namespace')
     finally:
