@@ -165,6 +165,10 @@ $(BUILD)/tests/test_ssh_deadline: tests/host/test_ssh_deadline.c $(HOST_TEST_OBJ
 test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(BUILD)/tests/test_proc_deadline $(BUILD)/tests/test_ssh_deadline
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_operation.c host/core/operation.c host/core/log.c host/util/fs.c vendor/cjson/cJSON.c -o $(BUILD)/tests/test_operation
 	$(BUILD)/tests/test_operation
+	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_operation_preflight.c host/core/operation.c host/core/log.c host/util/fs.c vendor/cjson/cJSON.c -o $(BUILD)/tests/test_operation_preflight
+	$(BUILD)/tests/test_operation_preflight
+	python3 tests/host/test_remote_cancel_boundaries.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_start_preflight.py
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_cancellation.c host/util/proc.c -o $(BUILD)/tests/test_proc_cancellation
 	$(BUILD)/tests/test_proc_cancellation
 	$(BUILD)/tests/test_proc_deadline
@@ -180,6 +184,8 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(B
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_navigation.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_workspaces.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui_native_regressions.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui_guarded_delete.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py
 	python3 tests/host/test_k3s_retirement.py
 	python3 tests/host/test_build_publish.py
