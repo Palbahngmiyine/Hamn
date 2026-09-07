@@ -127,6 +127,21 @@ def main():
                 if 'label=app=api' in flags:
                     assert 'app=api' in json.loads(query['filters'][0])['label']
             print('PASS:', ' '.join(command), 'direct CLI and three TUI toggles')
+        # A grouped root -H must suppress the UI default and remain a table even
+        # when the socket name contains q (not a container-local quiet flag).
+        alias = harness.root / 'query.sock'
+        alias.symlink_to(endpoint)
+        for flag in ('-DHunix://' + str(alias), '-DH unix://' + str(alias), '-DH=unix://' + str(alias)):
+            direct = subprocess.run([docker] + flag.split() + ['ps'], env=env,
+                capture_output=True, text=True, timeout=10)
+            assert direct.returncode == 0, direct.stderr
+            marker = 'grouped-host=' + str(len(requests))
+            harness.send((':docker ' + flag + ' ps --filter label=' + marker + '\r').encode(), str(alias))
+            harness.wait(lambda: marker in json.loads(requests[-1].get('filters', ['{}'])[0]).get('label', []))
+            harness.until('running-size')
+            assert 'Hamn profile' not in harness.screen.text() and 'docker terminal' not in harness.screen.text()
+            harness.send(b':ps\r', 'Hamn profile default')
+        print('PASS: grouped Docker root host options suppress defaults and preserve structured browsing')
     finally:
         harness.close()
         if server:

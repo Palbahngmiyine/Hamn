@@ -21,7 +21,7 @@ def main():
         return
     harness = Harness('kubernetes')
     requests, release = [], threading.Event()
-    server = thread = direct_watch = None
+    server = thread = direct_watch = alternate = alternate_thread = None
 
     def pod(name):
         return {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': name,
@@ -31,13 +31,16 @@ def main():
     class Api(DiscoveryApi):
         def do_GET(self):
             url = urllib.parse.urlsplit(self.path)
-            if not url.path.endswith('/pods'):
+            if '/pods' not in url.path:
                 return super().do_GET()
-            requests.append((url.path, urllib.parse.parse_qs(url.query)))
+            label = getattr(self.server, 'fixture_label', 'format')
+            requests.append((url.path, urllib.parse.parse_qs(url.query), label))
             watching = requests[-1][1].get('watch') in (['true'], ['1'])
             value = {'type': 'ADDED', 'object': pod('live-watch-row')} if watching else {
                 'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '1'},
-                'items': [pod('format-fixture')]}
+                'items': [pod(label + '-fixture')]}
+            if '/pods/' in url.path:
+                value = pod(label + '-fixture')
             data = json.dumps(value).encode() + b'\n'
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -77,6 +80,25 @@ def main():
             harness.send(b'\r', '[Kubernetes]')
             harness.until('format-fixture')
 
+        alternate = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Api)
+        alternate.fixture_label = 'explicit'
+        alternate_thread = threading.Thread(target=alternate.serve_forever)
+        alternate_thread.start()
+        endpoint = f'http://127.0.0.1:{alternate.server_port}'
+        for flag in ('-As' + endpoint, '-As ' + endpoint, '-As=' + endpoint):
+            direct = subprocess.run([kubectl, 'get', 'pods'] + flag.split(), env=env,
+                capture_output=True, text=True, timeout=10)
+            assert direct.returncode == 0 and 'explicit-fixture' in direct.stdout, direct
+            harness.send(b':get pods ' + flag.encode() + b'\r', 'explicit-fixture')
+            header = harness.screen.text()
+            harness.send(b'\r', 'Exit code 0')
+            assert 'name: explicit-fixture' in harness.screen.text(), harness.screen.text()
+            assert requests[-1][0].endswith('/pods/explicit-fixture') and requests[-1][2] == 'explicit', requests
+            assert endpoint in header, header
+            harness.send(b'\r', '[Kubernetes]')
+            harness.until('explicit-fixture')
+            harness.send(b':get pods\r', 'format-fixture')
+
         direct_watch = subprocess.Popen([kubectl, 'get', 'pods', '-Aw'], env=env,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output = b''
@@ -101,7 +123,7 @@ def main():
         harness.until('format-fixture')
         assert config.read_bytes() == before, 'query changed kubeconfig'
         assert sorted(p.name for p in (harness.root / '.hamn').iterdir()) == ['tui.json']
-        print('PASS: grouped kubectl YAML/JSON, all-namespace live watch, SIGINT exit and list restoration')
+        print('PASS: grouped kubectl output/watch and explicit server retained by selected detail; SIGINT and restoration')
     finally:
         if direct_watch and direct_watch.poll() is None:
             direct_watch.kill()
@@ -114,6 +136,12 @@ def main():
         if thread:
             thread.join(timeout=5)
             assert not thread.is_alive()
+        if alternate:
+            alternate.shutdown()
+            alternate.server_close()
+        if alternate_thread:
+            alternate_thread.join(timeout=5)
+            assert not alternate_thread.is_alive()
 
 
 if __name__ == '__main__':

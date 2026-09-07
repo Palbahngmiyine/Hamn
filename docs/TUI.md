@@ -58,6 +58,9 @@ selectable tables. CLI filtering, scope, and sorting run in the CLI.
 `ps --size` (including `-as`) adds a Size column; repeated boolean options follow
 the CLI's last-value rule. Grouped kubectl output/watch options such as
 `get pods -Aoyaml` and `get pods -Aw` run unchanged in the embedded terminal.
+Grouped connection options such as `docker -DHunix:///path/docker.sock ps` and
+`get pods -Ashttps://api.example` also retain their explicit target in the header
+and selected resource actions. The typed command's original arguments are preserved.
 Explicit output options such as `--format`, `-q`, and `-o yaml` are preserved and displayed
 in the terminal. Other commands are passed to the installed CLI, including
 Compose, buildx, `exec -it`, `attach`, `logs -f`, `stats`, `apply`, `edit`, and
