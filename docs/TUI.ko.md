@@ -90,6 +90,8 @@ UI 선택은 연결 기본값입니다. 명시한 Docker `--context`·`--host`, 
 유지합니다. Docker 전역 옵션은 CLI 규칙대로 명령 앞에 둡니다. 상단에는 실제 호출
 대상을 표시합니다. `docker context use`·`kubectl config`는 원래 설정 변경 의미대로
 실행하고 터미널에서 복귀하면 선택 정보를 다시 읽습니다.
+kubectl의 `--cluster`로 context의 기본 cluster를 덮어쓰면 목록·터미널·선택 작업
+확인 화면에 context와 함께 해당 cluster 옵션도 표시합니다.
 선택한 리소스의 작업에도 조회에 지정한 TLS 서버 이름·인증서·인증·사용자 가장·
 프록시 옵션을 유지합니다.
 

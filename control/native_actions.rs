@@ -65,6 +65,29 @@ pub fn selected(invocation: &Invocation, row: &Value, action: &str) -> Result<Ac
 mod tests {
     use super::*;
     #[test]
+    fn cluster_override_is_visible_without_exposing_consumed_credentials() {
+        let mut state = crate::tui_state::State::new(Default::default());
+        state.workspace = Workspace::Kubernetes;
+        state.request.context = Some("dev-context".into());
+        state.request.namespace = Some("test".into());
+        let row = serde_json::json!({"apiVersion":"v1", "kind":"Pod", "metadata":{
+            "name":"pod", "namespace":"test", "uid":"fixture-uid", "resourceVersion":"1"}});
+        for option in ["--cluster alternate", "--cluster=alternate"] {
+            let query = crate::native::parse(&format!("get pods {option} --token --cluster=secret"), &state).unwrap();
+            assert!(query.target.contains(option));
+            assert!(query.target.contains("--context dev-context"));
+            assert!(!query.target.contains("secret"));
+            for action in ["inspect", "delete", "logs", "stats"] {
+                let selected = selected(&query, &row, action).unwrap();
+                assert!(selected.invocation.target.contains(option));
+                assert!(selected.description.contains(option));
+                assert!(!selected.description.contains("secret"));
+                assert!(selected.invocation.args.windows(2).any(|v| v == ["--token", "--cluster=secret"]));
+                assert!(selected.invocation.args.join(" ").contains(option));
+            }
+        }
+    }
+    #[test]
     fn grouped_targets_survive_defaults_headers_and_selected_actions() {
         let mut state = crate::tui_state::State::new(Default::default());
         state.docker_context = Some("ui-default".into());

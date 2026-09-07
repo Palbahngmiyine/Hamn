@@ -207,7 +207,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     let mut skip_value = false;
     for (i, arg) in connections.iter().enumerate() {
         if skip_value { skip_value = false; continue; }
-        for name in ["--context", "-c", "--host", "-H", "--config", "--namespace", "-n", "--kubeconfig", "--server", "-s", "--tls-server-name"] {
+        for name in ["--context", "-c", "--host", "-H", "--config", "--namespace", "-n", "--kubeconfig", "--cluster", "--server", "-s", "--tls-server-name"] {
             if arg == name { target.push(format!("{name} {}", connections.get(i + 1).map(String::as_str).unwrap_or(""))); }
             else if arg.starts_with(&format!("{name}=")) || (name.len() == 2 && arg.starts_with(name) && arg.len() > 2) { target.push(arg.clone()); }
         }
