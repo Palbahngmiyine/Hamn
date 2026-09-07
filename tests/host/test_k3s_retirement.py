@@ -45,6 +45,23 @@ class Retirement(unittest.TestCase):
                  patch.object(r, 'safe', side_effect=lambda p: helpers / 'guest-deployment-transaction' if str(p) == '/usr/local/libexec/hamn/guest-deployment-transaction' else Path(p)), patch.object(r, 'run') as run:
                 (entry / 'provenance.json').write_text(json.dumps(identity))
                 r.recovery_identity(entry, payload)
+                # Corrupt metadata must be rejected before service reset or any
+                # live-file restoration, including values .strip() would accept.
+                for path, value in [(entry / 'phase', b'ready'),
+                                    (metadata / 'docker_config', b'absent'),
+                                    (metadata / 'docker.service.active', b'inactive'),
+                                    (metadata / 'docker.service.enabled', b'disabled')]:
+                    for invalid in [b' ' + value, value + b' \n', value + b'\t\n',
+                                    value + b'\r\n', value + b'\x00', b'\xc2\xa0' + value,
+                                    b'\xff' + value, b'']:
+                        with self.subTest(path=path.name, invalid=invalid):
+                            path.write_bytes(invalid)
+                            with self.assertRaises(RuntimeError):
+                                r.recover_deployment(payload)
+                            run.assert_not_called()
+                            self.assertTrue(entry.exists())
+                            self.assertEqual(sentinel.read_text(), 'preserve')
+                    path.write_bytes(value + b'\n')
                 for bad in ('different-contract', 'unfinished-retirement', 'retired-file', 'symlink', 'bad-metadata', 'missing-data', 'multiple'):
                     with self.subTest(bad=bad):
                         if bad == 'different-contract':
