@@ -246,11 +246,13 @@ def recovery_identity(entry, payload):
         metadata = safe(entry / 'meta' / name)
         if not metadata.is_file() or metadata.stat().st_size > 16:
             raise RuntimeError(f'missing deployment backup metadata: {name}')
-        state = metadata.read_text().strip()
+        # Shell command substitution removes trailing LF only. Do not accept
+        # whitespace that the rollback helper will reject after earlier restores.
+        state = metadata.read_bytes().rstrip(b'\n')
         data = entry / 'data' / name
-        if state not in ('present', 'absent') or (state == 'absent' and data.exists()):
+        if state not in (b'present', b'absent') or (state == b'absent' and data.exists()):
             raise RuntimeError(f'invalid deployment backup metadata: {name}')
-        if state == 'present' and not (data.is_dir() if name in directories else data.is_file()):
+        if state == b'present' and not (data.is_dir() if name in directories else data.is_file()):
             raise RuntimeError(f'incomplete deployment backup data: {name}')
     for service in ('hamnd', 'containerd', 'docker', 'hamn-host-dns'):
         for suffix, allowed in [('active', {'active', 'inactive'}),
@@ -258,7 +260,7 @@ def recovery_identity(entry, payload):
                                              'masked-runtime', 'static', 'indirect', 'generated',
                                              'transient', 'not-found'})]:
             metadata = safe(entry / 'meta' / f'{service}.service.{suffix}')
-            if not metadata.is_file() or metadata.stat().st_size > 32 or metadata.read_text().strip() not in allowed:
+            if not metadata.is_file() or metadata.stat().st_size > 32 or metadata.read_bytes().rstrip(b'\n') not in {value.encode() for value in allowed}:
                 raise RuntimeError(f'invalid deployment service metadata: {service}.{suffix}')
     for name in HELPERS:
         helper = safe(entry / 'data/libexec_hamn' / name)
@@ -297,7 +299,7 @@ def recover_deployment(payload=None):
     if not entry.is_dir() or not re.fullmatch(r'[0-9a-f]{32}', entry.name):
         raise RuntimeError('invalid deployment backup')
     phase = safe(entry / 'phase')
-    if not phase.is_file() or phase.stat().st_size > 32 or phase.read_text().strip() != 'ready':
+    if not phase.is_file() or phase.stat().st_size > 32 or phase.read_bytes().rstrip(b'\n') != b'ready':
         raise RuntimeError('incomplete deployment backup; recover it before K3s retirement')
     if payload is not None:
         recovery_identity(entry, payload)
