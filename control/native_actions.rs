@@ -48,7 +48,7 @@ pub fn selected(invocation: &Invocation, row: &Value, action: &str) -> Result<Ac
         result.args = connections(invocation, namespace);
         match action {
             "inspect" => result.args.extend(["get".into(), resource.into(), name.into(), "-o".into(), "yaml".into()]),
-            "delete" => crate::guarded_action::delete(&mut result, row)?,
+            "delete" => crate::guarded_action::delete(&mut result, row, resource)?,
             "logs" => result.args.extend(["logs".into(), "--follow".into(), format!("{resource}/{name}")]),
             "stats" if ["pods", "po", "pod"].contains(&resource) => result.args.extend(["top".into(), "pod".into(), name.into()]),
             "restart" if ["deployments", "deployment", "deploy", "statefulsets", "sts", "daemonsets", "ds"].contains(&resource) => crate::guarded_action::restart(&mut result, row, resource, name)?,

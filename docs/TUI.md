@@ -58,7 +58,12 @@ Compose, buildx, `exec -it`, `attach`, `logs -f`, `stats`, `apply`, `edit`, and
 `port-forward`. Compatibility aliases such as `containers` remain available.
 
 Typed commands run once, with no additional Hamn confirmation or command deadline.
-Changes selected through the action menu retain confirmation. Quotes and escaped
+Changes selected through the action menu retain confirmation. Kubernetes menu
+changes bind the selected UID and resource version: deletion sends server-side
+preconditions through kubectl, and restart uses an atomic guarded patch. If the
+resource changed, refresh and select it again. Changing a connection invalidates
+the previous rows until the new target returns a list. Native `kubectl events`
+(and `events`) keep their own command semantics; use `get events` for a table. Quotes and escaped
 arguments are supported; shell pipes, redirection, variable expansion, and shell
 aliases are not interpreted. Run a shell explicitly inside `exec` if required.
 Structured query output is limited to 16 MiB; larger output reports an error.
@@ -91,13 +96,16 @@ returns to the previous browser and refreshes its resources.
 VM start/stop/recovery runs independently of list queries. Navigation, refresh,
 and ordinary Esc do not cancel it. Quitting during a lifecycle mutation asks to
 cancel and exit, then waits for child termination and cleanup. A cancelled start
-only stops a VM it created. The operation log remains available while it runs.
+only stops a VM it created after remote cleanup is confirmed. If completion cannot
+be established, it preserves the VM and reports recovery required. The operation
+log remains available while it runs.
 External changes are not described as rolled back merely because their CLI exited.
 
 A running VM is not proof of Docker availability. Readiness distinguishes ready,
 preparing, unavailable, and recovery required; successful start requires the host
 socket and a real Docker `/_ping` response. An interrupted operation retains its
-identity and outcome for inspection on the next launch. See [API](API.md).
+identity and outcome for inspection on the next launch. Rejected preflight input
+with no VM changes is a known failure; it does not create a new recovery alarm. See [API](API.md).
 
 Completed K3s retirement and unfinished Docker deployment are checked separately.
 A complete, owned backup with matching helper contract and retirement provenance
