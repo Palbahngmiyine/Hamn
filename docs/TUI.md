@@ -140,6 +140,8 @@ status and log retain that warning; an `outcomeUnknown` warning also retains the
 original profile and `vm migrate` diagnostic in `!`. Known failures remain warnings
 without being relabeled unknown. These results stay in the Containers workspace
 when another workspace is visible and are printed after terminal restoration on exit.
+Long diagnostics use a one-line header summary with `! log`; the complete text
+remains in the scrollable operation detail without hiding the resource list.
 
 A running VM is not proof of Docker availability. Readiness distinguishes ready,
 preparing, unavailable, and recovery required; successful start requires the host
