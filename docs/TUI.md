@@ -63,6 +63,9 @@ Grouped connection options such as `docker -DHunix:///path/docker.sock ps` and
 and selected resource actions. The typed command's original arguments are preserved.
 For `--all-namespaces` / `-A`, the last boolean value determines the scope.
 A final `false` keeps the UI namespace default unless an explicit target overrides it.
+Option values are not treated as flags: `--as-group -nteam` keeps the selected
+namespace, just like `--as-group=-nteam`. A value that resembles `--context`,
+`--kubeconfig`, or an output option does not change the UI defaults or list format.
 Explicit output options such as `--format`, `-q`, and `-o yaml` are preserved and displayed
 in the terminal. Other commands are passed to the installed CLI, including
 Compose, buildx, `exec -it`, `attach`, `logs -f`, `stats`, `apply`, `edit`, and
@@ -131,6 +134,12 @@ An unsuccessful SSH mutation also fences its dispatch token before waiting for
 remote completion. If settlement cannot be verified, further guest mutations in
 that operation are blocked and the VM is preserved for recovery.
 External changes are not described as rolled back merely because their CLI exited.
+
+A successful VM stop can include an earlier retirement warning. The operation
+status and log retain that warning; an `outcomeUnknown` warning also retains the
+original profile and `vm migrate` diagnostic in `!`. Known failures remain warnings
+without being relabeled unknown. These results stay in the Containers workspace
+when another workspace is visible and are printed after terminal restoration on exit.
 
 A running VM is not proof of Docker availability. Readiness distinguishes ready,
 preparing, unavailable, and recovery required; successful start requires the host
