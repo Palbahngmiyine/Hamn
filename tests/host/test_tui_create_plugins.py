@@ -33,7 +33,11 @@ sys.exit(7)
             shadow.write_text('#!/bin/sh\nprintf UNEXPECTED_SHADOW_PLUGIN\nexit 99\n')
             shadow.chmod(0o700)
         wrapper = root / 'bin/kubectl'
-        wrapper.write_text(f'#!{sys.executable}\nimport os,sys\nos.execv({kubectl!r},[{kubectl!r}]+sys.argv[1:])\n')
+        wrapper.write_text(f'#!{sys.executable}\n' + '''import json, os, sys
+from pathlib import Path
+with Path(os.environ['HOME'], 'native-calls').open('a') as out:
+    out.write(json.dumps(sys.argv[1:]) + '\\n')
+''' + f'os.execv({kubectl!r},[{kubectl!r}]+sys.argv[1:])\n')
         env = dict(os.environ, HOME=str(root), KUBECONFIG=str(root / 'kubeconfig'),
             PATH=f'{root}/bin:/usr/bin:/bin')
         for prefix in ('', 'kubectl '):
@@ -61,8 +65,29 @@ sys.exit(7)
         # creates only stdout and cannot create a Kubernetes resource.
         harness.send(b':create configmap example --dry-run=client --validate=false -o yaml\r', 'Exit code 0')
         assert 'namespace: ui-ns' in harness.screen.text(), harness.screen.text()
+        harness.send(b'\r', '[Kubernetes]')
+        config_before = (root / 'kubeconfig').read_bytes()
+        for value in ('--namespace=value', '--context=value', '--kubeconfig=value'):
+            for joined in (False, True):
+                args = ['create', 'configmap', 'literal-fixture'] + (
+                    ['--from-literal=' + value] if joined else ['--from-literal', value]) + [
+                    '--dry-run=client', '--validate=false', '-o', 'yaml']
+                direct = subprocess.run([kubectl, '--context', 'old-cluster', '--namespace', 'ui-ns'] + args,
+                    env=env, capture_output=True, text=True, timeout=10)
+                assert direct.returncode == 0 and 'namespace: ui-ns' in direct.stdout, direct
+                def creates():
+                    return [json.loads(line) for line in (root / 'native-calls').read_text().splitlines()
+                            if 'literal-fixture' in json.loads(line)]
+                before = len(creates())
+                harness.send(b':' + ' '.join(args).encode() + b'\r', 'Exit code 0')
+                screen = harness.screen.text()
+                assert all(line.strip() in screen for line in direct.stdout.splitlines()), screen
+                assert value not in screen.split('apiVersion:')[0], screen
+                assert len(creates()) == before + 1 and creates()[-1][-len(args):] == args, creates()
+                harness.send(b'\r', '[Kubernetes]')
+        assert (root / 'kubeconfig').read_bytes() == config_before
         assert sorted(p.name for p in (root / '.hamn').iterdir()) == ['tui.json']
-        print('PASS: create plugins retain exact argv/exit/count; built-ins and aliases keep precedence and UI namespace')
+        print('PASS: create plugins retain exact argv/exit/count; built-ins, aliases and literal data keep UI namespace')
     finally:
         harness.close()
 

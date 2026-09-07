@@ -26,13 +26,16 @@ pub async fn containers(config: Option<&str>) -> Result<Value> {
     Ok(Value::Array(rows))
 }
 
-fn flag(args: &[String], name: &str) -> Option<String> {
-    let mut args = args.iter();
+fn flag(args: &[String], name: &str, workspace: Workspace) -> Option<String> {
+    let root = crate::native_flags::command(args, workspace);
+    let inspected = crate::native_flags::inspect(args, workspace);
+    let mut args = inspected.iter();
     let mut selected = None;
     while let Some(value) = args.next() {
         if value == "--" { break; }
         if value == name { selected = args.next().cloned(); }
         else if let Some(value) = value.strip_prefix(&format!("{name}=")) { selected = Some(value.into()); }
+        else if crate::native_flags::takes_value_in(value, workspace, root) { args.next(); }
     }
     selected
 }
@@ -53,14 +56,14 @@ pub async fn reload(invocation: &Invocation, state: &mut crate::tui_state::State
         let contexts = native::query(&query).await?;
         state.docker_context = contexts.as_array().into_iter().flatten().find(|row| row["Current"] == true)
             .and_then(|row| row["Name"].as_str()).map(String::from);
-        state.docker_config = flag(&query.args[..query.args.len() - 2], "--config");
+        state.docker_config = flag(&query.args[..query.args.len() - 2], "--config", Workspace::Containers);
         state.request.profile = None;
     } else {
-        query.args = flag(&invocation.args, "--kubeconfig").map(|path| vec!["--kubeconfig".into(), path]).unwrap_or_default();
+        query.args = flag(&invocation.args, "--kubeconfig", Workspace::Kubernetes).map(|path| vec!["--kubeconfig".into(), path]).unwrap_or_default();
         query.args.extend(["config".into(), "view".into(), "-o".into(), "json".into()]); query.resource = None;
         let configs = native::query(&query).await?;
         let config = &configs[0];
-        state.request.kubeconfig = flag(&invocation.args, "--kubeconfig");
+        state.request.kubeconfig = flag(&invocation.args, "--kubeconfig", Workspace::Kubernetes);
         state.request.context = config["current-context"].as_str().filter(|s| !s.is_empty()).map(String::from);
         state.request.namespace = config["contexts"].as_array().into_iter().flatten()
             .find(|c| c["name"].as_str() == state.request.context.as_deref())
@@ -90,9 +93,17 @@ mod tests {
             let invocation = native::parse(command, &state).unwrap();
             let query = docker_context_query(&invocation).unwrap();
             assert_eq!(query.args, expected);
-            assert_eq!(flag(&query.args, "--config").as_deref(), Some(path));
+            assert_eq!(flag(&query.args, "--config", Workspace::Containers).as_deref(), Some(path));
         }
         let args = ["--kubeconfig", "first", "config", "view", "--kubeconfig=last"].map(String::from);
-        assert_eq!(flag(&args, "--kubeconfig").as_deref(), Some("last"));
+        assert_eq!(flag(&args, "--kubeconfig", Workspace::Kubernetes).as_deref(), Some("last"));
+        for (input, workspace, name, expected) in [
+            ("--config actual --tlskey --config=literal context show", Workspace::Containers, "--config", "actual"),
+            ("--config actual -Dl --config=literal context show", Workspace::Containers, "--config", "actual"),
+            ("config view --raw --kubeconfig actual", Workspace::Kubernetes, "--kubeconfig", "actual"),
+            ("config set-credentials user --kubeconfig actual --exec-arg --kubeconfig=literal", Workspace::Kubernetes, "--kubeconfig", "actual"),
+        ] {
+            assert_eq!(flag(&crate::tui_state::split_command(input).unwrap(), name, workspace).as_deref(), Some(expected));
+        }
     }
 }

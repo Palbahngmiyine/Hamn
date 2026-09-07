@@ -4,6 +4,7 @@ use serde_json::Value;
 pub struct Action { pub invocation: Invocation, pub changes: bool, pub description: String }
 pub(crate) fn connections(original: &[String], workspace: Workspace, row_namespace: Option<&str>) -> Vec<String> {
     let inspected = crate::native_flags::inspect(original, workspace);
+    let root = crate::native_flags::command(original, workspace);
     let mut args = Vec::new();
     let mut i = 0;
     let docker = workspace == Workspace::Containers;
@@ -21,7 +22,7 @@ pub(crate) fn connections(original: &[String], workspace: Workspace, row_namespa
                 if !skip { if let Some(value) = inspected.get(i) { args.push(value.clone()); } }
             }
         } else if boolean.iter().any(|name| arg == *name || arg.starts_with(&format!("{name}="))) { args.push(arg.clone()); }
-        else if crate::native_flags::takes_value(arg, workspace) { i += 1; }
+        else if crate::native_flags::takes_value_in(arg, workspace, root) { i += 1; }
         i += 1;
     }
     if let Some(namespace) = row_namespace { args.extend(["--namespace".into(), namespace.into()]); }

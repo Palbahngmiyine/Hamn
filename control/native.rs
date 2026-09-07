@@ -35,11 +35,12 @@ fn has(args: &[String], names: &[&str], workspace: Workspace) -> bool {
         s == n || s.starts_with(&format!("{n}=")) || (n.len() == 2 && s.starts_with(n) && s.len() > 2)))
 }
 fn kube_all_namespaces(inspected: &[String]) -> bool {
+    let root = crate::native_flags::command(inspected, Workspace::Kubernetes);
     let mut enabled = false;
     let mut args = inspected.iter();
     while let Some(arg) = args.next() {
         if arg == "--" { break; }
-        if crate::native_flags::takes_value(arg, Workspace::Kubernetes) { args.next(); continue; }
+        if crate::native_flags::takes_value_in(arg, Workspace::Kubernetes, root) { args.next(); continue; }
         if ["--all-namespaces", "-A"].contains(&arg.as_str()) { enabled = true; }
         else if let Some(value) = arg.strip_prefix("--all-namespaces=").or_else(|| arg.strip_prefix("-A=")) {
             enabled = docker_bool(value);
@@ -314,6 +315,39 @@ mod tests {
         }
         let child = parse("compose --config child.yml version", &state).unwrap();
         assert_eq!(&child.args[..2], ["--config", "/fixture/docker"]);
+    }
+    #[test]
+    fn builtin_command_values_and_boolean_aliases_preserve_native_target_defaults() {
+        let mut state = State::new(Default::default());
+        state.workspace = Workspace::Kubernetes;
+        state.request.context = Some("ui-cluster".into());
+        state.request.namespace = Some("ui-ns".into());
+        state.request.kubeconfig = Some("/fixture/config".into());
+        for option in ["--from-literal", "--from-file", "--from-env-file", "--field-manager"] {
+            for value in ["--namespace=value", "--context=value", "--kubeconfig=value"] {
+                for separator in [" ", "="] {
+                    let text = format!("create configmap example {option}{separator}{value} --dry-run=client --validate=false -o yaml");
+                    let invocation = parse(&text, &state).unwrap();
+                    assert_eq!(&invocation.args[..6], ["--context", "ui-cluster", "--namespace", "ui-ns", "--kubeconfig", "/fixture/config"], "{text}");
+                    assert_eq!(invocation.target, "--context ui-cluster  --namespace ui-ns  --kubeconfig /fixture/config", "{text}");
+                    assert!(invocation.resource.is_none());
+                    assert!(invocation.args.ends_with(&split_command(&text).unwrap()));
+                }
+            }
+        }
+        for text in ["logs pod -fp --namespace explicit", "logs pod --prefix --namespace explicit",
+            "run pod --command --namespace explicit", "top pod --containers --namespace explicit",
+            "create configmap example --dry-run --validate --namespace explicit",
+            "delete pod example --cascade --namespace explicit"] {
+            let invocation = parse(text, &state).unwrap();
+            assert!(!invocation.args.contains(&"ui-ns".into()), "{text}");
+            assert!(invocation.target.contains("--namespace explicit"), "{text}: {}", invocation.target);
+        }
+        for text in ["proxy -w --context=literal", "proxy -p --namespace=literal", "patch pod example -p --namespace=literal"] {
+            let invocation = parse(text, &state).unwrap();
+            assert_eq!(&invocation.args[..4], ["--context", "ui-cluster", "--namespace", "ui-ns"], "{text}");
+            assert!(!invocation.target.contains("literal"), "{text}");
+        }
     }
     #[test]
     fn namespace_defaults_and_headers_follow_the_last_all_namespaces_boolean() {
