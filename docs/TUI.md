@@ -91,7 +91,10 @@ The connection rules are based on the official [Docker CLI reference](https://do
 The embedded PTY supplies terminal input/output and resizes with the window.
 Ctrl-C goes to the CLI; Docker's default Ctrl-P Ctrl-Q detach sequence is passed
 through. After the command exits, its exit code remains visible. Enter or Esc
-returns to the previous browser and refreshes its resources.
+returns to the previous browser and refreshes its resources. Shift+PageUp/PageDown
+scrolls terminal history while a command runs; PageUp/PageDown also scrolls after
+exit. Normal input returns to the live output. In the `!` operation log, arrows
+or `j/k` scroll the log.
 
 VM start/stop/recovery runs independently of list queries. Navigation, refresh,
 and ordinary Esc do not cancel it. Quitting during a lifecycle mutation asks to

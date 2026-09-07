@@ -286,9 +286,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         Event::Resize(width, height) => { if let Err(e) = session.resize(width, height) { state.message = e.to_string(); } },
                         Event::Paste(text) if session.exit.is_none() => {
                             let bytes = if session.parser.screen().bracketed_paste() { format!("\x1b[200~{text}\x1b[201~").into_bytes() } else { text.into_bytes() };
-                            let _ = session.write(&bytes).await;
+                            let _ = session.input(&bytes).await;
                         },
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            if session.scroll_key(key) { continue; }
                             if session.exit.is_some() && matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
                                 let completed = cli.take().unwrap();
                                 if completed.invocation.reset_selection {
@@ -297,7 +298,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                 job.refresh(&mut state);
                             } else if session.exit.is_none() {
                                 let bytes = crate::terminal_io::key_bytes(key, session.parser.screen().application_cursor());
-                                let _ = session.write(&bytes).await;
+                                let _ = session.input(&bytes).await;
                             }
                         },
                         _ => {},
