@@ -96,6 +96,8 @@ connection options according to that plugin. This exception prevents accidental
 argument rewriting; plugin support does not imply every plugin targets the UI selection.
 An installed `kubectl-ns` or `kubectl-pods` takes precedence over the corresponding
 Hamn convenience alias, with or without the `kubectl` prefix.
+`kubectl create <extension>` plugins also retain their original arguments;
+built-in create commands and their aliases keep precedence over plugin files.
 
 The connection rules are based on the official [Docker CLI reference](https://docs.docker.com/reference/cli/docker/),
 [kubectl reference](https://kubernetes.io/docs/reference/kubectl/), and

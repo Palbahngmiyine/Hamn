@@ -93,6 +93,8 @@ context·namespace 옵션을 삽입하지 않고 원래 인자를 전달합니�
 대상을 UI 선택으로 강제한다는 뜻은 아닙니다.
 설치된 `kubectl-ns`·`kubectl-pods`는 Hamn의 같은 이름 편의 별칭보다 우선합니다.
 `kubectl` 접두사를 생략해도 동일하게 동작합니다.
+`kubectl create <extension>` 플러그인도 원래 인자를 유지합니다. 내장 create 명령과
+그 별칭은 같은 이름의 플러그인 파일보다 우선합니다.
 
 연결 규칙은 공식 [Docker CLI 문서](https://docs.docker.com/reference/cli/docker/),
 [kubectl 문서](https://kubernetes.io/docs/reference/kubectl/),

@@ -115,13 +115,22 @@ fn kube_short_output(args: &[String]) -> bool {
 fn installed_kubectl_plugin(args: &[String], index: Option<usize>) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let Some(index) = index else { return false; };
+    let create_extension = args[index] == "create" && args.get(index + 1).is_some_and(|name|
+        !name.starts_with('-') && !["clusterrole", "clusterrolebinding", "configmap", "cm",
+            "cronjob", "cj", "deployment", "deploy", "ingress", "ing", "job", "namespace", "ns",
+            "poddisruptionbudget", "pdb", "priorityclass", "pc", "quota", "resourcequota",
+            "role", "rolebinding", "secret", "service", "svc", "serviceaccount", "sa", "token"]
+            .contains(&name.as_str()));
     // These are kubectl's built-in command roots, not an implementation of their flags.
-    if ["annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "certificate", "cluster-info", "completion", "config", "cordon", "cp", "create", "debug", "delete", "describe", "diff", "drain", "edit", "events", "exec", "explain", "expose", "get", "help", "kustomize", "label", "logs", "options", "patch", "plugin", "port-forward", "proxy", "replace", "rollout", "run", "scale", "set", "taint", "top", "uncordon", "version", "wait"].contains(&args[index].as_str()) { return false; }
+    if !create_extension && ["annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "certificate", "cluster-info", "completion", "config", "cordon", "cp", "create", "debug", "delete", "describe", "diff", "drain", "edit", "events", "exec", "explain", "expose", "get", "help", "kuberc", "kustomize", "label", "logs", "options", "patch", "plugin", "port-forward", "proxy", "replace", "rollout", "run", "scale", "set", "taint", "top", "uncordon", "version", "wait"].contains(&args[index].as_str()) { return false; }
     let Some(path) = std::env::var_os("PATH") else { return false; };
     let mut candidate = String::from("kubectl");
     for part in &args[index..] {
         if part.starts_with('-') || part.contains('/') { break; }
         candidate.push('-'); candidate.push_str(&part.replace('-', "_"));
+        // create is the only built-in root that permits new plugin subcommands.
+        // A kubectl-create executable cannot replace the built-in root itself.
+        if create_extension && candidate == "kubectl-create" { continue; }
         // kubectl also accepts literal hyphens for plugin subcommands.
         for name in [candidate.clone(), candidate.replace('_', "-")] {
             if std::env::split_paths(&path).any(|dir| std::fs::metadata(dir.join(&name)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)) { return true; }
