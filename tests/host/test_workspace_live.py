@@ -133,6 +133,8 @@ def main():
     try:
         runtime.call('vm', 'start', profile='verify', yes=True, cpu=4, memory=6, disk=60)
         recovery(root, runtime)
+        from workspace_live_cancel_boundaries import cancellation_boundaries
+        cancellation_boundaries(root, runtime, snapshot)
         cli_extensions(root, runtime)
         from workspace_live_cancellation import cancellation, owned_start_cancellation
         from workspace_live_kubernetes import kubernetes

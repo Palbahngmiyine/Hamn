@@ -167,6 +167,8 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(B
 	$(BUILD)/tests/test_operation
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_operation_preflight.c host/core/operation.c host/core/log.c host/util/fs.c vendor/cjson/cJSON.c -o $(BUILD)/tests/test_operation_preflight
 	$(BUILD)/tests/test_operation_preflight
+	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_remote_mutation.c host/core/remote_mutation.c -o $(BUILD)/tests/test_remote_mutation
+	$(BUILD)/tests/test_remote_mutation
 	python3 tests/host/test_remote_cancel_boundaries.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_start_preflight.py
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_cancellation.c host/util/proc.c -o $(BUILD)/tests/test_proc_cancellation
