@@ -28,7 +28,7 @@ pub fn load(path: &Path) -> io::Result<Option<Workspace>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         result => result?,
     }
-    let mut file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path) {
+    let mut file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(path) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         result => result?,
     };

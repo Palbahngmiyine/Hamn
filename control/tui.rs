@@ -530,7 +530,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     }
     if let Some(task) = mutation_job.task.take() { let _ = task.await; }
     drop(_restore);
-    for outcome in &state.uncertain {
+    for outcome in state.uncertain.iter().chain(&other.uncertain) {
         eprintln!("{outcome}");
     }
     match draw_error { Some(error) => Err(error), None => Ok(()) }
