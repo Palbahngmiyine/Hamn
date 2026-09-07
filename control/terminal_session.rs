@@ -1,10 +1,11 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{native::Invocation, terminal_io::{self, Replies}};
-use std::{io, os::fd::{AsRawFd, FromRawFd, OwnedFd}, process::Stdio, sync::Arc};
+use std::{collections::VecDeque, io, os::fd::{AsRawFd, FromRawFd, OwnedFd}, process::Stdio, sync::Arc};
 use tokio::{io::unix::AsyncFd, sync::mpsc};
 use ratatui::{layout::{Constraint, Layout}, widgets::Paragraph};
 
-pub enum Event { Output(Vec<u8>), Exited(i32), Ended }
+const INPUT_LIMIT: usize = 4 * 1024 * 1024;
+pub enum Event { Output(Vec<u8>), Exited(i32), Ended, InputProgress }
 pub struct Session {
     pub invocation: Invocation,
     pub parser: vt100::Parser<Replies>,
@@ -14,6 +15,9 @@ pub struct Session {
     output: mpsc::Receiver<io::Result<Vec<u8>>>,
     reader: tokio::task::JoinHandle<()>,
     ended: bool,
+    input: VecDeque<u8>,
+    input_closed: bool,
+    input_error: Option<String>,
 }
 impl Session {
     pub fn start(invocation: Invocation, width: u16, height: u16) -> io::Result<Self> {
@@ -63,11 +67,12 @@ impl Session {
             }
         });
         Ok(Self { invocation, parser: vt100::Parser::new_with_callbacks(rows, cols, 10000, Replies::default()),
-            exit: None, child, master, output, reader, ended: false })
+            exit: None, child, master, output, reader, ended: false,
+            input: VecDeque::new(), input_closed: false, input_error: None })
     }
     pub async fn next(&mut self) -> io::Result<Event> {
+        let pending_input = !self.input.is_empty() && !self.input_closed;
         tokio::select! {
-            biased;
             result = self.output.recv(), if !self.ended => match result {
                 Some(bytes) => Ok(Event::Output(bytes?)),
                 None => { self.ended = true; Ok(Event::Ended) },
@@ -76,22 +81,30 @@ impl Session {
                 use std::os::unix::process::ExitStatusExt;
                 let status = result?;
                 let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
-                self.exit = Some(code); Ok(Event::Exited(code))
+                self.exit = Some(code);
+                self.close_input("CLI exited");
+                Ok(Event::Exited(code))
+            },
+            result = flush_input(&self.master, &mut self.input), if pending_input => {
+                if let Err(error) = result { self.close_input(&format!("PTY write failed: {error}")); }
+                Ok(Event::InputProgress)
             },
             else => std::future::pending().await,
         }
     }
-    pub async fn write(&self, mut bytes: &[u8]) -> io::Result<()> {
-        while !bytes.is_empty() {
-            let mut ready = self.master.writable().await?;
-            match ready.try_io(|fd| {
-                let count = unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
-                if count < 0 { Err(io::Error::last_os_error()) } else { Ok(count as usize) }
-            }) {
-                Ok(Ok(0)) => return Err(io::ErrorKind::WriteZero.into()),
-                Ok(Ok(n)) => bytes = &bytes[n..], Ok(Err(e)) => return Err(e), Err(_) => {},
-            }
+    fn close_input(&mut self, reason: &str) {
+        if !self.input.is_empty() {
+            self.input_error = Some(format!("{reason}: {} queued input bytes were not delivered", self.input.len()));
         }
+        self.input.clear(); self.input_closed = true;
+    }
+    pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        if self.input_closed || bytes.len() > INPUT_LIMIT.saturating_sub(self.input.len()) {
+            let reason = if self.input_closed { "PTY input is closed" } else { "4 MiB input queue is full; wait and retry" };
+            self.input_error = Some(format!("{reason}: {} new bytes were not sent", bytes.len()));
+            return Err(io::Error::other(self.input_error.as_ref().unwrap().clone()));
+        }
+        self.input.extend(bytes);
         Ok(())
     }
     pub fn scroll_key(&mut self, key: KeyEvent) -> bool {
@@ -104,9 +117,19 @@ impl Session {
         screen.set_scrollback(offset);
         true
     }
-    pub async fn input(&mut self, bytes: &[u8]) -> io::Result<()> {
+    pub fn input(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.parser.screen_mut().set_scrollback(0);
-        self.write(bytes).await
+        self.write(bytes)
+    }
+    pub fn interrupt_input(&mut self) -> io::Result<()> {
+        let pending = self.input.len();
+        self.input.clear();
+        let flushed = unsafe { libc::tcflush(self.master.as_raw_fd(), libc::TCIFLUSH) };
+        self.input_error = Some(format!("Interrupted: discarded {pending} queued bytes and pending terminal input"));
+        let signal = self.signal(libc::SIGINT);
+        if let Err(error) = &signal { self.input_error = Some(format!("Interrupt failed: {error}; {pending} queued bytes discarded")); }
+        else if flushed < 0 { self.input_error = Some(format!("Interrupted; {pending} queued bytes discarded; terminal flush failed")); }
+        signal
     }
     pub fn resize(&mut self, width: u16, height: u16) -> io::Result<()> {
         let (rows, cols) = (height.saturating_sub(3).max(1), width.max(1));
@@ -127,7 +150,11 @@ impl Session {
         frame.render_widget(Paragraph::new(crate::tui_state::clean(&format!("Hamn | {} terminal\n{}", self.invocation.program(), self.invocation.target))), areas[0]);
         frame.render_widget(terminal_io::Screen(self.parser.screen()), areas[1]);
         let status = self.exit.map(|code| format!("Exit code {code} | PgUp/PgDn scroll | Enter / Esc returns to the resource list"))
-            .unwrap_or_else(|| "Shift+PgUp/PgDn scroll | Input goes to CLI | Ctrl-C interrupts | Ctrl-P Ctrl-Q detaches".into());
+            .unwrap_or_else(|| "Input goes to CLI | Ctrl+Alt+C interrupts/discards input | Shift+PgUp/PgDn scroll".into());
+        let status = self.input_error.as_ref().map_or(status.clone(), |error| match self.exit {
+            Some(code) => format!("Exit code {code} | {error} | Enter/Esc returns"),
+            None => format!("{error} | Ctrl+Alt+C interrupts"),
+        });
         frame.render_widget(Paragraph::new(status), areas[2]);
         if !self.parser.screen().hide_cursor() && self.exit.is_none() && self.parser.screen().scrollback() == 0 {
             let (row, col) = self.parser.screen().cursor_position();
@@ -135,6 +162,23 @@ impl Session {
         }
     }
 }
+// Each poll writes at most one bounded chunk. Queue advancement occurs in the
+// same poll as write(), so cancelling next() cannot replay or lose written bytes.
+async fn flush_input(master: &AsyncFd<OwnedFd>, queue: &mut VecDeque<u8>) -> io::Result<()> {
+    let mut ready = master.writable().await?;
+    let result = ready.try_io(|fd| {
+        let bytes = queue.as_slices().0;
+        let count = unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len().min(8192)) };
+        if count < 0 { Err(io::Error::last_os_error()) } else { Ok(count as usize) }
+    });
+    match result {
+        Ok(Ok(0)) => Err(io::ErrorKind::WriteZero.into()),
+        Ok(Ok(count)) => { queue.drain(..count); Ok(()) },
+        Ok(Err(error)) => Err(error),
+        Err(_) => Ok(()),
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.signal(libc::SIGHUP);
@@ -162,14 +206,14 @@ mod tests {
             for _ in 0..10 { assert!(session.scroll_key(shifted)); }
             assert!(session.parser.screen().contents().contains("history-00"));
             assert!(session.parser.screen().scrollback() > 0);
-            session.input(b"accepted\r").await.unwrap();
+            session.input(b"accepted\r").unwrap();
             assert_eq!(session.parser.screen().scrollback(), 0);
             loop {
                 match session.next().await.unwrap() {
                     Event::Output(bytes) => session.parser.process(&bytes),
                     Event::Exited(code) => { assert_eq!(code, 0); if session.ended { break; } },
                     Event::Ended if session.exit.is_some() => break,
-                    Event::Ended => {},
+                    Event::Ended | Event::InputProgress => {},
                 }
             }
             assert!(session.parser.screen().contents().contains("received:accepted"));
@@ -194,12 +238,12 @@ mod tests {
                     Event::Output(bytes) => {
                         output.extend(bytes);
                         if !sent && String::from_utf8_lossy(&output).contains("ready") {
-                            session.resize(100, 33).unwrap(); session.write(b"hello\r").await.unwrap(); sent = true;
+                            session.resize(100, 33).unwrap(); session.write(b"hello\r").unwrap(); sent = true;
                         }
                     },
                     Event::Exited(code) => { assert_eq!(code, 7); if session.ended { break; } },
                     Event::Ended if session.exit.is_some() => break,
-                    Event::Ended => {},
+                    Event::Ended | Event::InputProgress => {},
                 }
             }
         }).await.unwrap();
@@ -207,3 +251,7 @@ mod tests {
         assert!(text.contains("input:hello") && text.contains("30 100") && text.contains("stderr-marker"), "{text}");
     }
 }
+
+#[cfg(test)]
+#[path = "terminal_input_tests.rs"]
+mod input_tests;

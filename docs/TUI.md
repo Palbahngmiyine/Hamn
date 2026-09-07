@@ -93,7 +93,11 @@ Ctrl-C goes to the CLI; Docker's default Ctrl-P Ctrl-Q detach sequence is passed
 through. After the command exits, its exit code remains visible. Enter or Esc
 returns to the previous browser and refreshes its resources. Shift+PageUp/PageDown
 scrolls terminal history while a command runs; PageUp/PageDown also scrolls after
-exit. Normal input returns to the live output. In the `!` operation log, arrows
+exit. Normal input returns to the live output. Input is queued in order up to 4 MiB;
+a paste or key that would exceed this limit is rejected with a visible message.
+Ctrl-C retains the CLI's raw-byte behavior. Ctrl+Alt+C explicitly discards queued
+and terminal-buffered input and sends SIGINT to the CLI process group; the discarded
+queue byte count is shown. Undelivered input on CLI exit or write failure is reported. In the `!` operation log, arrows
 or `j/k` scroll the log.
 
 VM start/stop/recovery runs independently of list queries. Navigation, refresh,

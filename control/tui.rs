@@ -196,7 +196,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     Ok(TerminalEvent::Output(bytes)) => {
                         let session = cli.as_mut().unwrap(); session.parser.process(&bytes);
                         let replies = std::mem::take(&mut session.parser.callbacks_mut().0);
-                        if !replies.is_empty() { let _ = session.write(&replies).await; }
+                        if !replies.is_empty() { let _ = session.write(&replies); }
                     },
                     Ok(TerminalEvent::Exited(code)) => {
                         if exit_after_cancel {
@@ -205,7 +205,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         }
                         state.message = format!("CLI exit code {code}; Enter returns to the list");
                     },
-                    Ok(TerminalEvent::Ended) => {},
+                    Ok(TerminalEvent::Ended | TerminalEvent::InputProgress) => {},
                     Err(error) => { state.message = error.to_string(); cli.take(); job.refresh(&mut state); },
                 }
             },
@@ -286,9 +286,13 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         Event::Resize(width, height) => { if let Err(e) = session.resize(width, height) { state.message = e.to_string(); } },
                         Event::Paste(text) if session.exit.is_none() => {
                             let bytes = if session.parser.screen().bracketed_paste() { format!("\x1b[200~{text}\x1b[201~").into_bytes() } else { text.into_bytes() };
-                            let _ = session.input(&bytes).await;
+                            let _ = session.input(&bytes);
                         },
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            if session.exit.is_none() && key.code == KeyCode::Char('c') &&
+                                key.modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                                let _ = session.interrupt_input(); continue;
+                            }
                             if session.scroll_key(key) { continue; }
                             if session.exit.is_some() && matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
                                 let completed = cli.take().unwrap();
@@ -298,7 +302,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                 job.refresh(&mut state);
                             } else if session.exit.is_none() {
                                 let bytes = crate::terminal_io::key_bytes(key, session.parser.screen().application_cursor());
-                                let _ = session.input(&bytes).await;
+                                let _ = session.input(&bytes);
                             }
                         },
                         _ => {},
