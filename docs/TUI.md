@@ -66,6 +66,9 @@ A final `false` keeps the UI namespace default unless an explicit target overrid
 Option values are not treated as flags: `--as-group -nteam` keeps the selected
 namespace, just like `--as-group=-nteam`. A value that resembles `--context`,
 `--kubeconfig`, or an output option does not change the UI defaults or list format.
+This also applies to built-in command data, such as `create configmap example
+--from-literal --namespace=value`: that token remains data in the selected namespace.
+Command-specific meanings are retained, including `logs -f` for follow and `get -f` for a filename.
 Explicit output options such as `--format`, `-q`, and `-o yaml` are preserved and displayed
 in the terminal. Other commands are passed to the installed CLI, including
 Compose, buildx, `exec -it`, `attach`, `logs -f`, `stats`, `apply`, `edit`, and

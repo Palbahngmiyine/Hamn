@@ -58,7 +58,7 @@ pub(crate) fn command_index(args: &[String], workspace: Workspace) -> Option<usi
     while i < args.len() {
         let word = &args[i];
         if !word.starts_with('-') { return Some(i); }
-        if values.contains(&word.as_str()) || (workspace == Workspace::Kubernetes && ["--v", "-v", "--profile", "--profile-output"].contains(&word.as_str())) { i += 2; }
+        if values.contains(&word.as_str()) || (workspace == Workspace::Kubernetes && crate::native_flags::KUBE_GLOBAL_VALUES.contains(&word.as_str())) { i += 2; }
         else if word.contains('=') || values.iter().any(|n| n.len() == 2 && word.starts_with(n) && word.len() > 2) ||
             ["--debug", "-D", "--tls", "--tlsverify"].contains(&word.as_str()) || KUBE_CONNECTION_FLAGS.contains(&word.as_str()) { i += 1; }
         else if let Some(parts) = crate::native_flags::short_group(word, workspace) {
@@ -288,6 +288,7 @@ mod tests {
         state.request.context = Some("ui-cluster".into());
         state.request.namespace = Some("ui-ns".into());
         state.request.kubeconfig = Some("/fixture/config".into());
+        assert_eq!(parse("--log-flush-frequency 10s get pods", &state).unwrap().resource.as_deref(), Some("pods"));
         for value in ["-nteam", "--namespace=team", "--context=other", "--kubeconfig=other",
             "-oyaml", "--watch", "--help", "-A", "--"] {
             for separator in [" ", "="] {

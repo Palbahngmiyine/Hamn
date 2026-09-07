@@ -89,6 +89,17 @@ def main():
             assert 'Exit code' not in harness.screen.text(), 'consumed value changed query into PTY output'
         server.fixture_label = 'format'
         harness.send(b':get pods\r', 'format-fixture')
+        # --cascade has an optional value. Its following namespace flag must
+        # remain an override; client dry-run performs no server-side deletion.
+        args = ['delete', 'pod', 'format-fixture', '--cascade', '--namespace', 'explicit', '--dry-run=client', '-o', 'name']
+        direct = subprocess.run([kubectl, '--context', 'old-cluster'] + args, env=env,
+                                capture_output=True, text=True, timeout=10)
+        assert direct.returncode == 0, direct.stderr
+        harness.send(b':' + ' '.join(args).encode() + b'\r', 'Exit code 0')
+        assert all(line.strip() in harness.screen.text() for line in direct.stdout.splitlines()), harness.screen.text()
+        assert '--namespace explicit' in harness.screen.text(), harness.screen.text()
+        harness.send(b'\r', '[Kubernetes]')
+        harness.until('format-fixture')
         for flags in (['-Aoyaml'], ['-Ao', 'yaml'], ['-Aojson']):
             args = ['get', 'pods'] + flags
             direct = subprocess.run([kubectl] + args, env=env, capture_output=True,

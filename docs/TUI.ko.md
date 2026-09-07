@@ -65,6 +65,9 @@ kubectl get deployments -n dev --sort-by=.metadata.name
 옵션 값은 다른 옵션으로 해석하지 않습니다. `--as-group -nteam`은
 `--as-group=-nteam`처럼 선택한 namespace를 유지합니다. 값이 `--context`·
 `--kubeconfig`·출력 옵션과 비슷해도 UI 기본 대상이나 목록 형식을 바꾸지 않습니다.
+`create configmap example --from-literal --namespace=value`처럼 내장 명령에 전달하는
+데이터에도 적용됩니다. 이 토큰은 선택한 namespace에 들어갈 데이터로 유지합니다.
+`logs -f`의 follow와 `get -f`의 파일 이름처럼 명령별 옵션 의미도 구분합니다.
 필터·조회 범위·정렬은 CLI가 처리합니다. `--format`, `-q`, `-o yaml` 등 명시한 출력
 옵션은 유지하고 터미널에 표시합니다. 그 밖의 명령도 원래 CLI로 전달합니다.
 Compose·buildx·`exec -it`·`attach`·`logs -f`·`stats`·`apply`·`edit`·`port-forward`를

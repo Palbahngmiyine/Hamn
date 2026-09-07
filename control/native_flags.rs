@@ -2,6 +2,7 @@
 use crate::preferences::Workspace;
 
 pub const DOCKER_VALUES: &[&str] = &["--context", "-c", "--host", "-H", "--config", "--log-level", "-l", "--tlscacert", "--tlscert", "--tlskey"];
+pub const KUBE_GLOBAL_VALUES: &[&str] = &["--v", "-v", "--vmodule", "--profile", "--profile-output", "--log-flush-frequency"];
 pub fn takes_value(name: &str, workspace: Workspace) -> bool {
     takes_value_in(name, workspace, "get")
 }
@@ -47,8 +48,8 @@ pub fn takes_value_in(name: &str, workspace: Workspace, command: &str) -> bool {
         (command == "config" && name == "--raw") { false }
     else if name == "-w" { command == "proxy" }
     else { crate::native::KUBE_CONNECTION_VALUES.contains(&name) ||
-        KUBE_COMMAND_VALUES.contains(&name) ||
-        ["--selector", "-l", "--field-selector", "--filename", "-f", "--kustomize", "-k", "--sort-by", "--template", "--chunk-size", "--subresource", "--v", "-v", "--vmodule", "--profile", "--profile-output", "--output", "-o", "--label-columns", "-L"].contains(&name) }
+        KUBE_COMMAND_VALUES.contains(&name) || KUBE_GLOBAL_VALUES.contains(&name) ||
+        ["--selector", "-l", "--field-selector", "--filename", "-f", "--kustomize", "-k", "--sort-by", "--template", "--chunk-size", "--subresource", "--output", "-o", "--label-columns", "-L"].contains(&name) }
 }
 
 pub fn short_group(word: &str, workspace: Workspace) -> Option<Vec<String>> {
@@ -119,6 +120,29 @@ pub fn inspect(args: &[String], workspace: Workspace) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "run with installed CLI metadata by tests/host/test_native_flag_inventory.py"]
+    fn installed_kubectl_flag_inventory() {
+        let path = std::env::var("HAMN_KUBECTL_FLAG_INVENTORY").unwrap();
+        let inventory: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>> =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(inventory.len() > 50);
+        for (path, flags) in inventory {
+            let root = path.split_whitespace().next().unwrap();
+            for (name, consumes) in flags {
+                assert_eq!(takes_value_in(&name, Workspace::Kubernetes, root), consumes, "{path} {name}");
+                for grouped in [false, true].into_iter().filter(|grouped| !grouped || name.len() == 2) {
+                    let mut args = crate::tui_state::split_command(&path).unwrap();
+                    args.extend([if grouped { format!("-h{}", &name[1..]) } else { name.clone() },
+                        "--namespace=literal".into(), "--context=actual".into()]);
+                    let positions = options(&args, Workspace::Kubernetes);
+                    assert_eq!(positions.contains(&"--namespace=literal".into()), !consumes, "{path} {name} group={grouped}");
+                    assert!(positions.contains(&"--context=actual".into()), "{path} {name}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn inspection_splits_known_groups_without_splitting_values_or_original_argv() {
         for (workspace, input, expected) in [
