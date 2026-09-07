@@ -91,6 +91,8 @@ UI selections supply connection defaults. Explicit Docker `--context` / `--host`
 and kubectl `--context`, `--kubeconfig`, `--namespace` / `-n` take precedence;
 `-A` retains its all-namespace scope. Place Docker global flags before its command,
 as required by Docker CLI. The header shows the effective invocation target.
+An explicit kubectl `--cluster` override is also shown in the list, terminal, and
+selected-action confirmation alongside the context whose defaults it overrides.
 `docker context use` and `kubectl config` execute with their normal configuration
 write semantics; Hamn reloads selection information after the terminal closes.
 Selected-resource actions retain the query's TLS server name, certificates,
