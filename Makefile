@@ -200,6 +200,7 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(B
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_kubectl_output.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_cluster_target.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_picker_restore.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui_environment_actions.py
 	python3 tests/host/test_workspace_kubernetes_assertions.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_tls_target.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_backpressure.py

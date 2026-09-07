@@ -484,12 +484,12 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             crate::native::toggle_all(invocation); state.selected = 0; job.refresh(&mut state);
                         }
                     },
-                    KeyCode::Char('c') if state.request.operation() == "vm list" && state.docker_context.is_none() => {
+                    KeyCode::Char('c') if state.vm_panel() => {
                         if let Some(row) = state.selected() {
                             state.input = Some((':', format!("vm configure --profile {} --cpu {} --memory {} --disk {}", row["name"].as_str().unwrap_or("default"), row["cpus"], row["memoryMiB"].as_u64().unwrap_or(4096) / 1024, row["diskGiB"])));
                         }
                     },
-                    KeyCode::Char('v') if state.hamn_environment() => {
+                    KeyCode::Char('v') if !state.environment_picker && state.hamn_environment() => {
                         state.save_browser(); state.native = None; state.environment_picker = false;
                         let request = state.view("vm"); job.dispatch(request, &mut state);
                     },

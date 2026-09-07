@@ -141,6 +141,10 @@ impl State {
         self.workspace == Workspace::Containers && self.docker_context.is_none() &&
             self.native.as_ref().is_none_or(|command| command.hamn_profile.is_some())
     }
+    pub fn vm_panel(&self) -> bool {
+        !self.environment_picker && self.native.is_none() && self.hamn_environment()
+            && self.request.operation() == "vm list"
+    }
     pub fn save_browser(&mut self) {
         if self.native.is_some() {
             self.browser = Some(self.snapshot());
@@ -305,6 +309,9 @@ impl State {
         Ok(request)
     }
     pub fn action(&self, action: &str) -> Result<Request> {
+        if self.environment_picker {
+            return Err(Failure::new("selectEnvironment", "Select an environment with Enter before using resource actions"));
+        }
         if self.stale {
             return Err(Failure::new(
                 "staleData",
@@ -448,6 +455,13 @@ fn label(value: &Value) -> String {
         })
         .unwrap_or("");
     let docker = value["dockerStatus"].as_str().unwrap_or("");
+    if let Some(kind) = value["environmentKind"].as_str() {
+        return clean(&match kind {
+            "docker" => format!("{name}  Docker context  {}  {status}", value["endpoint"].as_str().unwrap_or("")),
+            "hamn" => format!("{name}  Hamn profile  {status}  {docker}"),
+            _ => format!("{name}  {status}"),
+        });
+    }
     clean(&format!("{name}  {status}  {docker}"))
 }
 
@@ -551,6 +565,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
         return;
     }
     let header = match state.workspace {
+        Workspace::Containers if state.environment_picker => "Hamn | [Containers]   Kubernetes   Tab switch   , settings\nChoose a Hamn profile or Docker context\nEnter selects the environment; Esc cancels".into(),
         Workspace::Containers => format!("Hamn | [Containers]   Kubernetes   Tab switch   , settings\nEnvironment: {}\n{}",
             if state.hamn_environment() { format!("Hamn profile {}", state.request.profile.as_deref().unwrap_or("default")) }
             else { state.docker_context.as_ref().map(|c| format!("Docker context {c}")).unwrap_or_else(|| "Explicit Docker CLI target".into()) },
@@ -643,7 +658,8 @@ pub fn draw(frame: &mut Frame, state: &State) {
             .block(Block::bordered()),
         areas[2],
     );
-    let keys = if state.workspace == Workspace::Kubernetes { ": command  / filter  Enter detail  l logs  g metrics  r rollout  d delete  m actions  ? help  q quit" }
+    let keys = if state.environment_picker { ": command  / filter  Enter select  Esc cancel  Tab workspace  q quit" }
+        else if state.workspace == Workspace::Kubernetes { ": command  / filter  Enter detail  l logs  g metrics  r rollout  d delete  m actions  ? help  q quit" }
         else { ": command  / filter  Enter detail  s start  t stop  r restart  d delete  l logs  g stats  m actions  ? help  q quit" };
     frame.render_widget(Paragraph::new(keys), areas[3]);
 }
@@ -660,6 +676,36 @@ pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn environment_picker_never_interprets_context_names_as_vm_profiles() {
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        assert!(state.vm_panel());
+        state.open_picker(); state.environment_picker = true;
+        state.accept(Ok(serde_json::json!([
+            {"name":"shared", "environmentKind":"hamn", "state":"running", "dockerStatus":"ready"},
+            {"name":"shared", "environmentKind":"docker", "endpoint":"unix:///external.sock"}
+        ])));
+        assert!(!state.vm_panel());
+        for selected in [0, 1] {
+            state.selected = selected;
+            for action in ["start", "stop", "delete", "restart", "logs", "stats"] {
+                assert_eq!(state.action(action).unwrap_err().code, "selectEnvironment");
+            }
+        }
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let screen: String = terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
+        for marker in ["shared  Hamn profile", "shared  Docker context", "unix:///external.sock", "Enter select"] {
+            assert!(screen.contains(marker), "{screen}");
+        }
+        assert!(!screen.contains("v VM settings")); assert!(!screen.contains("t stop"));
+        assert!(state.cancel_picker()); assert!(state.vm_panel());
+        state.data = serde_json::json!([{"name":"shared"}]);
+        assert_eq!(state.action("stop").unwrap().profile.as_deref(), Some("shared"));
+        state.native = Some(crate::native::parse("docker --context external ps", &state).unwrap());
+        assert!(!state.vm_panel()); // A stale vm-list request cannot enable configure in a native view.
+    }
     #[test]
     fn long_failure_header_keeps_normal_size_resource_and_scrollable_log_visible() {
         for diagnostic in ["x".repeat(8192), "긴 작업 진단 ".repeat(400), "first\nsecond\n".repeat(300)] {
