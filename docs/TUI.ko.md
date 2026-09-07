@@ -72,6 +72,8 @@ kubectl get deployments -n dev --sort-by=.metadata.name
 옵션은 유지하고 터미널에 표시합니다. 그 밖의 명령도 원래 CLI로 전달합니다.
 Compose·buildx·`exec -it`·`attach`·`logs -f`·`stats`·`apply`·`edit`·`port-forward`를
 포함합니다. `containers` 같은 이전 명령은 호환 별칭으로 남습니다.
+Docker의 `--digests`, `--no-trunc`, `--tree` 조회도 터미널로 표시하여 요청한
+digest 필드·전체 식별자·트리 모양을 CLI 출력 그대로 유지합니다.
 
 입력한 명령은 한 번 실행하며 Hamn의 추가 확인이나 명령 제한 시간을 삽입하지
 않습니다. 작업 메뉴에서 선택한 변경에는 확인을 유지합니다. Kubernetes 메뉴 변경은
@@ -97,8 +99,9 @@ context·namespace 옵션을 삽입하지 않고 원래 인자를 전달합니�
 **Plugin-defined target / inherited CLI configuration**을 표시합니다. 플러그인의
 연결 옵션은 해당 플러그인 규칙에 따라 지정하세요. 플러그인 지원이 모든 플러그인의
 대상을 UI 선택으로 강제한다는 뜻은 아닙니다.
-설치된 `kubectl-ns`·`kubectl-pods`는 Hamn의 같은 이름 편의 별칭보다 우선합니다.
-`kubectl` 접두사를 생략해도 동일하게 동작합니다.
+설치된 `kubectl-ns`·`kubectl-pods`·`kubectl-ctx`·`kubectl-contexts`는 Hamn의 같은
+이름 편의 별칭보다 우선합니다. `kubectl` 접두사나 추가 인자가 없어도 동일합니다.
+플러그인이 없으면 인자 없는 `ctx`·`contexts`는 기존 context 목록을 엽니다.
 `kubectl create <extension>` 플러그인도 원래 인자를 유지합니다. 내장 create 명령과
 그 별칭은 같은 이름의 플러그인 파일보다 우선합니다.
 

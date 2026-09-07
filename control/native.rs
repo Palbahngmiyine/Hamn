@@ -72,7 +72,7 @@ fn resource(args: &[String], workspace: Workspace) -> Option<String> {
     let i = command_index(args, workspace)?;
     let words: Vec<_> = args[i..].iter().map(String::as_str).collect();
     if workspace == Workspace::Containers {
-        if has(&args[i..], &["--format", "--quiet", "-q"], workspace) { return None; }
+        if has(&args[i..], &["--format", "--quiet", "-q", "--digests", "--no-trunc", "--tree"], workspace) { return None; }
         match words.as_slice() {
             ["ps", ..] | ["container", "ls" | "ps" | "list", ..] => Some("containers".into()),
             ["images", ..] | ["image", "ls" | "list", ..] => Some("images".into()),
@@ -113,7 +113,7 @@ fn kube_short_output(args: &[String]) -> bool {
     }
     false
 }
-fn installed_kubectl_plugin(args: &[String], index: Option<usize>) -> bool {
+pub(crate) fn installed_kubectl_plugin(args: &[String], index: Option<usize>) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let Some(index) = index else { return false; };
     let create_extension = args[index] == "create" && args.get(index + 1).is_some_and(|name|
@@ -311,9 +311,14 @@ mod tests {
             assert_eq!(invocation.resource.as_deref(), Some("containers"), "{input}");
             assert!(invocation.args.ends_with(&split_command(input).unwrap()));
         }
-        for input in ["ps -aq", "ps -l --format '{{.Names}}'", "-l debug ps -q"] {
-            assert!(parse(input, &state).unwrap().resource.is_none(), "{input}");
+        for input in ["ps -aq", "ps -l --format '{{.Names}}'", "-l debug ps -q",
+            "images --digests", "image ls --digests=false", "image list --tree",
+            "images --digests=true --digests=false", "images --no-trunc", "ps --no-trunc", "network ls --no-trunc"] {
+            let invocation = parse(input, &state).unwrap();
+            assert!(invocation.resource.is_none(), "{input}");
+            assert!(invocation.args.ends_with(&split_command(input).unwrap()));
         }
+        assert_eq!(parse("images --filter --digests", &state).unwrap().resource.as_deref(), Some("images"));
         let child = parse("compose --config child.yml version", &state).unwrap();
         assert_eq!(&child.args[..2], ["--config", "/fixture/docker"]);
     }

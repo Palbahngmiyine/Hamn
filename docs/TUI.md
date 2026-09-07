@@ -73,6 +73,8 @@ Explicit output options such as `--format`, `-q`, and `-o yaml` are preserved an
 in the terminal. Other commands are passed to the installed CLI, including
 Compose, buildx, `exec -it`, `attach`, `logs -f`, `stats`, `apply`, `edit`, and
 `port-forward`. Compatibility aliases such as `containers` remain available.
+Docker `--digests`, `--no-trunc`, and `--tree` queries also use the terminal so requested
+digest fields, full identifiers, and tree layout retain the CLI's output.
 
 Typed commands run once, with no additional Hamn confirmation or command deadline.
 Changes selected through the action menu retain confirmation. Kubernetes menu
@@ -100,8 +102,10 @@ flags before plugin names and plugins may not accept them. The header explicitly
 shows **Plugin-defined target / inherited CLI configuration**. Specify a plugin's
 connection options according to that plugin. This exception prevents accidental
 argument rewriting; plugin support does not imply every plugin targets the UI selection.
-An installed `kubectl-ns` or `kubectl-pods` takes precedence over the corresponding
-Hamn convenience alias, with or without the `kubectl` prefix.
+An installed `kubectl-ns`, `kubectl-pods`, `kubectl-ctx`, or `kubectl-contexts` takes
+precedence over the corresponding Hamn convenience alias, with or without the
+`kubectl` prefix or additional arguments. Without a plugin, bare `ctx` and `contexts`
+still open the context list.
 `kubectl create <extension>` plugins also retain their original arguments;
 built-in create commands and their aliases keep precedence over plugin files.
 
