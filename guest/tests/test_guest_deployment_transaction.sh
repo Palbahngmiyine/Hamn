@@ -1,10 +1,26 @@
 #!/bin/bash
-set -euo pipefail
+set -eEuo pipefail
 
 GUEST_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SCRIPT="$GUEST_ROOT/scripts/guest-deployment-transaction.sh"
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+cleanup() {
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        # Expected failures redirect their output. Keep unexpected assertion
+        # failures diagnosable before deleting this disposable fixture.
+        local output
+        for output in "$WORK"/*.err "$WORK"/*.out; do
+            [ -f "$output" ] || continue
+            printf '\nFixture output: %s\n' "${output##*/}" >&2
+            tail -n 40 "$output" >&2 || true
+        done
+    fi
+    rm -rf "$WORK"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'printf "FAIL: guest deployment transaction test line %s: %s\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 fail() {
     echo "FAIL: $*" >&2
