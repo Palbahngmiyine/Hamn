@@ -40,7 +40,7 @@
 #include "vmrun/ctlsock.h"
 #include "vz/vz_shim.h"
 
-#define START_REEXEC_AFTER_SIGNED_UPDATE 3
+#define START_REEXEC_AFTER_SIGNED_UPDATE OPERATION_RESTART_REQUIRED
 
 static int mac_ensure(const struct profile *p, char *mac, size_t cap)
 {
@@ -858,6 +858,7 @@ static int cmd_start_locked(const struct start_options *options, const char *pro
 {
     start_spawned = start_restored = start_unchanged = 0;
     int rc = cmd_start_execute(options, profile);
+    if (rc == START_REEXEC_AFTER_SIGNED_UPDATE) return operation_restart_required();
     if (start_unchanged) return operation_finish_unchanged(rc);
     return operation_finish(rc, !remote_mutation_cleanup_pending() &&
         (start_restored || (!start_spawned &&

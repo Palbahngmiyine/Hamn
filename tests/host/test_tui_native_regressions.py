@@ -58,7 +58,7 @@ else:
 
 
 class Harness:
-    def __init__(self, workspace, prepare_preferences=None):
+    def __init__(self, workspace, prepare_preferences=None, namespace=None):
         self.directory = tempfile.TemporaryDirectory(prefix='hamn-native-regression-', dir='/tmp')
         self.root = Path(self.directory.name)
         (self.root / 'bin').mkdir()
@@ -85,7 +85,8 @@ class Harness:
                    PATH=f'{self.root}/bin:/usr/bin:/bin', TERM='xterm-256color', KUBECONFIG=str(config))
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 32, 160, 0, 0))
-        self.child = subprocess.Popen([BINARY], stdin=self.slave, stdout=self.slave,
+        args = [BINARY] + (['--namespace', namespace] if namespace else [])
+        self.child = subprocess.Popen(args, stdin=self.slave, stdout=self.slave,
                                       stderr=self.slave, env=env, start_new_session=True)
         self.screen = Screen(32, 160)
         self.output = bytearray()
