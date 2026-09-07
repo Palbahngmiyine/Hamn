@@ -542,7 +542,12 @@ pub fn draw(frame: &mut Frame, state: &State) {
             state.uncertain.len()
         )
     };
-    let header = format!("{header}\n{}", state.operation_status);
+    // Full diagnostics belong in the scrollable log, not the fixed header.
+    let width = frame.area().width.saturating_sub(2);
+    let summary = if wrap_lines(&state.operation_status, width).len() > 1 {
+        format!("{} … (! log)", wrap_lines(&state.operation_status, width.saturating_sub(10)).first().cloned().unwrap_or_default())
+    } else { state.operation_status.clone() };
+    let header = format!("{header}\n{summary}");
     let header = wrap_lines(&header, frame.area().width.saturating_sub(2));
     let header_height = header.len().saturating_add(2).min(u16::MAX as usize) as u16;
     if frame.area().width < 20 || header_height.saturating_add(6) > frame.area().height {
@@ -623,6 +628,36 @@ pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn long_failure_header_keeps_normal_size_resource_and_scrollable_log_visible() {
+        for diagnostic in ["x".repeat(8192), "긴 작업 진단 ".repeat(400), "first\nsecond\n".repeat(300)] {
+            let mut state = State::new(Request::default());
+            state.show_all = true;
+            state.data = serde_json::json!([{"name":"still-browsable"}]);
+            state.operation_status = format!("outcomeUnknown: {diagnostic}");
+            state.operation_log = "full log retained".into();
+            state.uncertain.push(serde_json::json!({"profile":"owned", "error":diagnostic}));
+            let original = state.operation_status.clone();
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, &state)).unwrap();
+            let screen: String = terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
+            assert!(screen.contains("still-browsable"), "{screen}");
+            assert!(screen.contains("! log"), "{screen}");
+            state.show_operation = true;
+            let mut found = false;
+            for _ in 0..40 {
+                terminal.draw(|frame| draw(frame, &state)).unwrap();
+                let screen: String = terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
+                assert!(!screen.contains("resize terminal"), "{screen}");
+                if screen.contains("full log retained") { found = true; break; }
+                state.move_by(20);
+            }
+            assert!(found, "full operation log must remain reachable by scrolling");
+            assert_eq!(state.operation_status, original);
+            assert_eq!(state.uncertain[0]["error"], diagnostic);
+        }
+    }
+
     #[test]
     fn operation_log_navigation_scrolls_text_without_moving_resource_selection() {
         let mut state = State::new(Request::default());
