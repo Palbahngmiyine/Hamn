@@ -66,8 +66,8 @@ int remote_mutation_run(const struct profile *profile, const char *ip,
             "flock", "--wait", wait, lock, "true", NULL };
         /* Publishing outside the lock also defeats an original writer queued
          * behind us. The barrier alone would not establish FIFO ordering. */
-        if (ssh_exec(profile, ip, publish, 0) != 0 ||
-            ssh_exec(profile, ip, barrier, 0) != 0) {
+        if (ssh_exec_bounded(profile, ip, publish, 30000) != 0 ||
+            ssh_exec_bounded(profile, ip, barrier, (wait_seconds + 10) * 1000) != 0) {
             cleanup_pending = 1;
             logerr("cannot fence and settle cancelled guest mutation; preserving VM");
         }
