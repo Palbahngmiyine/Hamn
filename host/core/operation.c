@@ -79,7 +79,8 @@ cJSON *operation_snapshot(const struct profile *profile)
         strlen(uuid->valuestring) != 32 || strspn(uuid->valuestring, "0123456789abcdef") != 32 ||
         (strcmp(status->valuestring, "running") && strcmp(status->valuestring, "completed") &&
          strcmp(status->valuestring, "failed") && strcmp(status->valuestring, "cancelled") &&
-         strcmp(status->valuestring, "outcomeUnknown"))) {
+         strcmp(status->valuestring, "outcomeUnknown") &&
+         strcmp(status->valuestring, "restartRequired"))) {
         cJSON_Delete(value); errno = EINVAL; return NULL;
     }
     if (strcmp(status->valuestring, "running") == 0) {
@@ -105,7 +106,8 @@ int operation_begin(const struct profile *profile, const char *name)
     if (!previous) { logerr("cannot validate previous operation record"); return -1; }
     cJSON *status = cJSON_GetObjectItemCaseSensitive(previous, "status");
     int active = cJSON_IsString(status) && !strcmp(status->valuestring, "running");
-    previous_unknown = cJSON_IsString(status) && !strcmp(status->valuestring, "outcomeUnknown");
+    previous_unknown = (cJSON_IsString(status) && !strcmp(status->valuestring, "outcomeUnknown")) ||
+        cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(previous, "recoveryRequired"));
     cJSON_Delete(previous);
     if (active) { errno = EBUSY; return -1; }
     uint64_t sec, usec;
@@ -150,18 +152,35 @@ void operation_started_vm(void)
     }
 }
 
-int operation_finish(int result, int restored)
+static int finish_record(int result, const char *status)
 {
     if (!record) return result;
-    if (result != 0 && restored && proc_cancelled()) result = 130;
-    field("status", result == 0 ? "completed" : !restored ? "outcomeUnknown" :
-          result == 130 ? "cancelled" : "failed");
-    field("error", result == 0 ? "" : log_last_error());
+    field("status", status);
+    field("error", result == 0 || result == OPERATION_RESTART_REQUIRED ? "" : log_last_error());
     cJSON_AddNumberToObject(record, "exitCode", result);
     int saved = save_record();
     cJSON_Delete(record);
     record = NULL;
     return saved || persistence_failed ? -1 : result;
+}
+
+int operation_finish(int result, int restored)
+{
+    if (!record) return result;
+    if (result != 0 && restored && proc_cancelled()) result = 130;
+    return finish_record(result, result == 0 ? "completed" : !restored ? "outcomeUnknown" :
+                         result == 130 ? "cancelled" : "failed");
+}
+
+int operation_restart_required(void)
+{
+    if (record) {
+        field("phase", "signed-image-ready");
+        /* Installing an image neither completes VM start nor proves an earlier
+         * interrupted guest operation was recovered. The new worker must retry. */
+        if (previous_unknown && !cJSON_AddBoolToObject(record, "recoveryRequired", 1)) abort();
+    }
+    return finish_record(OPERATION_RESTART_REQUIRED, "restartRequired");
 }
 
 /* Rejecting input cannot resolve an earlier interrupted operation. */

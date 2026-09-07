@@ -19,13 +19,13 @@ def main():
     if not kubectl:
         print('SKIP: installed kubectl unavailable; grouped options are covered in Rust')
         return
-    harness = Harness('kubernetes')
+    harness = Harness('kubernetes', namespace='ui-ns')
     requests, release = [], threading.Event()
     server = thread = direct_watch = alternate = alternate_thread = None
 
-    def pod(name):
+    def pod(name, namespace='test'):
         return {'apiVersion': 'v1', 'kind': 'Pod', 'metadata': {'name': name,
-            'namespace': 'test', 'uid': 'fixture-uid', 'resourceVersion': '1'},
+            'namespace': namespace, 'uid': 'fixture-uid', 'resourceVersion': '1'},
             'status': {'phase': 'Running'}}
 
     class Api(DiscoveryApi):
@@ -34,13 +34,14 @@ def main():
             if '/pods' not in url.path:
                 return super().do_GET()
             label = getattr(self.server, 'fixture_label', 'format')
+            namespace = url.path.split('/namespaces/')[1].split('/')[0] if '/namespaces/' in url.path else 'test'
             requests.append((url.path, urllib.parse.parse_qs(url.query), label))
             watching = requests[-1][1].get('watch') in (['true'], ['1'])
             value = {'type': 'ADDED', 'object': pod('live-watch-row')} if watching else {
                 'apiVersion': 'v1', 'kind': 'PodList', 'metadata': {'resourceVersion': '1'},
-                'items': [pod(label + '-fixture')]}
+                'items': [pod(label + '-fixture', namespace)]}
             if '/pods/' in url.path:
-                value = pod(label + '-fixture')
+                value = pod(label + '-fixture', namespace)
             data = json.dumps(value).encode() + b'\n'
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -66,6 +67,24 @@ def main():
         wrapper = harness.root / 'bin/kubectl'
         wrapper.write_text(f'#!{os.sys.executable}\nimport os, sys\nos.execv({kubectl!r}, [{kubectl!r}] + sys.argv[1:])\n')
         env = dict(os.environ, HOME=str(harness.root), KUBECONFIG=str(config))
+        for index, (flags, all_namespaces) in enumerate([
+            ('--all-namespaces=false', False), ('-A=false', False),
+            ('-A --all-namespaces=false', False), ('-AA=false', False),
+            ('--all-namespaces=false -A', True), ('-A=0', False),
+            ('-A=False', False), ('-A=TRUE', True),
+        ]):
+            server.fixture_label = f'scope-{index}'
+            direct = subprocess.run([kubectl, '--context', 'old-cluster', '--namespace',
+                'ui-ns', 'get', 'pods'] + flags.split(), env=env, capture_output=True,
+                text=True, timeout=10)
+            assert direct.returncode == 0, direct.stderr
+            expected = '/api/v1/pods' if all_namespaces else '/api/v1/namespaces/ui-ns/pods'
+            assert requests[-1][0] == expected, requests
+            harness.send(b':get pods ' + flags.encode() + b'\r', f'scope-{index}-fixture')
+            assert requests[-1][0] == expected, requests
+            assert ('all namespaces' in harness.screen.text()) == all_namespaces, harness.screen.text()
+        server.fixture_label = 'format'
+        harness.send(b':get pods\r', 'format-fixture')
         for flags in (['-Aoyaml'], ['-Ao', 'yaml'], ['-Aojson']):
             args = ['get', 'pods'] + flags
             direct = subprocess.run([kubectl] + args, env=env, capture_output=True,

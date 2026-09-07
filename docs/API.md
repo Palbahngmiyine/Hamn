@@ -40,6 +40,10 @@ Ownership evidence includes PID, process start time, and executable UUID; PID al
 never establishes ownership. Completed, failed, cancelled, and unknown outcomes
 remain in the private atomic `~/.hamn/<profile>/operation.json` record.
 An orphaned running record is reported as `outcomeUnknown` / `recoveryRequired`.
+After preparing a missing signed image, `restartRequired` with phase
+`signed-image-ready` records the handoff to the installed binary. Both frontends
+retry start once; this handoff does not claim VM readiness or clear an earlier
+`recoveryRequired` outcome. A later successful start establishes completion.
 Navigation does not cancel managed work; confirmed quit requests cancellation
 and waits for cleanup. Unknown outcomes require inspection before retry.
 

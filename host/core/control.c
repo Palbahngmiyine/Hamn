@@ -52,7 +52,8 @@ static cJSON *profile_snapshot(const char *name)
         docker_status = "recoveryRequired";
     } else {
         const cJSON *status = cJSON_GetObjectItem(operation, "status");
-        if (cJSON_IsString(status) && !strcmp(status->valuestring, "outcomeUnknown"))
+        if ((cJSON_IsString(status) && !strcmp(status->valuestring, "outcomeUnknown")) ||
+            cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(operation, "recoveryRequired")))
             docker_status = "recoveryRequired";
         else if (!strcmp(live, "running"))
             docker_status = guest_deployment_docker_ready(&profile) ? "ready" :
