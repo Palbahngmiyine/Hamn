@@ -5,14 +5,29 @@ use crate::{
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+fn cancellation_failure(previous: Option<Failure>) -> Failure {
+    previous.unwrap_or_else(|| Failure::new("cancelled", "operation cancelled"))
+}
+
 fn retirement_result(operation: &str, result: Result<Value>, cancelled: bool) -> Result<Option<Failure>> {
     let error = match result {
-        Err(error) if operation != "vm stop" || cancelled => return Err(error),
+        Err(error) if operation != "vm stop" => return Err(error),
         Err(error) => Some(error),
         Ok(_) => None,
     };
-    if cancelled { return Err(Failure::new("cancelled", "operation cancelled")); }
+    if cancelled { return Err(cancellation_failure(error)); }
     Ok(error)
+}
+
+fn after_retirement(result: Result<Value>, previous: Option<Failure>) -> Result<Value> {
+    match result {
+        Err(error) if error.code == "cancelled" => Err(previous.unwrap_or(error)),
+        Err(error) => Err(error),
+        Ok(mut value) => {
+            if let Some(error) = previous { value["migrationError"] = serde_json::json!(error); }
+            Ok(value)
+        }
+    }
 }
 
 pub async fn execute_stream(
@@ -48,7 +63,7 @@ pub async fn execute_stream(
             // from the retirement that already ran, especially outcomeUnknown.
             migration_error = retirement_result(&request.operation(), migration, cancel.is_cancelled())?;
         }
-    if cancel.is_cancelled() { return Err(Failure::new("cancelled", "operation cancelled")); }
+    if cancel.is_cancelled() { return Err(cancellation_failure(migration_error)); }
     let run = async {
         if request.words.first().is_some_and(|word| word == "docker") {
             let mut status_request = request.clone();
@@ -63,13 +78,10 @@ pub async fn execute_stream(
         } else if request.words.first().is_some_and(|word| word == "k8s") {
             crate::kubernetes::execute(request, events.as_ref()).await
         } else {
-            let mut result = if managed {
-                core::call_control(request, cancel, events.as_ref()).await?
-            } else { core::call(request).await? };
-            if let Some(error) = migration_error {
-                result["migrationError"] = serde_json::json!(error);
-            }
-            Ok(result)
+            let result = if managed {
+                core::call_control(request, cancel, events.as_ref()).await
+            } else { core::call(request).await };
+            after_retirement(result, migration_error)
         }
     };
     if managed { return run.await; }
@@ -121,5 +133,18 @@ mod tests {
                 else { assert!(result.unwrap().is_none()); }
             }
         }
+    }
+    #[test]
+    fn cancellation_at_later_dispatch_boundaries_cannot_erase_retirement_uncertainty() {
+        let error = Failure::new("outcomeUnknown", "retirement diagnostic");
+        let previous = retirement_result("vm stop", Err(error), false).unwrap();
+        assert_eq!(cancellation_failure(previous.clone()).code, "outcomeUnknown");
+        let result = after_retirement(Err(Failure::new("cancelled", "dispatch cancelled")), previous.clone());
+        assert_eq!(result.unwrap_err().message, "retirement diagnostic");
+        let result = after_retirement(Err(Failure::new("outcomeUnknown", "stop diagnostic")), previous.clone());
+        assert_eq!(result.unwrap_err().message, "stop diagnostic");
+        let result = after_retirement(Ok(serde_json::json!({"state":"stopped"})), previous).unwrap();
+        assert_eq!(result["migrationError"]["code"], "outcomeUnknown");
+        assert_eq!(after_retirement(Err(Failure::new("cancelled", "cancelled")), None).unwrap_err().code, "cancelled");
     }
 }
