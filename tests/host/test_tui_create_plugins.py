@@ -40,6 +40,27 @@ with Path(os.environ['HOME'], 'native-calls').open('a') as out:
 ''' + f'os.execv({kubectl!r},[{kubectl!r}]+sys.argv[1:])\n')
         env = dict(os.environ, HOME=str(root), KUBECONFIG=str(root / 'kubeconfig'),
             PATH=f'{root}/bin:/usr/bin:/bin')
+        for alias in ('ctx', 'contexts', 'ns', 'pods'):
+            alias_plugin = root / 'bin' / ('kubectl-' + alias)
+            shutil.copy2(plugin, alias_plugin)
+            for suffix in ([], ['review-space']):
+                for prefix in ('', 'kubectl '):
+                    args = [alias] + suffix
+                    direct = subprocess.run([kubectl] + args, env=env, capture_output=True,
+                        text=True, timeout=10)
+                    assert direct.returncode == 7, direct
+                    before = len((root / 'plugin-calls').read_text().splitlines())
+                    harness.send(b':' + (prefix + ' '.join(args)).encode() + b'\r', 'Exit code 7')
+                    assert direct.stdout.strip() in harness.screen.text(), harness.screen.text()
+                    calls = (root / 'plugin-calls').read_text().splitlines()
+                    assert len(calls) == before + 1 and json.loads(calls[-1]) == suffix, calls
+                    native = [json.loads(line) for line in (root / 'native-calls').read_text().splitlines()]
+                    assert native[-1] == args and 'Plugin-defined target' in harness.screen.text(), native
+                    harness.send(b'\r', '[Kubernetes]')
+            alias_plugin.unlink()
+            if alias in ('ctx', 'contexts'):
+                harness.send((':' + alias + '\r').encode(), 'k8s contexts list')
+                harness.until('old-cluster')
         for prefix in ('', 'kubectl '):
             args = ['create', 'hamnfixture', 'marker', '--plugin-option', 'value']
             direct = subprocess.run([kubectl] + args, env=env, capture_output=True,
