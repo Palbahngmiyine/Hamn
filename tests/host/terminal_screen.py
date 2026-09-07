@@ -2,6 +2,10 @@
 import codecs
 import re
 import unicodedata
+import os
+import select
+import subprocess
+import time
 
 class Screen:
     def __init__(self, rows=40, cols=160):
@@ -47,3 +51,30 @@ class Screen:
 
     def text(self):
         return '\n'.join(''.join(row).rstrip() for row in self.cells)
+
+
+class RatatuiScreen(Screen):
+    """Expose completed draws, not transient mixtures of old and new rows."""
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.frame_pending = b''
+
+    def feed(self, data):
+        self.frame_pending += data
+        # Ratatui writes cursor visibility after the frame's cell updates.
+        while match := re.search(rb'\x1b\[\?25[hl]', self.frame_pending):
+            end = match.end()
+            super().feed(self.frame_pending[:end])
+            self.frame_pending = self.frame_pending[end:]
+
+
+def wait_for_exit(child, master, timeout):
+    """Drain redraw/restore output so a full PTY cannot block process exit."""
+    deadline = time.monotonic() + timeout
+    while child.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(child.args, timeout)
+        if select.select([master], [], [], min(remaining, 0.1))[0]:
+            os.read(master, 65536)
+    return child.returncode

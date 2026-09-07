@@ -16,7 +16,7 @@ import tempfile
 import termios
 import threading
 import time
-from terminal_screen import Screen
+from terminal_screen import RatatuiScreen as Screen, wait_for_exit
 
 BINARY = Path(os.environ.get('HAMN', 'build/hamn')).resolve()
 REAL_KUBECTL = shutil.which('kubectl')
@@ -120,7 +120,7 @@ else:
         finally:
             child.send_signal(signal.SIGTERM)
             try:
-                child.wait(timeout=5)
+                wait_for_exit(child, master, timeout=5)
             finally:
                 if child.poll() is None:
                     os.killpg(child.pid, signal.SIGKILL)
