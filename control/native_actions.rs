@@ -5,11 +5,13 @@ pub struct Action { pub invocation: Invocation, pub changes: bool, pub descripti
 fn connections(invocation: &Invocation, row_namespace: Option<&str>) -> Vec<String> {
     let mut args = Vec::new();
     let mut i = 0;
-    while i < invocation.args.len() {
+    let docker = invocation.workspace == Workspace::Containers;
+    let end = if docker { crate::native::command_index(&invocation.args, invocation.workspace).unwrap_or(0) } else { invocation.args.len() };
+    while i < end {
         let arg = &invocation.args[i];
         if arg == "--" { break; }
-        let value = ["--context", "-c", "--host", "-H", "--config", "--kubeconfig", "--namespace", "-n", "--cluster", "--user", "--server", "-s", "--token", "--certificate-authority", "--client-certificate", "--client-key", "--request-timeout", "--as", "--as-group", "--as-uid", "--cache-dir", "--tlscacert", "--tlscert", "--tlskey"];
-        let boolean = ["--tls", "--tlsverify", "--insecure-skip-tls-verify", "--disable-compression", "--warnings-as-errors"];
+        let value: &[&str] = if docker { &["--context", "-c", "--host", "-H", "--config", "--tlscacert", "--tlscert", "--tlskey"] } else { &["--context", "--kubeconfig", "--namespace", "-n", "--cluster", "--user", "--server", "-s", "--token", "--certificate-authority", "--client-certificate", "--client-key", "--request-timeout", "--as", "--as-group", "--as-uid", "--cache-dir"] };
+        let boolean: &[&str] = if docker { &["--tls", "--tlsverify"] } else { &["--insecure-skip-tls-verify", "--disable-compression", "--warnings-as-errors"] };
         if let Some(name) = value.iter().find(|name| arg == **name || arg.starts_with(&format!("{name}=")) || (name.len() == 2 && arg.starts_with(**name) && arg.len() > 2)) {
             let skip = row_namespace.is_some() && ["--namespace", "-n"].contains(name);
             if !skip { args.push(arg.clone()); }
@@ -46,10 +48,10 @@ pub fn selected(invocation: &Invocation, row: &Value, action: &str) -> Result<Ac
         result.args = connections(invocation, namespace);
         match action {
             "inspect" => result.args.extend(["get".into(), resource.into(), name.into(), "-o".into(), "yaml".into()]),
-            "delete" => result.args.extend(["delete".into(), resource.into(), name.into()]),
+            "delete" => crate::guarded_action::delete(&mut result, row)?,
             "logs" => result.args.extend(["logs".into(), "--follow".into(), format!("{resource}/{name}")]),
             "stats" if ["pods", "po", "pod"].contains(&resource) => result.args.extend(["top".into(), "pod".into(), name.into()]),
-            "restart" if ["deployments", "deployment", "deploy", "statefulsets", "sts", "daemonsets", "ds"].contains(&resource) => result.args.extend(["rollout".into(), "restart".into(), format!("{resource}/{name}")]),
+            "restart" if ["deployments", "deployment", "deploy", "statefulsets", "sts", "daemonsets", "ds"].contains(&resource) => crate::guarded_action::restart(&mut result, row, resource, name)?,
             _ => return Err(Failure::new("unsupportedOperation", "use a kubectl command for this resource action")),
         }
         if let Some(namespace) = namespace { result.target = format!("{}  selected namespace: {namespace}", result.target); }

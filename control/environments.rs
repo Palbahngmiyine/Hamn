@@ -7,7 +7,7 @@ pub async fn containers(config: Option<&str>) -> Result<Value> {
     let mut args = config.map(|path| vec!["--config".into(), path.into()]).unwrap_or_default();
     args.extend(["context".into(), "ls".into()]);
     let context_query = Invocation { workspace: Workspace::Containers, args,
-        hamn_profile: None, resource: Some("contexts".into()), target: "Docker configuration".into(), reset_selection: false };
+        hamn_profile: None, resource: Some("contexts".into()), target: "Docker configuration".into(), reset_selection: false, body: None };
     let (profiles, contexts) = tokio::join!(profiles, native::query(&context_query));
     let mut rows = Vec::new();
     match profiles {
@@ -31,6 +31,7 @@ fn flag(args: &[String], name: &str) -> Option<String> {
         else { value.strip_prefix(&format!("{name}=")).map(String::from) })
 }
 pub async fn reload(invocation: &Invocation, state: &mut crate::tui_state::State) -> Result<()> {
+    state.invalidate_results();
     let mut query = invocation.clone();
     if invocation.workspace == Workspace::Containers {
         let index = invocation.args.iter().position(|arg| arg == "context").unwrap_or(0);

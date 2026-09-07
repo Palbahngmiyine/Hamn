@@ -16,7 +16,9 @@ pub struct Session {
 }
 impl Session {
     pub fn start(invocation: Invocation, width: u16, height: u16) -> io::Result<Self> {
-        Self::spawn(invocation.command(false), invocation, width, height)
+        let mut command = invocation.command(false);
+        let _input = invocation.body.as_deref().map(|body| crate::command_input::attach(&mut command, body)).transpose()?;
+        Self::spawn(command, invocation, width, height)
     }
     fn spawn(mut command: tokio::process::Command, invocation: Invocation, width: u16, height: u16) -> io::Result<Self> {
         let (rows, cols) = (height.saturating_sub(3).max(1), width.max(1));

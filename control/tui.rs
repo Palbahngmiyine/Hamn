@@ -137,7 +137,7 @@ impl Job {
 }
 
 fn resource_action(action: &str, state: &mut State, job: &mut Job, cli: &mut Option<Session>, area: ratatui::layout::Rect) {
-    let result = if state.stale { Err(crate::model::Failure::new("staleData", "refresh before acting on previous data")) }
+    let result = if state.stale || state.loading { Err(crate::model::Failure::new("staleData", "refresh before acting on previous data")) }
         else { state.selected().ok_or_else(|| crate::model::Failure::new("noSelection", "select a resource first"))
             .and_then(|row| crate::native_actions::selected(state.native.as_ref().unwrap(), &row, action)) };
     match result {
@@ -477,7 +477,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                 state.docker_context = None;
                                 state.request.profile = row["name"].as_str().map(String::from);
                             }
-                            state.environment_picker = false; state.selected = 0;
+                            state.environment_picker = false; state.invalidate_results();
                             state.native = crate::native::parse("ps", &state).ok(); job.refresh(&mut state);
                         }
                     },
