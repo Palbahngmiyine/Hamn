@@ -35,7 +35,9 @@ for body, status, ready in [(b'OK', 200, True), (b'wrong', 200, False),
         finally:
             thread.join(timeout=6)
             server.close()
-        assert not thread.is_alive() and not errors, errors
+        assert not thread.is_alive() and not errors, {
+            'status': status, 'body_length': None if body is None else len(body),
+            'requests': requests, 'errors': errors, 'client': result}
         assert requests and requests[0].startswith(b'GET /_ping HTTP/1.1\r\n')
 with tempfile.TemporaryDirectory(prefix='hamn-ping-', dir='/tmp') as directory:
     assert subprocess.run([binary, directory], timeout=5).returncode == 1
