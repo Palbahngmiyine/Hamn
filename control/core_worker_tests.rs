@@ -101,9 +101,45 @@ signal.pause()
 
 #[tokio::test]
 async fn failed_worker_preserves_diagnostic_output_and_unknown_outcome() {
-    let fixture = Fixture::new("failed-worker", "print('failure-tail', file=sys.stderr, flush=True)\nsys.exit(7)\n");
+    let fixture = Fixture::new("failed-worker", "print('x' * 12000 + '\\nfailure-tail', file=sys.stderr, flush=True)\nsys.exit(7)\n");
     let request = Request::default();
     let result = call_executable(&request, fixture.worker.as_os_str(), None, None).await.unwrap_err();
     assert_eq!(result.code, "outcomeUnknown");
     assert!(result.message.contains("failure-tail") && result.message.contains('7'));
+}
+
+#[tokio::test]
+async fn saturated_log_channel_preserves_the_burst_and_final_diagnostic() {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
+    // A paused renderer can leave every slot occupied before another stderr
+    // burst arrives. Establish that boundary without relying on scheduling.
+    for _ in 0..32 { sender.try_send(json!({"type":"log", "text":"queued\n"})).unwrap(); }
+    let text = format!("{}\nfinal-cleanup-diagnostic\n", "x".repeat(160 * 1024));
+    let done = tokio_util::sync::CancellationToken::new();
+    let read = async {
+        let result = live_error(text.as_bytes(), Some(&sender), false, &done).await;
+        drop(sender);
+        result.unwrap()
+    };
+    let consume = async {
+        let mut logs = String::new();
+        while let Some(event) = receiver.recv().await { logs.push_str(event["text"].as_str().unwrap()); }
+        logs
+    };
+    let (saved, logs) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(read, consume)
+    }).await.unwrap();
+    assert!(logs == format!("{}{text}", "queued\n".repeat(32)), "stderr burst or final diagnostic was lost");
+    assert!(saved.ends_with(b"final-cleanup-diagnostic\n"));
+    assert!(saved.len() <= 8192);
+}
+
+#[tokio::test]
+async fn disconnected_log_consumer_still_drains_and_reaps_the_worker() {
+    let fixture = Fixture::new("closed-log-consumer", "print('x' * 160000, file=sys.stderr, flush=True)\nprint(json.dumps({'Ok': {'completed': True}}), flush=True)\n");
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    drop(receiver);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5),
+        call_executable(&Request::default(), fixture.worker.as_os_str(), None, Some(&sender))).await.unwrap().unwrap();
+    assert_eq!(result["completed"], true);
 }

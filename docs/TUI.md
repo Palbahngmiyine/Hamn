@@ -115,7 +115,9 @@ and ordinary Esc do not cancel it. Quitting during a lifecycle mutation asks to
 cancel and exit, then waits for child termination and cleanup. A cancelled start
 only stops a VM it created after remote cleanup is confirmed. If completion cannot
 be established, it preserves the VM and reports recovery required. The operation
-log remains available while it runs.
+log remains available while it runs, retaining the latest 1 MiB. A busy renderer
+applies backpressure instead of silently dropping queued worker logs. If a worker
+exits without a result, its error includes the last 8 KiB of diagnostics.
 An unsuccessful SSH mutation also fences its dispatch token before waiting for
 remote completion. If settlement cannot be verified, further guest mutations in
 that operation are blocked and the VM is preserved for recovery.
