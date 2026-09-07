@@ -71,7 +71,7 @@ def cancellation(root, runtime):
         assert json.loads(path.read_text())['status'] == 'running'
         terminal.send(b'q', 'Cancel the active operation and exit?')
         terminal.send(b'y')
-        wait_record(path, lambda value: value.get('phase') == 'recovering-after-cancel', terminal=terminal)
+        wait_record(path, lambda value: value.get('phase') == 'fencing-after-cancel', terminal=terminal)
         assert terminal.child.poll() is None, 'quit did not wait for remote cleanup'
         gate.release()
         completed = wait_record(path, lambda value: value.get('status') != 'running', timeout=60, terminal=terminal)
