@@ -13,7 +13,7 @@ import sys
 import tempfile
 import termios
 import time
-from terminal_screen import Screen
+from terminal_screen import RatatuiScreen as Screen, wait_for_exit
 
 BINARY = Path(os.environ.get('HAMN', 'build/hamn')).resolve()
 FIXTURE = r'''
@@ -117,7 +117,7 @@ class Harness:
         if self.child.poll() is None:
             os.kill(self.child.pid, signal.SIGTERM)
             try:
-                self.child.wait(timeout=5)
+                wait_for_exit(self.child, self.master, timeout=5)
             except subprocess.TimeoutExpired:
                 os.killpg(self.child.pid, signal.SIGKILL)
                 self.child.wait(timeout=5)

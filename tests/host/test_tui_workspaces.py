@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import termios
 import time
-from terminal_screen import Screen
+from terminal_screen import RatatuiScreen as Screen, wait_for_exit
 
 binary = Path(os.environ.get('HAMN', 'target/debug/hamn')).resolve()
 with tempfile.TemporaryDirectory(prefix='hamn-workspaces-', dir='/tmp') as directory:
@@ -64,7 +64,9 @@ else:
             while marker.decode() not in screen.text():
                 left = deadline - time.monotonic()
                 assert left > 0 and select.select([master], [], [], left)[0], (marker, bytes(output[-3000:]))
-                data = os.read(master, 65536)
+                # Fragment redraws deliberately: a text marker alone must not
+                # accept old rows remaining in a partially drawn settings view.
+                data = os.read(master, 64)
                 output.extend(data); screen.feed(data)
         def send(data, marker):
             output.clear(); os.write(master, data); until(marker)
@@ -104,7 +106,7 @@ else:
                 send(b'2\r', b'fixture-pod')
                 assert json.loads(prefs.read_text())['defaultWorkspace'] == 'kubernetes'
             if not terminate_cli: os.write(master, b'q')
-            assert child.wait(timeout=5) == 0
+            assert wait_for_exit(child, master, timeout=5) == 0
             after = termios.tcgetattr(slave)
             for modes in (before, after): modes[3] &= ~getattr(termios, 'PENDIN', 0)
             assert before == after
