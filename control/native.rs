@@ -36,7 +36,7 @@ fn has(args: &[String], names: &[&str]) -> bool {
 }
 pub(crate) fn command_index(args: &[String], workspace: Workspace) -> Option<usize> {
     let values = if workspace == Workspace::Containers {
-        &["--context", "-c", "--host", "-H", "--config", "--log-level", "-l", "--tlscacert", "--tlscert", "--tlskey"][..]
+        crate::native_flags::DOCKER_VALUES
     } else {
         KUBE_CONNECTION_VALUES
     };
@@ -47,7 +47,9 @@ pub(crate) fn command_index(args: &[String], workspace: Workspace) -> Option<usi
         if values.contains(&word.as_str()) || (workspace == Workspace::Kubernetes && ["--v", "-v", "--profile", "--profile-output"].contains(&word.as_str())) { i += 2; }
         else if word.contains('=') || values.iter().any(|n| n.len() == 2 && word.starts_with(n) && word.len() > 2) ||
             ["--debug", "-D", "--tls", "--tlsverify"].contains(&word.as_str()) || KUBE_CONNECTION_FLAGS.contains(&word.as_str()) { i += 1; }
-        else { return None; }
+        else if let Some(parts) = crate::native_flags::short_group(word, workspace) {
+            i += if parts.last().is_some_and(|last| crate::native_flags::takes_value(last, workspace)) { 2 } else { 1 };
+        } else { return None; }
     }
     None
 }
@@ -56,7 +58,7 @@ fn resource(args: &[String], workspace: Workspace) -> Option<String> {
     let i = command_index(args, workspace)?;
     let words: Vec<_> = args[i..].iter().map(String::as_str).collect();
     if workspace == Workspace::Containers {
-        if has(args, &["--format", "--quiet", "-q"]) || args.iter().any(|s| s.starts_with('-') && !s.starts_with("--") && s[1..].contains('q')) { return None; }
+        if has(&args[i..], &["--format", "--quiet", "-q"]) || args[i..].iter().any(|s| s.starts_with('-') && !s.starts_with("--") && s[1..].contains('q')) { return None; }
         match words.as_slice() {
             ["ps", ..] | ["container", "ls" | "ps" | "list", ..] => Some("containers".into()),
             ["images", ..] | ["image", "ls" | "list", ..] => Some("images".into()),
@@ -145,9 +147,11 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
         args.insert(0, "get".into());
     }
     let index = command_index(&args, workspace);
+    let inspected = crate::native_flags::inspect(&args, workspace);
+    let inspected_index = command_index(&inspected, workspace);
     let config_command = index.is_some_and(|i| args[i] == if workspace == Workspace::Containers { "context" } else { "config" });
-    let explicit = if workspace == Workspace::Containers { has(&args[..index.unwrap_or(args.len())], &["--context", "-c", "--host", "-H", "--config"]) }
-        else { has(&args, &["--context", "--kubeconfig"]) };
+    let explicit = if workspace == Workspace::Containers { has(&inspected[..inspected_index.unwrap_or(inspected.len())], &["--context", "-c", "--host", "-H", "--config"]) }
+        else { has(&inspected, &["--context", "--kubeconfig"]) };
     let mut defaults = Vec::new();
     let mut hamn_profile = None;
     if !config_command && !explicit && !plugin {
@@ -160,7 +164,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
             }
         } else {
             if let Some(context) = &state.request.context { defaults.extend(["--context".into(), context.clone()]); }
-            if !has(&args, &["--namespace", "-n"]) && !has(&args, &["--all-namespaces", "-A"]) {
+            if !has(&inspected, &["--namespace", "-n"]) && !has(&inspected, &["--all-namespaces", "-A"]) {
                 if let Some(namespace) = &state.request.namespace { defaults.extend(["--namespace".into(), namespace.clone()]); }
             }
         }
@@ -175,11 +179,15 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     let resource = resource(&defaults, workspace);
     // Display all connection/scope arguments exactly; credentials are never included in the header.
     let mut target = Vec::new();
-    for (i, arg) in defaults.iter().enumerate() {
+    let connections = crate::native_actions::connections(&defaults, workspace, None);
+    let mut skip_value = false;
+    for (i, arg) in connections.iter().enumerate() {
+        if skip_value { skip_value = false; continue; }
         for name in ["--context", "-c", "--host", "-H", "--config", "--namespace", "-n", "--kubeconfig", "--server", "-s", "--tls-server-name"] {
-            if arg == name { target.push(format!("{name} {}", defaults.get(i + 1).map(String::as_str).unwrap_or(""))); }
+            if arg == name { target.push(format!("{name} {}", connections.get(i + 1).map(String::as_str).unwrap_or(""))); }
             else if arg.starts_with(&format!("{name}=")) || (name.len() == 2 && arg.starts_with(name) && arg.len() > 2) { target.push(arg.clone()); }
         }
+        skip_value = crate::native_flags::takes_value(arg, workspace);
     }
     if has(&defaults, &["--all-namespaces", "-A"]) { target.push("all namespaces".into()); }
     Ok(Invocation { workspace, hamn_profile, body: None, args: defaults, target: if plugin { format!("Plugin-defined target / inherited CLI configuration {}", target.join("  ")) } else if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
