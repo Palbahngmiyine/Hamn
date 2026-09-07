@@ -12,11 +12,20 @@ fn segment(value: &str) -> Result<&str> {
     Ok(value)
 }
 
-pub fn delete(invocation: &mut Invocation, row: &Value) -> Result<()> {
+pub fn delete(invocation: &mut Invocation, row: &Value, resource: &str) -> Result<()> {
     let uid = required(row, "/metadata/uid")?;
     let version = required(row, "/metadata/resourceVersion")?;
     let name = segment(required(row, "/metadata/name")?)?;
     let kind = required(row, "/kind")?;
+    let expected_kind = match resource {
+        "pods" | "po" | "pod" => "Pod", "deployments" | "deployment" | "deploy" => "Deployment",
+        "services" | "service" | "svc" => "Service", "namespaces" | "ns" => "Namespace",
+        "nodes" | "no" => "Node", "statefulsets" | "sts" => "StatefulSet",
+        "daemonsets" | "ds" => "DaemonSet", "events" => "Event", "jobs" => "Job",
+        "cronjobs" => "CronJob", "ingresses" => "Ingress", "pvcs" => "PersistentVolumeClaim",
+        _ => return Err(Failure::new("unsupportedOperation", "unsupported deletion resource")),
+    };
+    if kind != expected_kind { return Err(Failure::new("invalidResponse", "resource kind does not match the selected list")); }
     let (plural, namespaced) = match kind {
         "Pod" => ("pods", true), "Deployment" => ("deployments", true),
         "Service" => ("services", true), "Namespace" => ("namespaces", false),
@@ -62,22 +71,23 @@ mod tests {
     #[test]
     fn delete_binds_server_preconditions_and_rejects_missing_identity() {
         let mut command = invocation(); command.args.clear();
-        delete(&mut command, &row()).unwrap();
+        delete(&mut command, &row(), "pods").unwrap();
         assert_eq!(command.args, ["delete", "--raw", "/api/v1/namespaces/test/pods/victim"]);
         let body: Value = serde_json::from_slice(command.body.as_ref().unwrap()).unwrap();
         assert_eq!(body["preconditions"], json!({"uid":"uid-a", "resourceVersion":"42"}));
         for field in ["uid", "resourceVersion", "name", "namespace"] {
             let mut value = row(); value["metadata"].as_object_mut().unwrap().remove(field);
-            assert!(delete(&mut invocation(), &value).is_err());
+            assert!(delete(&mut invocation(), &value, "pods").is_err());
         }
         for field in ["name", "namespace"] {
             for invalid in ["..", "a/b", "a?b", "a#b", "a%2fb"] {
                 let mut value = row(); value["metadata"][field] = invalid.into();
-                assert!(delete(&mut invocation(), &value).is_err());
+                assert!(delete(&mut invocation(), &value, "pods").is_err());
             }
         }
         let mut value = row(); value["kind"] = "Namespace".into(); value["metadata"].as_object_mut().unwrap().remove("namespace");
-        let mut command = invocation(); command.args.clear(); delete(&mut command, &value).unwrap();
+        assert!(delete(&mut invocation(), &value, "pods").is_err());
+        let mut command = invocation(); command.args.clear(); delete(&mut command, &value, "namespaces").unwrap();
         assert_eq!(command.args.last().unwrap(), "/api/v1/namespaces/victim");
     }
     #[test]
