@@ -1,3 +1,4 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::{native::Invocation, terminal_io::{self, Replies}};
 use std::{io, os::fd::{AsRawFd, FromRawFd, OwnedFd}, process::Stdio, sync::Arc};
 use tokio::{io::unix::AsyncFd, sync::mpsc};
@@ -93,6 +94,20 @@ impl Session {
         }
         Ok(())
     }
+    pub fn scroll_key(&mut self, key: KeyEvent) -> bool {
+        if !matches!(key.code, KeyCode::PageUp | KeyCode::PageDown) ||
+            !(key.modifiers == KeyModifiers::SHIFT || (self.exit.is_some() && key.modifiers.is_empty())) { return false; }
+        let screen = self.parser.screen_mut();
+        let page = usize::from(screen.size().0.saturating_sub(1).max(1));
+        let offset = if key.code == KeyCode::PageUp { screen.scrollback().saturating_add(page) }
+            else { screen.scrollback().saturating_sub(page) };
+        screen.set_scrollback(offset);
+        true
+    }
+    pub async fn input(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.parser.screen_mut().set_scrollback(0);
+        self.write(bytes).await
+    }
     pub fn resize(&mut self, width: u16, height: u16) -> io::Result<()> {
         let (rows, cols) = (height.saturating_sub(3).max(1), width.max(1));
         let size = libc::winsize { ws_row: rows, ws_col: cols, ws_xpixel: 0, ws_ypixel: 0 };
@@ -111,10 +126,10 @@ impl Session {
         let areas = Layout::vertical([Constraint::Length(2), Constraint::Min(1), Constraint::Length(1)]).split(frame.area());
         frame.render_widget(Paragraph::new(crate::tui_state::clean(&format!("Hamn | {} terminal\n{}", self.invocation.program(), self.invocation.target))), areas[0]);
         frame.render_widget(terminal_io::Screen(self.parser.screen()), areas[1]);
-        let status = self.exit.map(|code| format!("Exit code {code} | Enter / Esc returns to the resource list"))
-            .unwrap_or_else(|| "Input goes to CLI | Ctrl-C interrupts | Docker Ctrl-P Ctrl-Q detaches".into());
+        let status = self.exit.map(|code| format!("Exit code {code} | PgUp/PgDn scroll | Enter / Esc returns to the resource list"))
+            .unwrap_or_else(|| "Shift+PgUp/PgDn scroll | Input goes to CLI | Ctrl-C interrupts | Ctrl-P Ctrl-Q detaches".into());
         frame.render_widget(Paragraph::new(status), areas[2]);
-        if !self.parser.screen().hide_cursor() && self.exit.is_none() {
+        if !self.parser.screen().hide_cursor() && self.exit.is_none() && self.parser.screen().scrollback() == 0 {
             let (row, col) = self.parser.screen().cursor_position();
             frame.set_cursor_position((areas[1].x + col, areas[1].y + row));
         }
@@ -130,6 +145,41 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn scrollback_exposes_history_without_consuming_live_cli_keys() {
+        let invocation = crate::native::parse("version", &crate::tui_state::State::new(Default::default())).unwrap();
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "i=0; while test $i -lt 40; do printf 'history-%02d\\n' $i; i=$((i+1)); done; printf INPUT_READY; read value; printf '\\nreceived:%s\\n' \"$value\";"]);
+        let mut session = Session::spawn(command, invocation, 60, 12).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !session.parser.screen().contents().contains("INPUT_READY") {
+                if let Event::Output(bytes) = session.next().await.unwrap() { session.parser.process(&bytes); }
+            }
+            let page_up = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+            assert!(!session.scroll_key(page_up)); // A running pager still receives its own PgUp.
+            assert!(!session.scroll_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::ALT)));
+            let shifted = KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT);
+            for _ in 0..10 { assert!(session.scroll_key(shifted)); }
+            assert!(session.parser.screen().contents().contains("history-00"));
+            assert!(session.parser.screen().scrollback() > 0);
+            session.input(b"accepted\r").await.unwrap();
+            assert_eq!(session.parser.screen().scrollback(), 0);
+            loop {
+                match session.next().await.unwrap() {
+                    Event::Output(bytes) => session.parser.process(&bytes),
+                    Event::Exited(code) => { assert_eq!(code, 0); if session.ended { break; } },
+                    Event::Ended if session.exit.is_some() => break,
+                    Event::Ended => {},
+                }
+            }
+            assert!(session.parser.screen().contents().contains("received:accepted"));
+            for _ in 0..10 { assert!(session.scroll_key(page_up)); }
+            assert!(session.parser.screen().contents().contains("history-00"));
+            for _ in 0..10 { assert!(session.scroll_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))); }
+            assert_eq!(session.parser.screen().scrollback(), 0);
+            assert!(session.parser.screen().contents().contains("received:accepted"));
+        }).await.unwrap();
+    }
     #[tokio::test]
     async fn real_pty_preserves_input_resize_stderr_and_exit_status() {
         let state = crate::tui_state::State::new(Default::default());

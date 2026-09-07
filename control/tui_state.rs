@@ -176,7 +176,7 @@ impl State {
         self.rows().get(self.selected).map(|v| (*v).clone())
     }
     pub fn move_by(&mut self, delta: isize) {
-        if self.detail.is_some() {
+        if self.detail.is_some() || self.show_operation {
             self.scroll = self
                 .scroll
                 .saturating_add_signed(delta.clamp(-32768, 32767) as i16);
@@ -623,6 +623,20 @@ pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &s
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn operation_log_navigation_scrolls_text_without_moving_resource_selection() {
+        let mut state = State::new(Request::default());
+        state.data = serde_json::json!([{"ID":"first", "State":"running"}, {"ID":"second", "State":"running"}]);
+        state.selected = 1;
+        state.show_operation = true;
+        state.move_by(20);
+        assert_eq!((state.scroll, state.selected), (20, 1));
+        state.move_by(-30);
+        assert_eq!((state.scroll, state.selected), (0, 1));
+        state.show_operation = false;
+        state.move_by(-1);
+        assert_eq!(state.selected, 0);
+    }
     #[test]
     fn workspaces_keep_selection_and_do_not_show_vm_controls_in_kubernetes() {
         let mut containers = State::for_workspace(Request::default(), Workspace::Containers);
