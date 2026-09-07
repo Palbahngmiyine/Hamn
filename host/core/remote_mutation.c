@@ -39,6 +39,12 @@ int remote_mutation_run(const struct profile *profile, const char *ip,
            run_seconds > 0 && run_seconds <= 600);
     assert(!strcmp(lock, "/run/hamn-deployment.lock") ||
            !strcmp(lock, "/run/hamn-retirement.lock"));
+    /* No subsequent rollback may race a writer we could not settle. A fresh
+     * operation must inspect/recover the preserved guest state instead. */
+    if (cleanup_pending) {
+        errno = EIO;
+        return -1;
+    }
     unsigned char random[16];
     char token[33], wait[16], limit[16], total[16];
     arc4random_buf(random, sizeof(random));
@@ -58,9 +64,10 @@ int remote_mutation_run(const struct profile *profile, const char *ip,
     wrapped[count] = NULL;
     int rc = output ? ssh_exec_capture_checked(profile, ip, wrapped, output, capacity, truncated) :
                       ssh_exec(profile, ip, wrapped, 0);
-    if (rc != 0 && proc_cancelled()) {
+    if (rc != 0) {
+        int cancelled = proc_cancelled();
         proc_cleanup_begin();
-        (void)operation_phase("fencing-after-cancel");
+        (void)operation_phase(cancelled ? "fencing-after-cancel" : "fencing-after-failure");
         const char *publish[] = { "sudo", "bash", "-c", fence, "--", token, NULL };
         const char *barrier[] = { "sudo", "timeout", "--kill-after=5s", total,
             "flock", "--wait", wait, lock, "true", NULL };
@@ -69,7 +76,7 @@ int remote_mutation_run(const struct profile *profile, const char *ip,
         if (ssh_exec_bounded(profile, ip, publish, 30000) != 0 ||
             ssh_exec_bounded(profile, ip, barrier, (wait_seconds + 10) * 1000) != 0) {
             cleanup_pending = 1;
-            logerr("cannot fence and settle cancelled guest mutation; preserving VM");
+            logerr("cannot fence and settle unsuccessful guest mutation; preserving VM");
         }
         proc_cleanup_end();
     }

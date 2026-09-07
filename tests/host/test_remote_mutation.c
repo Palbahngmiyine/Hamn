@@ -7,13 +7,13 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static int calls, cancelled, depth, fault, phase, held, fenced;
+static int calls, cancelled, depth, fault, phase, held, fenced, failure_code;
 static char token[33];
 int proc_cancelled(void) { return cancelled && !depth; }
 void proc_cleanup_begin(void) { depth++; }
 void proc_cleanup_end(void) { assert(depth > 0); depth--; }
 int operation_phase(const char *value)
-{ assert(!strcmp(value, "fencing-after-cancel")); phase++; return 0; }
+{ assert(!strcmp(value, failure_code == 130 ? "fencing-after-cancel" : "fencing-after-failure")); phase++; return 0; }
 void logerr(const char *format, ...) { (void)format; }
 
 int ssh_exec(const struct profile *profile, const char *ip,
@@ -28,8 +28,8 @@ int ssh_exec(const struct profile *profile, const char *ip,
         assert(strstr(argv[6], "if test -e") && strstr(argv[6], "exit 130"));
         if (fault == 0) return 0;
         held = fault == 1; /* fault 2: original invocation is still queued */
-        cancelled = 1;
-        return 130;
+        cancelled = failure_code == 130;
+        return failure_code;
     }
     assert(depth == 1);
     if (calls == 2) {
@@ -63,23 +63,32 @@ int ssh_exec_capture_checked(const struct profile *p, const char *ip,
 
 int main(void)
 {
-    for (int scenario = 0; scenario < 5; scenario++) {
-        pid_t child = fork(); assert(child >= 0);
-        if (child == 0) {
-            fault = scenario;
-            struct profile p = {0};
-            const char *command[] = { "sudo", "true", NULL };
-            int result = remote_mutation_run(&p, "192.0.2.1", "/run/hamn-deployment.lock",
-                                              120, 60, command, NULL, 0, NULL);
-            assert(result == (fault ? 130 : 0) && depth == 0 && !held);
-            assert(calls == (fault == 0 ? 1 : fault == 3 ? 2 : 3));
-            assert(phase == !!fault);
-            assert(remote_mutation_cleanup_pending() == (fault >= 3));
-            if (fault == 2) assert(fenced); /* delayed original must see its fence */
-            _exit(0);
+    const int failures[] = {130, 255, -1, 124, 1};
+    for (size_t code = 0; code < sizeof(failures) / sizeof(failures[0]); code++) {
+        for (int scenario = 0; scenario < 5; scenario++) {
+            pid_t child = fork(); assert(child >= 0);
+            if (child == 0) {
+                fault = scenario; failure_code = failures[code];
+                struct profile p = {0};
+                const char *command[] = { "sudo", "true", NULL };
+                int result = remote_mutation_run(&p, "192.0.2.1", "/run/hamn-deployment.lock",
+                                                  120, 60, command, NULL, 0, NULL);
+                assert(result == (fault ? failure_code : 0) && depth == 0 && !held);
+                assert(calls == (fault == 0 ? 1 : fault == 3 ? 2 : 3));
+                assert(phase == !!fault);
+                assert(remote_mutation_cleanup_pending() == (fault >= 3));
+                if (fault >= 3) {
+                    int prior_calls = calls;
+                    assert(remote_mutation_run(&p, "192.0.2.1", "/run/hamn-deployment.lock",
+                        120, 60, command, NULL, 0, NULL) == -1);
+                    assert(calls == prior_calls); /* no rollback overtakes an unverified writer */
+                }
+                if (fault == 2) assert(fenced); /* delayed original must see its fence */
+                _exit(0);
+            }
+            int status; assert(waitpid(child, &status, 0) == child);
+            assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
         }
-        int status; assert(waitpid(child, &status, 0) == child);
-        assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    puts("PASS: mutation token fence precedes lock barrier; unknown cleanup remains sticky");
+    puts("PASS: cancellation/transport/command failures fence before the barrier; unknown cleanup blocks later writes");
 }

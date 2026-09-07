@@ -74,6 +74,8 @@ and kubectl `--context`, `--kubeconfig`, `--namespace` / `-n` take precedence;
 as required by Docker CLI. The header shows the effective invocation target.
 `docker context use` and `kubectl config` execute with their normal configuration
 write semantics; Hamn reloads selection information after the terminal closes.
+Selected-resource actions retain the query's TLS server name, certificates,
+authentication, impersonation, and proxy overrides.
 
 Installed kubectl plugins own their argument grammar. Hamn passes their original
 arguments without injecting UI context/namespace flags, because kubectl rejects
@@ -81,6 +83,8 @@ flags before plugin names and plugins may not accept them. The header explicitly
 shows **Plugin-defined target / inherited CLI configuration**. Specify a plugin's
 connection options according to that plugin. This exception prevents accidental
 argument rewriting; plugin support does not imply every plugin targets the UI selection.
+An installed `kubectl-ns` or `kubectl-pods` takes precedence over the corresponding
+Hamn convenience alias, with or without the `kubectl` prefix.
 
 The connection rules are based on the official [Docker CLI reference](https://docs.docker.com/reference/cli/docker/),
 [kubectl reference](https://kubernetes.io/docs/reference/kubectl/), and
@@ -106,6 +110,9 @@ cancel and exit, then waits for child termination and cleanup. A cancelled start
 only stops a VM it created after remote cleanup is confirmed. If completion cannot
 be established, it preserves the VM and reports recovery required. The operation
 log remains available while it runs.
+An unsuccessful SSH mutation also fences its dispatch token before waiting for
+remote completion. If settlement cannot be verified, further guest mutations in
+that operation are blocked and the VM is preserved for recovery.
 External changes are not described as rolled back merely because their CLI exited.
 
 A running VM is not proof of Docker availability. Readiness distinguishes ready,
