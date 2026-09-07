@@ -40,6 +40,9 @@ Esc cancels an environment, context, or namespace picker and restores the previo
 query, explicit connection options, row filter, selection, and scroll position.
 Enter commits the selected target; entering a new resource query also replaces
 the previous view. Picker navigation does not rewind lifecycle progress or logs.
+The environment picker labels Hamn profiles and Docker contexts separately and
+shows external endpoints. Choose a row with Enter before using resource actions;
+VM actions and configuration shortcuts are unavailable inside this picker.
 
 ## Commands
 
