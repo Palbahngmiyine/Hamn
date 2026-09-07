@@ -39,6 +39,7 @@ static const char *fault;
 #define guest_deployment_wait_cloud_init(...) 0
 #define deployment_token_generate(...) ((void)0)
 #define operation_phase(...) 0
+#define remote_mutation_cleanup_pending() 0
 #define guest_deployment_configure_runtime(...) 0
 #define guest_deployment_configure_docker(...) 0
 #define guest_deployment_forward_sockets(...) 0
@@ -91,6 +92,7 @@ struct profile { int unused; };
 static int cancel_recovered, cleanup_pending, depth, calls, failed, cancelled;
 #define logerr(...) ((void)0)
 #define operation_phase(...) 0
+#define remote_mutation_cleanup_pending() 0
 static int proc_cancelled(void) { return cancelled && !depth; }
 static void proc_cleanup_begin(void) { depth++; }
 static void proc_cleanup_end(void) { depth--; }

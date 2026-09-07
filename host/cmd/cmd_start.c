@@ -22,6 +22,7 @@
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/operation.h"
+#include "core/remote_mutation.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
 #include "core/retirement.h"
@@ -845,7 +846,7 @@ static int cmd_start_execute(const struct start_options *options,
 rollback:
     proc_cleanup_begin();
     if (start_spawned && !guest_deployment_cleanup_pending() &&
-        !retirement_cleanup_pending())
+        !retirement_cleanup_pending() && !remote_mutation_cleanup_pending())
         start_restored = rollback_incomplete_start(&p) == 0;
     proc_cleanup_end();
 out:
@@ -858,7 +859,9 @@ static int cmd_start_locked(const struct start_options *options, const char *pro
     start_spawned = start_restored = start_unchanged = 0;
     int rc = cmd_start_execute(options, profile);
     if (start_unchanged) return operation_finish_unchanged(rc);
-    return operation_finish(rc, start_restored || (!start_spawned && (guest_deployment_recovery_complete() || retirement_cancel_recovered())));
+    return operation_finish(rc, !remote_mutation_cleanup_pending() &&
+        (start_restored || (!start_spawned &&
+         (guest_deployment_recovery_complete() || retirement_cancel_recovered()))));
 }
 
 int hamn_control_start(const char *profile, unsigned cpus,
