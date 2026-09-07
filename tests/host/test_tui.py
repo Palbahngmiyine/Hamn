@@ -98,7 +98,9 @@ def exercise(exit_mode, command=None):
                     signal.signal(signal.SIGALRM, old_alarm)
                 output.clear()
                 os.kill(process.pid, signal.SIGCONT)
-                until(b"Hamn")
+                # Screen still contains the pre-suspend frame. Wait for the new
+                # terminal entry, which follows raw-mode restoration on resume.
+                until(b"\x1b[?1049h")
                 assert terminal_settings(slave) != before
                 os.write(master, b"q")
             elif exit_mode == "panic":
