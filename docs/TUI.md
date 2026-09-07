@@ -61,6 +61,8 @@ the CLI's last-value rule. Grouped kubectl output/watch options such as
 Grouped connection options such as `docker -DHunix:///path/docker.sock ps` and
 `get pods -Ashttps://api.example` also retain their explicit target in the header
 and selected resource actions. The typed command's original arguments are preserved.
+For `--all-namespaces` / `-A`, the last boolean value determines the scope.
+A final `false` keeps the UI namespace default unless an explicit target overrides it.
 Explicit output options such as `--format`, `-q`, and `-o yaml` are preserved and displayed
 in the terminal. Other commands are passed to the installed CLI, including
 Compose, buildx, `exec -it`, `attach`, `logs -f`, `stats`, `apply`, `edit`, and
@@ -119,7 +121,9 @@ cancel and exit, then waits for child termination and cleanup. A cancelled start
 only stops a VM it created after remote cleanup is confirmed. If completion cannot
 be established, it preserves the VM and reports recovery required. The operation
 log remains available while it runs, retaining the latest 1 MiB. A busy renderer
-applies backpressure instead of silently dropping queued worker logs. If a worker
+applies backpressure instead of silently dropping queued worker logs. After the
+worker exits, Hamn drains the queued bytes without waiting for background stderr
+holders; renderer delays cannot expire that drain. If a worker
 exits without a result, its error includes the last 8 KiB of diagnostics.
 An unsuccessful SSH mutation also fences its dispatch token before waiting for
 remote completion. If settlement cannot be verified, further guest mutations in

@@ -37,7 +37,7 @@ cJSON *operation_snapshot(const struct profile *profile)
 {
     char path[PROFILE_PATH_CAP], text[16384];
     if (!profile_path(profile, "operation.json", path, sizeof(path))) return NULL;
-    int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0 && errno == ENOENT) return cJSON_CreateNull();
     if (fd < 0) return NULL;
     struct stat st;
