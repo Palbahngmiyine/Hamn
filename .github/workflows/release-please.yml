@@ -18,7 +18,8 @@ concurrency:
 
 jobs:
   release-pr:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    # Skip release PR updates for an explicitly marked push, without skipping CI.
+    if: (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip release]'))
     name: Update release PR
     runs-on: ubuntu-24.04
     timeout-minutes: 15
