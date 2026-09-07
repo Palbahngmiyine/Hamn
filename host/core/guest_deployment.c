@@ -201,7 +201,8 @@ static int deployment_exec_locked(const struct profile *profile, const char *ip,
     return ssh_exec(profile, ip, wrapped, 0);
 }
 
-static int recovery_complete;
+static int recovery_complete, cleanup_pending;
+int guest_deployment_cleanup_pending(void) { return cleanup_pending; }
 int guest_deployment_recovery_complete(void) { return recovery_complete; }
 
 static int guest_deployment_configure_docker(const struct profile *profile,
@@ -401,10 +402,30 @@ static int deployment_transaction(const struct profile *profile,
     return deployment_exec_locked(profile, ip, command);
 }
 
+/* A cancelled SSH client cannot acknowledge begin/commit. Wait behind the
+ * original writer before inspecting its token or allowing owned-VM cleanup. */
+static void deployment_cancel_recover(const struct profile *profile, const char *ip)
+{
+    if (!proc_cancelled()) return;
+    proc_cleanup_begin();
+    cleanup_pending = 1;
+    (void)operation_phase("recovering-after-cancel");
+    const char *barrier[] = { "sudo", "true", NULL };
+    if (deployment_exec_locked(profile, ip, barrier) == 0) {
+        cleanup_pending = 0;
+        recovery_complete = retirement_recover(profile, ip) == 0 &&
+            guest_deployment_forward_sockets(profile, ip) == 0 &&
+            guest_deployment_runtime_ready(profile, ip, 30) == 0;
+    }
+    if (!recovery_complete)
+        logerr("cancelled deployment needs recovery; its result was not confirmed");
+    proc_cleanup_end();
+}
+
 static int deployment_refresh_locked(const struct profile *profile,
                                      const struct vm_state *state, int force)
 {
-    recovery_complete = 0;
+    recovery_complete = cleanup_pending = 0;
     int current = guest_deployment_is_current(profile);
     if (current == 1 && !force)
         return 0;
@@ -430,6 +451,7 @@ static int deployment_refresh_locked(const struct profile *profile,
     deployment_token_generate(token);
     if (deployment_transaction(profile, state->ip, "begin", token) != 0) {
         logerr("cannot create a safe guest deployment backup");
+        deployment_cancel_recover(profile, state->ip);
         return -1;
     }
 
@@ -449,6 +471,7 @@ static int deployment_refresh_locked(const struct profile *profile,
     if (deployment_transaction(profile, state->ip, "commit", token) != 0) {
         logerr("guest deployment succeeded but backup commit failed for "
                "operation %s; the host marker was not updated", token);
+        deployment_cancel_recover(profile, state->ip);
         return -1;
     }
     if (guest_deployment_mark_current(profile) != 0) {
@@ -467,6 +490,7 @@ rollback:
     if (deployment_transaction(profile, state->ip, "rollback", token) != 0) {
         logerr("guest deployment rollback failed for operation %s; "
                "the guest backup was retained for manual recovery", token);
+        cleanup_pending = 1;
         proc_cleanup_end();
         return -1;
     }
@@ -489,7 +513,7 @@ int guest_deployment_refresh_locked(const struct profile *profile,
 int guest_deployment_reconcile_runtime_locked(
     const struct profile *profile, const struct vm_state *state)
 {
-    recovery_complete = 0;
+    recovery_complete = cleanup_pending = 0;
     if (guest_deployment_is_current(profile) != 1) {
         errno = ESTALE;
         logerr("cannot reconcile a stale guest deployment");
@@ -505,6 +529,7 @@ int guest_deployment_reconcile_runtime_locked(
     deployment_token_generate(token);
     if (deployment_transaction(profile, state->ip, "begin", token) != 0) {
         logerr("cannot create a safe guest runtime reconciliation backup");
+        deployment_cancel_recover(profile, state->ip);
         return -1;
     }
 
@@ -517,6 +542,7 @@ int guest_deployment_reconcile_runtime_locked(
         }
         logerr("guest runtime reconciliation succeeded but backup commit failed "
                "for operation %s", token);
+        deployment_cancel_recover(profile, state->ip);
         return -1;
     }
 
@@ -526,6 +552,7 @@ int guest_deployment_reconcile_runtime_locked(
     if (deployment_transaction(profile, state->ip, "rollback", token) != 0) {
         logerr("guest runtime reconciliation rollback failed for operation %s; "
                "the guest backup was retained for manual recovery", token);
+        cleanup_pending = 1;
         proc_cleanup_end();
         return -1;
     }

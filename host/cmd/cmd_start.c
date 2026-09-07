@@ -402,7 +402,7 @@ int hamn_test_start_ensure_signed_guest_image(char *image, size_t capacity,
 }
 #endif
 
-static int start_spawned, start_restored;
+static int start_spawned, start_restored, start_unchanged;
 
 static int cmd_start_execute(const struct start_options *options,
                             const char *profile_name)
@@ -456,6 +456,7 @@ static int cmd_start_execute(const struct start_options *options,
     }
     int already_running = process_state == VM_PROCESS_VERIFIED;
     if (options->disk_gib && options->disk_gib < p.disk_gib) {
+        start_unchanged = 1;
         logerr("disk size cannot shrink (current: %u GiB)", p.disk_gib);
         goto out;
     }
@@ -477,6 +478,7 @@ static int cmd_start_execute(const struct start_options *options,
         if (running_profile.cpus != p.cpus ||
             running_profile.mem_mib != p.mem_mib ||
             running_profile.disk_gib != p.disk_gib) {
+            start_unchanged = 1;
             logerr("resource change requires a stopped VM; run: hamn stop");
             goto out;
         }
@@ -842,7 +844,8 @@ static int cmd_start_execute(const struct start_options *options,
 
 rollback:
     proc_cleanup_begin();
-    if (start_spawned)
+    if (start_spawned && !guest_deployment_cleanup_pending() &&
+        !retirement_cleanup_pending())
         start_restored = rollback_incomplete_start(&p) == 0;
     proc_cleanup_end();
 out:
@@ -852,8 +855,9 @@ out:
 
 static int cmd_start_locked(const struct start_options *options, const char *profile)
 {
-    start_spawned = start_restored = 0;
+    start_spawned = start_restored = start_unchanged = 0;
     int rc = cmd_start_execute(options, profile);
+    if (start_unchanged) return operation_finish_unchanged(rc);
     return operation_finish(rc, start_restored || (!start_spawned && (guest_deployment_recovery_complete() || retirement_cancel_recovered())));
 }
 
