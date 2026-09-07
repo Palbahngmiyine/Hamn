@@ -6,6 +6,14 @@ from physical_runtime import run
 from workspace_live_terminal import Terminal, exercise
 
 
+def assert_deployment_preserved(before, after):
+    # Controllers can update status/metadata and resourceVersion between reads.
+    # A rejected restart must preserve this selected object's desired state.
+    assert after['metadata']['uid'] == before['metadata']['uid']
+    assert after['spec'] == before['spec']
+    assert after['metadata']['annotations']['guard-proof'] == before['metadata']['annotations']['guard-proof']
+
+
 def guarded_mutations(root, runtime, config, env):
     """Prove menu preconditions against API replacement and concurrent changes."""
     name = 'hamn-guard-' + hashlib.sha256(str(root).encode()).hexdigest()[:12]
@@ -19,7 +27,10 @@ def guarded_mutations(root, runtime, config, env):
         args = ['get', kind, resource_name, '-o', 'json']
         if kind != 'namespace':
             args.extend(['--namespace', name])
-        return json.loads(kubectl(*args))
+        value = json.loads(kubectl(*args))
+        evidence.setdefault('resourceSnapshots', []).append({'kind': kind, 'resource': value})
+        (root / 'kubernetes-guarded-actions.json').write_text(json.dumps(evidence, indent=2))
+        return value
 
     def create_namespace():
         nonlocal owned
@@ -101,13 +112,17 @@ def guarded_mutations(root, runtime, config, env):
         assert replacement['metadata']['uid'] == evidence['replacementDeploymentUid']
         assert 'kubectl.kubernetes.io/restartedAt' not in replacement['spec']['template']['metadata']['annotations']
 
+        concurrent_expected = None
         def change_version():
+            nonlocal concurrent_expected
             kubectl('annotate', 'deployment', name, '--namespace', name, 'guard-proof=changed')
-            evidence['concurrentVersion'] = resource('deployment', name)['metadata']['resourceVersion']
+            concurrent_expected = resource('deployment', name)
+            evidence['concurrentVersion'] = concurrent_expected['metadata']['resourceVersion']
 
         confirmed_action('deployments', name, b'r', 'restart', change_version, 1)
         concurrent = resource('deployment', name)
-        assert concurrent['metadata']['resourceVersion'] == evidence['concurrentVersion']
+        evidence['afterRejectedVersion'] = concurrent['metadata']['resourceVersion']
+        assert_deployment_preserved(concurrent_expected, concurrent)
         assert 'kubectl.kubernetes.io/restartedAt' not in concurrent['spec']['template']['metadata']['annotations']
         confirmed_action('deployments', name, b'r', 'restart', lambda: None, 0)
         restarted = resource('deployment', name)
@@ -118,6 +133,7 @@ def guarded_mutations(root, runtime, config, env):
         (root / 'kubernetes-guarded-actions.json').write_text(json.dumps(evidence, indent=2))
         print('PASS: real Kubernetes guarded delete/restart reject stale UID/version and accept fresh selection', flush=True)
     finally:
+        (root / 'kubernetes-guarded-actions.json').write_text(json.dumps(evidence, indent=2))
         if owned:
             kubectl('delete', 'namespace', name, '--ignore-not-found=true', '--wait=true', '--timeout=60s')
 

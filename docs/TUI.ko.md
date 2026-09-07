@@ -57,6 +57,9 @@ kubectl get deployments -n dev --sort-by=.metadata.name
 `ps --size`(`-as` 포함)는 Size 열을 추가하며, 반복한 불리언 옵션은 CLI처럼 마지막
 값을 적용합니다. `get pods -Aoyaml`·`get pods -Aw`처럼 결합한 kubectl 출력·watch
 옵션도 내부 터미널에서 원래 인자를 유지하여 실행합니다.
+`docker -DHunix:///path/docker.sock ps`·`get pods -Ashttps://api.example` 같은 결합
+연결 옵션도 명시한 대상을 상단 표시와 선택한 리소스 작업에 유지합니다. 입력한
+명령의 원래 인자는 그대로 전달합니다.
 필터·조회 범위·정렬은 CLI가 처리합니다. `--format`, `-q`, `-o yaml` 등 명시한 출력
 옵션은 유지하고 터미널에 표시합니다. 그 밖의 명령도 원래 CLI로 전달합니다.
 Compose·buildx·`exec -it`·`attach`·`logs -f`·`stats`·`apply`·`edit`·`port-forward`를
