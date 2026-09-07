@@ -72,6 +72,9 @@ def main():
             ('-A --all-namespaces=false', False), ('-AA=false', False),
             ('--all-namespaces=false -A', True), ('-A=0', False),
             ('-A=False', False), ('-A=TRUE', True),
+            *[(f'--as reviewer --as-group{separator}{value}', False)
+              for separator in (' ', '=') for value in
+              ('-nteam', '--context=other', '--kubeconfig=other', '-oyaml', '--watch', '--help')],
         ]):
             server.fixture_label = f'scope-{index}'
             direct = subprocess.run([kubectl, '--context', 'old-cluster', '--namespace',
@@ -83,6 +86,7 @@ def main():
             harness.send(b':get pods ' + flags.encode() + b'\r', f'scope-{index}-fixture')
             assert requests[-1][0] == expected, requests
             assert ('all namespaces' in harness.screen.text()) == all_namespaces, harness.screen.text()
+            assert 'Exit code' not in harness.screen.text(), 'consumed value changed query into PTY output'
         server.fixture_label = 'format'
         harness.send(b':get pods\r', 'format-fixture')
         for flags in (['-Aoyaml'], ['-Ao', 'yaml'], ['-Aojson']):

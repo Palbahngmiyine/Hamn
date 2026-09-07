@@ -9,13 +9,22 @@ pub fn takes_value(name: &str, workspace: Workspace) -> bool {
 }
 
 pub fn short_group(word: &str, workspace: Workspace) -> Option<Vec<String>> {
+    short_options(word, workspace, false)
+}
+
+fn option_takes_value(name: &str, workspace: Workspace, docker_query: bool) -> bool {
+    if docker_query { ["--filter", "-f", "--last", "-n", "--format"].contains(&name) }
+    else { takes_value(name, workspace) }
+}
+
+fn short_options(word: &str, workspace: Workspace, docker_query: bool) -> Option<Vec<String>> {
     if !word.starts_with('-') || word.starts_with("--") || word.len() < 2 { return None; }
-    let booleans = if workspace == Workspace::Containers { "Dvh" } else { "Awh" };
+    let booleans = if docker_query { "aslqh" } else if workspace == Workspace::Containers { "Dvh" } else { "Awh" };
     let mut parts = Vec::new();
     for (offset, flag) in word[1..].char_indices() {
         let name = format!("-{flag}");
         let rest = &word[offset + 1 + flag.len_utf8()..];
-        if takes_value(&name, workspace) {
+        if option_takes_value(&name, workspace, docker_query) {
             parts.push(format!("{name}{rest}"));
             return Some(parts);
         }
@@ -24,6 +33,25 @@ pub fn short_group(word: &str, workspace: Workspace) -> Option<Vec<String>> {
         parts.push(name);
     }
     Some(parts)
+}
+
+// Return only option positions for presence checks. A separately consumed value
+// must never be reinterpreted as a connection or output flag. Docker's -l is a
+// root log-level value but a boolean in list queries, so keep the command boundary.
+pub fn options(args: &[String], workspace: Workspace) -> Vec<String> {
+    let command = crate::native::command_index(args, workspace).unwrap_or(args.len());
+    let mut options = Vec::new();
+    let mut args = args.iter().enumerate();
+    while let Some((index, arg)) = args.next() {
+        if arg == "--" { options.push(arg.clone()); break; }
+        if !arg.starts_with('-') { continue; }
+        let query = workspace == Workspace::Containers && index >= command;
+        let parts = short_options(arg, workspace, query).unwrap_or_else(|| vec![arg.clone()]);
+        let consume = parts.last().is_some_and(|last| option_takes_value(last, workspace, query));
+        options.extend(parts);
+        if consume { args.next(); }
+    }
+    options
 }
 
 // Docker connection options belong before its command. kubectl persistent
