@@ -30,6 +30,9 @@ their existing contract and do not require these CLI installations.
 Containers opens with running containers. A stopped Hamn environment offers
 start; listing never boots a VM. The VM panel shows VM state separately from
 Docker readiness. External Docker contexts have no Hamn VM controls.
+The `a` key toggles Docker's `--all` value, including grouped flags such as `-as`
+and repeated boolean options. It preserves filters, size, and `--last`/`--latest`;
+those last two options retain Docker's behavior of including all container states.
 Kubernetes opens Pods in the current valid context, otherwise the context picker.
 Entering Kubernetes neither starts a VM nor migrates a Hamn profile.
 Selecting contexts or namespaces does not write kubeconfig or Docker configuration.

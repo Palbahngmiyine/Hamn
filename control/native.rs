@@ -160,10 +160,40 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     Ok(Invocation { workspace, hamn_profile, body: None, args: defaults, target: if plugin { format!("Plugin-defined target / inherited CLI configuration {}", target.join("  ")) } else if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
 }
 pub fn toggle_all(invocation: &mut Invocation) {
-    let showing_all = invocation.args.iter().any(|s| s == "-a" || s == "--all" || s == "--all=true");
-    invocation.args.retain(|s| s != "-a" && s != "--all" && !s.starts_with("--all="));
-    if !showing_all { invocation.args.push("--all".into()); }
+    // Docker/pflag accepts grouped short flags and repeated booleans (last wins).
+    // Preserve the original flags and append one explicit override, rather than
+    // deleting tokens that may also contain size/latest flags or filter values.
+    let mut showing_all = false;
+    let mut skip_value = false;
+    let mut override_at = None;
+    let index = command_index(&invocation.args, invocation.workspace).unwrap_or(invocation.args.len());
+    for (position, arg) in invocation.args.iter().enumerate().skip(index) {
+        if skip_value { skip_value = false; continue; }
+        if arg == "--" { break; }
+        if arg == "--all" { showing_all = true; }
+        else if let Some(value) = arg.strip_prefix("--all=") { showing_all = docker_bool(value); override_at = Some(position); }
+        else if ["--filter", "--last", "--format", "--context", "--host", "--config", "--log-level", "--tlscacert", "--tlscert", "--tlskey"].contains(&arg.as_str()) {
+            skip_value = true;
+        } else if arg.starts_with('-') && !arg.starts_with("--") {
+            for (offset, flag) in arg[1..].char_indices() {
+                let rest = &arg[offset + 1 + flag.len_utf8()..];
+                if ['f', 'n', 'c', 'H'].contains(&flag) {
+                    skip_value = rest.is_empty(); break;
+                }
+                if flag == 'a' { showing_all = rest.strip_prefix('=').map(docker_bool).unwrap_or(true); }
+                if rest.starts_with('=') { break; }
+                // Unknown shorthands remain the CLI's responsibility, including
+                // their value consumption. Never interpret their suffix as -a.
+                if !['a', 's', 'l', 'q', 'D'].contains(&flag) { break; }
+            }
+        }
+    }
+    let value = format!("--all={}", !showing_all);
+    if override_at.is_some_and(|position| position + 1 == invocation.args.len()) {
+        *invocation.args.last_mut().unwrap() = value;
+    } else { invocation.args.push(value); }
 }
+fn docker_bool(value: &str) -> bool { ["1", "t", "T", "true", "TRUE", "True"].contains(&value) }
 pub async fn query(invocation: &Invocation) -> Result<Value> {
     let mut command = invocation.command(true);
     let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true)
@@ -190,6 +220,35 @@ pub async fn query(invocation: &Invocation) -> Result<Value> {
 mod tests {
     use super::*;
     #[test]
+    fn all_toggle_preserves_other_flags_values_and_last_boolean_precedence() {
+        let mut state = State::new(Default::default());
+        state.docker_context = Some("--all=true".into());
+        for (text, initial) in [
+            ("ps -as", true), ("ps -sa=false", false), ("ps -a=true", true),
+            ("ps --all=true --all=false", false), ("ps --all=false -as", true),
+            ("container list -asf label=a", true), ("ps -sf label=a", false),
+            ("ps -sn5", false), ("ps -san5", true), ("ps --filter --all=true", false),
+            ("ps -éa", false), ("ps", false),
+        ] {
+            let mut invocation = parse(text, &state).unwrap();
+            let original = invocation.args.clone();
+            for (round, value) in [!initial, initial, !initial].into_iter().enumerate() {
+                toggle_all(&mut invocation);
+                assert_eq!(invocation.args.last().unwrap(), &format!("--all={value}"), "{text}, round {round}");
+                let retained = if text.ends_with("--all=false") { original.len() - 1 } else { original.len() };
+                assert_eq!(invocation.args[..retained], original[..retained], "{text}");
+                assert!(invocation.args.len() <= original.len() + 1, "{text}");
+            }
+        }
+        for value in ["1", "t", "T", "true", "TRUE", "True", "0", "f", "F", "false", "FALSE", "False"] {
+            for spelling in ["--all", "-a", "-sa"] {
+                let mut invocation = parse(&format!("ps {spelling}={value}"), &state).unwrap();
+                toggle_all(&mut invocation);
+                assert_eq!(invocation.args.last().unwrap(), &format!("--all={}", !docker_bool(value)));
+            }
+        }
+    }
+    #[test]
     fn native_arguments_preserve_scope_output_and_plugin_semantics() {
         let mut state = State::new(Default::default());
         assert_eq!(command_workspace("  kubectl\tget pods", Workspace::Containers), Workspace::Kubernetes);
@@ -209,10 +268,10 @@ mod tests {
         }
         let mut filtered = parse("ps -a --filter 'label=app=api'", &state).unwrap();
         toggle_all(&mut filtered);
-        assert!(!filtered.args.iter().any(|s| s == "-a" || s == "--all"));
+        assert_eq!(filtered.args.last().unwrap(), "--all=false");
         assert!(filtered.args.iter().any(|s| s == "label=app=api"));
         toggle_all(&mut filtered);
-        assert_eq!(filtered.args.last().unwrap(), "--all");
+        assert_eq!(filtered.args.last().unwrap(), "--all=true");
         let invocation = parse("docker --host unix:///explicit ps -a", &state).unwrap();
         assert_eq!(invocation.args, ["--host", "unix:///explicit", "ps", "-a"]);
         assert_eq!(parse("docker context use external", &state).unwrap().args, ["context", "use", "external"]);

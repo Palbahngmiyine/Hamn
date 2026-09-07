@@ -30,6 +30,9 @@ Hamn은 하나의 실행 파일을 유지합니다. 헤드리스 SDK 작업은 �
 컨테이너 영역은 실행 중인 컨테이너부터 표시합니다. 정지된 Hamn 환경은 시작
 동작을 제공하며, 목록 조회만으로 VM을 부팅하지 않습니다. VM 패널은 VM 상태와
 Docker 준비 상태를 구분합니다. 외부 Docker context에는 Hamn VM 제어가 없습니다.
+`a` 키는 `-as` 같은 결합 옵션과 반복 boolean 옵션에서도 Docker의 `--all` 값을
+전환합니다. 필터·크기·`--last`·`--latest` 옵션은 유지하며, 마지막 두 옵션은
+Docker의 원래 동작대로 모든 컨테이너 상태를 조회 범위에 포함합니다.
 Kubernetes는 현재 유효한 context의 Pod 목록, 없으면 context 선택기로 시작합니다.
 Kubernetes 진입은 VM 시작이나 Hamn 프로필 마이그레이션을 실행하지 않습니다.
 context·namespace 선택은 kubeconfig나 Docker 설정을 변경하지 않습니다.
