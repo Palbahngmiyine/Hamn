@@ -2,13 +2,14 @@ use crate::{model::{Failure, Result}, native::Invocation, preferences::Workspace
 use serde_json::Value;
 #[derive(Clone)]
 pub struct Action { pub invocation: Invocation, pub changes: bool, pub description: String }
-fn connections(invocation: &Invocation, row_namespace: Option<&str>) -> Vec<String> {
+pub(crate) fn connections(original: &[String], workspace: Workspace, row_namespace: Option<&str>) -> Vec<String> {
+    let inspected = crate::native_flags::inspect(original, workspace);
     let mut args = Vec::new();
     let mut i = 0;
-    let docker = invocation.workspace == Workspace::Containers;
-    let end = if docker { crate::native::command_index(&invocation.args, invocation.workspace).unwrap_or(0) } else { invocation.args.len() };
+    let docker = workspace == Workspace::Containers;
+    let end = if docker { crate::native::command_index(&inspected, workspace).unwrap_or(0) } else { inspected.len() };
     while i < end {
-        let arg = &invocation.args[i];
+        let arg = &inspected[i];
         if arg == "--" { break; }
         let value: &[&str] = if docker { &["--context", "-c", "--host", "-H", "--config", "--tlscacert", "--tlscert", "--tlskey"] } else { crate::native::KUBE_CONNECTION_VALUES };
         let boolean: &[&str] = if docker { &["--tls", "--tlsverify"] } else { crate::native::KUBE_CONNECTION_FLAGS };
@@ -17,9 +18,10 @@ fn connections(invocation: &Invocation, row_namespace: Option<&str>) -> Vec<Stri
             if !skip { args.push(arg.clone()); }
             if arg == name {
                 i += 1;
-                if !skip { if let Some(value) = invocation.args.get(i) { args.push(value.clone()); } }
+                if !skip { if let Some(value) = inspected.get(i) { args.push(value.clone()); } }
             }
         } else if boolean.iter().any(|name| arg == *name || arg.starts_with(&format!("{name}="))) { args.push(arg.clone()); }
+        else if crate::native_flags::takes_value(arg, workspace) { i += 1; }
         i += 1;
     }
     if let Some(namespace) = row_namespace { args.extend(["--namespace".into(), namespace.into()]); }
@@ -32,7 +34,7 @@ pub fn selected(invocation: &Invocation, row: &Value, action: &str) -> Result<Ac
     let name;
     if invocation.workspace == Workspace::Containers {
         name = row["ID"].as_str().or_else(|| row["Id"].as_str()).or_else(|| row["Name"].as_str()).ok_or_else(|| Failure::new("noSelection", "CLI response has no resource identity"))?;
-        result.args = connections(invocation, None);
+        result.args = connections(&invocation.args, invocation.workspace, None);
         let singular = match resource { "containers" => "container", "images" => "image", "volumes" => "volume", "networks" => "network", _ => return Err(Failure::new("unsupportedOperation", "choose a Docker resource")) };
         match action {
             "inspect" => result.args.extend([singular.into(), "inspect".into(), name.into()]),
@@ -45,7 +47,7 @@ pub fn selected(invocation: &Invocation, row: &Value, action: &str) -> Result<Ac
     } else {
         name = row["metadata"]["name"].as_str().ok_or_else(|| Failure::new("noSelection", "CLI response has no resource name"))?;
         let namespace = row["metadata"]["namespace"].as_str();
-        result.args = connections(invocation, namespace);
+        result.args = connections(&invocation.args, invocation.workspace, namespace);
         match action {
             "inspect" => result.args.extend(["get".into(), resource.into(), name.into(), "-o".into(), "yaml".into()]),
             "delete" => crate::guarded_action::delete(&mut result, row, resource)?,
@@ -61,6 +63,41 @@ pub fn selected(invocation: &Invocation, row: &Value, action: &str) -> Result<Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grouped_targets_survive_defaults_headers_and_selected_actions() {
+        let mut state = crate::tui_state::State::new(Default::default());
+        state.docker_context = Some("ui-default".into());
+        for (text, target) in [("docker -DHunix:///query.sock ps", "-Hunix:///query.sock"),
+            ("docker -DH unix:///query.sock ps", "-H unix:///query.sock"),
+            ("docker -Dcother ps", "-cother")] {
+            let query = crate::native::parse(text, &state).unwrap();
+            assert_eq!(query.args, crate::tui_state::split_command(text).unwrap()[1..]);
+            assert_eq!(query.resource.as_deref(), Some("containers"));
+            assert!(query.hamn_profile.is_none());
+            assert!(query.target.contains(target), "{}", query.target);
+            let action = selected(&query, &serde_json::json!({"ID":"exact-id"}), "inspect").unwrap();
+            let expected = crate::tui_state::split_command(&format!("{target} container inspect exact-id")).unwrap();
+            assert_eq!(action.invocation.args, expected);
+        }
+        state.workspace = Workspace::Kubernetes;
+        state.request.context = Some("ui-cluster".into());
+        state.request.namespace = Some("ui-ns".into());
+        let row = serde_json::json!({"metadata":{"name":"pod", "namespace":"actual"}});
+        for flag in ["-Ashttps://explicit", "-As https://explicit", "-As=https://explicit"] {
+            let query = crate::native::parse(&format!("get pods {flag}"), &state).unwrap();
+            assert_eq!(query.resource.as_deref(), Some("pods"));
+            assert!(query.target.contains("https://explicit") && query.target.contains("all namespaces"));
+            assert!(!query.args.iter().any(|a| a == "ui-ns"));
+            let action = selected(&query, &row, "inspect").unwrap();
+            assert!(action.invocation.args.iter().any(|a| a.contains("https://explicit")));
+            assert!(action.invocation.args.ends_with(&["--namespace", "actual", "get", "pods", "pod", "-o", "yaml"].map(String::from)));
+        }
+        let query = crate::native::parse("get pods --token -sprivate --selector -slabel", &state).unwrap();
+        assert!(!query.target.contains("private") && !query.target.contains("label"));
+        let action = selected(&query, &row, "inspect").unwrap();
+        assert!(!action.invocation.args.iter().any(|a| a == "-slabel"));
+        assert!(action.invocation.args.windows(2).any(|a| a == ["--token", "-sprivate"]));
+    }
     #[test]
     fn selected_actions_preserve_tls_proxy_and_authentication_overrides() {
         let mut state = crate::tui_state::State::new(Default::default());
