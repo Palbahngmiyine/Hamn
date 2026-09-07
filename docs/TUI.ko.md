@@ -36,6 +36,10 @@ Docker의 원래 동작대로 모든 컨테이너 상태를 조회 범위에 포
 Kubernetes는 현재 유효한 context의 Pod 목록, 없으면 context 선택기로 시작합니다.
 Kubernetes 진입은 VM 시작이나 Hamn 프로필 마이그레이션을 실행하지 않습니다.
 context·namespace 선택은 kubeconfig나 Docker 설정을 변경하지 않습니다.
+환경·context·namespace 선택기에서 Esc를 누르면 선택을 취소하고 이전 조회,
+명시적 연결 옵션, 행 필터, 선택과 스크롤 위치를 복원합니다. Enter로 대상을
+선택하거나 새 리소스 조회 명령을 입력하면 새 화면으로 전환합니다.
+선택기를 이동하거나 취소해도 수명 주기 작업의 진행 상태와 로그는 되돌리지 않습니다.
 
 ## 명령
 
