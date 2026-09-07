@@ -81,6 +81,9 @@ def main():
             (['--all=TRUE'], True),
             (['-a=0'], False),
             (['-asn5'], True),
+            (['--size', '--size=false'], False),
+            (['--size=false', '-s'], False),
+            (['-as=false'], True),
         ]
         for case_index, (flags, all_value) in enumerate(cases):
             command = ['ps'] + flags
@@ -93,6 +96,13 @@ def main():
                 if direct_marker in json.loads(query.get('filters', ['{}'])[0]).get('label', []))
             assert (baseline.get('all') == ['1']) == all_value, (command, baseline)
             size = baseline.get('size') == ['1']
+            displayed_size = json.loads(direct.stdout)['Size']
+            plain = subprocess.run([docker, '--host', 'unix://' + str(endpoint)] + command,
+                env=env, capture_output=True, text=True, timeout=10)
+            assert plain.returncode == 0, plain.stderr
+            # Docker's JSON formatter evaluates Size even without --size. The
+            # ordinary CLI header establishes whether the user requested it.
+            show_size = 'SIZE' in plain.stdout.splitlines()[0].split()
             # Include a sequence marker in the filter so a stale screen cannot pass.
             marker = 'label=case=' + str(case_index)
             text = 'docker ps ' + ' '.join(flags) + ' --filter ' + marker
@@ -107,6 +117,10 @@ def main():
                 os.write(harness.master, b'a')
                 harness.wait(lambda: observed(value))
                 harness.until(('all' if value else 'running') + suffix)
+                screen = harness.screen.text()
+                assert ('Size' in screen) == show_size, (command, screen)
+                if show_size:
+                    assert displayed_size in screen, (command, displayed_size, screen)
                 query = requests[-1]
                 assert (query.get('size') == ['1']) == size, (command, query)
                 assert query.get('limit') == baseline.get('limit'), (command, query)

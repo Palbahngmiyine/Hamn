@@ -9,6 +9,7 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &State, title: String) {
             Some("images") => &["Repository", "Tag", "ID", "Size"],
             Some("volumes") => &["Name", "Driver", "Scope"],
             Some("networks") => &["ID", "Name", "Driver", "Scope"],
+            Some("containers") if crate::native::show_size(invocation) => &["ID", "Names", "Image", "Status", "Ports", "Size"],
             _ => &["ID", "Names", "Image", "Status", "Ports"],
         }};
     let rows: Vec<Row> = state.rows().into_iter().map(|row| {
@@ -41,5 +42,19 @@ mod tests {
         let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
         for value in ["ID", "Names", "Image", "Status", "Ports", "web", "nginx", "8080"] { assert!(text.contains(value)); }
         assert_eq!(super::text(&serde_json::json!("\u{1b}[2Jname")), "[2Jname");
+    }
+    #[test]
+    fn container_size_column_honors_grouped_and_repeated_flags() {
+        let mut state = State::new(Default::default());
+        state.data = serde_json::json!([{"Names":"web", "Size":"42B"}]);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 12)).unwrap();
+        for (flags, visible) in [("", false), ("-as", true), ("-sa=false", true), ("-as=false", false),
+            ("--size --size=false", false), ("--size=false -s", true), ("-sf label=a", true), ("--filter --size", false)] {
+            state.native = Some(crate::native::parse(&format!("ps {flags}"), &state).unwrap());
+            terminal.draw(|f| draw(f, f.area(), &state, "containers".into())).unwrap();
+            let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+            assert_eq!(text.contains("Size"), visible, "{flags}");
+            assert_eq!(text.contains("42B"), visible, "{flags}");
+        }
     }
 }
