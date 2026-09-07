@@ -134,6 +134,8 @@ def cancellation_boundaries(root, runtime, snapshot):
              ('reconcile', 'commit'), ('retirement', 'retirement')]
     for mode, action, queued in [(m, a, False) for m, a in cases] + [
             (m, a, True) for m, a in cases if m != 'reconcile']:
+        runtime.call('vm', 'start', profile='verify', yes=True)
+        original_pid = (path.parent / 'vmrun.pid').read_bytes()
         original_config = config.read_bytes()
         gate = BoundaryGate(runtime, action, queued)
         child = None
@@ -177,6 +179,7 @@ def cancellation_boundaries(root, runtime, snapshot):
                 runtime.call('vm', 'start', profile='verify', yes=True)
             else:
                 assert runtime.call('vm', 'status', profile='verify')['state'] == 'running'
+                assert (path.parent / 'vmrun.pid').read_bytes() == original_pid
             runtime.ssh('test -z "$(ls -A /var/lib/hamn/deployment-transactions)"', profile='verify')
             assert snapshot(runtime) == before
             assert runtime.ssh(f'sha256sum {HELPERS}/verify-image-contract {HELPERS}/guest-deployment-transaction {HELPERS}/configure-docker', profile='verify') == hashes
