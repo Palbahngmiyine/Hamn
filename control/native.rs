@@ -11,6 +11,7 @@ pub struct Invocation {
     pub resource: Option<String>,
     pub hamn_profile: Option<String>,
     pub reset_selection: bool,
+    pub body: Option<Vec<u8>>,
 }
 impl Invocation {
     pub fn program(&self) -> &'static str { if self.workspace == Workspace::Containers { "docker" } else { "kubectl" } }
@@ -28,7 +29,7 @@ fn has(args: &[String], names: &[&str]) -> bool {
     args.iter().take_while(|s| s.as_str() != "--").any(|s| names.iter().any(|n|
         s == n || s.starts_with(&format!("{n}=")) || (n.len() == 2 && s.starts_with(n) && s.len() > 2)))
 }
-fn command_index(args: &[String], workspace: Workspace) -> Option<usize> {
+pub(crate) fn command_index(args: &[String], workspace: Workspace) -> Option<usize> {
     let values = if workspace == Workspace::Containers {
         &["--context", "-c", "--host", "-H", "--config", "--log-level", "-l", "--tlscacert", "--tlscert", "--tlskey"][..]
     } else {
@@ -107,7 +108,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
             "networks" => args.splice(0..1, ["network".into(), "ls".into()]).for_each(drop),
             _ => {},
         }
-    } else if ["pods", "po", "deployments", "deploy", "services", "svc", "nodes", "namespaces", "ns", "statefulsets", "sts", "daemonsets", "ds", "events", "jobs", "cronjobs", "ingresses", "pvcs"].contains(&args.first().map(String::as_str).unwrap_or("")) {
+    } else if ["pods", "po", "deployments", "deploy", "services", "svc", "nodes", "namespaces", "ns", "statefulsets", "sts", "daemonsets", "ds", "jobs", "cronjobs", "ingresses", "pvcs"].contains(&args.first().map(String::as_str).unwrap_or("")) {
         args.insert(0, "get".into());
     }
     let index = command_index(&args, workspace);
@@ -149,7 +150,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
         }
     }
     if has(&defaults, &["--all-namespaces", "-A"]) { target.push("all namespaces".into()); }
-    Ok(Invocation { workspace, hamn_profile, args: defaults, target: if plugin { format!("Plugin-defined target / inherited CLI configuration {}", target.join("  ")) } else if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
+    Ok(Invocation { workspace, hamn_profile, body: None, args: defaults, target: if plugin { format!("Plugin-defined target / inherited CLI configuration {}", target.join("  ")) } else if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
 }
 pub fn toggle_all(invocation: &mut Invocation) {
     let showing_all = invocation.args.iter().any(|s| s == "-a" || s == "--all" || s == "--all=true");

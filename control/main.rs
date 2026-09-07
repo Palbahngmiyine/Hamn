@@ -17,6 +17,8 @@ mod resource_table;
 mod native_actions;
 mod terminal_io;
 mod terminal_session;
+mod command_input;
+mod guarded_action;
 mod environments;
 mod tui;
 mod tui_state;

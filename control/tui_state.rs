@@ -149,6 +149,13 @@ impl State {
             self.native = browser.native; self.data = browser.data; self.selected = browser.selected; self.filter = browser.filter; self.scroll = browser.scroll;
         } else { self.native = crate::native::parse("", self).ok(); self.selected = 0; self.filter.clear(); self.scroll = 0; }
     }
+    pub fn invalidate_results(&mut self) {
+        self.data = Value::Null;
+        self.stale = true;
+        self.selected = 0;
+        self.pending_native = None;
+        self.connection_status = "Connecting".into();
+    }
     pub fn rows(&self) -> Vec<&Value> {
         self.data
             .as_array()
