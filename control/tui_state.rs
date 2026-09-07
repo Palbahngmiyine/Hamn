@@ -181,6 +181,7 @@ impl State {
         self.data = Value::Null;
         self.stale = true;
         self.selected = 0;
+        self.filter.clear(); self.scroll = 0; self.detail = None;
         self.pending_native = None;
         self.connection_status = "Connecting".into();
     }
@@ -393,13 +394,13 @@ impl State {
                         "legacy Hamn context is unavailable",
                     ));
                 }
-                self.discard_picker(); self.browser = None;
+                self.invalidate_results();
                 self.request.context = row["name"].as_str().map(String::from);
                 self.request.namespace = row["namespace"].as_str().map(String::from);
                 self.view("pods").map(Some)
             }
             "k8s namespaces list" => {
-                self.discard_picker(); self.browser = None;
+                self.invalidate_results();
                 self.request.namespace = row["metadata"]["name"].as_str().map(String::from);
                 self.view("pods").map(Some)
             }
@@ -856,8 +857,10 @@ mod tests {
             state.open_picker(); state.view(picker).unwrap();
             state.data = serde_json::json!([{"name":"chosen", "namespace":"chosen-ns",
                 "metadata":{"name":"chosen-ns"}}]);
+            state.filter = "chosen".into(); state.scroll = 8;
             assert_eq!(state.enter().unwrap().unwrap().operation(), "k8s pods list");
             assert!(!state.cancel_picker());
+            assert!(state.filter.is_empty()); assert_eq!(state.scroll, 0);
             assert_eq!(state.request.namespace.as_deref(), Some("chosen-ns"));
             if picker == "contexts" { assert_eq!(state.request.context.as_deref(), Some("chosen")); }
         }

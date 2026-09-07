@@ -36,6 +36,10 @@ those last two options retain Docker's behavior of including all container state
 Kubernetes opens Pods in the current valid context, otherwise the context picker.
 Entering Kubernetes neither starts a VM nor migrates a Hamn profile.
 Selecting contexts or namespaces does not write kubeconfig or Docker configuration.
+Esc cancels an environment, context, or namespace picker and restores the previous
+query, explicit connection options, row filter, selection, and scroll position.
+Enter commits the selected target; entering a new resource query also replaces
+the previous view. Picker navigation does not rewind lifecycle progress or logs.
 
 ## Commands
 
