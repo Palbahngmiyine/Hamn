@@ -5,12 +5,14 @@ use crate::{
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-fn retirement_failure(operation: &str, error: Failure) -> Result<Option<Failure>> {
-    if operation == "vm stop" {
-        Ok(Some(error))
-    } else {
-        Err(error)
-    }
+fn retirement_result(operation: &str, result: Result<Value>, cancelled: bool) -> Result<Option<Failure>> {
+    let error = match result {
+        Err(error) if operation != "vm stop" || cancelled => return Err(error),
+        Err(error) => Some(error),
+        Ok(_) => None,
+    };
+    if cancelled { return Err(Failure::new("cancelled", "operation cancelled")); }
+    Ok(error)
 }
 
 pub async fn execute_stream(
@@ -42,11 +44,9 @@ pub async fn execute_stream(
             let mut migrate = request.clone();
             migrate.words = vec!["vm".into(), "migrate".into()];
             let migration = core::call_control(&migrate, cancel, events.as_ref()).await;
-            if let Err(error) = migration {
-                // A failed retirement must never prevent stopping the owned VM.
-                // Preserve the failure in the result; its pending marker remains.
-                migration_error = retirement_failure(&request.operation(), error)?;
-            }
+            // Cancellation stops further dispatch, but cannot erase a failure
+            // from the retirement that already ran, especially outcomeUnknown.
+            migration_error = retirement_result(&request.operation(), migration, cancel.is_cancelled())?;
         }
     if cancel.is_cancelled() { return Err(Failure::new("cancelled", "operation cancelled")); }
     let run = async {
@@ -94,13 +94,31 @@ mod tests {
             "docker containers delete",
         ] {
             let result =
-                retirement_failure(operation, Failure::new("coreError", "retirement failed"));
+                retirement_result(operation, Err(Failure::new("coreError", "retirement failed")), false);
             if operation == "vm stop" {
                 let retained = result.unwrap().unwrap();
                 assert_eq!(retained.code, "coreError");
                 assert_eq!(retained.message, "retirement failed");
             } else {
                 assert_eq!(result.unwrap_err().code, "coreError");
+            }
+        }
+    }
+    #[test]
+    fn cancellation_after_retirement_preserves_unknown_outcomes_and_diagnostics() {
+        for operation in ["vm stop", "vm delete", "docker containers start"] {
+            for cancelled in [false, true] {
+                for code in ["outcomeUnknown", "operationFailed", "cancelled"] {
+                    let result = retirement_result(operation, Err(Failure::new(code, "retirement diagnostic")), cancelled);
+                    let error = if operation == "vm stop" && !cancelled {
+                        result.unwrap().unwrap()
+                    } else { result.unwrap_err() };
+                    assert_eq!(error.code, code);
+                    assert_eq!(error.message, "retirement diagnostic");
+                }
+                let result = retirement_result(operation, Ok(Value::Null), cancelled);
+                if cancelled { assert_eq!(result.unwrap_err().code, "cancelled"); }
+                else { assert!(result.unwrap().is_none()); }
             }
         }
     }

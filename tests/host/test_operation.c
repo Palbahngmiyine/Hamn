@@ -5,6 +5,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <poll.h>
+#include <signal.h>
+#include <sys/wait.h>
 static int alive = 1, cancelled;
 int proc_cancelled(void) { return cancelled; }
 int proc_start_identity(pid_t pid, uint64_t *sec, uint64_t *usec)
@@ -39,6 +42,23 @@ int main(void)
     value = operation_snapshot(&p);
     assert(!strcmp(cJSON_GetObjectItem(value, "status")->valuestring, "outcomeUnknown")); cJSON_Delete(value);
     profile_path(&p, "operation.json", path, sizeof(path)); assert(chmod(path, 0644) == 0);
-    assert(!operation_snapshot(&p)); assert(unlink(path) == 0); assert(rmdir(directory) == 0);
+    assert(!operation_snapshot(&p)); assert(unlink(path) == 0);
+    assert(mkfifo(path, 0600) == 0);
+    int gate[2]; assert(pipe(gate) == 0);
+    pid_t child = fork(); assert(child >= 0);
+    if (child == 0) {
+        close(gate[0]);
+        assert(!operation_snapshot(&p));
+        assert(operation_begin(&p, "vm start") == -1);
+        _exit(0);
+    }
+    close(gate[1]);
+    struct pollfd ready = { .fd = gate[0], .events = POLLIN };
+    int completed = poll(&ready, 1, 5000);
+    if (completed <= 0) kill(child, SIGKILL);
+    int status; assert(waitpid(child, &status, 0) == child);
+    close(gate[0]);
+    assert(unlink(path) == 0); assert(rmdir(directory) == 0);
+    assert(completed > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0);
     puts("PASS: operation ownership, completion and unsafe record handling");
 }

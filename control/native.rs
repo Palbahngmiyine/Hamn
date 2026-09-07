@@ -34,6 +34,19 @@ fn has(args: &[String], names: &[&str]) -> bool {
     args.iter().take_while(|s| s.as_str() != "--").any(|s| names.iter().any(|n|
         s == n || s.starts_with(&format!("{n}=")) || (n.len() == 2 && s.starts_with(n) && s.len() > 2)))
 }
+fn kube_all_namespaces(inspected: &[String]) -> bool {
+    let mut enabled = false;
+    let mut args = inspected.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" { break; }
+        if crate::native_flags::takes_value(arg, Workspace::Kubernetes) { args.next(); continue; }
+        if ["--all-namespaces", "-A"].contains(&arg.as_str()) { enabled = true; }
+        else if let Some(value) = arg.strip_prefix("--all-namespaces=").or_else(|| arg.strip_prefix("-A=")) {
+            enabled = docker_bool(value);
+        }
+    }
+    enabled
+}
 pub(crate) fn command_index(args: &[String], workspace: Workspace) -> Option<usize> {
     let values = if workspace == Workspace::Containers {
         crate::native_flags::DOCKER_VALUES
@@ -148,6 +161,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     }
     let index = command_index(&args, workspace);
     let inspected = crate::native_flags::inspect(&args, workspace);
+    let all_namespaces = workspace == Workspace::Kubernetes && kube_all_namespaces(&inspected);
     let inspected_index = command_index(&inspected, workspace);
     let config_command = index.is_some_and(|i| args[i] == if workspace == Workspace::Containers { "context" } else { "config" });
     let explicit = if workspace == Workspace::Containers { has(&inspected[..inspected_index.unwrap_or(inspected.len())], &["--context", "-c", "--host", "-H", "--config"]) }
@@ -164,7 +178,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
             }
         } else {
             if let Some(context) = &state.request.context { defaults.extend(["--context".into(), context.clone()]); }
-            if !has(&inspected, &["--namespace", "-n"]) && !has(&inspected, &["--all-namespaces", "-A"]) {
+            if !has(&inspected, &["--namespace", "-n"]) && !all_namespaces {
                 if let Some(namespace) = &state.request.namespace { defaults.extend(["--namespace".into(), namespace.clone()]); }
             }
         }
@@ -189,7 +203,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
         }
         skip_value = crate::native_flags::takes_value(arg, workspace);
     }
-    if has(&defaults, &["--all-namespaces", "-A"]) { target.push("all namespaces".into()); }
+    if all_namespaces { target.push("all namespaces".into()); }
     Ok(Invocation { workspace, hamn_profile, body: None, args: defaults, target: if plugin { format!("Plugin-defined target / inherited CLI configuration {}", target.join("  ")) } else if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
 }
 fn docker_list_bool(invocation: &Invocation, name: &str, short: char) -> (bool, Option<usize>) {
@@ -257,6 +271,29 @@ pub async fn query(invocation: &Invocation) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn namespace_defaults_and_headers_follow_the_last_all_namespaces_boolean() {
+        let mut state = State::new(Default::default());
+        state.workspace = Workspace::Kubernetes;
+        state.request.context = Some("ui-cluster".into());
+        state.request.namespace = Some("ui-ns".into());
+        for (flags, all) in [
+            ("--all-namespaces=false", false), ("-A=false", false),
+            ("-A --all-namespaces=false", false), ("--all-namespaces=false -A", true),
+            ("-AA=false", false), ("-A=false -A", true),
+            ("--selector --all-namespaces=true", false), ("-l -A", false),
+        ] {
+            let command = format!("get pods {flags}");
+            let invocation = parse(&command, &state).unwrap();
+            assert_eq!(invocation.target.contains("all namespaces"), all, "{command}");
+            assert_eq!(invocation.args.contains(&"--namespace".into()), !all, "{command}");
+            assert!(invocation.args.ends_with(&split_command(&command).unwrap()));
+        }
+        for value in ["1", "t", "T", "true", "TRUE", "True", "0", "f", "F", "false", "FALSE", "False"] {
+            let invocation = parse(&format!("get pods -A={value}"), &state).unwrap();
+            assert_eq!(invocation.target.contains("all namespaces"), docker_bool(value));
+        }
+    }
     #[test]
     fn all_toggle_preserves_other_flags_values_and_last_boolean_precedence() {
         let mut state = State::new(Default::default());

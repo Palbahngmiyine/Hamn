@@ -116,8 +116,10 @@ async fn saturated_log_channel_preserves_the_burst_and_final_diagnostic() {
     for _ in 0..32 { sender.try_send(json!({"type":"log", "text":"queued\n"})).unwrap(); }
     let text = format!("{}\nfinal-cleanup-diagnostic\n", "x".repeat(160 * 1024));
     let done = tokio_util::sync::CancellationToken::new();
+    let (reader, mut writer) = tokio::net::UnixStream::pair().unwrap();
+    let write = async { writer.write_all(text.as_bytes()).await.unwrap(); drop(writer); };
     let read = async {
-        let result = live_error(text.as_bytes(), Some(&sender), false, &done).await;
+        let result = live_error(reader, Some(&sender), false, &done).await;
         drop(sender);
         result.unwrap()
     };
@@ -126,12 +128,50 @@ async fn saturated_log_channel_preserves_the_burst_and_final_diagnostic() {
         while let Some(event) = receiver.recv().await { logs.push_str(event["text"].as_str().unwrap()); }
         logs
     };
-    let (saved, logs) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        tokio::join!(read, consume)
+    let (saved, logs, _) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(read, consume, write)
     }).await.unwrap();
     assert!(logs == format!("{}{text}", "queued\n".repeat(32)), "stderr burst or final diagnostic was lost");
     assert!(saved.ends_with(b"final-cleanup-diagnostic\n"));
     assert!(saved.len() <= 8192);
+}
+
+#[tokio::test(start_paused = true)]
+async fn worker_exit_during_renderer_backpressure_preserves_the_entire_queued_tail() {
+    use std::{future::Future, task::Poll};
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    sender.try_send(json!({"text":"queued\n"})).unwrap();
+    let text = format!("{}\nfinal-cleanup-diagnostic\n", "x".repeat(5000));
+    let (reader, mut writer) = tokio::net::UnixStream::pair().unwrap();
+    writer.write_all(text.as_bytes()).await.unwrap();
+    reader.readable().await.unwrap();
+    let done = tokio_util::sync::CancellationToken::new();
+    done.cancel();
+    let read = async {
+        let result = live_error(reader, Some(&sender), false, &done).await.unwrap();
+        drop(sender); result
+    };
+    tokio::pin!(read);
+    std::future::poll_fn(|cx| {
+        assert!(read.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    }).await;
+    // The old 250ms deadline expired while this renderer was blocked. Virtual
+    // time establishes the condition without a scheduling-dependent sleep.
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    // Later descendant output is outside the completed worker's queue snapshot.
+    writer.write_all(b"descendant-late-log\n").await.unwrap();
+    let consume = async {
+        let mut logs = String::new();
+        while let Some(event) = receiver.recv().await { logs.push_str(event["text"].as_str().unwrap()); }
+        logs
+    };
+    let (saved, logs) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(read, consume)
+    }).await.unwrap();
+    assert_eq!(logs, format!("queued\n{text}"));
+    assert_eq!(saved, text.as_bytes());
+    drop(writer); // Completion must not require the inherited descriptor's EOF.
 }
 
 #[tokio::test]

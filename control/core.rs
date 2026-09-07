@@ -253,28 +253,35 @@ pub async fn call_control(
 }
 
 async fn live_error(
-    mut reader: impl AsyncRead + Unpin,
+    mut reader: impl AsyncRead + std::os::fd::AsRawFd + Unpin,
     events: Option<&crate::stream::Events>,
     headless: bool,
     worker_done: &tokio_util::sync::CancellationToken,
 ) -> std::io::Result<Vec<u8>> {
     // Background SSH masters may inherit stderr. Only the exact worker owns
-    // operation completion; after it is reaped, drain already queued logs without
-    // waiting for an unrelated descendant to close the pipe.
-    let drain = async {
-        worker_done.cancelled().await;
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    };
-    tokio::pin!(drain);
+    // operation completion. After reaping, snapshot the queued byte count and
+    // drain exactly that tail. Renderer backpressure cannot consume a deadline,
+    // and a descendant cannot prolong completion by holding or writing stderr.
+    let mut remaining = None;
     let mut saved = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
+        if remaining == Some(0) { return Ok(saved); }
+        let capacity = remaining.unwrap_or(buffer.len()).min(buffer.len());
         let n = tokio::select! {
             biased;
-            _ = &mut drain => return Ok(saved),
-            n = reader.read(&mut buffer) => n?,
+            _ = worker_done.cancelled(), if remaining.is_none() => {
+                let mut queued: libc::c_int = 0;
+                if unsafe { libc::ioctl(reader.as_raw_fd(), libc::FIONREAD, &mut queued) } < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                remaining = Some(queued.max(0) as usize);
+                continue;
+            },
+            n = reader.read(&mut buffer[..capacity]) => n?,
         };
         if n == 0 { return Ok(saved); }
+        if let Some(remaining) = &mut remaining { *remaining -= n; }
         // Keep the final diagnostic if the worker exits without a response.
         // Logs already delivered to the UI are retained by its own bounded log.
         saved.extend_from_slice(&buffer[..n]);
