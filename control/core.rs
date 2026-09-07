@@ -395,7 +395,17 @@ signal.pause()
             .unwrap();
         drop(writer);
         drop(saved);
+        // Parallel tests may briefly inherit this socket between fork and exec.
+        // Await EOF while cat is still alive: a leaked descriptor still times out,
+        // but an unrelated child completing exec must not make this check flaky.
         reader.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut fd = libc::pollfd { fd: reader.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let rc = unsafe { libc::poll(&mut fd, 1, remaining.as_millis() as i32) };
+            if rc >= 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted || remaining.is_zero() { break; }
+        }
         let result = std::io::Read::read(&mut reader, &mut [0]);
         let alive = child.try_wait().unwrap().is_none();
         drop(child.stdin.take());
