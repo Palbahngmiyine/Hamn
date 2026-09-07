@@ -46,6 +46,13 @@ int ssh_exec(const struct profile *profile, const char *ip,
     return 0;
 }
 
+int ssh_exec_bounded(const struct profile *p, const char *ip,
+                     const char *const argv[], unsigned timeout_ms)
+{
+    assert(timeout_ms == 30000 || timeout_ms == 130000);
+    return ssh_exec(p, ip, argv, 0);
+}
+
 int ssh_exec_capture_checked(const struct profile *p, const char *ip,
                              const char *const argv[], char *out,
                              size_t capacity, int *truncated)
