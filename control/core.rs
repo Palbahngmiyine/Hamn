@@ -256,11 +256,24 @@ async fn live_error(
     mut reader: impl AsyncRead + Unpin,
     events: Option<&crate::stream::Events>,
     headless: bool,
+    worker_done: &tokio_util::sync::CancellationToken,
 ) -> std::io::Result<Vec<u8>> {
+    // Background SSH masters may inherit stderr. Only the exact worker owns
+    // operation completion; after it is reaped, drain already queued logs without
+    // waiting for an unrelated descendant to close the pipe.
+    let drain = async {
+        worker_done.cancelled().await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    };
+    tokio::pin!(drain);
     let mut saved = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
-        let n = reader.read(&mut buffer).await?;
+        let n = tokio::select! {
+            biased;
+            _ = &mut drain => return Ok(saved),
+            n = reader.read(&mut buffer) => n?,
+        };
         if n == 0 { return Ok(saved); }
         saved.extend_from_slice(&buffer[..n.min(8192usize.saturating_sub(saved.len()))]);
         if headless { let _ = std::io::stderr().write_all(&buffer[..n]); }
@@ -292,24 +305,29 @@ async fn call_executable(
     drop(input);
     let output = child.stdout.take().unwrap();
     let error = child.stderr.take().unwrap();
+    let worker_done = tokio_util::sync::CancellationToken::new();
     let wait = async {
-        if let Some(cancel) = cancel {
-            tokio::select! {
-                status = child.wait() => return status,
-                _ = cancel.cancelled() => {},
-                _ = tokio::time::sleep(std::time::Duration::from_secs(request.timeout)) => {},
+        let status = async {
+            if let Some(cancel) = cancel {
+                tokio::select! {
+                    status = child.wait() => return status,
+                    _ = cancel.cancelled() => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(request.timeout)) => {},
+                }
+                // try_wait reaps an exited child. Otherwise its PID cannot be reused
+                // before our wait, so SIGTERM targets this exact owned worker.
+                if let Some(status) = child.try_wait()? { return Ok(status); }
+                if let Some(pid) = child.id() { unsafe { libc::kill(pid as i32, libc::SIGTERM); } }
             }
-            // try_wait reaps an exited child. Otherwise its PID cannot be reused
-            // before our wait, so SIGTERM targets this exact owned worker.
-            if let Some(status) = child.try_wait()? { return Ok(status); }
-            if let Some(pid) = child.id() { unsafe { libc::kill(pid as i32, libc::SIGTERM); } }
-        }
-        child.wait().await
+            child.wait().await
+        }.await;
+        worker_done.cancel();
+        status
     };
     let (status, output, error) = tokio::try_join!(
         wait,
         capture(output, 1024 * 1024, false),
-        live_error(error, events, request.headless)
+        live_error(error, events, request.headless, &worker_done)
     )
     .map_err(|e| Failure::new("coreProtocol", e))?;
     if !status.success() {
@@ -332,8 +350,8 @@ mod tests {
         use std::os::unix::fs::OpenOptionsExt;
         let path = std::env::temp_dir().join(format!("hamn-cancel-worker-{}.py", std::process::id()));
         let mut file = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o700).open(&path).unwrap();
-        file.write_all(br#"#!/usr/bin/python3
-import json, signal, sys
+        file.write_all(format!("#!{}\n", worker_lifetime_tests::python()).as_bytes()).unwrap();
+        file.write_all(br#"import json, signal, sys
 json.load(sys.stdin)
 def cleanup(*_):
     print(json.dumps({'Ok': {'cleanup': 'completed'}}), flush=True)
@@ -346,8 +364,18 @@ signal.pause()
         let cancel = tokio_util::sync::CancellationToken::new();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
         let request = Request { timeout: 20, ..Default::default() };
-        let call = call_executable(&request, path.as_os_str(), Some(&cancel), Some(&sender));
-        let trigger = async { assert_eq!(receiver.recv().await.unwrap()["text"], "ready\n"); cancel.cancel(); };
+        let done = tokio_util::sync::CancellationToken::new();
+        let call = async {
+            let result = call_executable(&request, path.as_os_str(), Some(&cancel), Some(&sender)).await;
+            done.cancel(); result
+        };
+        let trigger = async {
+            tokio::select! {
+                event = receiver.recv() => assert_eq!(event.unwrap()["text"], "ready\n"),
+                _ = done.cancelled() => panic!("fixture worker exited before installing its cancellation handler"),
+            }
+            cancel.cancel();
+        };
         let (result, _) = tokio::time::timeout(std::time::Duration::from_secs(30), async { tokio::join!(call, trigger) }).await.unwrap();
         std::fs::remove_file(path).unwrap();
         assert_eq!(result.unwrap()["cleanup"], "completed");
@@ -376,3 +404,7 @@ signal.pause()
         assert_eq!(result.unwrap(), 0, "EOF must not depend on daemon exit");
     }
 }
+
+#[cfg(test)]
+#[path = "core_worker_tests.rs"]
+mod worker_lifetime_tests;
