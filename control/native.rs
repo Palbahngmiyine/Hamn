@@ -65,12 +65,37 @@ fn resource(args: &[String], workspace: Workspace) -> Option<String> {
             _ => None,
         }
     } else {
-        if has(args, &["--output", "-o", "--watch", "-w", "--watch-only", "--raw", "--output-watch-events", "--no-headers", "--show-labels", "--label-columns", "-L", "--show-kind"]) { return None; }
+        if has(args, &["--output", "-o", "--watch", "-w", "--watch-only", "--raw", "--output-watch-events", "--no-headers", "--show-labels", "--label-columns", "-L", "--show-kind"]) || kube_short_output(args) { return None; }
         match words.as_slice() {
             ["get", resource, ..] if ["pods", "po", "pod", "deployments", "deploy", "deployment", "services", "svc", "service", "namespaces", "ns", "nodes", "no", "statefulsets", "sts", "daemonsets", "ds", "events", "jobs", "cronjobs", "ingresses", "pvcs"].contains(resource) => Some((*resource).into()),
             _ => None,
         }
     }
+}
+// pflag consumes the rest of a short-option group as soon as a value option is
+// encountered. Only classify display options here; kubectl still parses argv.
+fn kube_short_output(args: &[String]) -> bool {
+    let mut skip_value = false;
+    for arg in args {
+        if skip_value { skip_value = false; continue; }
+        if arg == "--" { break; }
+        if KUBE_CONNECTION_VALUES.contains(&arg.as_str()) || ["--selector", "--field-selector", "--filename", "--kustomize", "--sort-by", "--template", "--chunk-size", "--subresource", "--v", "--vmodule", "--profile", "--profile-output"].contains(&arg.as_str()) {
+            skip_value = true;
+        } else if arg.starts_with('-') && !arg.starts_with("--") {
+            for (offset, flag) in arg[1..].char_indices() {
+                let rest = &arg[offset + 1 + flag.len_utf8()..];
+                if ['o', 'w', 'L', 'h'].contains(&flag) { return true; }
+                if ['n', 's', 'l', 'f', 'k', 'v'].contains(&flag) {
+                    skip_value = rest.is_empty(); break;
+                }
+                if rest.starts_with('=') { break; }
+                // Unknown option groups are passed through without injecting
+                // output flags whose interaction cannot be established here.
+                if flag != 'A' { return true; }
+            }
+        }
+    }
+    false
 }
 fn installed_kubectl_plugin(args: &[String], index: Option<usize>) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -159,7 +184,7 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     if has(&defaults, &["--all-namespaces", "-A"]) { target.push("all namespaces".into()); }
     Ok(Invocation { workspace, hamn_profile, body: None, args: defaults, target: if plugin { format!("Plugin-defined target / inherited CLI configuration {}", target.join("  ")) } else if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
 }
-pub fn toggle_all(invocation: &mut Invocation) {
+fn docker_list_bool(invocation: &Invocation, name: &str, short: char) -> (bool, Option<usize>) {
     // Docker/pflag accepts grouped short flags and repeated booleans (last wins).
     // Preserve the original flags and append one explicit override, rather than
     // deleting tokens that may also contain size/latest flags or filter values.
@@ -170,8 +195,8 @@ pub fn toggle_all(invocation: &mut Invocation) {
     for (position, arg) in invocation.args.iter().enumerate().skip(index) {
         if skip_value { skip_value = false; continue; }
         if arg == "--" { break; }
-        if arg == "--all" { showing_all = true; }
-        else if let Some(value) = arg.strip_prefix("--all=") { showing_all = docker_bool(value); override_at = Some(position); }
+        if arg == name { showing_all = true; }
+        else if let Some(value) = arg.strip_prefix(&format!("{name}=")) { showing_all = docker_bool(value); override_at = Some(position); }
         else if ["--filter", "--last", "--format", "--context", "--host", "--config", "--log-level", "--tlscacert", "--tlscert", "--tlskey"].contains(&arg.as_str()) {
             skip_value = true;
         } else if arg.starts_with('-') && !arg.starts_with("--") {
@@ -180,7 +205,7 @@ pub fn toggle_all(invocation: &mut Invocation) {
                 if ['f', 'n', 'c', 'H'].contains(&flag) {
                     skip_value = rest.is_empty(); break;
                 }
-                if flag == 'a' { showing_all = rest.strip_prefix('=').map(docker_bool).unwrap_or(true); }
+                if flag == short { showing_all = rest.strip_prefix('=').map(docker_bool).unwrap_or(true); }
                 if rest.starts_with('=') { break; }
                 // Unknown shorthands remain the CLI's responsibility, including
                 // their value consumption. Never interpret their suffix as -a.
@@ -188,6 +213,11 @@ pub fn toggle_all(invocation: &mut Invocation) {
             }
         }
     }
+    (showing_all, override_at)
+}
+pub fn show_size(invocation: &Invocation) -> bool { docker_list_bool(invocation, "--size", 's').0 }
+pub fn toggle_all(invocation: &mut Invocation) {
+    let (showing_all, override_at) = docker_list_bool(invocation, "--all", 'a');
     let value = format!("--all={}", !showing_all);
     if override_at.is_some_and(|position| position + 1 == invocation.args.len()) {
         *invocation.args.last_mut().unwrap() = value;
@@ -282,6 +312,15 @@ mod tests {
         assert_eq!(parse("--kubeconfig '/tmp/my config' get pods", &state).unwrap().args, ["--kubeconfig", "/tmp/my config", "get", "pods"]);
         assert!(parse("get pods -oyaml", &state).unwrap().resource.is_none());
         assert!(parse("get pods --watch", &state).unwrap().resource.is_none());
+        for flags in ["-Aoyaml", "-Ao yaml", "-Aw", "-Aw=false", "-ALapp", "-Ah", "-lapp=web -Aw"] {
+            let command = format!("get pods {flags}");
+            let invocation = parse(&command, &state).unwrap();
+            assert!(invocation.resource.is_none(), "{command}");
+            assert!(!invocation.command(true).as_std().get_args().any(|arg| arg == "json"));
+        }
+        for flags in ["-A", "-Alapp=web", "-Al app=web", "-nwork", "--selector app=web"] {
+            assert!(parse(&format!("get pods {flags}"), &state).unwrap().resource.is_some(), "{flags}");
+        }
         assert!(parse("custom-plugin --custom-option", &state).unwrap().resource.is_none());
         assert_eq!(parse("kubectl config current-context", &state).unwrap().args, ["config", "current-context"]);
     }

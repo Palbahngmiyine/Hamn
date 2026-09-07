@@ -54,8 +54,11 @@ kubectl get deployments -n dev --sort-by=.metadata.name
 ```
 
 Ordinary supported list queries use the installed CLI's JSON output to populate
-selectable tables. CLI filtering, scope, and sorting run in the CLI. Explicit
-output options such as `--format`, `-q`, and `-o yaml` are preserved and displayed
+selectable tables. CLI filtering, scope, and sorting run in the CLI.
+`ps --size` (including `-as`) adds a Size column; repeated boolean options follow
+the CLI's last-value rule. Grouped kubectl output/watch options such as
+`get pods -Aoyaml` and `get pods -Aw` run unchanged in the embedded terminal.
+Explicit output options such as `--format`, `-q`, and `-o yaml` are preserved and displayed
 in the terminal. Other commands are passed to the installed CLI, including
 Compose, buildx, `exec -it`, `attach`, `logs -f`, `stats`, `apply`, `edit`, and
 `port-forward`. Compatibility aliases such as `containers` remain available.
