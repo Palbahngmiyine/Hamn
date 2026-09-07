@@ -275,10 +275,15 @@ async fn live_error(
             n = reader.read(&mut buffer) => n?,
         };
         if n == 0 { return Ok(saved); }
-        saved.extend_from_slice(&buffer[..n.min(8192usize.saturating_sub(saved.len()))]);
+        // Keep the final diagnostic if the worker exits without a response.
+        // Logs already delivered to the UI are retained by its own bounded log.
+        saved.extend_from_slice(&buffer[..n]);
+        if saved.len() > 8192 { saved.drain(..saved.len() - 8192); }
         if headless { let _ = std::io::stderr().write_all(&buffer[..n]); }
         if let Some(events) = events.filter(|_| !headless) {
-            let _ = events.try_send(json!({"type":"log", "text":String::from_utf8_lossy(&buffer[..n])}));
+            // Backpressure preserves a burst when the renderer is temporarily
+            // busy. A disconnected renderer must still allow worker reaping.
+            let _ = events.send(json!({"type":"log", "text":String::from_utf8_lossy(&buffer[..n])})).await;
         }
     }
 }
