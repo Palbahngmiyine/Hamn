@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 (2026-09-08)
+
+## What's Changed
+* docs: refine agent instructions [skip release] by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/47
+* feat: add workspace-based TUI and recover interrupted Docker deployment by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/46
+
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.1.0...v0.1.1
+
 ## 0.1.0 (2026-09-06)
 
 ## What's Changed
