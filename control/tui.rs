@@ -23,6 +23,7 @@ struct Job {
     generation: u64,
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
+    reload: Option<tokio::task::JoinHandle<Result<crate::environments::Selection>>>,
     sender: mpsc::Sender<(u64, bool, Result<Value>)>,
     mutation: Option<Request>,
 }
@@ -51,6 +52,7 @@ fn write_outcomes(mut output: impl std::io::Write, states: &[&State]) -> std::io
 impl Drop for Job {
     fn drop(&mut self) {
         self.cancel.cancel();
+        if let Some(task) = &self.reload { task.abort(); }
         if self.mutation.is_none() {
             if let Some(task) = &self.task { task.abort(); }
         }
@@ -93,6 +95,7 @@ impl Job {
     fn cancel(&mut self, state: &mut State) {
         if self.mutation.is_some() { return; }
         self.cancel.cancel();
+        if let Some(task) = self.reload.take() { task.abort(); }
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -142,6 +145,12 @@ impl Job {
         } else if let Some(invocation) = state.native.clone() {
             self.start_query(Some(invocation), state);
         } else { self.start(state.request.clone(), state); }
+    }
+    fn start_reload(&mut self, invocation: crate::native::Invocation, state: &mut State) {
+        self.cancel(state);
+        state.invalidate_results();
+        state.loading = true;
+        self.reload = Some(tokio::spawn(async move { crate::environments::reload(&invocation).await }));
     }
     fn start_query(&mut self, invocation: Option<crate::native::Invocation>, state: &mut State) {
         let docker_config = state.docker_config.clone();
@@ -212,12 +221,13 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         generation: 0,
         cancel: CancellationToken::new(),
         task: None,
+        reload: None,
         sender,
         mutation: None,
     };
     let (mutation_sender, mut mutation_responses) = mpsc::channel(64);
     let mut mutation_job = Job { generation: 0, cancel: CancellationToken::new(),
-        task: None, sender: mutation_sender, mutation: None };
+        task: None, reload: None, sender: mutation_sender, mutation: None };
     let mut exit_after_cancel = false;
     if state.request.operation() != "k8s contexts list" { state.native = crate::native::parse("", &state).ok(); }
     if other.request.operation() != "k8s contexts list" { other.native = crate::native::parse("", &other).ok(); }
@@ -234,6 +244,18 @@ pub async fn run(request: Request) -> std::io::Result<()> {
             draw_error = Some(error); break;
         }
         tokio::select! {
+            result = async { match job.reload.as_mut() {
+                Some(task) => task.await,
+                None => std::future::pending().await,
+            }} => {
+                job.reload.take();
+                let result = result.map_err(|e| crate::model::Failure::new("cliError", e))
+                    .and_then(|result| result).and_then(|selection| selection.apply(&mut state));
+                match result {
+                    Ok(()) => job.refresh(&mut state),
+                    Err(error) => state.accept(Err(error)),
+                }
+            },
             event = async { match cli.as_mut() { Some(session) => session.next().await, None => std::future::pending().await } } => {
                 match event {
                     Ok(TerminalEvent::Output(bytes)) => {
@@ -275,7 +297,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         mutation_job.finish_mutation(result, &mut state, &mut other);
                         if let Some(task) = mutation_job.task.take() { let _ = task.await; }
                         if exit_after_cancel { break; }
-                        job.refresh(&mut state);
+                        if job.reload.is_none() { job.refresh(&mut state); }
                     } else if let Ok(event) = result {
                         let Some(request) = mutation_job.mutation.as_ref() else { continue; };
                         let progress = mutation_progress(request, &mut state, &mut other);
@@ -332,9 +354,8 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             if session.exit.is_some() && matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
                                 let completed = cli.take().unwrap();
                                 if completed.invocation.reset_selection {
-                                    if let Err(error) = crate::environments::reload(&completed.invocation, &mut state).await { state.message = error.message; }
-                                }
-                                job.refresh(&mut state);
+                                    job.start_reload(completed.invocation.clone(), &mut state);
+                                } else { job.refresh(&mut state); }
                             } else if session.exit.is_none() {
                                 let bytes = crate::terminal_io::key_bytes(key, session.parser.screen().application_cursor());
                                 let _ = session.input(&bytes);
@@ -584,7 +605,7 @@ mod tests {
                     profile: Some("owned-original".into()), ..Default::default() };
                 let (sender, _receiver) = mpsc::channel(1);
                 let mut job = Job { generation: 3, cancel: CancellationToken::new(),
-                    task: None, sender, mutation: Some(request) };
+                    task: None, reload: None, sender, mutation: Some(request) };
                 let mut state = State::new(Default::default());
                 let mut other = State::new(Default::default());
                 other.workspace = Workspace::Kubernetes;
@@ -634,7 +655,7 @@ mod tests {
             let request = Request { words: vec!["k8s".into(), "pods".into(), "delete".into()],
                 context: Some("owned-cluster".into()), name: Some("sample".into()), ..Default::default() };
             let (sender, _receiver) = mpsc::channel(1);
-            let mut job = Job { generation: 1, cancel: CancellationToken::new(), task: None, sender, mutation: Some(request) };
+            let mut job = Job { generation: 1, cancel: CancellationToken::new(), task: None, reload: None, sender, mutation: Some(request) };
             let mut state = State::new(Default::default());
             let mut other = State::new(Default::default());
             other.workspace = Workspace::Kubernetes;
@@ -659,7 +680,7 @@ mod tests {
             profile: Some("owned".into()), ..Default::default() };
         let (sender, _receiver) = mpsc::channel(1);
         let mut job = Job { generation: 7, cancel: CancellationToken::new(),
-            task: None, sender, mutation: Some(request) };
+            task: None, reload: None, sender, mutation: Some(request) };
         let mut state = State::new(Request::default());
         job.cancel(&mut state);
         job.start(Request::default(), &mut state);
