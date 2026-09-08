@@ -598,6 +598,40 @@ pub async fn run(request: Request) -> std::io::Result<()> {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires an isolated PTY and gate from tests/host/test_tui.py"]
+    fn resize_and_key_readiness_survive_the_same_poll_batch() {
+        use std::{io::{Read, Write}, os::fd::FromRawFd, time::Duration};
+        struct RawMode;
+        impl Drop for RawMode {
+            fn drop(&mut self) { crossterm::terminal::disable_raw_mode().unwrap(); }
+        }
+        crossterm::terminal::enable_raw_mode().unwrap();
+        let _raw = RawMode;
+        assert!(!crossterm::event::poll(Duration::ZERO).unwrap());
+        // Register the resize source before raising its signal synchronously.
+        // The parent adds a key and releases a separate pipe gate afterward,
+        // so both descriptors are ready before the first event poll.
+        assert_eq!(unsafe { libc::raise(libc::SIGWINCH) }, 0);
+        println!("SIGNAL_READY");
+        std::io::stdout().flush().unwrap();
+        let fd: i32 = std::env::var("HAMN_TEST_EVENT_GATE").unwrap().parse().unwrap();
+        assert!(fd > 2);
+        let mut gate = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut byte = [0]; gate.read_exact(&mut byte).unwrap();
+        assert_eq!(byte, [1]);
+        let (mut resized, mut keyed) = (false, false);
+        for _ in 0..2 {
+            assert!(crossterm::event::poll(Duration::from_secs(1)).unwrap(),
+                "ready event lost: resize={resized} key={keyed}");
+            match crossterm::event::read().unwrap() {
+                Event::Resize(100, 24) => resized = true,
+                Event::Key(key) if key.code == KeyCode::Char('q') => keyed = true,
+                event => panic!("unexpected event: {event:?}"),
+            }
+        }
+        assert!(resized && keyed);
+    }
+    #[test]
     fn successful_stop_retains_retirement_warning_in_owner_screen_and_exit_output() {
         for hidden in [false, true] {
             for code in ["outcomeUnknown", "operationFailed"] {

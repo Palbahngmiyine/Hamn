@@ -119,6 +119,35 @@ def exercise(exit_mode, command=None):
             os.close(slave)
 
 
+def coalesced_events(test_binary):
+    master, slave = pty.openpty()
+    gate_read, gate_write = os.pipe()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
+    before = terminal_settings(slave)
+    child = subprocess.Popen([test_binary, 'tui::tests::resize_and_key_readiness_survive_the_same_poll_batch',
+        '--ignored', '--exact', '--nocapture'], stdin=slave, stdout=slave, stderr=slave,
+        env=dict(os.environ, HAMN_TEST_EVENT_GATE=str(gate_read)), pass_fds=(gate_read,),
+        start_new_session=True)
+    output = bytearray()
+    try:
+        def until(marker):
+            deadline = time.monotonic() + 10
+            while marker not in output:
+                left = deadline - time.monotonic()
+                assert left > 0 and select.select([master], [], [], left)[0], bytes(output)
+                output.extend(os.read(master, 65536))
+        until(b'SIGNAL_READY')
+        os.write(master, b'q')
+        os.write(gate_write, b'\x01')
+        until(b'test result:')
+        assert child.wait(timeout=5) == 0, bytes(output)
+        assert terminal_settings(slave) == before
+    finally:
+        if child.poll() is None: os.killpg(child.pid, signal.SIGKILL)
+        child.wait(timeout=5)
+        for fd in (master, slave, gate_read, gate_write): os.close(fd)
+
+
 for mode in ("q", "confirm-small", "interrupt", "terminate", "suspend-key", "suspend-signal"):
     exercise(mode)
 build = subprocess.run(['cargo', 'test', '--locked', '--no-run', '--message-format=json'],
@@ -127,4 +156,5 @@ artifacts = [json.loads(line) for line in build.stdout.splitlines() if line.star
 test_binary = next(item['executable'] for item in artifacts if item.get('reason') == 'compiler-artifact'
                    and item.get('profile', {}).get('test') and item.get('executable'))
 exercise('panic', [test_binary, 'tui::tests::panic_restores_terminal_fixture', '--ignored', '--exact', '--nocapture'])
+coalesced_events(test_binary)
 print("TUI entry, navigation, resize and terminal restoration: passed")
