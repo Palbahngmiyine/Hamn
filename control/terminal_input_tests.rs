@@ -46,9 +46,26 @@ async fn blocked_input_still_allows_output_resize_termination_and_explicit_inter
     for explicit_interrupt in [false, true] {
         let invocation = crate::native::parse("version", &crate::tui_state::State::new(Default::default())).unwrap();
         let mut command = tokio::process::Command::new(interpreter.trim());
-        command.args(["-c", "import os,signal,sys,tty\ntty.setraw(0)\ndef done(signum,*_):\n print('STOPPED',flush=True);sys.exit(128+signum)\nsignal.signal(signal.SIGTERM,done)\nsignal.signal(signal.SIGINT,done)\nsignal.signal(signal.SIGWINCH,lambda *_:print('RESIZED',flush=True))\nprint('READY',flush=True)\nwhile True: signal.pause()"]);
+        // Block before publishing readiness: signals stay pending until sigwait
+        // consumes them. No Python handler can re-enter buffered output while
+        // READY/RESIZED is being flushed. The PTY input remains deliberately unread.
+        command.args(["-c", r#"import os,signal,tty
+tty.setraw(0)
+signals = {signal.SIGTERM, signal.SIGINT, signal.SIGWINCH}
+for number in signals: signal.signal(number, lambda *_: None)
+signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+os.write(1, b'READY\n')
+while True:
+    number = signal.sigwait(signals)
+    if number == signal.SIGWINCH:
+        os.write(1, b'RESIZED\n')
+    else:
+        os.write(1, b'STOPPED\n')
+        os._exit(128 + number)
+"#]);
         let mut session = Session::spawn(command, invocation, 80, 24).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let mut phase = "ready";
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             while !session.parser.screen().contents().contains("READY") {
                 if let Event::Output(bytes) = session.next().await.unwrap() { session.parser.process(&bytes); }
             }
@@ -56,11 +73,13 @@ async fn blocked_input_still_allows_output_resize_termination_and_explicit_inter
             session.input(&[3]).unwrap(); // Ordinary Ctrl-C remains a raw byte behind the paste.
             assert_eq!(session.input.back(), Some(&3));
             session.resize(100, 33).unwrap();
+            phase = "resized";
             while !session.parser.screen().contents().contains("RESIZED") {
                 if let Event::Output(bytes) = session.next().await.unwrap() { session.parser.process(&bytes); }
             }
             assert!(!session.input.is_empty(), "fixture must still be backpressured");
             let pending = session.input.len();
+            phase = "stopped";
             if explicit_interrupt {
                 session.interrupt_input().unwrap();
                 assert!(session.input.is_empty());
@@ -84,6 +103,8 @@ async fn blocked_input_still_allows_output_resize_termination_and_explicit_inter
             terminal.draw(|frame| session.draw(frame)).unwrap();
             let drawn: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
             assert!(drawn.contains("Exit code") && drawn.contains(if explicit_interrupt { "discarded" } else { "not delivered" }));
-        }).await.unwrap();
+        }).await;
+        assert!(completed.is_ok(), "phase={phase} explicit={explicit_interrupt} exit={:?} ended={} pending={} screen={:?}",
+            session.exit, session.ended, session.input.len(), session.parser.screen().contents());
     }
 }
