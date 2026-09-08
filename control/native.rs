@@ -1,6 +1,5 @@
 use crate::{model::{Failure, Result}, preferences::Workspace, tui_state::{State, split_command}};
 use serde_json::Value;
-use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 
 // Connection and authentication options must survive both command parsing and
@@ -257,15 +256,13 @@ pub fn toggle_all(invocation: &mut Invocation) {
 }
 fn docker_bool(value: &str) -> bool { ["1", "t", "T", "true", "TRUE", "True"].contains(&value) }
 pub async fn query(invocation: &Invocation) -> Result<Value> {
-    let mut command = invocation.command(true);
-    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true)
-        .spawn().map_err(|e| Failure::new("cliUnavailable", format!("{}: {e}", invocation.program())))?;
+    let (mut child, stdout, stderr) = crate::query_process::QueryProcess::spawn(invocation.command(true))
+        .map_err(|e| Failure::new("cliUnavailable", format!("{}: {e}", invocation.program())))?;
     async fn read(reader: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
         let mut bytes = Vec::new(); reader.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes).await?;
         if bytes.len() > 16 * 1024 * 1024 { return Err(std::io::Error::other("CLI output exceeds 16 MiB")); }
         Ok(bytes)
     }
-    let stdout = child.stdout.take().unwrap(); let stderr = child.stderr.take().unwrap();
     let (status, out, err) = tokio::try_join!(child.wait(), read(stdout), read(stderr)).map_err(|e| Failure::new("cliError", e))?;
     if !status.success() { return Err(Failure::new("cliError", format!("{} exited {}: {}", invocation.program(), status, String::from_utf8_lossy(&err)))); }
     if out.len() > 16 * 1024 * 1024 { return Err(Failure::new("responseTooLarge", "CLI output exceeds 16 MiB")); }
