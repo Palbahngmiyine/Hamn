@@ -13,6 +13,7 @@ mod service;
 mod stream;
 mod preferences;
 mod native;
+mod query_process;
 mod native_flags;
 mod resource_table;
 mod native_actions;

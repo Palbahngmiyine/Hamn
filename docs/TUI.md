@@ -95,6 +95,8 @@ aliases are not interpreted. Run a shell explicitly inside `exec` if required.
 Double-quoted JSONPath templates and regular expressions retain literal `\n`,
 `\t`, and `\.`; an escaped newline continues the same argument.
 Structured query output is limited to 16 MiB; larger output reports an error.
+Finishing or cancelling a structured query also terminates CLI helpers in its
+owned process group, including helpers that retain output pipes after CLI exit.
 
 UI selections supply connection defaults. Explicit Docker `--context` / `--host`
 and kubectl `--context`, `--kubeconfig`, `--namespace` / `-n` take precedence;
