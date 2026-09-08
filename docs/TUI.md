@@ -104,6 +104,8 @@ An explicit kubectl `--cluster` override is also shown in the list, terminal, an
 selected-action confirmation alongside the context whose defaults it overrides.
 `docker context use` and `kubectl config` execute with their normal configuration
 write semantics; Hamn reloads selection information after the terminal closes.
+This reload keeps input and shutdown responsive. Navigating away cancels the
+pending reload, so its late result cannot replace the new selection.
 Selected-resource actions retain the query's TLS server name, certificates,
 authentication, impersonation, and proxy overrides.
 

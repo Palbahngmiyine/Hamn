@@ -48,34 +48,56 @@ fn docker_context_query(invocation: &Invocation) -> Result<Invocation> {
     query.resource = Some("contexts".into());
     Ok(query)
 }
-pub async fn reload(invocation: &Invocation, state: &mut crate::tui_state::State) -> Result<()> {
-    state.invalidate_results();
-    let mut query = invocation.clone();
+// Reload observes CLI configuration without mutating a screen. The owning UI
+// job may discard this result on navigation; only a current result is applied.
+pub enum Selection {
+    Docker { context: Option<String>, config: Option<String> },
+    Kubernetes { context: Option<String>, namespace: Option<String>, config: Option<String> },
+}
+pub async fn reload(invocation: &Invocation) -> Result<Selection> {
     if invocation.workspace == Workspace::Containers {
-        query = docker_context_query(invocation)?;
+        let query = docker_context_query(invocation)?;
         let contexts = native::query(&query).await?;
-        state.docker_context = contexts.as_array().into_iter().flatten().find(|row| row["Current"] == true)
+        let context = contexts.as_array().into_iter().flatten().find(|row| row["Current"] == true)
             .and_then(|row| row["Name"].as_str()).map(String::from);
-        state.docker_config = flag(&query.args[..query.args.len() - 2], "--config", Workspace::Containers);
-        state.request.profile = None;
+        Ok(Selection::Docker { context,
+            config: flag(&query.args[..query.args.len() - 2], "--config", Workspace::Containers) })
     } else {
+        let mut query = invocation.clone();
         query.args = flag(&invocation.args, "--kubeconfig", Workspace::Kubernetes).map(|path| vec!["--kubeconfig".into(), path]).unwrap_or_default();
         query.args.extend(["config".into(), "view".into(), "-o".into(), "json".into()]); query.resource = None;
         let configs = native::query(&query).await?;
         let config = &configs[0];
-        state.request.kubeconfig = flag(&invocation.args, "--kubeconfig", Workspace::Kubernetes);
-        state.request.context = config["current-context"].as_str().filter(|s| !s.is_empty()).map(String::from);
-        state.request.namespace = config["contexts"].as_array().into_iter().flatten()
-            .find(|c| c["name"].as_str() == state.request.context.as_deref())
+        let context = config["current-context"].as_str().filter(|s| !s.is_empty()).map(String::from);
+        let namespace = config["contexts"].as_array().into_iter().flatten()
+            .find(|c| c["name"].as_str() == context.as_deref())
             .and_then(|c| c["context"]["namespace"].as_str()).map(String::from);
-        if state.request.context.is_none() {
+        Ok(Selection::Kubernetes { context, namespace,
+            config: flag(&invocation.args, "--kubeconfig", Workspace::Kubernetes) })
+    }
+}
+impl Selection {
+    pub fn apply(self, state: &mut crate::tui_state::State) -> Result<()> {
+        match self {
+            Self::Docker { context, config } => {
+                assert_eq!(state.workspace, Workspace::Containers);
+                state.docker_context = context; state.docker_config = config;
+                state.request.profile = None;
+            },
+            Self::Kubernetes { context, namespace, config } => {
+                assert_eq!(state.workspace, Workspace::Kubernetes);
+                state.request.context = context; state.request.namespace = namespace;
+                state.request.kubeconfig = config;
+            },
+        }
+        state.environment_picker = false;
+        if state.workspace == Workspace::Kubernetes && state.request.context.is_none() {
             state.native = None; state.request.words = vec!["k8s".into(), "contexts".into(), "list".into()];
             return Ok(());
         }
+        state.native = Some(native::parse("", state)?);
+        Ok(())
     }
-    state.native = Some(native::parse("", state)?);
-    state.environment_picker = false; state.selected = 0; state.filter.clear(); state.detail = None;
-    Ok(())
 }
 
 #[cfg(test)]
