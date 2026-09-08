@@ -237,6 +237,12 @@ done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^ #]+).*/\1/p' \
     "$ROOT"/.github/workflows/*.yml)
 
 ci_workflow=$ROOT/.github/workflows/ci.yml
+ruby -ryaml -e '
+    workflow = YAML.load_file(ARGV.fetch(0))
+    trigger = workflow.fetch("on") { workflow.fetch(true) }.fetch("pull_request")
+    abort "required PR checks must not be filtered by paths" if
+        trigger.key?("paths") || trigger.key?("paths-ignore")
+' "$ci_workflow"
 for requirement in \
     '  contents: read' \
     '    runs-on: ubuntu-24.04' \
@@ -270,7 +276,7 @@ release_please_workflow=$ROOT/.github/workflows/release-please.yml
 for requirement in \
     '    workflows: [Release]' \
     '    types: [completed]' \
-    "    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'" \
+    "    if: (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip release]'))" \
     '          ref: main' \
     '        run: python3 packaging/release/release-pr-ready.py' \
     "        if: steps.publication.outputs.ready == 'true'" \
