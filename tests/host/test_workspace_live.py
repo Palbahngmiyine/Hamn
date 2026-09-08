@@ -44,7 +44,14 @@ def prepare(binary, cache, existing):
                  'profile':'verify', 'home':str(home), 'guestImageSha256':digest(image)}
         (root / 'ownership.json').write_text(json.dumps(owner, indent=2))
     frozen = root / 'hamn-under-test'
-    if binary.resolve() != frozen.resolve(): shutil.copy2(binary, frozen)
+    # A running VM may still execute this inode. Even an identical in-place
+    # copy invalidates macOS code-signing state. A root stays bound to its first
+    # candidate; a different candidate needs a fresh validation root.
+    if frozen.exists():
+        if digest(binary) != digest(frozen):
+            raise ValueError('validation root belongs to a different candidate; use a fresh root')
+    else:
+        shutil.copy2(binary, frozen)
     assert digest(binary) == digest(frozen)
     (root / 'binary-sha256.txt').write_text(digest(frozen) + '\n')
     runtime = Runtime(frozen, root / 'home', shutil.which('docker'))

@@ -197,6 +197,7 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(B
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_quoting.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_reload.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_native_query_lifetime.py
+	python3 tests/host/test_workspace_live_prepare.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_all.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_images.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_config.py
