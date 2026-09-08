@@ -9,22 +9,29 @@ use ratatui::{
 };
 use serde_json::Value;
 
+// Tokenize shell-style quotes without performing expansions or executing a shell.
+// In double quotes, backslash is literal except before $ ` " \ and newline.
 pub fn split_command(command: &str) -> Result<Vec<String>> {
     let (mut words, mut word, mut quote, mut escaped, mut started) =
         (Vec::new(), String::new(), None, false, false);
     for c in command.chars() {
         if escaped {
-            word.push(c);
+            if c != '\n' {
+                if quote == Some('"') && !matches!(c, '$' | '`' | '"' | '\\') {
+                    word.push('\\');
+                }
+                word.push(c);
+                started = true;
+            }
             escaped = false;
         } else if c == '\\' && quote != Some('\'') {
             escaped = true;
-            started = true;
         } else if quote == Some(c) {
             quote = None;
         } else if quote.is_none() && matches!(c, '\'' | '"') {
             quote = Some(c);
             started = true;
-        } else if quote.is_none() && c.is_whitespace() {
+        } else if quote.is_none() && matches!(c, ' ' | '\t' | '\n') {
             if started {
                 words.push(std::mem::take(&mut word));
                 started = false;
@@ -969,6 +976,25 @@ mod tests {
         assert!(split_command("'unfinished").is_err());
         assert!(split_command("unfinished\\").is_err());
         assert_eq!(split_command("''").unwrap(), [""]);
+    }
+    #[test]
+    fn quoted_templates_preserve_backslashes_and_continuations_preserve_word_boundaries() {
+        for (input, expected) in [
+            (r#""a\nb\tc\.d""#, vec![r"a\nb\tc\.d"]),
+            (r#""\$HOME \`literal\` \\\"""#, vec!["$HOME `literal` \\\""]),
+            (r#"'a\nb' a\ b"#, vec![r"a\nb", "a b"]),
+            ("one\\\ntwo \\\n three", vec!["onetwo", "three"]),
+            ("\\\n", vec![]),
+            ("\"\\\n\"", vec![""]),
+            ("\"one\ntwo\"", vec!["one\ntwo"]),
+            ("a\u{a0}b c\u{2003}d", vec!["a\u{a0}b", "c\u{2003}d"]),
+            (r#""$HOME $(literal)""#, vec!["$HOME $(literal)"]),
+        ] {
+            assert_eq!(split_command(input).unwrap(), expected, "{input:?}");
+        }
+        for input in ["\"unfinished\\", "\"unfinished\\\n", "unfinished\\"] {
+            assert!(split_command(input).is_err(), "{input:?}");
+        }
     }
     #[test]
     fn confirmation_requires_complete_target_and_impact_to_fit() {

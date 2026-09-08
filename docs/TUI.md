@@ -92,6 +92,8 @@ the previous rows until the new target returns a list. Native `kubectl events`
 (and `events`) keep their own command semantics; use `get events` for a table. Quotes and escaped
 arguments are supported; shell pipes, redirection, variable expansion, and shell
 aliases are not interpreted. Run a shell explicitly inside `exec` if required.
+Double-quoted JSONPath templates and regular expressions retain literal `\n`,
+`\t`, and `\.`; an escaped newline continues the same argument.
 Structured query output is limited to 16 MiB; larger output reports an error.
 
 UI selections supply connection defaults. Explicit Docker `--context` / `--host`
