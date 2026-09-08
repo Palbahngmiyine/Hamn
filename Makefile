@@ -2,7 +2,7 @@ BUILD      := build
 HOST_BIN   := $(BUILD)/hamn
 CARGO_PROFILE ?= release
 # x-release-please-start-version
-VERSION    ?= 0.1.0
+VERSION    ?= 0.1.1
 # x-release-please-end
 VERSION_STAMP := $(BUILD)/.hamn-version
 PREFIX     ?= $(HOME)/.local

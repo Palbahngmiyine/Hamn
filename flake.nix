@@ -14,7 +14,7 @@
       forAllSystems = nixpkgs.lib.genAttrs systems;
       pkgsFor = system: nixpkgs.legacyPackages.${system};
       source = nixpkgs.lib.cleanSource ./.;
-      hamnVersion = "0.1.0"; # x-release-please-version
+      hamnVersion = "0.1.1"; # x-release-please-version
       actionlintVersion = "1.7.12";
       actionlintArchives = {
         "aarch64-darwin" = {
