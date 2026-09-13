@@ -181,7 +181,7 @@ value = {
     "schemaVersion": 2,
     "channel": "stable",
     "version": "v" + version,
-    "repository": repository,
+    # Stable v2 clients reject unknown keys; repository is already in artifact URLs.
     "commit": commit,
     "validationMode": "github-hosted-no-vm",
     "compatibility": {

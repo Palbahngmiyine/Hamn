@@ -289,6 +289,7 @@ test-uninstall: host
 	HAMN=$(HOST_BIN) bash tests/host/test_uninstall.sh
 
 test-update: host
+	HAMN=$(HOST_BIN) python3 tests/host/test_update_ux.py
 	HAMN=$(HOST_BIN) bash tests/host/test_update.sh
 
 test-release-artifacts: host

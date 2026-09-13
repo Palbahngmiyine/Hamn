@@ -159,7 +159,7 @@ int hamn_control_update(const char *manifest)
     command[count] = NULL;
     int rc = proc_run(command);
     if (rc != 0) {
-        logerr("update failed; the previous binary and guest image selection remain active");
+        logerr("update failed; inspect the diagnostics above and retry with hamn --headless system update --yes; an incomplete transaction is recovered on retry");
         return 1;
     }
     logmsg("update installed atomically; the selected guest image is used for new profile disks; existing profile disks keep their current guest root");

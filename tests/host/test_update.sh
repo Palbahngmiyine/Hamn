@@ -106,7 +106,8 @@ MANAGED_BINDIR=$(cd "$BINDIR" && pwd -P)
 MANAGED_DATADIR=$(cd "$DATADIR" && pwd -P)
 
 MANIFEST_2=$(build_release 0.0.2 'immutable guest image v0.0.2' normal)
-run_update "$MANIFEST_2" >"$WORK/update.out"
+run_update "$MANIFEST_2" >"$WORK/update.out" 2>"$WORK/update.err"
+grep -Fq "Updated Hamn: $ORIGINAL_VERSION -> 0.0.2" "$WORK/update.err"
 grep -Fq '"completed":true' "$WORK/update.out"
 new_target=$(readlink "$BINDIR/hamn")
 [ "$new_target" != "$old_target" ] || {
