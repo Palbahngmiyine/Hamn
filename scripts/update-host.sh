@@ -20,7 +20,7 @@ usage() {
 }
 
 sha256_file() {
-    shasum -a 256 "$1" | awk '{print $1}'
+    install_support hash "$1"
 }
 
 safe_directory() {
@@ -83,6 +83,8 @@ fetch() {
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 source_root=$(cd "$script_dir/.." && pwd -P)
+ROOT=$source_root
+source "$script_dir/install-support.sh"
 bindir=
 datadir=
 manifest_ref=
@@ -118,7 +120,7 @@ BINDIR=$bindir DATADIR=$datadir
 source "$script_dir/install-transaction.sh"
 bindir=$BINDIR datadir=$DATADIR
 prune_generations() {
-    python3 "$script_dir/prune-generations.py" "$bindir" "$datadir" \
+    install_support prune "$bindir" "$datadir" \
         "$old_target" "$source_root" ||
         echo "hamn update: obsolete generation cleanup deferred" >&2
 }
@@ -462,27 +464,7 @@ prepare_update_journal() {
         }
         # Remember every recovery root using this generation, including callers
         # using different HOME directories. Publish before the durable journal.
-        if ! python3 - "$old_target" "$cache" <<'PY_ROOT'
-import hashlib, os, pathlib, stat, sys, tempfile
-root = pathlib.Path(sys.argv[1]).parent.parent
-cache = str(pathlib.Path(sys.argv[2]).resolve())
-p = root / ('.hamn-recovery-root-' + hashlib.sha256(cache.encode()).hexdigest())
-fd, temporary = tempfile.mkstemp(prefix='.hamn-root.', dir=root)
-try:
-    with os.fdopen(fd, 'w') as out:
-        out.write(cache)
-        out.flush()
-        os.fsync(out.fileno())
-    if p.exists() or p.is_symlink():
-        s = p.lstat()
-        if not stat.S_ISREG(s.st_mode) or stat.S_IMODE(s.st_mode) != 0o600 or s.st_uid != os.getuid() or s.st_nlink != 1 or p.read_text() != cache:
-            sys.exit('unsafe generation recovery root')
-    else:
-        # Both install roots are locked; rename leaves no hardlink window if killed.
-        os.rename(temporary, p)
-finally:
-    pathlib.Path(temporary).unlink(missing_ok=True)
-PY_ROOT
+        if ! install_support recovery-root "$old_target" "$cache"
         then
             discard_journal_stage "$journal_stage" || true
             journal_stage=
@@ -622,91 +604,8 @@ manifest=$work/manifest.json
 progress "Checking release metadata..."
 fetch "$manifest_ref" "$manifest" || fail "release metadata download failed; check your connection and retry"
 
-if ! python3 - "$manifest" "$(sw_vers -productVersion)" "$(uname -m)" <<'PY' \
+if ! install_support manifest "$manifest" "$(sw_vers -productVersion)" "$(uname -m)" \
     >"$work/manifest-fields"
-import json
-import re
-import sys
-
-
-def pairs(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate key: " + key)
-        result[key] = value
-    return result
-
-
-def version(value):
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", value):
-        raise ValueError("invalid macOS version")
-    return tuple(int(part) for part in value.split("."))
-
-
-def require_keys(value, keys, label):
-    if not isinstance(value, dict) or set(value) != set(keys):
-        raise ValueError(label + " has an invalid schema")
-
-
-def artifact(value, label):
-    require_keys(value, ("url", "sha256"), label)
-    url = value["url"]
-    digest = value["sha256"]
-    if not isinstance(url, str) or not url or any(ord(ch) < 33 or ord(ch) > 126 for ch in url):
-        raise ValueError(label + " URL is invalid")
-    if not re.fullmatch(r"[0-9a-f]{64}", digest if isinstance(digest, str) else ""):
-        raise ValueError(label + " SHA-256 is invalid")
-    return url, digest
-
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as source:
-        manifest = json.load(source, object_pairs_hook=pairs,
-                             parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-    # v0.1.x published repository as optional descriptive metadata. Accept
-    # that exact extension, while retaining strict rejection of unknown keys.
-    if isinstance(manifest, dict) and "repository" in manifest:
-        repository = manifest.pop("repository")
-        if not isinstance(repository, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-            raise ValueError("release repository is invalid")
-    require_keys(manifest, ("schemaVersion", "channel", "version", "commit",
-                            "validationMode", "compatibility", "artifacts"),
-                 "manifest")
-    if manifest["schemaVersion"] != 2 or manifest["channel"] != "stable":
-        raise ValueError("manifest is not a stable schema v2 release")
-    if not isinstance(manifest["version"], str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", manifest["version"]):
-        raise ValueError("release version is invalid")
-    if not isinstance(manifest["commit"], str) or \
-            not re.fullmatch(r"[0-9a-f]{40}", manifest["commit"]):
-        raise ValueError("release commit is invalid")
-    if manifest["validationMode"] not in ("github-hosted-no-vm", "physical-apple-silicon"):
-        raise ValueError("release validation mode is invalid")
-    compatibility = manifest["compatibility"]
-    require_keys(compatibility, ("os", "architecture", "minimumMacOS"), "compatibility")
-    if compatibility["os"] != "darwin" or compatibility["architecture"] != "arm64":
-        raise ValueError("manifest is not compatible with Apple Silicon macOS")
-    current = version(sys.argv[2])
-    minimum = version(compatibility["minimumMacOS"])
-    current = current + (0,) * (3 - len(current))
-    minimum = minimum + (0,) * (3 - len(minimum))
-    if current < minimum:
-        raise ValueError("macOS is below the release minimum")
-    if sys.argv[3] not in ("arm64", "arm64e"):
-        raise ValueError("host architecture is not Apple Silicon")
-    artifacts = manifest["artifacts"]
-    require_keys(artifacts, ("host", "guestImage"), "artifacts")
-    host_url, host_hash = artifact(artifacts["host"], "host artifact")
-    guest_url, guest_hash = artifact(artifacts["guestImage"], "guest image artifact")
-except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-    raise SystemExit("hamn update: invalid immutable release manifest: " + str(error))
-
-print(manifest["version"])
-print(host_url)
-print(host_hash)
-print(guest_url)
-print(guest_hash)
-PY
 then
     progress "No new release was installed. See the official installer recovery instructions:"
     progress "https://github.com/Palbahngmiyine/Hamn#install"
@@ -727,102 +626,7 @@ fi
 # a version string alone never permits skipping downloads. Each generation owns
 # its private receipt, so rollback restores the previous receipt with the link.
 release_receipt() {
-    python3 - "$1" "$2" "$release_version" "$host_hash" "$guest_hash" "$cache" <<'PY_RECEIPT'
-import hashlib
-import json
-import os
-from pathlib import Path
-import stat
-import sys
-import tempfile
-
-mode, target, version, host_hash, guest_hash, cache = sys.argv[1:]
-generation = Path(target).parent.parent
-receipt = generation / ".hamn-release.json"
-
-
-def owned(path, directory=False):
-    info = path.lstat()
-    valid = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
-    if not valid or info.st_uid != os.getuid() or (not directory and info.st_nlink != 1):
-        raise ValueError("unsafe release evidence")
-    return info
-
-
-def digest(path):
-    owned(path)
-    result = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            result.update(block)
-    return result.hexdigest()
-
-
-def installed_digest():
-    # Include updater and packaging bytes and executable modes, not just hamn.
-    entries = []
-    def visit(path, name):
-        info = path.lstat()
-        if stat.S_ISDIR(info.st_mode):
-            owned(path, directory=True)
-            entries.append((name, stat.S_IMODE(info.st_mode), None))
-            for child in sorted(path.iterdir()):
-                visit(child, name + "/" + child.name)
-        else:
-            entries.append((name, stat.S_IMODE(info.st_mode), digest(path)))
-    owned(generation, directory=True)
-    visit(generation / "bin", "bin")
-    for name in ("scripts", "packaging"):
-        visit(generation / "share/hamn/src" / name, name)
-    return hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode()).hexdigest()
-
-
-try:
-    identity = {"schemaVersion": 1, "version": version, "hostSHA256": host_hash,
-                "guestSHA256": guest_hash}
-    if mode == "check":
-        info = owned(receipt)
-        if stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096:
-            raise ValueError("invalid receipt")
-        recorded = json.loads(receipt.read_text())
-        if not isinstance(recorded, dict) or set(recorded) != set(identity) | {"installedSHA256"}:
-            raise ValueError("invalid receipt schema")
-        if any(recorded[key] != value for key, value in identity.items()):
-            raise ValueError("different release")
-        if recorded["installedSHA256"] != installed_digest():
-            raise ValueError("installed files changed")
-        cache = Path(cache)
-        selection = cache / "guest-image.json"
-        if owned(selection).st_size > 4096:
-            raise ValueError("invalid selection")
-        name = "hamn-guest-" + guest_hash + ".img"
-        if json.loads(selection.read_text()) != {"schemaVersion": 1, "file": name, "sha256": guest_hash}:
-            raise ValueError("different image selection")
-        marker = cache / (name + ".verified")
-        if owned(marker).st_size > 128 or marker.read_text().strip() != guest_hash:
-            raise ValueError("invalid image verification marker")
-        if digest(cache / name) != guest_hash:
-            raise ValueError("cached image changed")
-    elif mode == "write":
-        identity["installedSHA256"] = installed_digest()
-        fd, temporary = tempfile.mkstemp(prefix=".hamn-release-", dir=generation)
-        try:
-            with os.fdopen(fd, "w") as output:
-                json.dump(identity, output, sort_keys=True, separators=(",", ":"))
-                output.write("\n")
-                output.flush()
-                os.fsync(output.fileno())
-            # Never replace a pre-existing file or follow a receipt symlink.
-            os.link(temporary, receipt)
-        finally:
-            os.unlink(temporary)
-    else:
-        raise ValueError("unknown receipt operation")
-except (OSError, ValueError, TypeError, RecursionError) as error:
-    if mode == "write":
-        print("hamn update: cannot record installed release: " + str(error), file=sys.stderr)
-    sys.exit(1)
-PY_RECEIPT
+    install_support receipt "$1" "$2" "$release_version" "$host_hash" "$guest_hash" "$cache"
 }
 
 if [ -n "$old_target" ] && [ "$managed_marker" = version=1 ]; then
@@ -860,47 +664,9 @@ progress "Verifying archive and image SHA-256..."
     fail "guest image SHA-256 mismatch"
 
 progress "Extracting verified host archive..."
-artifact_root=$(python3 - "$host_archive" "$work/extract" <<'PY'
-import os
-import posixpath
-import sys
-import tarfile
+artifact_root=$(install_support extract "$host_archive" "$work/extract") ||
+    fail "host artifact validation or extraction failed"
 
-archive, destination = sys.argv[1:]
-with tarfile.open(archive, "r:gz") as bundle:
-    members = bundle.getmembers()
-    if not members:
-        raise SystemExit("empty host artifact")
-    roots = set()
-    for member in members:
-        name = member.name
-        if name.startswith("/") or "\\" in name:
-            raise SystemExit("unsafe host artifact path")
-        normalized = posixpath.normpath(name)
-        if normalized in (".", "..") or normalized.startswith("../") or normalized != name.rstrip("/"):
-            raise SystemExit("unsafe host artifact path")
-        roots.add(normalized.split("/", 1)[0])
-        if not (member.isdir() or member.isreg()):
-            raise SystemExit("host artifact contains a non-regular entry")
-    if len(roots) != 1:
-        raise SystemExit("host artifact must have one top-level directory")
-    root = next(iter(roots))
-    required = {
-        root + "/bin/hamn",
-        root + "/scripts/install-host.sh",
-        root + "/scripts/update-host.sh",
-        root + "/packaging/release/update-manifest-url",
-    }
-    actual = {member.name.rstrip("/") for member in members}
-    if not required.issubset(actual):
-        missing = ", ".join(sorted(required - actual))
-        raise SystemExit("host artifact is missing required Hamn files: " + missing)
-    os.makedirs(destination, mode=0o700, exist_ok=True)
-    for member in members:
-        bundle.extract(member, destination)
-print(root)
-PY
-) || fail "host artifact validation or extraction failed"
 artifact=$work/extract/$artifact_root
 [ -x "$artifact/bin/hamn" ] && [ -f "$artifact/scripts/install-host.sh" ] ||
     fail "extracted host artifact is incomplete"

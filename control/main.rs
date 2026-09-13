@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::{ffi::CString, io::IsTerminal, os::unix::ffi::OsStrExt};
 mod capabilities;
+mod install_support;
 mod core;
 mod docker;
 mod exec_auth;
@@ -30,6 +31,9 @@ unsafe extern "C" {
 }
 
 fn main() {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("__install-support")) {
+        std::process::exit(install_support::run());
+    }
     if std::env::args().nth(1).as_deref() == Some("__core-worker") {
         std::process::exit(core::worker());
     }

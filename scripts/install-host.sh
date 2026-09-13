@@ -14,6 +14,8 @@ DATA_PARENT=$(dirname "$DATADIR")
 DATA_BASE=$(basename "$DATADIR")
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
+source "$ROOT/scripts/install-support.sh"
+
 case "$DATA_BASE" in
 ''|.|..|/)
     echo "hamn: refusing non-canonical data directory: $DATADIR" >&2
@@ -80,7 +82,7 @@ path_absent() {
 
 path_identity() {
     local output
-    output=$(printf '%s\0' "$1" | shasum -a 256) || return 1
+    output=$(install_support path-hash "$1") || return 1
     output=${output%% *}
     [[ "$output" =~ ^[0-9a-f]{64}$ ]] || return 1
     printf '%s\n' "$output"
@@ -130,22 +132,11 @@ lock_path_identity() {
 }
 
 lock_fd_identity() {
-    /usr/bin/perl -e '
-        my $fd = shift;
-        open(my $fh, "<&=$fd") or exit 1;
-        my @s = stat($fh);
-        @s or exit 1;
-        printf "%d:%d:%d:%o:%d\n", $s[0], $s[1], $s[4],
-            $s[2] & 07777, $s[3];
-    ' "$1"
+    install_support fd-identity "$1"
 }
 
 lock_fd_exclusive() {
-    /usr/bin/perl -MFcntl=:flock -e '
-        my $fd = shift;
-        open(my $fh, ">>&=$fd") or exit 1;
-        flock($fh, LOCK_EX) or exit 1;
-    ' "$1"
+    install_support fd-lock "$1"
 }
 
 lock_path_prepare "$LOCK_ONE"
@@ -205,7 +196,7 @@ owned_executable() {
 
 file_hash() {
     local output
-    output=$(shasum -a 256 "$1") || return 1
+    output=$(install_support hash "$1") || return 1
     output=${output%% *}
     [[ "$output" =~ ^[0-9a-f]{64}$ ]] || return 1
     printf '%s\n' "$output"
@@ -548,7 +539,7 @@ esac
 
 # Collection is best effort after the durable public commit. Never roll back a
 # successful installation because an obsolete generation could not be removed.
-python3 "$ROOT/scripts/prune-generations.py" "$BINDIR" "$DATADIR" \
+install_support prune "$BINDIR" "$DATADIR" \
     "$hamn_original_target" "$ROOT" ||
     echo "hamn: obsolete generation cleanup deferred" >&2
 

@@ -26,6 +26,9 @@ curl -fsSL --proto '=https' --tlsv1.2 \
 hamn
 ```
 
+릴리스 설치와 업데이트는 macOS 기본 도구와 내려받은 Hamn 실행 파일만 사용합니다.
+Python, Homebrew, Rust, Xcode Command Line Tools를 따로 설치할 필요가 없습니다.
+
 소스 빌드는 [개발 문서](docs/DEVELOPMENT.ko.md)를 참고하세요.
 서명된 릴리스 설치는 [릴리스 설정](docs/RELEASE-SETUP.ko.md)을 참고하세요.
 

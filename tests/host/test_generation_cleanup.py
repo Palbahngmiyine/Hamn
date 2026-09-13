@@ -22,8 +22,8 @@ with tempfile.TemporaryDirectory(prefix='hamn-generation-test-') as work:
         return Path(os.readlink(bindir / 'hamn')).parent.parent
 
     def collect(previous=''):
-        subprocess.run(['bash', '-c', 'source scripts/install-transaction.sh; '
-                        'python3 scripts/prune-generations.py "$BINDIR" "$DATADIR" "$1" "$PWD"',
+        subprocess.run(['bash', '-c', 'ROOT=$PWD; source scripts/install-support.sh; source scripts/install-transaction.sh; '
+                        'install_support prune "$BINDIR" "$DATADIR" "$1" "$PWD"',
                         'collect', str(previous)], env=dict(env, BINDIR=str(bindir), DATADIR=str(datadir)),
                        check=True, timeout=60, stdout=subprocess.PIPE)
 
@@ -88,7 +88,7 @@ with tempfile.TemporaryDirectory(prefix='hamn-generation-test-') as work:
 
     # The same transaction lock spans updater recovery and installer publication.
     holder = subprocess.Popen(['bash', '-c',
-        'source scripts/install-transaction.sh; echo ready; read -r release'],
+        'ROOT=$PWD; source scripts/install-support.sh; source scripts/install-transaction.sh; echo ready; read -r release'],
         env=dict(env, BINDIR=str(bindir), DATADIR=str(datadir)),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE)
     waiting = None
@@ -146,8 +146,8 @@ with tempfile.TemporaryDirectory(prefix='hamn-generation-test-') as work:
 
     saved_previous = (current / '.hamn-previous-target').read_bytes()
     (current / '.hamn-previous-target').write_text('')
-    invalid = subprocess.run(['bash', '-c', 'source scripts/install-transaction.sh; '
-                             'python3 scripts/prune-generations.py "$BINDIR" "$DATADIR" "" "$PWD"'],
+    invalid = subprocess.run(['bash', '-c', 'ROOT=$PWD; source scripts/install-support.sh; source scripts/install-transaction.sh; '
+                             'install_support prune "$BINDIR" "$DATADIR" "" "$PWD"'],
                             env=dict(env, BINDIR=str(bindir), DATADIR=str(datadir)),
                             capture_output=True, timeout=60)
     assert invalid.returncode != 0 and b'invalid predecessor reference' in invalid.stderr
@@ -157,22 +157,13 @@ with tempfile.TemporaryDirectory(prefix='hamn-generation-test-') as work:
     candidate = install()
     spare = candidate.with_name(candidate.name[:64] + '-FAULT1')
     shutil.copytree(candidate, spare)
-    fault_script = root / 'fault.py'
-    fault_script.write_text("""import runpy, subprocess, sys
-m = runpy.run_path('scripts/prune-generations.py')
-def unavailable(*args, **kwargs):
-    raise subprocess.TimeoutExpired('lsof', 30)
-m['subprocess'].run = unavailable
-try:
-    m['collect'](m['Path'](sys.argv[1]), m['Path'](sys.argv[2]), '', '')
-except subprocess.TimeoutExpired:
-    pass
-else:
-    raise AssertionError('process scan failure was ignored')
-""")
-    subprocess.run(['bash', '-c', 'source scripts/install-transaction.sh; '
-                    'python3 "$1" "$BINDIR" "$DATADIR"', 'fault', str(fault_script)],
-                   env=dict(env, BINDIR=str(bindir), DATADIR=str(datadir)), check=True, timeout=60)
+    profile = root / 'deny-scanner.sb'
+    profile.write_text('(version 1)(allow default)(deny process-exec (literal "/usr/sbin/lsof"))\n')
+    failed = subprocess.run(['/usr/bin/sandbox-exec', '-f', str(profile), 'bash', '-c',
+                    'ROOT=$PWD; source scripts/install-support.sh; source scripts/install-transaction.sh; '
+                    'install_support prune "$BINDIR" "$DATADIR" "" "$PWD"'],
+                   env=dict(env, BINDIR=str(bindir), DATADIR=str(datadir)), capture_output=True, timeout=60)
+    assert failed.returncode != 0
     assert spare.exists()
     collect()
     assert not spare.exists()

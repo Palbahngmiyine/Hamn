@@ -2,6 +2,15 @@
 
 See [INSTALLATION.ko.md](INSTALLATION.ko.md) for Korean.
 
+The published installer and updater use macOS system commands and support code
+compiled into the same Hamn executable. No Python, Perl, Ruby, Homebrew, Rust,
+or Xcode Command Line Tools installation is needed. The bootstrap verifies the
+archive's pinned SHA-256 with the system `openssl`, reads only its executable
+through system `tar` into a private file, then uses that authenticated executable
+to validate the complete archive before extracting it. Manifest validation,
+receipt compatibility, locking, recovery metadata and generation collection run
+inside Hamn. Developer builds and tests still require their documented toolchain.
+
 Use the [official installer](../README.md#install) for a first installation or
 an older updater that cannot read the published release manifest. For a managed
 installation, run:
