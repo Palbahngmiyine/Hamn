@@ -114,6 +114,15 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$bindir" ] && [ -n "$datadir" ] || usage
 
+BINDIR=$bindir DATADIR=$datadir
+source "$script_dir/install-transaction.sh"
+bindir=$BINDIR datadir=$DATADIR
+prune_generations() {
+    python3 "$script_dir/prune-generations.py" "$bindir" "$datadir" \
+        "$old_target" "$source_root" ||
+        echo "hamn update: obsolete generation cleanup deferred" >&2
+}
+
 hamn_link=$bindir/hamn
 bootstrap_entry=$bootstrap
 old_target=
@@ -451,6 +460,34 @@ prepare_update_journal() {
             journal_stage=
             return 1
         }
+        # Remember every recovery root using this generation, including callers
+        # using different HOME directories. Publish before the durable journal.
+        if ! python3 - "$old_target" "$cache" <<'PY_ROOT'
+import hashlib, os, pathlib, stat, sys, tempfile
+root = pathlib.Path(sys.argv[1]).parent.parent
+cache = str(pathlib.Path(sys.argv[2]).resolve())
+p = root / ('.hamn-recovery-root-' + hashlib.sha256(cache.encode()).hexdigest())
+fd, temporary = tempfile.mkstemp(prefix='.hamn-root.', dir=root)
+try:
+    with os.fdopen(fd, 'w') as out:
+        out.write(cache)
+        out.flush()
+        os.fsync(out.fileno())
+    if p.exists() or p.is_symlink():
+        s = p.lstat()
+        if not stat.S_ISREG(s.st_mode) or stat.S_IMODE(s.st_mode) != 0o600 or s.st_uid != os.getuid() or s.st_nlink != 1 or p.read_text() != cache:
+            sys.exit('unsafe generation recovery root')
+    else:
+        # Both install roots are locked; rename leaves no hardlink window if killed.
+        os.rename(temporary, p)
+finally:
+    pathlib.Path(temporary).unlink(missing_ok=True)
+PY_ROOT
+        then
+            discard_journal_stage "$journal_stage" || true
+            journal_stage=
+            return 1
+        fi
         printf '%s\n' "$old_target" >"$journal_stage/old-target"
         chmod 0600 "$journal_stage/old-target" || {
             discard_journal_stage "$journal_stage" || true
@@ -794,6 +831,7 @@ if [ -n "$old_target" ] && [ "$managed_marker" = version=1 ]; then
         [ "$(readlink "$hamn_link")" = "$old_target" ] && path_absent "$update_journal"; then
         progress "Unchanged Hamn ${release_version#v}: installed files and guest image match this release."
         progress "No further artifact downloads or installation were needed."
+        prune_generations
         exit 0
     fi
 fi
@@ -954,6 +992,8 @@ fi
 if ! cleanup_deferred_journals; then
     echo "hamn update: completed transaction cleanup remains deferred; the committed binary and guest image selection are active" >&2
 fi
+
+prune_generations
 
 if [ -n "$previous_version" ]; then
     progress "Updated Hamn: $previous_version -> ${release_version#v}"

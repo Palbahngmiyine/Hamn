@@ -51,6 +51,19 @@ the generation, so rollback also restores the prior release evidence.
 The standalone bootstrap still downloads and verifies its pinned host archive to
 obtain the release's updater; that updater can then skip further payload downloads.
 
+Managed installs collect obsolete generations after commit, retaining the active
+and immediately previous generation, open executables/support files, and recovery
+references. Install and update transactions serialize on both target roots. A
+pending recovery journal, failed process scan, or uncertain ownership defers
+collection; retrying installation/update retries cleanup. Interrupted retirement
+is also retried. Unmarked directories, incomplete staging copies, external package
+manager files, profiles and guest images are outside collection. Do not manually
+launch inactive generation paths during collection. Older updater scripts do not
+participate in the new transaction locks; finish those before installing this fix.
+Generations predating this retention policy are preserved: their recovery roots
+in other HOME directories cannot be enumerated. Existing accumulated generations
+require separate review; automatic collection bounds new unnecessary generations.
+
 ## Compatibility contract
 
 Schema v2 publication uses exactly `schemaVersion`, `channel`, `version`,

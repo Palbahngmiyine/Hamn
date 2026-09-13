@@ -52,6 +52,8 @@ if path_contains "$BINDIR" "$DATADIR" ||
     exit 1
 fi
 
+source "$ROOT/scripts/install-transaction.sh"
+
 HAMN_PATH=$BINDIR/hamn
 LEGACY_BINARY_MARKER=$BINDIR/.hamn-binary.sha256
 DATA_MARKER=$DATADIR/.hamn-managed
@@ -463,6 +465,14 @@ rsync -a --delete --exclude build \
     "$ROOT/scripts" "$ROOT/packaging" \
     "$generation_stage/share/hamn/src/"
 chmod 0755 "$generation_stage"
+# Older generations cannot enumerate recovery roots from other HOME values.
+# Only generations created with the retention contract opt into collection.
+printf 'version=1\n' >"$generation_stage/.hamn-retention"
+chmod 0600 "$generation_stage/.hamn-retention"
+if [ -n "$hamn_original_target" ]; then
+    printf '%s\n' "$hamn_original_target" >"$generation_stage/.hamn-previous-target"
+    chmod 0600 "$generation_stage/.hamn-previous-target"
+fi
 # Marker-last: only a fully copied and hash-verified generation is publishable.
 /bin/sync
 {
@@ -535,6 +545,12 @@ esac
     exit 1
 }
 /bin/rmdir "$hamn_link_stage"
+
+# Collection is best effort after the durable public commit. Never roll back a
+# successful installation because an obsolete generation could not be removed.
+python3 "$ROOT/scripts/prune-generations.py" "$BINDIR" "$DATADIR" \
+    "$hamn_original_target" "$ROOT" ||
+    echo "hamn: obsolete generation cleanup deferred" >&2
 
 echo "installed: $HAMN_PATH -> $generation/bin/hamn"
 echo "installed: $generation/share/hamn/src/{scripts,packaging}"
