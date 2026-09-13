@@ -16,12 +16,19 @@ hamn --version
 리다이렉션한 stderr와 TUI 로그에는 단계별 일반 텍스트를 표시합니다.
 headless stdout은 JSON 결과를 유지합니다. 최초 설치기는 PATH 안내를 위해서만
 호출자의 PATH를 보존하며, 설치에는 고정된 시스템 도구 PATH를 사용합니다.
-`~/.local/bin`이 PATH에 없을 때만 셸 설정 명령을 안내합니다.
+PATH에서 설치된 실행 파일을 찾지 못하거나 다른 `hamn`이 먼저 선택되면 셸 설정
+명령을 안내합니다. 같은 설치 파일을 가리키는 앞쪽 심볼릭 링크는 허용합니다.
+PATH 변경 후에는 새 터미널을 열어 셸의 명령 캐시를 비웁니다. 셸의 alias나 함수는
+별도로 조정해야 합니다.
 
 호스트·게스트 SHA-256 검증을 마친 뒤 설치하며, 압축을 푼 호스트의 버전도
 manifest와 일치해야 합니다. 바이너리와 새 프로필용 이미지 선택은 기존 복구
 저널을 통해 반영합니다. VM을 재시작하거나 기존 프로필 디스크를 교체하지 않습니다.
-선택된 이미지는 새 프로필 디스크에 적용됩니다. 바이너리 롤백으로 게스트 상태나
+선택된 이미지는 새 프로필 디스크에 적용됩니다. 기존 관리형 세대 위에 공식 설치기를
+다시 실행해도 동일한 바이너리 복구 계약을 적용합니다. 이전 형식의 일반 실행 파일은
+먼저 `make install`로 이전해야 하며, 공식 설치기는 활성 포인터를 바꾸기 전에 거부합니다.
+첫 설치 실패에는 복구할 이전 바이너리가 없으므로 공개된 명령이 남을 수 있고,
+기존 이미지 선택을 복구합니다. 바이너리 롤백으로 게스트 상태나
 기존 K3s 데이터 정리를 되돌릴 수는 없습니다.
 
 실패하면 진단 메시지를 확인한 뒤 재시도합니다. manifest 옵션을 지정했다면 같은
@@ -30,6 +37,16 @@ manifest와 일치해야 합니다. 바이너리와 새 프로필용 이미지 �
 활성 상태라고 단정하지 않습니다. 메타데이터 호환성 오류에는 공식 설치기 링크도
 표시합니다. 로컬 설치 성공은 물리 VM 검증이 아니며 최초 설치 메타데이터에는
 `github-hosted-no-vm`을 기록합니다.
+
+설치 세대의 비공개 기록에 요청 버전과 호스트·게스트 아티팩트 SHA-256이 일치하면,
+현재 바이너리·스크립트·패키징 파일과 선택된 캐시 이미지도 다시 검증합니다.
+모두 일치할 때만 `Unchanged Hamn`을 표시하고 아티팩트 다운로드와 설치를 생략합니다.
+릴리스 메타데이터는 매번 받아 검증합니다. 기록이 없거나 잘못됐거나 현재 파일과
+다르면 일반 검증·설치 경로를 사용하며, 버전 문자열만으로 생략하지 않습니다.
+손상된 캐시 이미지는 변경 없음이 아닌 오류로 처리합니다. 기록은 설치 세대에
+속하므로 롤백하면 이전 릴리스의 기록도 함께 복구됩니다.
+독립 실행하는 공식 설치기는 해당 릴리스의 업데이트기를 얻기 위해 고정된 호스트
+아카이브를 먼저 받아 검증합니다. 이후 업데이트기가 추가 다운로드를 생략할 수 있습니다.
 
 ## 호환성 계약
 
@@ -49,7 +66,7 @@ Microsoft·GitHub·Rust 재단 생태계의 공식 프로젝트로 대상을 제
 | --- | --- | --- |
 | [GitHub CLI](https://cli.github.com/manual/gh_extension_upgrade) | 작업별 사용법·옵션·dry-run 설명, [stderr 업데이트 알림](https://cli.github.com/manual/gh_help_environment) | 작업별 도움말, 필수 `--yes` 설명, JSON과 진행 안내 분리 |
 | [Microsoft .NET 설치기](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-install-script) | [소스](https://github.com/dotnet/install-scripts/blob/47940ac9fc30a2f2dd19167165d0bb0774625f67/src/dotnet-install.sh)의 다운로드·압축 해제·설치 버전·PATH 안내, dry-run의 재실행 명령 | 단계 안내, 재시도 방법, 필요한 경우의 PATH 안내 |
-| [rustup](https://rust-lang.github.io/rustup/installation/) | [버전 요약 구현](https://github.com/rust-lang/rustup/blob/454ff04cdefebc8f38f47f64b3904866f9e0660f/src/cli/common.rs)의 설치·업데이트·변경 없음·실패 구분 | 설치 전후 버전 표시, 반영 완료 후 성공 요약 |
+| [rustup](https://rust-lang.github.io/rustup/installation/) | [버전 요약 구현](https://github.com/rust-lang/rustup/blob/454ff04cdefebc8f38f47f64b3904866f9e0660f/src/cli/common.rs)의 설치·업데이트·변경 없음·실패 구분 | 설치 전후 버전 표시, 검증된 변경 없음 결과, 반영 완료 후 성공 요약 |
 
 PTY 터미널에서 GitHub CLI 2.100.0의 `extension upgrade --help`와
 `--all --dry-run`, rustup 1.29.1의 `update --help`, Microsoft 설치기의 `--help`와
@@ -63,5 +80,6 @@ Hamn 검증은 격리된 HOME에서 실제 실행 파일·worker·관리형 설�
 제어된 curl fixture가 진행 안내를 관찰할 때까지 대기한 뒤 체크섬이 고정된
 아티팩트를 제공합니다. PTY와 리다이렉션 실행으로 완료 전 안내, JSON 분리,
 버전 요약, 잘못된 메타데이터 거부 시 기존 상태 보존을 확인합니다.
-기존 업데이트 테스트는 중단과 롤백을 검사합니다. 제어된 전송은 진행률 모드
+업데이트 테스트는 공식 설치기 경로의 TERM·SIGKILL, 복구 후 재실패, 설치 기록 무효화,
+동일 릴리스 반복과 PATH 충돌도 검사합니다. 제어된 전송은 진행률 모드
 선택의 검증이며 실제 네트워크 처리량이나 VM 부팅 검증은 아닙니다.

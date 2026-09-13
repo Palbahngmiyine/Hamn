@@ -17,12 +17,20 @@ stages, and a final version summary. Interactive headless stderr enables downloa
 percentages; redirected stderr and TUI logs use plain stage messages. Headless
 stdout remains a JSON result. Bootstrap preserves the caller's PATH only for
 setup advice and uses a fixed system-tool PATH for installation. It suggests a
-shell PATH entry only if `~/.local/bin` is absent.
+shell PATH entry if the caller's PATH cannot resolve the installed command,
+including when another `hamn` executable appears first. An earlier symlink to
+the same installed executable is accepted. Open a new terminal after changing
+PATH to clear shell command caches; shell aliases/functions require separate adjustment.
 
 Host and guest SHA-256 checks finish before publication. The extracted host
 version must match the manifest. The binary and new-profile image selection are
 published through the existing recovery journal. Updates do not restart VMs or
 replace existing profile disks; the selected image applies to new profile disks.
+Bootstrap reinstalls over an existing managed generation use the same binary
+rollback contract. A legacy regular executable must first be migrated through
+`make install`; bootstrap refuses it before changing either active pointer.
+On a failed first installation there is no previous binary to restore: a published
+command may remain, while the prior image selection is recovered.
 A binary rollback is not a rollback of guest state or legacy K3s retirement.
 
 On failure, read the diagnostic before retrying. Retry with the same manifest
@@ -31,6 +39,17 @@ update begins. Recovery can itself fail: the CLI must not promise that the old
 binary is active without a successful recovery. Metadata compatibility errors
 also link to the official installer. A successful local install is not physical
 VM validation; bootstrap metadata records `github-hosted-no-vm`.
+
+When a private generation receipt matches the requested version and both artifact
+SHA-256 values, the updater rechecks the installed binary, scripts, packaging,
+and selected cached image. Only a complete match reports `Unchanged Hamn` and
+skips payload downloads and installation. It still fetches and validates release
+metadata. Missing, invalid, or stale receipts take the normal verified install
+path; equal version strings alone never skip an update. Corrupt cached images
+remain an error, rather than being reported as unchanged. Receipts travel with
+the generation, so rollback also restores the prior release evidence.
+The standalone bootstrap still downloads and verifies its pinned host archive to
+obtain the release's updater; that updater can then skip further payload downloads.
 
 ## Compatibility contract
 
@@ -51,7 +70,7 @@ These are interaction choices, not measured usability rankings.
 | --- | --- | --- |
 | [GitHub CLI](https://cli.github.com/manual/gh_extension_upgrade) | Operation-specific usage, flags, and dry-run explanation; [update notices use stderr](https://cli.github.com/manual/gh_help_environment). | Update-specific help, explicit `--yes`, progress separate from JSON. |
 | [Microsoft .NET installer](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-install-script) | [Source](https://github.com/dotnet/install-scripts/blob/47940ac9fc30a2f2dd19167165d0bb0774625f67/src/dotnet-install.sh) reports download, extraction, installed version, PATH advice, and a repeatable dry-run invocation. | Stage messages, actionable retry guidance, conditional PATH advice. |
-| [rustup](https://rust-lang.github.io/rustup/installation/) | [Version summary implementation](https://github.com/rust-lang/rustup/blob/454ff04cdefebc8f38f47f64b3904866f9e0660f/src/cli/common.rs) distinguishes installed, updated, unchanged, and failed results. | Installed-to-selected version display and a success summary only after commit. |
+| [rustup](https://rust-lang.github.io/rustup/installation/) | [Version summary implementation](https://github.com/rust-lang/rustup/blob/454ff04cdefebc8f38f47f64b3904866f9e0660f/src/cli/common.rs) distinguishes installed, updated, unchanged, and failed results. | Installed-to-selected version display, verified unchanged result, and a success summary only after commit. |
 
 Terminal observations used a PTY: GitHub CLI 2.100.0 `extension upgrade --help`
 and `--all --dry-run`, rustup 1.29.1 `update --help`, and Microsoft's installer
@@ -65,5 +84,6 @@ Hamn validation uses its real executable, worker, and managed installer under an
 isolated HOME. A controlled curl fixture blocks until progress is observed, then
 supplies checksum-pinned artifacts. PTY and redirected runs verify progress before
 completion, JSON separation, version summaries, and rejected metadata preserving
-active state. Existing update tests exercise interruption and rollback. Controlled
+active state. Update tests also exercise bootstrap TERM/SIGKILL, recovery followed by another failure,
+receipt invalidation, repeated releases, and PATH shadowing. Controlled
 transport verifies progress-mode selection, not real network throughput or VM boot.
