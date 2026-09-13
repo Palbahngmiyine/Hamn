@@ -69,6 +69,8 @@ latest operation record, which may now describe the completed stop.
 VM and Docker requests require `--profile`, except `vm list`. VM create and
 configure accept `--cpu`, `--memory` (GiB), and `--disk` (GiB). `vm diagnostics`
 accepts `--path` for an archive. `system update` accepts `--manifest`.
+Use `hamn --headless system update --help` for update-specific usage and recovery.
+See [installation and update experience](INSTALLATION.md) for progress and compatibility.
 `vm env` returns Docker connection information, not shell text.
 
 Kubernetes requests require `--context`, except context listing. Namespaced

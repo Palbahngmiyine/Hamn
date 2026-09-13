@@ -2,6 +2,8 @@
 # Bootstrap one immutable Hamn release selected by GitHub's latest asset URL.
 set -euo pipefail
 export LC_ALL=C
+# Keep the caller PATH only for setup advice; installation uses system tools.
+caller_path=${PATH:-}
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
@@ -29,9 +31,11 @@ safe_regular() {
 
 fetch() {
     local source=$1 destination=$2
+    local curl_output=(--silent)
+    if [ -t 2 ]; then curl_output=(--progress-bar); fi
     case "$source" in
     https://*)
-        curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
+        curl --fail --show-error --location "${curl_output[@]}" --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
             -o "$destination" "$source"
         ;;
     file://*|/*)
@@ -44,6 +48,18 @@ fetch() {
     *) fail "artifact URL must use HTTPS" ;;
     esac
 }
+
+if [ "$#" -gt 0 ]; then
+    if [ "$#" = 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
+        echo "Install Hamn ${HAMN_VERSION#v} for Apple Silicon macOS."
+        echo "Usage: bash install.sh"
+        echo "Downloads and verifies the host archive and guest image, then installs to ~/.local/bin."
+        echo "Existing VMs are not restarted; existing profile disks keep their guest root."
+        echo "For updates: hamn --headless system update --yes"
+        exit 0
+    fi
+    fail "unknown arguments; use bash install.sh --help"
+fi
 
 [ -n "${HOME:-}" ] || fail "HOME is not set"
 [[ "$HAMN_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
@@ -59,8 +75,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+echo "hamn install: Preparing Hamn ${HAMN_VERSION#v}" >&2
+echo "hamn install: Downloading host archive..." >&2
 host_archive=$work/host.tar.gz
-fetch "$HAMN_HOST_URL" "$host_archive"
+fetch "$HAMN_HOST_URL" "$host_archive" || fail "host download failed; check your connection and rerun this installer"
+echo "hamn install: Verifying host archive SHA-256..." >&2
 [ "$(sha256_file "$host_archive")" = "$HAMN_HOST_SHA256" ] ||
     fail "host artifact SHA-256 mismatch"
 
@@ -120,7 +139,7 @@ value = {
     "channel": "stable",
     "version": version,
     "commit": commit,
-    "validationMode": "physical-apple-silicon",
+    "validationMode": "github-hosted-no-vm",
     "compatibility": {
         "os": "darwin",
         "architecture": "arm64",
@@ -141,4 +160,11 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     --bindir "$HOME/.local/bin" --datadir "$HOME/.local/share/hamn/src" \
     --manifest "file://$manifest"
 
-echo "installed Hamn; add $HOME/.local/bin to PATH if needed"
+echo "hamn install: Ready. Run hamn to open the terminal interface." >&2
+case ":$caller_path:" in
+*":$HOME/.local/bin:"*) ;;
+*)
+    echo "hamn install: Add this to your shell configuration, then open a new terminal:" >&2
+    echo '  export PATH="$HOME/.local/bin:$PATH"' >&2
+    ;;
+esac

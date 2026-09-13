@@ -65,6 +65,8 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 VM·Docker 작업은 `vm list`를 제외하고 `--profile`이 필요합니다. 생성·설정은
 `--cpu`, `--memory`(GiB), `--disk`(GiB)를 받습니다. `vm diagnostics`의 `--path`는
 아카이브 경로이며 `system update`는 `--manifest`를 지원합니다.
+`hamn --headless system update --help`로 작업별 사용법과 복구 방법을 확인합니다.
+진행 안내와 호환성은 [설치와 업데이트 경험](INSTALLATION.ko.md)을 참고하세요.
 `vm env`는 셸 코드 대신 Docker 접속 정보를 반환합니다.
 
 Kubernetes는 context 목록을 제외하고 `--context`가 필요합니다. 네임스페이스 변경

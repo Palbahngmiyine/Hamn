@@ -158,6 +158,14 @@ printf '%s' \
 
 HOME_DIR=$WORK/home
 mkdir -p "$HOME_DIR"
+HOME="$HOME_DIR" bash "$WORK/candidate/install.sh" --help >"$WORK/help.out"
+grep -Fq 'For updates: hamn --headless system update --yes' "$WORK/help.out"
+[ ! -e "$HOME_DIR/.local" ] && [ ! -e "$HOME_DIR/.hamn" ]
+if HOME="$HOME_DIR" bash "$WORK/candidate/install.sh" --unknown >"$WORK/unknown.out" 2>"$WORK/unknown.err"; then
+    echo "FAIL: bootstrap accepted an unknown option" >&2
+    exit 1
+fi
+[ ! -e "$HOME_DIR/.local" ] && [ ! -e "$HOME_DIR/.hamn" ]
 if HOME="$HOME_DIR" bash "$WORK/candidate/install.sh" >"$WORK/local.out" \
     2>"$WORK/local.err"; then
     echo "FAIL: bootstrap accepted local release input by default" >&2
@@ -166,7 +174,10 @@ fi
 grep -Fq 'local artifacts are disabled' "$WORK/local.err"
 
 HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
-    bash "$WORK/candidate/install.sh" >"$WORK/install.out"
+    bash "$WORK/candidate/install.sh" >"$WORK/install.out" 2>"$WORK/install.err"
+[ ! -s "$WORK/install.out" ]
+grep -Fq 'Installed Hamn 0.0.1' "$WORK/install.err"
+grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$WORK/install.err"
 "$HOME_DIR/.local/bin/hamn" --version | grep -Fxq 'hamn 0.0.1'
 grep -Fq "\"sha256\":\"$GUEST_HASH\"" \
     "$HOME_DIR/.hamn/cache/guest-image.json"
@@ -175,6 +186,13 @@ grep -Fq "\"sha256\":\"$GUEST_HASH\"" \
 grep -Fq "\"sourceTree\":\"$(git -C "$ROOT" rev-parse HEAD^{tree})\"" \
     "$WORK/candidate/candidate.json"
 
+HOME="$HOME_DIR" PATH="$HOME_DIR/.local/bin:$PATH" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
+    bash "$WORK/candidate/install.sh" >"$WORK/reinstall.out" 2>"$WORK/reinstall.err"
+[ ! -s "$WORK/reinstall.out" ]
+if grep -Fq 'export PATH=' "$WORK/reinstall.err"; then
+    echo "FAIL: bootstrap suggested PATH setup when the command directory was present" >&2
+    exit 1
+fi
 installed_target=$(readlink "$HOME_DIR/.local/bin/hamn")
 printf 'tampered\n' >>"$HOST_ARTIFACT"
 if HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \

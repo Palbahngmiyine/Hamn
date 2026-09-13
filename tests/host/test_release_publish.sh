@@ -66,7 +66,8 @@ manifest_path, commit, evidence_path, tree = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as source:
     manifest = json.load(source)
 if manifest.get("schemaVersion") != 2 or manifest.get("version") != "v0.0.1" or \
-        manifest.get("repository") != "example/hamn" or \
+        set(manifest) != {"schemaVersion", "channel", "version", "commit",
+                         "validationMode", "compatibility", "artifacts"} or \
         manifest.get("commit") != commit or \
         manifest.get("validationMode") != "github-hosted-no-vm":
     raise SystemExit("keyless update manifest identity is invalid")
