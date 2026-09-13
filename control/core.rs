@@ -300,7 +300,11 @@ async fn call_executable(
     cancel: Option<&tokio_util::sync::CancellationToken>,
     events: Option<&crate::stream::Events>,
 ) -> Result<Value> {
+    // The child stderr is a pipe even in a terminal. TUI logs and redirected
+    // headless output stay line-oriented; only interactive headless uses bars.
+    use std::io::IsTerminal;
     let mut child = tokio::process::Command::new(executable)
+        .env("HAMN_UPDATE_PROGRESS", if request.headless && std::io::stderr().is_terminal() { "1" } else { "0" })
         .arg("__core-worker")
         .arg(std::env::args_os().next().unwrap_or_default())
         .stdin(Stdio::piped())

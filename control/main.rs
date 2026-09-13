@@ -40,6 +40,10 @@ fn main() {
     ) {
         std::process::exit(internal());
     }
+    if let Some(help) = model::update_help(&std::env::args_os().collect::<Vec<_>>()) {
+        print!("{help}");
+        return;
+    }
     let mut request = match model::Request::try_parse() {
         Ok(request) => request,
         Err(error) => {

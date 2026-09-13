@@ -8,6 +8,12 @@ fail() {
     exit 1
 }
 
+# Human progress goes to stderr; stdout belongs to the headless JSON protocol.
+# HAMN_UPDATE_PROGRESS is set by the frontend because the worker uses a pipe.
+progress() {
+    echo "hamn update: $*" >&2
+}
+
 usage() {
     echo "usage: update-host.sh --bindir DIR --datadir DIR [--manifest URL_OR_PATH] [--bootstrap]" >&2
     exit 2
@@ -47,9 +53,13 @@ path_absent() {
 
 fetch() {
     local source=$1 destination=$2
+    local curl_output=(--silent)
+    if [ -t 2 ] || [ "${HAMN_UPDATE_PROGRESS:-0}" = 1 ]; then
+        curl_output=(--progress-bar)
+    fi
     case "$source" in
     https://*)
-        curl -fsSL --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
+        curl --fail --show-error --location "${curl_output[@]}" --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
             -o "$destination" "$source"
         ;;
     file://*)
@@ -534,9 +544,10 @@ cleanup() {
 }
 trap cleanup EXIT
 manifest=$work/manifest.json
-fetch "$manifest_ref" "$manifest"
+progress "Checking release metadata..."
+fetch "$manifest_ref" "$manifest" || fail "release metadata download failed; check your connection and retry"
 
-python3 - "$manifest" "$(sw_vers -productVersion)" "$(uname -m)" <<'PY' \
+if ! python3 - "$manifest" "$(sw_vers -productVersion)" "$(uname -m)" <<'PY' \
     >"$work/manifest-fields"
 import json
 import re
@@ -578,6 +589,12 @@ try:
     with open(sys.argv[1], encoding="utf-8") as source:
         manifest = json.load(source, object_pairs_hook=pairs,
                              parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+    # v0.1.x published repository as optional descriptive metadata. Accept
+    # that exact extension, while retaining strict rejection of unknown keys.
+    if isinstance(manifest, dict) and "repository" in manifest:
+        repository = manifest.pop("repository")
+        if not isinstance(repository, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+            raise ValueError("release repository is invalid")
     require_keys(manifest, ("schemaVersion", "channel", "version", "commit",
                             "validationMode", "compatibility", "artifacts"),
                  "manifest")
@@ -609,12 +626,19 @@ try:
 except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
     raise SystemExit("hamn update: invalid immutable release manifest: " + str(error))
 
+print(manifest["version"])
 print(host_url)
 print(host_hash)
 print(guest_url)
 print(guest_hash)
 PY
+then
+    progress "No new release was installed. See the official installer recovery instructions:"
+    progress "https://github.com/Palbahngmiyine/Hamn#install"
+    exit 1
+fi
 {
+    IFS= read -r release_version
     IFS= read -r host_url
     IFS= read -r host_hash
     IFS= read -r guest_url
@@ -623,15 +647,30 @@ PY
 [ -n "$host_url" ] && [ -n "$host_hash" ] && [ -n "$guest_url" ] &&
     [ -n "$guest_hash" ] || fail "immutable manifest fields are incomplete"
 
+previous_version=
+if [ -n "$old_target" ] && managed_generation_target "$old_target"; then
+    previous_version=$("$old_target" --version) || fail "cannot read installed version"
+    previous_version=${previous_version#hamn }
+fi
+if [ -n "$previous_version" ]; then
+    progress "Release: $previous_version -> ${release_version#v}"
+else
+    progress "Installing Hamn ${release_version#v}"
+fi
+progress "Existing VMs are not restarted; existing profile disks keep their guest root."
 host_archive=$work/host.tar.gz
 guest_download=$work/guest.img
-fetch "$host_url" "$host_archive"
-fetch "$guest_url" "$guest_download"
+progress "Downloading host archive..."
+fetch "$host_url" "$host_archive" || fail "host download failed; check your connection and retry"
+progress "Downloading guest image (this may take several minutes)..."
+fetch "$guest_url" "$guest_download" || fail "guest image download failed; check your connection and retry"
+progress "Verifying archive and image SHA-256..."
 [ "$(sha256_file "$host_archive")" = "$host_hash" ] ||
     fail "host artifact SHA-256 mismatch"
 [ "$(sha256_file "$guest_download")" = "$guest_hash" ] ||
     fail "guest image SHA-256 mismatch"
 
+progress "Extracting verified host archive..."
 artifact_root=$(python3 - "$host_archive" "$work/extract" <<'PY'
 import os
 import posixpath
@@ -677,6 +716,10 @@ artifact=$work/extract/$artifact_root
 [ -x "$artifact/bin/hamn" ] && [ -f "$artifact/scripts/install-host.sh" ] ||
     fail "extracted host artifact is incomplete"
 
+[ "$("$artifact/bin/hamn" --version)" = "hamn ${release_version#v}" ] ||
+    fail "host binary version does not match the release manifest"
+
+progress "Staging verified guest image..."
 guest_name=hamn-guest-$guest_hash.img
 guest_target=$cache/$guest_name
 guest_marker=$guest_target.verified
@@ -702,6 +745,7 @@ printf '{"schemaVersion":1,"file":"%s","sha256":"%s"}\n' \
     "$guest_name" "$guest_hash" >"$new_selection"
 chmod 0600 "$new_selection"
 
+progress "Installing release atomically..."
 prepare_update_journal "$new_selection" ||
     fail "cannot record a durable update rollback transaction"
 trap 'interrupted_update HUP' HUP
@@ -710,7 +754,9 @@ trap 'interrupted_update TERM' TERM
 
 if ! env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     /bin/bash "$artifact/scripts/install-host.sh" "$artifact/bin/hamn" \
-    "$bindir" "$datadir"; then
+    "$bindir" "$datadir" >"$work/host-install.log" 2>&1; then
+    # A closed diagnostic stream must not prevent transaction recovery.
+    cat "$work/host-install.log" >&2 || :
     trap - HUP INT TERM
     rollback_update_journal ||
         fail "host install failed and the recovery journal could not be applied"
@@ -734,7 +780,7 @@ fi
 if ! retire_update_journal completed; then
     trap - HUP INT TERM
     rollback_update_journal ||
-        fail "update commit could not clear its recovery journal; run hamn update again before starting a VM"
+        fail "update commit could not clear its recovery journal; run hamn --headless system update --yes again before starting a VM"
     fail "update commit metadata could not be cleared; prior binary and guest image selection were restored"
 fi
 trap - HUP INT TERM
@@ -748,4 +794,11 @@ if ! cleanup_deferred_journals; then
     echo "hamn update: completed transaction cleanup remains deferred; the committed binary and guest image selection are active" >&2
 fi
 
-echo "updated Hamn from immutable release manifest: $manifest_ref"
+if [ -n "$previous_version" ]; then
+    progress "Updated Hamn: $previous_version -> ${release_version#v}"
+else
+    progress "Installed Hamn ${release_version#v}"
+fi
+progress "Command: $hamn_link"
+progress "Guest image verified and selected for new profile disks. Existing VMs were not restarted."
+progress "Verify: $hamn_link --version"
