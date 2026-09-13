@@ -48,11 +48,16 @@ def erase(path):
 
 
 def pending(cache):
-    if not cache.exists():
-        return cache.is_symlink()
+    # exists()/glob() can suppress permission errors in newer Python releases.
+    # Only ENOENT proves absence; unreadable recovery state must retain history.
+    try:
+        cache.lstat()
+    except FileNotFoundError:
+        return False
     if not owned(cache, directory=True):
         return True
-    return any(cache.glob('.hamn-update-*'))
+    with os.scandir(cache) as entries:
+        return any(entry.name.startswith('.hamn-update-') for entry in entries)
 
 
 def recovery_pending(path):

@@ -75,6 +75,13 @@ with tempfile.TemporaryDirectory(prefix='hamn-generation-test-') as work:
     (third / ('.hamn-recovery-root-' + hashlib.sha256(str(other_cache).encode()).hexdigest())).write_text(str(other_cache))
     sixth = install()
     assert third.exists() and not fourth.exists()
+    for blocked in (other_cache.parent, other_cache):
+        blocked.chmod(0)
+        try:
+            install()
+            assert third.exists(), 'inaccessible recovery state was treated as absent'
+        finally:
+            blocked.chmod(0o755)
     other_journal.rmdir()
     seventh = install()
     assert not third.exists()
