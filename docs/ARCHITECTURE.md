@@ -90,6 +90,19 @@ System macOS libraries, SSH, guest images/binaries and kubeconfig exec plugins
 are permitted dependencies. No separate host core binary or dedicated shared
 library is required at runtime.
 
+## Release installation support
+
+`control/install_support/` implements the private `__install-support` mode in the
+same executable, before Tokio or terminal initialization. It owns archive and
+manifest validation, version-1 receipt compatibility, host install locks,
+recovery references and obsolete-generation collection. Shell scripts retain
+transaction ordering and transfer verified paths/identities as explicit arguments.
+The bootstrap needs only system commands to authenticate and read the executable;
+subsequent parsing and filesystem decisions require no external interpreter.
+The scanner has a process-group deadline, and both install roots remain locked
+through update recovery and collection. See [Installation](INSTALLATION.md) for
+retention and compatibility limits.
+
 ## Mount and network boundaries
 
 `$HOME` is the default virtiofs share and may be disabled or made read-only.

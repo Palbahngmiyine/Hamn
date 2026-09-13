@@ -20,7 +20,7 @@ fail() {
 }
 
 sha256_file() {
-    shasum -a 256 "$1" | awk '{print $1}'
+    /usr/bin/openssl dgst -sha256 -r "$1" | awk '{print $1}'
 }
 
 safe_regular() {
@@ -83,78 +83,34 @@ echo "hamn install: Verifying host archive SHA-256..." >&2
 [ "$(sha256_file "$host_archive")" = "$HAMN_HOST_SHA256" ] ||
     fail "host artifact SHA-256 mismatch"
 
-artifact_root=$(python3 - "$host_archive" "$work/extract" <<'PY'
-import os
-import posixpath
-import sys
-import tarfile
+# The pinned archive digest authenticates its executable. Extract only that
+# executable to stdout into one fixed private file: archive paths cannot write
+# to the filesystem here. The native helper validates the complete archive
+# (including PAX paths/types) before extracting any other member.
+/usr/bin/tar -tzf "$host_archive" >"$work/members" || fail "cannot list host artifact"
+bootstrap_member=
+while IFS= read -r member; do
+    if [[ "$member" =~ ^[A-Za-z0-9._-]+/bin/hamn$ ]]; then
+        [ -z "$bootstrap_member" ] || fail "duplicate bootstrap executable"
+        bootstrap_member=$member
+    fi
+done <"$work/members"
+[ -n "$bootstrap_member" ] || fail "host artifact has no bootstrap executable"
+/usr/bin/tar -xzOf "$host_archive" -- "$bootstrap_member" >"$work/hamn-support" ||
+    fail "cannot read verified bootstrap executable"
+chmod 0755 "$work/hamn-support"
+artifact_root=$("$work/hamn-support" __install-support extract "$host_archive" "$work/extract") ||
+    fail "host artifact validation or extraction failed"
 
-archive, destination = sys.argv[1:]
-with tarfile.open(archive, "r:gz") as bundle:
-    members = bundle.getmembers()
-    if not members:
-        raise SystemExit("empty host artifact")
-    roots = set()
-    for member in members:
-        name = member.name
-        if name.startswith("/") or "\\" in name:
-            raise SystemExit("unsafe host artifact path")
-        normalized = posixpath.normpath(name)
-        if normalized in (".", "..") or normalized.startswith("../") or normalized != name.rstrip("/"):
-            raise SystemExit("unsafe host artifact path")
-        roots.add(normalized.split("/", 1)[0])
-        if not (member.isdir() or member.isreg()):
-            raise SystemExit("host artifact contains a non-regular entry")
-    if len(roots) != 1:
-        raise SystemExit("host artifact must have one top-level directory")
-    root = next(iter(roots))
-    required = {
-        root + "/bin/hamn",
-        root + "/scripts/install-host.sh",
-        root + "/scripts/update-host.sh",
-        root + "/packaging/release/update-manifest-url",
-    }
-    actual = {member.name.rstrip("/") for member in members}
-    if not required.issubset(actual):
-        raise SystemExit("host artifact is missing required Hamn files")
-    os.makedirs(destination, mode=0o700, exist_ok=True)
-    for member in members:
-        bundle.extract(member, destination)
-print(root)
-PY
-) || fail "host artifact validation or extraction failed"
 artifact=$work/extract/$artifact_root
 [ -x "$artifact/bin/hamn" ] && [ -x "$artifact/scripts/update-host.sh" ] ||
     fail "verified host artifact is incomplete"
 
 manifest=$work/manifest.json
-python3 - "$manifest" "$HAMN_VERSION" "$HAMN_COMMIT" "$host_archive" \
-    "$HAMN_HOST_SHA256" "$HAMN_GUEST_URL" "$HAMN_GUEST_SHA256" <<'PY'
-import json
-import sys
+"$work/hamn-support" __install-support bootstrap-manifest "$manifest" "$HAMN_VERSION" \
+    "$HAMN_COMMIT" "$host_archive" "$HAMN_HOST_SHA256" "$HAMN_GUEST_URL" "$HAMN_GUEST_SHA256"
 
-path, version, commit, host, host_hash, guest, guest_hash = sys.argv[1:]
-value = {
-    "schemaVersion": 2,
-    "channel": "stable",
-    "version": version,
-    "commit": commit,
-    "validationMode": "github-hosted-no-vm",
-    "compatibility": {
-        "os": "darwin",
-        "architecture": "arm64",
-        "minimumMacOS": "13.0",
-    },
-    "artifacts": {
-        "host": {"url": "file://" + host, "sha256": host_hash},
-        "guestImage": {"url": guest, "sha256": guest_hash},
-    },
-}
-with open(path, "w", encoding="utf-8", newline="\n") as output:
-    json.dump(value, output, sort_keys=True, separators=(",", ":"))
-    output.write("\n")
-PY
-env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+env -i HOME="$HOME" TMPDIR="$work" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
     /bin/bash "$artifact/scripts/update-host.sh" --bootstrap \
     --bindir "$HOME/.local/bin" --datadir "$HOME/.local/share/hamn/src" \
@@ -163,14 +119,8 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
 # Resolve the command using the caller's search order without executing it.
 # PATH membership alone misses an earlier Homebrew or legacy hamn executable.
 resolved_command=$(PATH="$caller_path" command -v hamn || :)
-if [ -n "$resolved_command" ] && python3 - "$resolved_command" "$HOME/.local/bin/hamn" <<'PY_PATH'
-import os
-import sys
-try:
-    sys.exit(0 if os.path.samefile(sys.argv[1], sys.argv[2]) else 1)
-except OSError:
-    sys.exit(1)
-PY_PATH
+if [ -n "$resolved_command" ] && "$work/hamn-support" __install-support same-file \
+    "$resolved_command" "$HOME/.local/bin/hamn" 2>/dev/null
 then
     echo "hamn install: Ready. Run hamn to open the terminal interface." >&2
 else
