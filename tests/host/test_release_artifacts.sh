@@ -193,7 +193,51 @@ if grep -Fq 'export PATH=' "$WORK/reinstall.err"; then
     echo "FAIL: bootstrap suggested PATH setup when the command directory was present" >&2
     exit 1
 fi
+grep -Fq 'Unchanged Hamn 0.0.1' "$WORK/reinstall.err"
 installed_target=$(readlink "$HOME_DIR/.local/bin/hamn")
+mkdir "$WORK/shadow"
+printf '#!/bin/sh\necho old-hamn\n' >"$WORK/shadow/hamn"
+chmod 0755 "$WORK/shadow/hamn"
+HOME="$HOME_DIR" PATH="$WORK/shadow:$HOME_DIR/.local/bin:$PATH" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
+    bash "$WORK/candidate/install.sh" >"$WORK/shadow.out" 2>"$WORK/shadow.err"
+grep -Fq "PATH currently selects another hamn: $WORK/shadow/hamn" "$WORK/shadow.err"
+grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$WORK/shadow.err"
+if grep -Fq 'Ready. Run hamn' "$WORK/shadow.err"; then
+    echo "FAIL: bootstrap reported a shadowed command ready" >&2
+    exit 1
+fi
+[ "$(readlink "$HOME_DIR/.local/bin/hamn")" = "$installed_target" ]
+# An earlier alias symlink to the installed executable is already usable.
+rm "$WORK/shadow/hamn"
+ln -s "$HOME_DIR/.local/bin/hamn" "$WORK/shadow/hamn"
+HOME="$HOME_DIR" PATH="$WORK/shadow:$PATH" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
+    bash "$WORK/candidate/install.sh" >"$WORK/alias.out" 2>"$WORK/alias.err"
+grep -Fq 'Ready. Run hamn' "$WORK/alias.err"
+if grep -Fq 'export PATH=' "$WORK/alias.err"; then
+    echo "FAIL: bootstrap rejected a PATH symlink to the installed command" >&2
+    exit 1
+fi
+# Preserve bootstrap migration of the original empty ownership marker, even
+# when the release receipt matches; a no-op would leave later updates unusable.
+: >"$HOME_DIR/.local/share/hamn/src/.hamn-managed"
+HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
+    bash "$WORK/candidate/install.sh" >"$WORK/migrate.out" 2>"$WORK/migrate.err"
+[ "$(cat "$HOME_DIR/.local/share/hamn/src/.hamn-managed")" = version=1 ]
+[ "$(readlink "$HOME_DIR/.local/bin/hamn")" != "$installed_target" ]
+installed_target=$(readlink "$HOME_DIR/.local/bin/hamn")
+# Refuse a regular legacy/foreign executable before making an unjournaled cutover.
+mkdir -p "$WORK/legacy-home/.local/bin"
+cp "$HOME_DIR/.local/bin/hamn" "$WORK/legacy-home/.local/bin/hamn"
+legacy_hash=$(sha256 "$WORK/legacy-home/.local/bin/hamn")
+if HOME="$WORK/legacy-home" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
+    bash "$WORK/candidate/install.sh" >"$WORK/legacy.out" 2>"$WORK/legacy.err"; then
+    echo "FAIL: bootstrap replaced a regular executable without rollback evidence" >&2
+    exit 1
+fi
+grep -Fq 'migrate it with make install' "$WORK/legacy.err"
+[ "$(sha256 "$WORK/legacy-home/.local/bin/hamn")" = "$legacy_hash" ]
+[ ! -L "$WORK/legacy-home/.local/bin/hamn" ]
+[ ! -e "$WORK/legacy-home/.hamn" ]
 printf 'tampered\n' >>"$HOST_ARTIFACT"
 if HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     bash "$WORK/candidate/install.sh" >"$WORK/tampered.out" \

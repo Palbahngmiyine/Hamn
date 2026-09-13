@@ -115,14 +115,32 @@ done
 [ -n "$bindir" ] && [ -n "$datadir" ] || usage
 
 hamn_link=$bindir/hamn
+bootstrap_entry=$bootstrap
 old_target=
+# A bootstrap over a managed installation has the same rollback obligations as
+# an update. Do not discard its old target just because the entrypoint changed.
+if [ "$bootstrap" = 1 ] && ! path_absent "$hamn_link"; then
+    [ -L "$hamn_link" ] ||
+        fail "existing hamn is not a managed generation; migrate it with make install before using the release installer"
+    bootstrap=0
+fi
 if [ "$bootstrap" = 0 ]; then
     safe_directory "$bindir" || fail "unsafe managed binary directory: $bindir"
     safe_directory "$datadir" || fail "unsafe managed data directory: $datadir"
     safe_regular "$datadir/.hamn-managed" ||
         fail "managed data marker is missing or unsafe"
-    [ "$(cat "$datadir/.hamn-managed")" = 'version=1' ] ||
-        fail "managed data marker is invalid"
+    managed_marker=$(cat "$datadir/.hamn-managed")
+    if [ "$managed_marker" != version=1 ]; then
+        # The installer can upgrade the original empty ownership marker after
+        # validating the existing generation. Preserve that bootstrap migration.
+        [ "$bootstrap_entry" = 1 ] && [ -z "$managed_marker" ] ||
+            fail "managed data marker is invalid"
+    fi
+    # install-host publishes canonical absolute targets. Resolve parent aliases
+    # only after rejecting unsafe leaf directories (for example /tmp on macOS).
+    bindir=$(cd "$bindir" && pwd -P)
+    datadir=$(cd "$datadir" && pwd -P)
+    hamn_link=$bindir/hamn
     [ -L "$hamn_link" ] || fail "managed hamn link is missing"
     old_target=$(readlink "$hamn_link") || fail "cannot read managed hamn link"
     case "$old_target" in
@@ -154,12 +172,17 @@ journal_attempt=
 journal_stage=
 
 managed_generation_target() {
-    local target=$1 relative
+    local target=$1 relative generation_root
+    # A fresh bootstrap creates these directories only during host install.
+    # Its supplied path may still contain an alias such as macOS /tmp.
+    safe_directory "$datadir" || return 1
+    generation_root=$(cd "$datadir" && pwd -P) || return 1
+    generation_root=$generation_root/.hamn-generations
     case "$target" in
-    "$datadir/.hamn-generations/"*) ;;
+    "$generation_root/"*) ;;
     *) return 1 ;;
     esac
-    relative=${target#"$datadir/.hamn-generations/"}
+    relative=${target#"$generation_root/"}
     [[ "$relative" =~ ^[0-9a-f]{64}-[A-Za-z0-9]{6}/bin/hamn$ ]] ||
         return 1
     safe_regular "$target"
@@ -361,6 +384,10 @@ rollback_update_journal() {
     load_update_journal || return 1
     restore_guest_selection_from_journal || return 1
     restore_binary_link_from_journal || return 1
+    recovery_summary="prior binary and guest image selection were restored"
+    if [ "$journal_bootstrap" = 1 ]; then
+        recovery_summary="guest image selection was restored; no previous binary was recorded, so a published command may remain"
+    fi
     retire_update_journal recovered
 }
 
@@ -370,7 +397,11 @@ recover_pending_update() {
         echo "hamn update: incomplete prior update could not be safely recovered" >&2
         return 1
     fi
-    echo "hamn update: recovered the previous binary and guest image selection after an interrupted update" >&2
+    if [ "$journal_bootstrap" = 0 ]; then
+        echo "hamn update: recovered the previous binary and guest image selection after an interrupted update" >&2
+    else
+        progress "Recovered interrupted bootstrap: $recovery_summary"
+    fi
 }
 
 prepare_update_journal() {
@@ -509,7 +540,7 @@ interrupted_update() {
     if ! rollback_update_journal; then
         echo "hamn update: interrupted by $signal; recovery journal remains for a later safe recovery" >&2
     else
-        echo "hamn update: interrupted by $signal; previous binary and guest image selection were restored" >&2
+        echo "hamn update: interrupted by $signal; $recovery_summary" >&2
     fi
     case "$signal" in
     HUP) status=129 ;;
@@ -529,6 +560,13 @@ cleanup_retired_journals ||
     fail "the recovered update transaction could not be cleaned"
 cleanup_deferred_journals ||
     fail "the recovered transaction cleanup is unsafe or could not be cleaned"
+
+# Recovery may have restored a different generation. Snapshot the recovered
+# target, not the interrupted candidate, for this attempt's rollback journal.
+if [ "$bootstrap" = 0 ]; then
+    old_target=$(readlink "$hamn_link") || fail "cannot read recovered hamn link"
+    managed_generation_target "$old_target" || fail "recovered hamn link is unsafe"
+fi
 
 if [ -z "$manifest_ref" ]; then
     manifest_url_file=$source_root/packaging/release/update-manifest-url
@@ -647,6 +685,119 @@ fi
 [ -n "$host_url" ] && [ -n "$host_hash" ] && [ -n "$guest_url" ] &&
     [ -n "$guest_hash" ] || fail "immutable manifest fields are incomplete"
 
+# A receipt is advisory: absent, malformed, unsafe, or stale evidence forces the
+# normal verified install. It binds release identities to the installed files;
+# a version string alone never permits skipping downloads. Each generation owns
+# its private receipt, so rollback restores the previous receipt with the link.
+release_receipt() {
+    python3 - "$1" "$2" "$release_version" "$host_hash" "$guest_hash" "$cache" <<'PY_RECEIPT'
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+mode, target, version, host_hash, guest_hash, cache = sys.argv[1:]
+generation = Path(target).parent.parent
+receipt = generation / ".hamn-release.json"
+
+
+def owned(path, directory=False):
+    info = path.lstat()
+    valid = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    if not valid or info.st_uid != os.getuid() or (not directory and info.st_nlink != 1):
+        raise ValueError("unsafe release evidence")
+    return info
+
+
+def digest(path):
+    owned(path)
+    result = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            result.update(block)
+    return result.hexdigest()
+
+
+def installed_digest():
+    # Include updater and packaging bytes and executable modes, not just hamn.
+    entries = []
+    def visit(path, name):
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            owned(path, directory=True)
+            entries.append((name, stat.S_IMODE(info.st_mode), None))
+            for child in sorted(path.iterdir()):
+                visit(child, name + "/" + child.name)
+        else:
+            entries.append((name, stat.S_IMODE(info.st_mode), digest(path)))
+    owned(generation, directory=True)
+    visit(generation / "bin", "bin")
+    for name in ("scripts", "packaging"):
+        visit(generation / "share/hamn/src" / name, name)
+    return hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode()).hexdigest()
+
+
+try:
+    identity = {"schemaVersion": 1, "version": version, "hostSHA256": host_hash,
+                "guestSHA256": guest_hash}
+    if mode == "check":
+        info = owned(receipt)
+        if stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096:
+            raise ValueError("invalid receipt")
+        recorded = json.loads(receipt.read_text())
+        if not isinstance(recorded, dict) or set(recorded) != set(identity) | {"installedSHA256"}:
+            raise ValueError("invalid receipt schema")
+        if any(recorded[key] != value for key, value in identity.items()):
+            raise ValueError("different release")
+        if recorded["installedSHA256"] != installed_digest():
+            raise ValueError("installed files changed")
+        cache = Path(cache)
+        selection = cache / "guest-image.json"
+        if owned(selection).st_size > 4096:
+            raise ValueError("invalid selection")
+        name = "hamn-guest-" + guest_hash + ".img"
+        if json.loads(selection.read_text()) != {"schemaVersion": 1, "file": name, "sha256": guest_hash}:
+            raise ValueError("different image selection")
+        marker = cache / (name + ".verified")
+        if owned(marker).st_size > 128 or marker.read_text().strip() != guest_hash:
+            raise ValueError("invalid image verification marker")
+        if digest(cache / name) != guest_hash:
+            raise ValueError("cached image changed")
+    elif mode == "write":
+        identity["installedSHA256"] = installed_digest()
+        fd, temporary = tempfile.mkstemp(prefix=".hamn-release-", dir=generation)
+        try:
+            with os.fdopen(fd, "w") as output:
+                json.dump(identity, output, sort_keys=True, separators=(",", ":"))
+                output.write("\n")
+                output.flush()
+                os.fsync(output.fileno())
+            # Never replace a pre-existing file or follow a receipt symlink.
+            os.link(temporary, receipt)
+        finally:
+            os.unlink(temporary)
+    else:
+        raise ValueError("unknown receipt operation")
+except (OSError, ValueError, TypeError, RecursionError) as error:
+    if mode == "write":
+        print("hamn update: cannot record installed release: " + str(error), file=sys.stderr)
+    sys.exit(1)
+PY_RECEIPT
+}
+
+if [ -n "$old_target" ] && [ "$managed_marker" = version=1 ]; then
+    progress "Checking installed release and cached image..."
+    if release_receipt check "$old_target" &&
+        [ "$(readlink "$hamn_link")" = "$old_target" ] && path_absent "$update_journal"; then
+        progress "Unchanged Hamn ${release_version#v}: installed files and guest image match this release."
+        progress "No further artifact downloads or installation were needed."
+        exit 0
+    fi
+fi
+
 previous_version=
 if [ -n "$old_target" ] && managed_generation_target "$old_target"; then
     previous_version=$("$old_target" --version) || fail "cannot read installed version"
@@ -760,28 +911,38 @@ if ! env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     trap - HUP INT TERM
     rollback_update_journal ||
         fail "host install failed and the recovery journal could not be applied"
-    fail "host install failed; prior binary and guest image selection were restored"
+    fail "host install failed; $recovery_summary"
 fi
 
 if ! test_after_host_install_barrier; then
     trap - HUP INT TERM
     rollback_update_journal ||
         fail "update interruption barrier failed and the recovery journal could not be applied"
-    fail "update interruption barrier failed; prior binary and guest image selection were restored"
+    fail "update interruption barrier failed; $recovery_summary"
 fi
+
+installed_target=$(readlink "$hamn_link")
+if ! managed_generation_target "$installed_target" ||
+    [ "$(sha256_file "$installed_target")" != "$(sha256_file "$artifact/bin/hamn")" ] ||
+    ! release_receipt write "$installed_target"; then
+    trap - HUP INT TERM
+    rollback_update_journal || fail "release receipt failed and recovery could not be applied"
+    fail "release receipt failed; update transaction recovered"
+fi
+/bin/sync
 
 if ! commit_guest_selection_from_journal; then
     trap - HUP INT TERM
     rollback_update_journal ||
         fail "guest image commit failed and the recovery journal could not be applied"
-    fail "guest image commit failed; prior binary and guest image selection were restored"
+    fail "guest image commit failed; $recovery_summary"
 fi
 
 if ! retire_update_journal completed; then
     trap - HUP INT TERM
     rollback_update_journal ||
-        fail "update commit could not clear its recovery journal; run hamn --headless system update --yes again before starting a VM"
-    fail "update commit metadata could not be cleared; prior binary and guest image selection were restored"
+        fail "update commit could not clear its recovery journal; retry the same command with all original options (including --manifest) before starting a VM"
+    fail "update commit metadata could not be cleared; $recovery_summary"
 fi
 trap - HUP INT TERM
 if ! test_after_journal_retire_barrier; then

@@ -160,11 +160,26 @@ env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     --bindir "$HOME/.local/bin" --datadir "$HOME/.local/share/hamn/src" \
     --manifest "file://$manifest"
 
-echo "hamn install: Ready. Run hamn to open the terminal interface." >&2
-case ":$caller_path:" in
-*":$HOME/.local/bin:"*) ;;
-*)
+# Resolve the command using the caller's search order without executing it.
+# PATH membership alone misses an earlier Homebrew or legacy hamn executable.
+resolved_command=$(PATH="$caller_path" command -v hamn || :)
+if [ -n "$resolved_command" ] && python3 - "$resolved_command" "$HOME/.local/bin/hamn" <<'PY_PATH'
+import os
+import sys
+try:
+    sys.exit(0 if os.path.samefile(sys.argv[1], sys.argv[2]) else 1)
+except OSError:
+    sys.exit(1)
+PY_PATH
+then
+    echo "hamn install: Ready. Run hamn to open the terminal interface." >&2
+else
+    if [ -n "$resolved_command" ]; then
+        printf 'hamn install: PATH currently selects another hamn: %s\n' "$resolved_command" >&2
+    else
+        echo "hamn install: hamn is not on your current PATH." >&2
+    fi
+    printf 'hamn install: Installed command: %s\n' "$HOME/.local/bin/hamn" >&2
     echo "hamn install: Add this to your shell configuration, then open a new terminal:" >&2
     echo '  export PATH="$HOME/.local/bin:$PATH"' >&2
-    ;;
-esac
+fi
