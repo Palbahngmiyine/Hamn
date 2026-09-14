@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.2 (2026-09-14)
+
+## What's Changed
+* fix: improve installation UX and release manifest compatibility by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/49
+* fix: install with macOS system tools and bound generation retention by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/51
+
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.1.1...v0.1.2
+
 ## 0.1.1 (2026-09-08)
 
 ## What's Changed
