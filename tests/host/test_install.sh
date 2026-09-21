@@ -309,7 +309,7 @@ fresh_generations=("$FRESH_KILL_DATA"/.hamn-generations/[0-9a-f]*-*)
 bash "$INSTALL" "$HAMN" "$FRESH_KILL_BIN" "$FRESH_KILL_DATA" \
     >"$WORK/fresh-kill-retry.out"
 assert_managed_install "$FRESH_KILL_BIN" "$FRESH_KILL_DATA" "$HAMN"
-[ -f "${fresh_generations[0]}/bin/hamn" ]
+[ ! -e "${fresh_generations[0]}" ]
 
 # SIGKILL immediately before the symlink commit leaves the old generation
 # active. SIGKILL immediately after it leaves a complete new generation.

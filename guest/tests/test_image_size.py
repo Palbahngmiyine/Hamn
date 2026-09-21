@@ -15,6 +15,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("image_size", ROOT / "guest/image/verify-size.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+variation_spec = importlib.util.spec_from_file_location("image_variations", ROOT / "guest/tests/image_build_variations.py")
+variations = importlib.util.module_from_spec(variation_spec)
+variation_spec.loader.exec_module(variations)
 
 
 class ImageSizeGate(unittest.TestCase):
@@ -103,6 +106,34 @@ class ImageSizeGate(unittest.TestCase):
         failure = subprocess.run(command, capture_output=True, text=True)
         self.assertNotEqual(failure.returncode, 0)
         self.assertIn("do not match", failure.stderr)
+
+    def test_guestfish_trailing_newline_produces_publishable_inventory(self):
+        # guestfish prints its own newline after dpkg-query's final newline.
+        self.packages.write_text("docker.io\t28.0\t12345\nrunc\t1.3.4\t34734\n\n")
+        self.run_gate(review=True)
+        expected = ["docker.io\t28.0\t12345", "runc\t1.3.4\t34734"]
+        report = json.loads(self.report.read_text())
+        self.assertEqual(report["packagesBefore"], expected)
+        self.assertEqual(report["packagesAfter"], expected)
+        variations.verify_inventory(self.packages, report["packagesAfter"])
+        changed = self.root / "changed-packages.tsv"
+        changed.write_text("docker.io\t29.0\t12345\nrunc\t1.3.4\t34734\n\n")
+        with self.assertRaisesRegex(ValueError, "changed the pinned"):
+            variations.verify_inventory(changed, report["packagesAfter"])
+        self.budget.write_bytes(self.report.with_suffix(".budget-proposal.json").read_bytes())
+        self.run_gate()
+        subprocess.run([sys.executable, str(ROOT / "guest/image/verify-release-size.py"),
+                        str(self.candidate), str(self.report), str(self.budget)], check=True)
+
+    def test_invalid_or_empty_inventory_is_rejected_before_report_publication(self):
+        for value in ("", "\n\n", "docker.io\t28.0\t12345\n\nrunc\t1.3.4\t34734\n",
+                      "docker.io\t28.0\n", "docker.io\t28.0\t-1\n",
+                      "docker.io\t\t12345\n", "docker.io\t28.0\t12345\ndocker.io\t28.0\t12345\n"):
+            with self.subTest(value=value):
+                self.packages.write_text(value)
+                with self.assertRaisesRegex(ValueError, "package inventory"):
+                    self.run_gate(review=True)
+                self.assertFalse(self.report.exists())
 
     def test_gpt_crc_and_virtual_size_validation(self):
         raw = self.root / "raw"

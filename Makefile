@@ -2,7 +2,7 @@ BUILD      := build
 HOST_BIN   := $(BUILD)/hamn
 CARGO_PROFILE ?= release
 # x-release-please-start-version
-VERSION    ?= 0.1.1
+VERSION    ?= 0.1.2
 # x-release-please-end
 VERSION_STAMP := $(BUILD)/.hamn-version
 PREFIX     ?= $(HOME)/.local
@@ -201,6 +201,8 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(B
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_reload.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_native_query_lifetime.py
 	python3 tests/host/test_workspace_live_prepare.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_workspace_management.py
+	python3 tests/host/test_workspace_live_external_contexts.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_all.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_images.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_config.py
@@ -283,12 +285,16 @@ test-guest-deployment: host
 	bash guest/tests/test_verify_image_contract.sh
 	bash guest/tests/test_guest_image_builder.sh
 	python3 guest/tests/test_image_size.py
+	python3 guest/tests/test_image_evidence.py
 
 test-diagnostics: host
 	HAMN=$(HOST_BIN) bash tests/host/test_diagnostics.sh
 
 test-install: host
 	HAMN=$(HOST_BIN) bash tests/host/test_install.sh
+	HAMN=$(HOST_BIN) python3 tests/host/test_generation_cleanup.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_install_system_tools.py
+	python3 tests/host/test_bootstrap_acquire.py
 
 test-uninstall: host
 	HAMN=$(HOST_BIN) bash tests/host/test_uninstall.sh
@@ -296,6 +302,9 @@ test-uninstall: host
 test-update: host
 	python3 tests/host/test_upgrade_support.py
 	python3 tests/host/test_upgrade_properties.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_native.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_concurrency.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_recovery_ownership.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_update_check.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_cli.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_update_ux.py

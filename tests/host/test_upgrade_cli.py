@@ -65,6 +65,24 @@ def main():
         assert os.readlink(command)==active
         selection=home / ".hamn/cache/guest-image.json"
         cached=selection.parent / json.loads(selection.read_text())["file"]
+        # A matching digest/receipt cannot override contradictory v3 byte size.
+        # Check and mutation must agree, and failure must not publish a journal
+        # or alter the active generation, selected image, or profile data.
+        selected_before=selection.read_bytes()
+        for declared_size in (guest.stat().st_size - 1, guest.stat().st_size + 1):
+            value["artifacts"]["guestImage"]["size"]=declared_size
+            manifest.write_text(json.dumps(value))
+            assert json.loads(run("upgrade","--check","--output","json").stdout)["status"]=="repair-required"
+            receipt=subprocess.run([command,"__install-support","upgrade","receipt",manifest,
+                "check",active,selection.parent],env=env,capture_output=True,text=True,timeout=10)
+            assert receipt.returncode!=0, "receipt accepted a contradictory guest byte size"
+            run("upgrade","--output","json",success=False)
+            assert os.readlink(command)==active and selection.read_bytes()==selected_before
+            assert digest(disk)==disk_before and cached.read_bytes()==guest.read_bytes()
+            assert not (selection.parent/".hamn-update-transaction").exists()
+        value["artifacts"]["guestImage"]["size"]=guest.stat().st_size
+        manifest.write_text(json.dumps(value))
+        assert json.loads(run("upgrade","--output","json").stdout)["status"]=="up-to-date"
         cached.write_bytes(b"damaged guest image")
         repaired=json.loads(run("upgrade","--output","json").stdout)
         assert repaired["status"]=="repaired" and repaired["artifacts"]["host"]["downloadedBytes"]==0
@@ -108,7 +126,7 @@ def main():
                     assert os.read(ready_fd,64)==b"ready\n"
                     journal=home / ".hamn/cache/.hamn-update-transaction"
                     state=(journal / "state").read_text()
-                    assert state.startswith("version=2\n") and "hostMutation=0" in state
+                    assert state.startswith("version=3\n") and "hostMutation=0" in state
                     child.send_signal(termination)
                     stdout,stderr=child.communicate(timeout=15)
                     assert child.returncode!=0,(point,termination,stdout,stderr)

@@ -79,7 +79,7 @@ I/O, so shared storage does not imply universally faster profile creation.
 
 For a legacy profile, SSH readiness starts managed K3s retirement before normal
 provisioning. The existing EFI boot path is preserved; old K3s can briefly run
-before SSH becomes available. The fixed Python payload and replacement verifier
+before SSH becomes available. The fixed guest-side Python payload and replacement verifier
 and transaction helper are embedded in the signed host binary. This narrowly
 scoped, one-time replacement updates existing guest disks without treating the
 host checkout as a general guest configuration source.
@@ -104,6 +104,25 @@ then signs and inspects a temporary candidate before atomically publishing
 System macOS libraries, SSH, guest images/binaries and kubeconfig exec plugins
 are permitted dependencies. No separate host core binary or dedicated shared
 library is required at runtime.
+
+## Release installation support
+
+`control/install_support/` implements the private `__install-support` mode in the
+same executable, before Tokio or terminal initialization. It owns archive and
+manifest validation, stable version decisions, manifest-only checks, artifact
+acquisition and byte accounting, version-1 receipt compatibility, host install
+locks, recovery references and obsolete-generation collection. Shell scripts retain
+transaction ordering and transfer verified paths/identities as explicit arguments.
+Before the host executable is authenticated, the bootstrap uses macOS's stock
+`zsh/system` for the shared per-digest lock and bounded partial writes. It verifies
+the pinned size and SHA-256 before reading the executable through `tar` stdout.
+That process releases its download lock before the native updater runs. Subsequent
+manifest, receipt and transfer decisions execute inside Hamn; host installation
+does not run Python. Release-build validators and test references may use Python,
+and legacy retirement's embedded Python payload runs in the guest.
+The scanner has a process-group deadline, and both install roots remain locked
+through update recovery and collection. See [Installation](INSTALLATION.md) for
+retention and compatibility limits.
 
 ## Mount and network boundaries
 

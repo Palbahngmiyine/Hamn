@@ -41,6 +41,26 @@ def validate_budget(value):
         raise ValueError("invalid reviewed size budget")
 
 
+def package_inventory(path):
+    """Read dpkg TSV, allowing guestfish's additional trailing newline only.
+
+    Keep every package/version/installed-KiB record unchanged. Empty inventories,
+    malformed/interior-empty rows and repeated package identities fail closed.
+    """
+    rows = path.read_text().rstrip("\n").splitlines()
+    seen = set()
+    for row in rows:
+        fields = row.split("\t")
+        if (len(fields) != 3 or not fields[0] or not fields[1] or
+                any(character.isspace() for field in fields for character in field) or
+                re.fullmatch(r"[0-9]+", fields[2]) is None or fields[0] in seen):
+            raise ValueError("invalid package inventory: " + str(path))
+        seen.add(fields[0])
+    if not rows:
+        raise ValueError("empty package inventory: " + str(path))
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("baseline", "candidate", "packages-before", "packages-after", "report", "budget"):
@@ -64,8 +84,8 @@ def main():
         "baselineSha256": sha256(args.baseline),
         "imageSha256": sha256(args.candidate),
         "savedBytes": baseline - candidate, "requiredSavingsBytes": required,
-        "packagesBefore": args.packages_before.read_text().splitlines(),
-        "packagesAfter": args.packages_after.read_text().splitlines(),
+        "packagesBefore": package_inventory(args.packages_before),
+        "packagesAfter": package_inventory(args.packages_after),
         "cleanup": ["build dependencies", "apt archives and lists", "temporary sources",
                     "logs and journals", "cloud-init state", "machine-id", "SSH host keys",
                     "systemd random seed", "free filesystem blocks"],

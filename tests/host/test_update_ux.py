@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Observe the real headless/worker/installer boundary with controlled transport.
 
-The curl fixture blocks on a socket until the parent has observed the download
-stage. No real VM or network is used; installation is isolated under a temp HOME.
+An owned HTTPS endpoint blocks on a socket until the parent observes download
+progress. Native curl/TLS execute unchanged; no public network or VM is used.
 """
+import contextlib
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -14,74 +16,101 @@ import select
 import signal
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
 HAMN = (ROOT / os.environ.get('HAMN', 'build/hamn')).resolve()
+from measure_upgrade_download import certificate
 
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+
+@contextlib.contextmanager
+def controlled_https(root):
+    cert, key = certificate(root)
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args): pass
+        def do_GET(self):
+            if self.path not in ('/host.tar.gz', '/guest.img'):
+                self.send_error(404); return
+            assert isinstance(self.connection, ssl.SSLSocket)
+            with (root / 'transport-requests').open('a') as log:
+                log.write(self.path + ' ' + self.connection.version() + '\n')
+            if self.path == '/host.tar.gz' and not (root / 'download-observed').exists():
+                with socket.socket(socket.AF_UNIX) as channel:
+                    channel.settimeout(20)
+                    channel.connect(str(root / 'ready.sock'))
+                    channel.sendall(b'ready')
+                    assert channel.recv(1) == b'!'
+            source = root / self.path[1:]
+            self.send_response(200)
+            self.send_header('Content-Length', str(source.stat().st_size))
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            with source.open('rb') as data:
+                shutil.copyfileobj(data, self.wfile, 64 * 1024)
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(cert, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    worker = threading.Thread(target=server.serve_forever)
+    worker.start()
+    try:
+        yield 'https://127.0.0.1:' + str(server.server_address[1]), {
+            'CURL_CA_BUNDLE': str(cert), 'SSL_CERT_FILE': str(cert),
+            'NO_PROXY': '127.0.0.1', 'no_proxy': '127.0.0.1'}
+    finally:
+        server.shutdown(); server.server_close(); worker.join(timeout=5)
+        assert not worker.is_alive()
+
+
 def check(terminal):
-    with tempfile.TemporaryDirectory(prefix='hamn-update-ux-') as directory:
+    with tempfile.TemporaryDirectory(prefix='hamn-update-ux-') as directory, contextlib.ExitStack() as resources:
         work = Path(directory).resolve()
         home, bindir, datadir = work / 'home', work / 'bin', work / 'src'
         home.mkdir()
         version = subprocess.check_output([HAMN, '--version'], text=True).strip().split()[1]
-        subprocess.run(['bash', ROOT / 'scripts/install-host.sh', HAMN, bindir, datadir],
-                       check=True, capture_output=True)
-        original = os.readlink(bindir / 'hamn')
         artifact = work / 'release'
         (artifact / 'bin').mkdir(parents=True)
         shutil.copy2(HAMN, artifact / 'bin/hamn')
         for name in ('scripts', 'packaging'):
             shutil.copytree(ROOT / name, artifact / name)
         (artifact / 'packaging/release/update-manifest-url').write_text('https://example.test/manifest\n')
+        # Resolving support from ROOT/scripts would select the shared build/hamn
+        # even when HAMN names a frozen binary. Own every installer dependency.
+        subprocess.run(['bash', artifact / 'scripts/install-host.sh', artifact / 'bin/hamn', bindir, datadir],
+                       env={**os.environ, 'HOME': str(home)}, check=True, capture_output=True)
+        original = os.readlink(bindir / 'hamn')
         archive, guest = work / 'host.tar.gz', work / 'guest.img'
         with tarfile.open(archive, 'w:gz') as bundle:
             bundle.add(artifact, arcname='release')
         guest.write_bytes(b'controlled guest fixture\n')
+        base_url, tls_env = resources.enter_context(controlled_https(work))
         manifest = {
             'schemaVersion': 2, 'channel': 'stable', 'version': 'v' + version,
             'commit': '1' * 40, 'repository': 'example/hamn',
             'validationMode': 'github-hosted-no-vm',
             'compatibility': {'os': 'darwin', 'architecture': 'arm64', 'minimumMacOS': '13.0'},
-            'artifacts': {name: {'url': 'https://example.test/' + path.name, 'sha256': digest(path)}
+            'artifacts': {name: {'url': base_url + '/' + path.name, 'sha256': digest(path)}
                           for name, path in [('host', archive), ('guestImage', guest)]},
         }
         manifest_path = work / 'manifest.json'
         manifest_path.write_text(json.dumps(manifest))
         transport = work / 'transport'
         transport.mkdir()
-        curl = transport / 'curl'
-        curl.write_text(f'#!{sys.executable}\n' + '''import os, pathlib, socket, sys
-root = pathlib.Path(os.environ['UX_WORK'])
-args = sys.argv[1:]
-with (root / 'curl-args').open('a') as log:
-    log.write(' '.join(args) + '\\n')
-if args[-1].endswith('host.tar.gz') and not (root / 'download-observed').exists():
-    with socket.socket(socket.AF_UNIX) as channel:
-        channel.connect(str(root / 'ready.sock'))
-        channel.sendall(b'ready')
-        assert channel.recv(1) == b'!'
-source = root / args[-1].rsplit('/', 1)[-1]
-data = source.read_bytes()
-if '--dump-header' in args:
-    pathlib.Path(args[args.index('--dump-header') + 1]).write_text('HTTP/1.1 200 OK\\r\\nContent-Length: ' + str(len(data)) + '\\r\\n\\r\\n')
-if args[args.index('-o') + 1] == '-':
-    sys.stdout.buffer.write(data)
-else:
-    pathlib.Path(args[args.index('-o') + 1]).write_bytes(data)
-''')
-        curl.chmod(0o755)
-        env = {**os.environ, 'HOME': str(home), 'PATH': str(transport) + ':' + os.environ['PATH'],
-               'HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS': '1', 'UX_WORK': str(work)}
+        env = {**os.environ, **tls_env, 'HOME': str(home),
+               'PATH': str(transport) + ':' + os.environ['PATH'],
+               'HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS': '1'}
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(str(work / 'ready.sock'))
         listener.listen(1)
@@ -125,8 +154,8 @@ else:
             assert b'Updated Hamn:' in received and version.encode() in received
             assert b'Existing VMs were not restarted' in received
             assert b'.hamn-generations/' not in received and b'file://' not in received
-            args = (work / 'curl-args').read_text()
-            assert '--silent' in args and '--proto-redir =https' in args, args
+            args = (work / 'transport-requests').read_text()
+            assert len(args.splitlines()) == 2 and all(' TLSv1.' in row for row in args.splitlines()), args
             active = os.readlink(bindir / 'hamn')
             assert active != original
             selection = home / '.hamn/cache/guest-image.json'
@@ -137,14 +166,28 @@ else:
             def update():
                 return subprocess.run(command, env=env, capture_output=True, timeout=30)
 
+            def recover_changed_generation():
+                # This invocation started in the interrupted new generation.
+                # Recovery restores its predecessor, so continuing the stale
+                # frontend would bypass the version/identity-under-lock guard.
+                recovered = update()
+                assert recovered.returncode != 0, recovered.stdout
+                assert not json.loads(recovered.stdout)['ok'], recovered.stdout
+                assert b'recovered the previous binary and guest image selection' in recovered.stderr, recovered.stderr
+                assert b'managed generation changed while waiting or recovering' in recovered.stderr, recovered.stderr
+                assert os.readlink(bindir / 'hamn') == active
+                assert selection.read_bytes() == saved
+                assert not (home / '.hamn/cache/.hamn-update-transaction').exists()
+                return recovered
+
             # Identical release must not fetch either payload or rewrite state.
-            before_calls = (work / 'curl-args').read_bytes()
+            before_calls = (work / 'transport-requests').read_bytes()
             before_mtime = selection.stat().st_mtime_ns
             repeated = update()
             assert repeated.returncode == 0, repeated.stderr
             assert json.loads(repeated.stdout)['data']['completed'] is True
             assert b'Unchanged Hamn' in repeated.stderr and b'Updated Hamn:' not in repeated.stderr
-            assert (work / 'curl-args').read_bytes() == before_calls
+            assert (work / 'transport-requests').read_bytes() == before_calls
             assert os.readlink(bindir / 'hamn') == active
             assert selection.read_bytes() == saved and selection.stat().st_mtime_ns == before_mtime
             assert not (home / '.hamn/cache/.hamn-update-transaction').exists()
@@ -162,13 +205,13 @@ else:
                     (generation / 'share/hamn/src/packaging/changed.txt').write_text('changed')
                 else:
                     selection.write_text('{}')
-                calls = len((work / 'curl-args').read_text().splitlines())
+                calls = len((work / 'transport-requests').read_text().splitlines())
                 result = update()
-                assert result.returncode == 0, (damage, result.stderr)
+                assert result.returncode == 0, (damage, result.returncode, result.stdout, result.stderr)
                 assert b'Unchanged Hamn' not in result.stderr, damage
                 # Both payloads are cached. Only damaged host integrity requires
                 # a generation reinstall; guest selection repair preserves it.
-                assert len((work / 'curl-args').read_text().splitlines()) == calls, damage
+                assert len((work / 'transport-requests').read_text().splitlines()) == calls, damage
                 assert (os.readlink(bindir / 'hamn') == active) == (damage == 'selection changed'), damage
                 active = os.readlink(bindir / 'hamn')
                 assert selection.read_bytes() == saved
@@ -220,7 +263,7 @@ else:
                 assert b'Updated Hamn:' not in result.stderr
                 assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
             # Reinstalling through bootstrap must preserve the managed binary,
-            # including SIGKILL followed by a second failed installation attempt.
+            # including SIGKILL recovery and a later failed installation attempt.
             if not terminal:
                 (artifact / 'packaging/same-version-change.txt').write_text('next candidate')
                 with tarfile.open(archive, 'w:gz') as bundle:
@@ -233,7 +276,7 @@ else:
                     os.mkfifo(ready)
                     os.mkfifo(release)
                     ready_fd = os.open(ready, os.O_RDWR | os.O_NONBLOCK)
-                    child = subprocess.Popen(['bash', ROOT / 'scripts/update-host.sh', '--bootstrap',
+                    child = subprocess.Popen(['bash', artifact / 'scripts/update-host.sh', '--bootstrap',
                                               '--bindir', bindir, '--datadir', datadir,
                                               '--manifest', manifest_path],
                                              env={**env, 'HAMN_TEST_UPDATE_AFTER_HOST_INSTALL_READY_FIFO': str(ready),
@@ -257,6 +300,7 @@ else:
                             assert child.returncode == -signal.SIGKILL
                             assert journal.exists()
                             assert (journal / 'old-target').read_text().strip() == active
+                            recover_changed_generation()
                         assert selection.read_bytes() == saved
                     finally:
                         os.close(ready_fd)
@@ -278,11 +322,9 @@ else:
             result = subprocess.run([bindir / 'hamn', '--headless', 'system', 'update', '--yes',
                                      '--manifest', manifest_path], env=env, capture_output=True, timeout=15)
             assert result.returncode != 0 and not json.loads(result.stdout)['ok']
-            assert b'host install failed; prior binary and guest image selection were restored' in result.stderr
+            assert b'host install failed; prior binary and guest image selection were restored' in result.stderr, (result.stdout, result.stderr)
             assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
             assert not (home / '.hamn/cache/.hamn-update-transaction').exists()
-            if not terminal:
-                assert b'recovered the previous binary and guest image selection' in result.stderr
             manifest_path.write_text(json.dumps(manifest))
             repeated = update()
             assert repeated.returncode == 0 and b'Unchanged Hamn' in repeated.stderr, repeated.stderr
@@ -313,9 +355,9 @@ else:
                 assert (home / '.hamn/cache/.hamn-update-transaction').is_dir()
                 move.unlink()
                 manifest_path.write_text(json.dumps(manifest))
+                recover_changed_generation()
                 recovered = update()
                 assert recovered.returncode == 0, recovered.stderr
-                assert b'recovered the previous binary and guest image selection' in recovered.stderr
                 assert b'Unchanged Hamn' in recovered.stderr
                 assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
                 assert not (home / '.hamn/cache/.hamn-update-transaction').exists()

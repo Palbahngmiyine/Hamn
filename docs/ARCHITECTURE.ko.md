@@ -72,7 +72,7 @@ APFS에서는 파일 descriptor를 받는 `clonefile(2)` 계열의 `fclonefileat
 
 구형 프로필은 SSH 준비 직후 일반 provisioning보다 먼저 K3s 전환을 시작합니다.
 기존 EFI 부팅을 유지하므로 SSH 준비 전에는 구 K3s가 잠시 실행될 수 있습니다.
-고정 Python payload와 새 검증기·트랜잭션 helper는 서명된 호스트에 내장합니다.
+게스트에서 실행하는 고정 Python payload와 새 검증기·트랜잭션 helper는 서명된 호스트에 내장합니다.
 이는 기존 디스크를 위한 한정된 일회성 교체이며 호스트 체크아웃을 일반 게스트
 설정의 원본으로 사용하지 않습니다.
 
@@ -93,6 +93,24 @@ K3s 전환은 이 rollback과 분리되어 런타임 설정 복원이 K3s 데이
 컴파일러를 고정합니다. macOS 시스템 라이브러리, SSH, 게스트 이미지·실행 파일,
 kubeconfig 인증 플러그인은 허용합니다. 별도 호스트 코어나 전용 동적 라이브러리는
 실행 시 필요하지 않습니다.
+
+## 릴리스 설치 지원
+
+`control/install_support/`는 같은 실행 파일의 내부 `__install-support` 모드를
+구현하며 Tokio·터미널 초기화 전에 실행합니다. 아카이브·manifest 검증, stable 버전
+판정, manifest-only 검사, artifact 획득과 byte 집계, version-1 설치 기록 호환,
+호스트 설치 잠금, 복구 참조, 불필요한 설치본 정리를
+담당합니다. Shell 스크립트가 트랜잭션 순서를 유지하고 검증된 경로·식별자를
+명시적 인자로 전달합니다. 호스트 실행 파일을 검증하기 전에는 macOS 기본
+`zsh/system`이 공통 digest 잠금과 크기를 제한한 partial 기록을 소유합니다.
+고정 크기·SHA-256을 검증한 다음 `tar` 표준 출력으로 실행 파일을 읽으며, native
+updater를 호출하기 전에 다운로드 프로세스와 잠금을 정리합니다. 이후 manifest·설치
+기록·전송 판단은 Hamn 내부에서 실행하고 호스트 설치는 Python을 실행하지 않습니다.
+릴리스 빌드 검증기와 테스트 참조 구현은 Python을 사용할 수 있으며, 구형 전환용
+내장 Python payload는 게스트에서 실행합니다.
+조회 프로세스 그룹에는 실행 시간 제한을 적용하며, 업데이트 복구와 정리가
+끝날 때까지 두 설치 경로의 잠금을 유지합니다. 보존·호환 범위는
+[설치 문서](INSTALLATION.ko.md)를 참고하세요.
 
 ## Mount 및 network 경계
 

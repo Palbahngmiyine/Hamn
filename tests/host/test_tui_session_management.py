@@ -42,11 +42,17 @@ def sessions():
 elif 'events' in args:""")
         peer.write_text(source)
         for mapping in ('8080:80', '9090:90'):
-            harness.send(f':port-forward pod/example {mapping}\r'.encode(), f'FORWARD_READY:{mapping}')
+            harness.send(f':port-forward --token session-credential-fixture pod/example {mapping}\r'.encode(), f'FORWARD_READY:{mapping}')
             harness.send(CONTROL_B, 'old-target-row')
         pids = [json.loads(line) for line in (harness.root/'session-pids').read_text().splitlines()]
         assert len(pids) == 2 and all(process_alive(pid) for pair in pids for pid in pair)
         harness.send(CONTROL_S, 'Sessions: Enter resumes')
+        harness.until('port-forward pod/example 8080:80')
+        harness.until('port-forward pod/example 9090:90')
+        assert 'session-credential-fixture' not in harness.screen.text()
+        assert 'session-credential-fixture' not in (harness.root / '.hamn/tui.json').read_text()
+        calls = [args for _, args in harness.calls() if 'port-forward' in args]
+        assert len(calls) == 2 and all(args[args.index('--token') + 1] == 'session-credential-fixture' for args in calls)
         # The last detached session is selected; its PTY still accepts normal input.
         harness.send(b'\r', 'FORWARD_READY:9090:90')
         harness.send(b'ordinary-input\r', 'RECEIVED:ordinary-input')

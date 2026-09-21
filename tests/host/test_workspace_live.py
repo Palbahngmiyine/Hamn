@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -128,6 +129,23 @@ def cli_extensions(root, runtime):
     print('PASS: installed Compose and buildx against isolated Docker', flush=True)
 
 
+def start_isolated(runtime):
+    """Create first, disable home sharing while stopped, then start this profile."""
+    config = runtime.home / '.hamn/verify/config.yaml'
+    if not config.exists():
+        runtime.call('vm', 'create', profile='verify', yes=True, cpu=4, memory=6, disk=60)
+    text = config.read_text()
+    values = re.findall(r'^mountHome: (true|false)$', text, re.MULTILINE)
+    assert len(values) == 1, 'missing or ambiguous home-sharing configuration'
+    if values[0] == 'true':
+        status = runtime.call('vm', 'status', profile='verify')
+        assert status['state'] == 'stopped', 'refusing to change a running validation profile'
+        config.write_text(re.sub(r'^mountHome: true$', 'mountHome: false', text, flags=re.MULTILINE))
+    result = runtime.call('vm', 'start', profile='verify', yes=True)
+    assert runtime.call('vm', 'status', profile='verify')['mountHome'] is False
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', help='resume only a workspace-owned integration root')
@@ -138,13 +156,15 @@ def main():
     root, runtime = prepare(args.binary.resolve(), args.cache, args.root)
     print('Evidence and owned runtime:', root, flush=True)
     try:
-        runtime.call('vm', 'start', profile='verify', yes=True, cpu=4, memory=6, disk=60)
+        start_isolated(runtime)
         recovery(root, runtime)
         from workspace_live_cancel_boundaries import cancellation_boundaries
         cancellation_boundaries(root, runtime, snapshot)
         from workspace_live_transport import transport_failure
         transport_failure(root, runtime, snapshot)
         cli_extensions(root, runtime)
+        from workspace_live_external_contexts import external_contexts
+        external_contexts(root, runtime)
         from workspace_live_cancellation import cancellation, owned_start_cancellation
         from workspace_live_kubernetes import kubernetes
         cancellation(root, runtime)

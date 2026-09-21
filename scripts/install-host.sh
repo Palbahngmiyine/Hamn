@@ -2,17 +2,20 @@
 set -euo pipefail
 export LC_ALL=C
 
-if [ "$#" -ne 3 ]; then
-    echo "usage: install-host.sh HAMN_BINARY BINDIR DATADIR" >&2
+if [ "$#" -ne 3 ] && { [ "$#" -ne 4 ] || [ -z "${4:-}" ]; }; then
+    echo "usage: install-host.sh HAMN_BINARY BINDIR DATADIR [UPDATE_JOURNAL]" >&2
     exit 2
 fi
 
 SOURCE=$1
 BINDIR=$2
 DATADIR=$3
+UPDATE_JOURNAL=${4:-}
 DATA_PARENT=$(dirname "$DATADIR")
 DATA_BASE=$(basename "$DATADIR")
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+
+source "$ROOT/scripts/install-support.sh"
 
 case "$DATA_BASE" in
 ''|.|..|/)
@@ -52,6 +55,8 @@ if path_contains "$BINDIR" "$DATADIR" ||
     exit 1
 fi
 
+source "$ROOT/scripts/install-transaction.sh"
+
 HAMN_PATH=$BINDIR/hamn
 LEGACY_BINARY_MARKER=$BINDIR/.hamn-binary.sha256
 DATA_MARKER=$DATADIR/.hamn-managed
@@ -78,7 +83,7 @@ path_absent() {
 
 path_identity() {
     local output
-    output=$(printf '%s\0' "$1" | shasum -a 256) || return 1
+    output=$(install_support path-hash "$1") || return 1
     output=${output%% *}
     [[ "$output" =~ ^[0-9a-f]{64}$ ]] || return 1
     printf '%s\n' "$output"
@@ -128,22 +133,11 @@ lock_path_identity() {
 }
 
 lock_fd_identity() {
-    /usr/bin/perl -e '
-        my $fd = shift;
-        open(my $fh, "<&=$fd") or exit 1;
-        my @s = stat($fh);
-        @s or exit 1;
-        printf "%d:%d:%d:%o:%d\n", $s[0], $s[1], $s[4],
-            $s[2] & 07777, $s[3];
-    ' "$1"
+    install_support fd-identity "$1"
 }
 
 lock_fd_exclusive() {
-    /usr/bin/perl -MFcntl=:flock -e '
-        my $fd = shift;
-        open(my $fh, ">>&=$fd") or exit 1;
-        flock($fh, LOCK_EX) or exit 1;
-    ' "$1"
+    install_support fd-lock "$1"
 }
 
 lock_path_prepare "$LOCK_ONE"
@@ -203,7 +197,7 @@ owned_executable() {
 
 file_hash() {
     local output
-    output=$(shasum -a 256 "$1") || return 1
+    output=$(install_support hash "$1") || return 1
     output=${output%% *}
     [[ "$output" =~ ^[0-9a-f]{64}$ ]] || return 1
     printf '%s\n' "$output"
@@ -375,6 +369,53 @@ else
     exit 1
 fi
 
+validate_update_journal() {
+    local cache state bootstrap selection attempt expected_count name
+    [ -n "$UPDATE_JOURNAL" ] || return 0
+    # The fourth argument is an internal handoff, never an arbitrary output.
+    # The updater owns this HOME's journal and inherited cache-lock descriptor.
+    cache=${HOME:?HOME is required}/.hamn/cache
+    [ "$UPDATE_JOURNAL" = "$cache/.hamn-update-transaction" ] || return 1
+    safe_owned_directory "$HOME/.hamn" &&
+        [ "$(stat -f '%Lp' "$HOME/.hamn")" = 700 ] &&
+        safe_owned_directory "$cache" &&
+        safe_owned_directory "$UPDATE_JOURNAL" &&
+        [ "$(stat -f '%Lp' "$UPDATE_JOURNAL")" = 700 ] || return 1
+    install_support lock-same "$cache/.hamn-upgrade.lock" 5 || return 1
+    for name in state attempt new-selection new-target; do
+        owned_regular "$UPDATE_JOURNAL/$name" 600 || return 1
+    done
+    [ ! -s "$UPDATE_JOURNAL/new-target" ] || return 1
+    attempt=$(cat "$UPDATE_JOURNAL/attempt") || return 1
+    [[ "$attempt" =~ ^[A-Za-z0-9]{6}$ ]] || return 1
+    state=$(cat "$UPDATE_JOURNAL/state") || return 1
+    case "$state" in
+    $'version=3\nbootstrap=0\nselection=present\nhostMutation=1') bootstrap=0; selection=present ;;
+    $'version=3\nbootstrap=0\nselection=absent\nhostMutation=1') bootstrap=0; selection=absent ;;
+    $'version=3\nbootstrap=1\nselection=present\nhostMutation=1') bootstrap=1; selection=present ;;
+    $'version=3\nbootstrap=1\nselection=absent\nhostMutation=1') bootstrap=1; selection=absent ;;
+    *) return 1 ;;
+    esac
+    expected_count=4
+    if [ "$bootstrap" = 0 ]; then
+        [ "$hamn_kind" = managed ] &&
+            owned_regular "$UPDATE_JOURNAL/old-target" 600 &&
+            [ "$(cat "$UPDATE_JOURNAL/old-target")" = "$hamn_original_target" ] || return 1
+        expected_count=$((expected_count + 1))
+    else
+        [ "$hamn_kind" = absent ] || return 1
+    fi
+    if [ "$selection" = present ]; then
+        owned_regular "$UPDATE_JOURNAL/previous-selection" 600 || return 1
+        expected_count=$((expected_count + 1))
+    fi
+    [ "$(find "$UPDATE_JOURNAL" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" = "$expected_count" ]
+}
+validate_update_journal || {
+    echo "hamn: unsafe update journal handoff" >&2
+    exit 1
+}
+
 create_data_marker() {
     local marker_stage
     marker_stage=$(/usr/bin/mktemp -d \
@@ -463,6 +504,14 @@ rsync -a --delete --exclude build \
     "$ROOT/scripts" "$ROOT/packaging" \
     "$generation_stage/share/hamn/src/"
 chmod 0755 "$generation_stage"
+# Older generations cannot enumerate recovery roots from other HOME values.
+# Only generations created with the retention contract opt into collection.
+printf 'version=1\n' >"$generation_stage/.hamn-retention"
+chmod 0600 "$generation_stage/.hamn-retention"
+if [ -n "$hamn_original_target" ]; then
+    printf '%s\n' "$hamn_original_target" >"$generation_stage/.hamn-previous-target"
+    chmod 0600 "$generation_stage/.hamn-previous-target"
+fi
 # Marker-last: only a fully copied and hash-verified generation is publishable.
 /bin/sync
 {
@@ -483,6 +532,24 @@ generation_valid "$generation" "$new_hash" || {
     echo "hamn: published generation validation failed" >&2
     exit 1
 }
+
+if [ -n "$UPDATE_JOURNAL" ]; then
+    validate_update_journal || {
+        echo "hamn: update journal changed before generation publication" >&2
+        exit 1
+    }
+    # Recording after symlink publication would leave an unowned rollback
+    # window on SIGKILL. Persist the exact target before exposing that link.
+    install_support recovery-root "$generation/bin/hamn" "${UPDATE_JOURNAL%/*}"
+    target_stage=$(/usr/bin/mktemp "${UPDATE_JOURNAL%/*}/.hamn-target.XXXXXX")
+    printf '%s\n' "$generation/bin/hamn" >"$target_stage"
+    chmod 0600 "$target_stage"
+    /bin/sync
+    /bin/mv -f "$target_stage" "$UPDATE_JOURNAL/new-target"
+    /bin/sync
+    owned_regular "$UPDATE_JOURNAL/new-target" 600 &&
+        [ "$(cat "$UPDATE_JOURNAL/new-target")" = "$generation/bin/hamn" ] || exit 1
+fi
 
 make_link_stage() {
     local prefix=$1
@@ -535,6 +602,12 @@ esac
     exit 1
 }
 /bin/rmdir "$hamn_link_stage"
+
+# Collection is best effort after the durable public commit. Never roll back a
+# successful installation because an obsolete generation could not be removed.
+install_support prune "$BINDIR" "$DATADIR" \
+    "$hamn_original_target" "$ROOT" ||
+    echo "hamn: obsolete generation cleanup deferred" >&2
 
 echo "installed: $HAMN_PATH -> $generation/bin/hamn"
 echo "installed: $generation/share/hamn/src/{scripts,packaging}"

@@ -155,6 +155,7 @@ if PATH="$WORK/bin:$PATH" \
 HAMN_GUEST_BASE_IMAGE="$BASE" \
 HAMN_GUEST_BASE_SHA256="$BASE_SHA256" \
 HAMN_GUEST_OUTPUT="$OUTPUT" \
+HAMN_GUEST_BASELINE_OUTPUT="$WORK/baseline.img" \
 HAMN_VIRT_CUSTOMIZE="$WORK/virt-customize" \
 HAMN_QEMU_IMG="$WORK/qemu-img" \
 HAMN_VIRT_RESIZE="$WORK/virt-resize" \
@@ -173,6 +174,8 @@ HAMN_TEST_GUESTFISH_RESIZE_COMMANDS="$GUESTFISH_RESIZE_COMMANDS" \
 fi
 grep -Fq 'qcow2: file too small' "$WORK/build.err"
 [ ! -e "$OUTPUT" ]
+[ ! -e "$WORK/baseline.img" ]
+[ ! -e "$WORK/baseline.img.sha256" ]
 
 grep -Fxq 8G "$QEMU_ARGUMENTS"
 grep -Fxq convert "$QEMU_ARGUMENTS"

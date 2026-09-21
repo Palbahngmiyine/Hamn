@@ -8,7 +8,7 @@ import struct
 import subprocess
 import termios
 import time
-from terminal_screen import Screen
+from terminal_screen import RatatuiScreen as Screen
 
 
 class Terminal:
@@ -22,15 +22,19 @@ class Terminal:
         self.screen = Screen(38, 160)
         self.record = (root / 'live-tui.ansi').open('ab')
 
-    def until(self, marker, timeout=90):
+    def wait(self, predicate, timeout=90):
         deadline = time.monotonic() + timeout
-        while marker not in self.screen.text():
+        while not predicate():
             left = deadline - time.monotonic()
             if left <= 0 or not select.select([self.master], [], [], left)[0]:
-                raise AssertionError((marker, self.screen.text()))
+                raise AssertionError(self.screen.text())
             data = os.read(self.master, 65536)
+            assert data, 'PTY closed before the expected result'
             self.record.write(data); self.record.flush(); self.screen.feed(data)
         (self.root / 'live-tui-screen.txt').write_text(self.screen.text())
+
+    def until(self, marker, timeout=90):
+        self.wait(lambda: marker in self.screen.text(), timeout)
 
     def send(self, data, marker=None):
         os.write(self.master, data)

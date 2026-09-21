@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Real managed-install/PTY notice checks and isolated checker policy tests.
 
-Never rebuilds, runs a VM or accesses a release service. The installed helper is
-replaced only inside this test's temporary generation by a socket recorder.
-Policy tests exercise the real Python helper with controlled time/network and
-real inter-process flock contention. All deadlines are bounded.
+Never rebuilds, runs a VM or accesses a release service. The native checker uses an invalid offline manifest URL, so dispatch is observed
+through its owned lock/cache files without release network. Native Rust tests
+cover sanitized launcher argv/environment/stdio and controlled policy boundaries;
+the historical Python policy oracle remains an independent comparison.
 """
 import argparse
 import fcntl
@@ -68,14 +68,9 @@ class ManagedNotice(unittest.TestCase):
         cls.managed = cls.bindir / "hamn"
         cls.generation = cls.managed.resolve().parent.parent
         source = cls.generation / "share/hamn/src"
-        (source / "packaging/release/update-manifest-url").write_text("https://fixture.invalid/never-requested\n")
-        (source / "scripts/upgrade_support.py").write_text('''import json, os, socket, sys
-with socket.socket(socket.AF_UNIX) as connection:
-    connection.connect(os.path.join(os.environ["HOME"], "schedule.sock"))
-    data = {"args": sys.argv[1:], "environment": dict(os.environ),
-            "stdioTty": [os.isatty(fd) for fd in (0, 1, 2)]}
-    connection.sendall(json.dumps(data).encode())
-''')
+        (source / "packaging/release/update-manifest-url").write_text("invalid-offline-url\n")
+        # A normal install must check updates without an external language helper.
+        (source / "scripts/upgrade_support.py").unlink(missing_ok=True)
         cls.tools = cls.root / "tools"
         cls.tools.mkdir()
         cli = '''#!/usr/bin/python3
@@ -118,31 +113,31 @@ elif "get" in sys.argv:
         self.env.pop("HAMN_NO_UPDATE_CHECK", None)
 
     def run_tui(self, binary=None, extra_env=None, schedule=False, stderr_tty=True, arguments=()):
-        endpoint = self.home / "schedule.sock"
-        with socket.socket(socket.AF_UNIX) as listener:
-            listener.bind(str(endpoint))
-            listener.listen(4)
-            try:
-                result = self.terminal([binary or self.managed, *arguments],
-                                       {**self.env, **(extra_env or {})}, stderr_tty,
-                                       interactive=not arguments)
-                ready = select.select([listener], [], [], 5 if schedule else 0.5)[0]
-                self.assertEqual(bool(ready), schedule, result[-2000:])
-                if ready:
-                    with listener.accept()[0] as channel:
-                        channel.settimeout(2)
-                        chunks = []
-                        while chunk := channel.recv(4096): chunks.append(chunk)
-                    recorded = json.loads(b"".join(chunks))
-                    self.assertEqual(recorded["args"][0], "schedule")
-                    self.assertIn("https://fixture.invalid/never-requested", recorded["args"])
-                    self.assertNotIn("HAMN_UPDATE_CHECK_TEST_SECRET", recorded["environment"])
-                    self.assertEqual(recorded["environment"]["HOME"], str(self.home))
-                    self.assertEqual(recorded["environment"]["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
-                    self.assertEqual(recorded["stdioTty"], [False, False, False])
-                return result
-            finally:
-                endpoint.unlink(missing_ok=True)
+        lock_path = self.cache / ".update-check.lock"
+        # Each invocation needs a new creation witness. A prior worker must have
+        # released its actual cross-process lock before this fixture removes it.
+        if lock_path.exists():
+            with lock_path.open("r+") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                lock_path.unlink()
+        result = self.terminal([binary or self.managed, *arguments],
+                               {**self.env, **(extra_env or {})}, stderr_tty,
+                               interactive=not arguments)
+        deadline = time.monotonic() + (5 if schedule else 0.5)
+        while not lock_path.exists() and time.monotonic() < deadline:
+            select.select([], [], [], 0.01)
+        self.assertEqual(lock_path.exists(), schedule, result[-2000:])
+        if schedule:
+            # Creating the lock precedes acquiring it. Observe the exact owned
+            # executable's checker exit instead of winning that acquisition race.
+            prefix = str(self.managed.resolve()) + " __install-support upgrade schedule "
+            while True:
+                processes = subprocess.check_output(["/bin/ps", "-axo", "args="], text=True, timeout=2)
+                if not any(line.startswith(prefix) for line in processes.splitlines()):
+                    break
+                self.assertLess(time.monotonic(), deadline, "native checker did not finish")
+                select.select([], [], [], 0.01)
+        return result
 
     def terminal(self, command, env, stderr_tty, interactive=True):
         master, slave = pty.openpty()
@@ -280,7 +275,12 @@ elif "get" in sys.argv:
                 else: os.link(external, self.check_path)
                 before = self.check_path.read_bytes()
                 self.assert_no_notice(self.run_tui(schedule=True))
-                self.assertEqual(self.check_path.read_bytes(), before)
+                if kind in ("mode", "symlink", "hardlink"):
+                    self.assertEqual(self.check_path.read_bytes(), before)
+                else:
+                    refreshed = json.loads(self.check_path.read_text())
+                    self.assertFalse(refreshed["ok"])
+                    self.assertGreaterEqual(refreshed["checkedAt"], self.now)
                 self.assertEqual(json.loads(external.read_text()), self.check_record)
                 self.assertFalse(self.notice_path.exists())
 

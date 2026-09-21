@@ -57,8 +57,11 @@ CANONICAL_HOST_ARTIFACT=$WORK/canonical-candidate/hamn-v0.0.1-darwin-arm64.tar.g
     echo "FAIL: GitHub candidate did not embed the canonical stable manifest URL" >&2
     exit 1
 }
-grep -Fq "readonly HAMN_VERSION=\"v0.0.1\"" \
-    "$WORK/canonical-candidate/install.sh" || {
+# Check the embedded value through the generated installer's public behavior;
+# valid shell quoting may differ without changing the release version.
+bash "$WORK/canonical-candidate/install.sh" --help >"$WORK/canonical-help.out"
+grep -Fxq 'Install Hamn 0.0.1 for Apple Silicon macOS.' \
+    "$WORK/canonical-help.out" || {
     echo "FAIL: GitHub candidate installer did not embed the release version" >&2
     exit 1
 }

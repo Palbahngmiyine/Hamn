@@ -41,8 +41,16 @@ fn operation(name: &str, mutation: bool) -> Value {
         );
     }
     if domain == "docker" {
-        add("context", json!({"type":"string", "minLength":1, "maxLength":253, "pattern":"^[^\\u0000-\\u001F\\u007F-\\u009F]+$", "description":"Explicit external Docker context, exclusive with profile; requires Docker CLI"}), false);
-        add("docker-config", json!({"type":"string", "minLength":1, "description":"Docker CLI configuration directory; requires context"}), false);
+        add(
+            "context",
+            json!({"type":"string", "minLength":1, "maxLength":253, "pattern":"^[^\\u0000-\\u001F\\u007F-\\u009F]+$", "description":"Explicit external Docker context, exclusive with profile; requires Docker CLI"}),
+            false,
+        );
+        add(
+            "docker-config",
+            json!({"type":"string", "minLength":1, "description":"Docker CLI configuration directory; requires context"}),
+            false,
+        );
     }
     if domain == "k8s" {
         add(
@@ -103,8 +111,16 @@ fn operation(name: &str, mutation: bool) -> Value {
         );
     }
     if upgrade {
-        add("check", json!({"type":"boolean", "default":false, "description":"Manifest-only read; no --yes required"}), false);
-        add("force", json!({"type":"boolean", "default":false, "description":"Same-version host reinstall; conflicts with check; no downgrade"}), false);
+        add(
+            "check",
+            json!({"type":"boolean", "default":false, "description":"Manifest-only read; no --yes required"}),
+            false,
+        );
+        add(
+            "force",
+            json!({"type":"boolean", "default":false, "description":"Same-version host reinstall; conflicts with check; no downgrade"}),
+            false,
+        );
         add(
             "manifest",
             json!({"type":"string", "description":"Release manifest URL; runtime HTTPS, strict schema, size and SHA-256 policy applies"}),
@@ -166,12 +182,23 @@ mod tests {
     #[test]
     fn docker_capabilities_require_one_explicit_target_and_scope_custom_config() {
         let op = operation("docker containers list", false);
-        assert!(!op["arguments"]["required"].as_array().unwrap().contains(&json!("profile")));
-        assert_eq!(op["arguments"]["oneOf"], json!([
-            {"required":["profile"],"not":{"required":["context"]}},
-            {"required":["context"],"not":{"required":["profile"]}}
-        ]));
-        assert_eq!(op["arguments"]["dependentRequired"]["docker-config"], json!(["context"]));
+        assert!(
+            !op["arguments"]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("profile"))
+        );
+        assert_eq!(
+            op["arguments"]["oneOf"],
+            json!([
+                {"required":["profile"],"not":{"required":["context"]}},
+                {"required":["context"],"not":{"required":["profile"]}}
+            ])
+        );
+        assert_eq!(
+            op["arguments"]["dependentRequired"]["docker-config"],
+            json!(["context"])
+        );
     }
     #[test]
     fn schema_names_and_mandatory_arguments_match_the_registry() {
@@ -180,8 +207,14 @@ mod tests {
         assert_eq!(operations.len(), OPERATIONS.len());
         for op in operations {
             let required = op["arguments"]["required"].as_array().unwrap();
-            let upgrade = matches!(op["name"].as_str(), Some("system update" | "system upgrade"));
-            assert_eq!(required.contains(&json!("yes")), op["mutates"] == true && !upgrade);
+            let upgrade = matches!(
+                op["name"].as_str(),
+                Some("system update" | "system upgrade")
+            );
+            assert_eq!(
+                required.contains(&json!("yes")),
+                op["mutates"] == true && !upgrade
+            );
             if upgrade {
                 assert_eq!(op["arguments"]["else"]["required"], json!(["yes"]));
                 assert_eq!(op["arguments"]["if"]["properties"]["check"]["const"], true);

@@ -226,11 +226,10 @@ fn managed_helper() -> Option<(PathBuf, PathBuf)> {
         return None;
     }
     let source = generation.join("share/hamn/src");
-    let helper = source.join("scripts/upgrade_support.py");
     let pointer = source.join("packaging/release/update-manifest-url");
-    owned_regular(&helper, false, 1024 * 1024)?;
+    owned_regular(&executable, false, 128 * 1024 * 1024)?;
     owned_regular(&pointer, false, 4096)?;
-    Some((helper, pointer))
+    Some((executable, pointer))
 }
 
 /// Call only after a successful TUI exit, after its terminal guard is restored.
@@ -352,20 +351,8 @@ pub fn after_tui() {
     let Ok(manifest) = fs::read_to_string(pointer) else {
         return;
     };
-    if let Ok(mut child) = Command::new("/usr/bin/python3")
-        .arg(helper)
-        .arg("schedule")
-        .arg("--manifest")
-        .arg(manifest.trim())
-        .arg("--current-version")
-        .arg(env!("HAMN_VERSION"))
-        .env_clear()
-        .env("HOME", home)
-        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
+    if let Ok(mut child) =
+        checker_command(&helper, &home, manifest.trim(), env!("HAMN_VERSION")).spawn()
     {
         // The scheduler exits after spawning a detached checker; wait/reap in
         // a helper thread, never wait for release network in the foreground.
@@ -377,9 +364,53 @@ pub fn after_tui() {
     }
 }
 
+fn checker_command(executable: &Path, home: &Path, manifest: &str, current: &str) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .args(["__install-support", "upgrade", "schedule"])
+        .arg("--manifest")
+        .arg(manifest)
+        .arg("--current-version")
+        .arg(current)
+        .env_clear()
+        .env("HOME", home)
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::stable;
+    #[test]
+    fn scheduler_uses_native_binary_clean_environment_and_detached_stdio() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = crate::install_support::test_support::Temp::new();
+        let script = temporary.0.join("record");
+        let keys = temporary.0.join("keys");
+        let args = temporary.0.join("args");
+        std::fs::write(&script, format!("#!/bin/sh\nset -eu\numask 077\nfor fd in 0 1 2; do if test -t \"$fd\"; then exit 91; fi; done\n/usr/bin/env | /usr/bin/cut -d = -f 1 > '{}'\nprintf '%s\\n' \"$@\" > '{}'\ntest \"$HOME\" = '{}'\ntest \"$PATH\" = /usr/bin:/bin:/usr/sbin:/sbin\n", keys.display(), args.display(), temporary.0.display())).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = super::checker_command(
+            &script,
+            &temporary.0,
+            "https://fixture.invalid/manifest",
+            "1.2.3",
+        );
+        assert!(command.status().unwrap().success());
+        let keys = std::fs::read_to_string(keys).unwrap();
+        assert!(
+            keys.lines()
+                .all(|key| ["HOME", "PATH", "PWD", "SHLVL", "_"].contains(&key)),
+            "unexpected inherited environment key"
+        );
+        assert_eq!(
+            std::fs::read_to_string(args).unwrap(),
+            "__install-support\nupgrade\nschedule\n--manifest\nhttps://fixture.invalid/manifest\n--current-version\n1.2.3\n"
+        );
+    }
     #[test]
     fn stable_versions_reject_metadata_and_overflow() {
         assert_eq!(stable("v4294967295.2.3"), Some([u32::MAX, 2, 3]));

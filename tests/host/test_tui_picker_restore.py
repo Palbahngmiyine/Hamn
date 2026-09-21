@@ -36,7 +36,8 @@ class NamespaceApi(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         assert self.path.startswith('/api/v1/namespaces'), self.path
         body = json.dumps({'apiVersion':'v1', 'kind':'NamespaceList', 'items':[
-            {'apiVersion':'v1', 'kind':'Namespace', 'metadata':{'name':name}}
+            {'apiVersion':'v1', 'kind':'Namespace', 'metadata':{
+                'name':name, 'uid':'namespace-' + name, 'resourceVersion':'1'}}
             for name in ('row-one', 'row-two')]}).encode()
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
@@ -118,14 +119,27 @@ def committed_navigation_is_not_undone(workspace, key, title, typed=False):
             harness.send((':' + query + '\r').encode(), '--context replacement')
         else:
             choice = 'external' if workspace == 'containers' else ('old-cluster' if key == b'e' else 'row-two')
-            harness.send(('/' + choice + '\r').encode(), choice)
+            harness.until(choice)
             harness.wait(lambda: '[loading]' not in harness.screen.text())
+            # Start filtering only after the picker response has rendered. A
+            # hidden selection must clear, not move to the remaining row.
+            harness.send(('/' + choice + '\r:PICKER_FILTER_BARRIER').encode(), ':PICKER_FILTER_BARRIER')
+            os.write(harness.master, b'\x1b')
+            harness.wait(lambda: ':PICKER_FILTER_BARRIER' not in harness.screen.text())
+            if key == b'n':
+                assert '> row-two' not in harness.screen.text(), harness.screen.text()
+            # Filtering is not a selection action. Explicitly select the visible
+            # choice and wait for its completed frame before committing it.
+            os.write(harness.master, b'j')
+            harness.until('> ' + choice)
             harness.send(b'\r', 'docker containers' if workspace == 'containers' else 'kubectl pods')
         harness.until('outside')
         harness.wait(lambda: '[loading]' not in harness.screen.text())
         current = harness.calls()[-1]
         assert 'explicit' not in current[1], current
         assert not any(value in current[1] for value in ('label=old', 'app=old')), current
+        if not typed and key == b'n':
+            assert current[1][current[1].index('--namespace') + 1] == 'row-two', current
         harness.send(b'/outside\r', 'outside')
         harness.wait(lambda: 'row-one' not in harness.screen.text())
         harness.send(b'\x1b', 'row-one')

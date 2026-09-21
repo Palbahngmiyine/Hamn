@@ -76,36 +76,9 @@ HAMN_EXPECTED_WORKFLOW_ATTEMPT="$workflow_attempt" \
 [ "$(sha256 "$host")" = "$host_hash" ]
 [ ! -e "$publish/hamn-update-manifest.json.sig" ]
 [ ! -e "$publish/validation-evidence.json.sig" ]
-# Consume the publisher's exact manifests through the real updater. Transport
-# only substitutes immutable fixture bytes for the declared HTTPS URLs.
-mkdir "$WORK/transport" "$WORK/contract-home"
-cat >"$WORK/transport/curl" <<'PY_CURL'
-#!/usr/bin/env python3
-import os, pathlib, sys
-args=sys.argv[1:]
-assert args[args.index('--proto')+1] == '=https'
-assert args[args.index('--proto-redir')+1] == '=https'
-source=pathlib.Path(os.environ['HAMN_PUBLISH_FIXTURE']) / args[-1].rsplit('/',1)[-1]
-data=source.read_bytes()
-if '--dump-header' in args:
-    pathlib.Path(args[args.index('--dump-header')+1]).write_text('HTTP/1.1 200 OK\r\nContent-Length: '+str(len(data))+'\r\n\r\n')
-if args[args.index('-o')+1] == '-': sys.stdout.buffer.write(data)
-else: pathlib.Path(args[args.index('-o')+1]).write_bytes(data)
-PY_CURL
-chmod 0755 "$WORK/transport/curl"
-for manifest_name in hamn-update-manifest.json hamn-update-manifest-v3.json; do
-    HOME="$WORK/contract-home" PATH="$WORK/transport:$PATH" \
-    HAMN_PUBLISH_FIXTURE="$candidate" HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
-        bash "$ROOT/scripts/update-host.sh" --bootstrap --output-json \
-        --bindir "$WORK/contract-home/bin" --datadir "$WORK/contract-home/src" \
-        --manifest "$publish/$manifest_name" >"$WORK/$manifest_name.result"
-    python3 - "$WORK/$manifest_name.result" <<'PY_RESULT'
-import json, sys
-with open(sys.argv[1]) as source: result=json.load(source)
-assert result['completed'] is True and result['latestVersion']=='0.0.1'
-assert result['profileDisksChanged'] is False
-PY_RESULT
-done
+# Keep publisher URLs and bytes unchanged; native curl uses a bounded local TLS
+# CONNECT fixture with child-only trust, not a PATH replacement.
+python3 "$ROOT/tests/host/publisher_consumer.py" "$publish" "$candidate" "$WORK/consumers"
 python3 - "$publish/hamn-update-manifest.json" "$release_ref" \
     "$publish/hosted-validation-evidence.json" "$source_tree" \
     "$publish/hamn-update-manifest-v3.json" "$candidate" <<'PY'

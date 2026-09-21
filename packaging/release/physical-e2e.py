@@ -50,7 +50,22 @@ def unpack(archive, destination):
     return roots[0]
 
 
-def fixture(source, destination, state, legacy_hash):
+def fixture(source, destination, state, legacy_hash, *, home=None):
+    # Only the caller's new private temporary HOME may be shared by old start.
+    # Legacy v0.0.1 emits invalid null cloud-init mounts when sharing is off.
+    if home is not None:
+        home = Path(home)
+        temporary = Path('/private/tmp')
+        if state != 'running' or home == temporary or home != home.resolve(strict=True) or not home.is_relative_to(temporary):
+            raise ValueError('legacy HOME must be a private temporary directory')
+        for directory in [home, *home.parents]:
+            if directory == temporary:
+                break
+            info = directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                raise ValueError('legacy HOME must be owned and private')
+        if destination.parent != home / '.hamn' or destination.parent != destination.parent.resolve(strict=True):
+            raise ValueError('legacy clone must be inside its temporary HOME')
     source = Path(source).resolve(strict=True)
     expected = read_json(owned(source / 'expected.json'))
     if set(expected) != {'k3sState', 'docker'} or expected['k3sState'] != state:
@@ -64,9 +79,14 @@ def fixture(source, destination, state, legacy_hash):
         digest.update(sha256(path).encode())
         run(['/bin/cp', '-c', path, destination / name])
     config = (destination / 'config.yaml').read_text()
-    if 'mounts: []' not in config or 'provision: []' not in config or 'kubernetes:' not in config:
+    empty_lists = all([line for line in config.splitlines() if line.lstrip().startswith(key + ':')] == [key + ': []']
+                      for key in ('mounts', 'provision'))
+    if not empty_lists or 'kubernetes:' not in config:
         raise ValueError('legacy fixture must have no custom mounts or provision commands')
-    (destination / 'config.yaml').write_text(config.replace('mountHome: true', 'mountHome: false'))
+    mount_lines = [line for line in config.splitlines() if line.lstrip().startswith('mountHome:')]
+    if len(mount_lines) != 1 or mount_lines[0] not in ('mountHome: true', 'mountHome: false'):
+        raise ValueError('legacy fixture must have one explicit mountHome boolean')
+    (destination / 'config.yaml').write_text(config.replace(mount_lines[0], 'mountHome: ' + ('true' if home else 'false')))
     digest.update(json.dumps(expected, sort_keys=True).encode())
     return expected['docker'], digest.hexdigest()
 
@@ -83,6 +103,13 @@ def legacy_kubeconfig(home):
             'users': [{'name': 'fixture-base', 'user': {'token': 'fixture-only'}}],
             'contexts': [{'name': 'fixture-base', 'context': {'cluster': 'fixture-base', 'user': 'fixture-base'}}]}, output)
     path.chmod(0o600)
+
+
+def legacy_environment(home):
+    # Keep installed Docker/kubectl discoverable without inheriting user targets.
+    return {'HOME': str(home), 'PATH': os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin'),
+            'LC_ALL': 'C', 'DOCKER_CONFIG': str(home / '.docker'),
+            'KUBECONFIG': str(home / '.kube/config')}
 
 
 def workspace():
@@ -136,6 +163,7 @@ def main():
         binary_hash = sha256(binary)
         checks.add('singleBinary')
         home = work / 'home'
+        home.mkdir(mode=0o700)
         cache = home / '.hamn/cache'
         cache.mkdir(parents=True, mode=0o700)
         legacy_kubeconfig(home)
@@ -168,11 +196,12 @@ def main():
             runtime.call('vm', 'stop', profile=profile, yes=True)
         for state in ['running', 'stopped']:
             profile = 'retire-' + state
-            before, source_hash = fixture(os.environ['HAMN_LEGACY_' + state.upper() + '_FIXTURE'], home / '.hamn' / profile, state, legacy_hash)
+            before, source_hash = fixture(os.environ['HAMN_LEGACY_' + state.upper() + '_FIXTURE'], home / '.hamn' / profile,
+                                          state, legacy_hash, home=home if state == 'running' else None)
             profiles.append(profile)
             if state == 'running':
-                run([legacy_binary, 'start', '--profile', profile, '--template=false'], dict(os.environ, HOME=str(home)))
-                runtime.terminal(retiring=profile)
+                run([legacy_binary, 'start', '--profile', profile, '--template=false'], legacy_environment(home))
+                runtime.retire_running(profile)
             else:
                 runtime.call('vm', 'start', profile=profile, yes=True)
             runtime.verify_retired(profile)

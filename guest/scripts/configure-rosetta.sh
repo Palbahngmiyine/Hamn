@@ -13,6 +13,10 @@ MOUNT_POINT=${HAMN_ROSETTA_MOUNT_POINT:-/mnt/hamn-rosetta}
 ROSETTA_HANDLER=${HAMN_ROSETTA_HANDLER:-hamn-rosetta}
 QEMU_HANDLER=${HAMN_QEMU_HANDLER:-qemu-x86_64}
 PRESERVE=${HAMN_ROSETTA_PRESERVE:-no}
+# update-binfmts rejects equal magic in one database with fix-binary, even
+# when the other handler is disabled. Keep the package-owned qemu database
+# intact; Rosetta owns only this separate database and its kernel handler.
+ROSETTA_BINFMT_DIR=${HAMN_ROSETTA_BINFMT_DIR:-/var/lib/hamn/binfmts}
 
 MAGIC='\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00'
 MASK='\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff'
@@ -45,12 +49,23 @@ handler_exists() {
     "$UPDATE_BINFMT" --display "$1" >/dev/null 2>&1
 }
 
-remove_handler() {
-    local name=$1
+rosetta_binfmt() {
+    "$UPDATE_BINFMT" --admindir "$ROSETTA_BINFMT_DIR" "$@"
+}
 
-    if handler_exists "$name"; then
-        "$UPDATE_BINFMT" --remove "$name" ||
-            fail "cannot remove binfmt handler: $name"
+remove_legacy_rosetta() {
+    # Releases before the dedicated database could leave a failed install in
+    # the default database. Remove that entry before enabling qemu again.
+    if handler_exists "$ROSETTA_HANDLER"; then
+        "$UPDATE_BINFMT" --remove "$ROSETTA_HANDLER" "$MOUNT_POINT/rosetta" ||
+            fail "cannot remove legacy Rosetta binfmt handler"
+    fi
+}
+
+remove_rosetta_handler() {
+    if rosetta_binfmt --display "$ROSETTA_HANDLER" >/dev/null 2>&1; then
+        rosetta_binfmt --remove "$ROSETTA_HANDLER" "$MOUNT_POINT/rosetta" ||
+            fail "cannot remove Rosetta binfmt handler"
     fi
 }
 
@@ -89,30 +104,45 @@ enable_rosetta() {
     handler_exists "$QEMU_HANDLER" ||
         fail "qemu x86_64 binfmt handler is unavailable: $QEMU_HANDLER"
 
-    remove_handler "$ROSETTA_HANDLER"
-    "$UPDATE_BINFMT" --install "$ROSETTA_HANDLER" "$runtime" \
+    remove_legacy_rosetta
+    # Reconfiguration can start with qemu disabled. Establish the fallback
+    # before replacing the old Rosetta registration or attempting a new one.
+    ensure_qemu_handler
+    remove_rosetta_handler
+    rosetta_binfmt --install "$ROSETTA_HANDLER" "$runtime" \
         --magic "$MAGIC" --mask "$MASK" --credentials yes \
         --preserve "$PRESERVE" --fix-binary yes || {
-        remove_handler "$ROSETTA_HANDLER"
+        ensure_qemu_handler
+        remove_rosetta_handler
         fail "cannot register the Rosetta runtime"
     }
     if ! "$UPDATE_BINFMT" --disable "$QEMU_HANDLER"; then
-        remove_handler "$ROSETTA_HANDLER"
         ensure_qemu_handler
+        remove_rosetta_handler
         fail "cannot disable qemu while Rosetta is active"
     fi
-    handler_exists "$ROSETTA_HANDLER" ||
+    if ! rosetta_binfmt --display "$ROSETTA_HANDLER" |
+        grep -Fxq "$ROSETTA_HANDLER (enabled):"; then
+        ensure_qemu_handler
+        remove_rosetta_handler
         fail "Rosetta registration did not persist"
+    fi
     echo "hamn: Rosetta x86_64 translation is enabled"
 }
 
 disable_rosetta() {
     # Make qemu available before removing Rosetta so an interruption never
     # leaves the guest without an x86_64 ELF handler.
+    remove_legacy_rosetta
     ensure_qemu_handler
-    remove_handler "$ROSETTA_HANDLER"
+    remove_rosetta_handler
     echo "hamn: qemu x86_64 translation is enabled"
 }
+
+[ ! -L "$ROSETTA_BINFMT_DIR" ] || fail "Rosetta binfmt database is a symlink"
+"$INSTALL" -d -m 0755 "$ROSETTA_BINFMT_DIR" ||
+    fail "cannot create Rosetta binfmt database"
+[ -d "$ROSETTA_BINFMT_DIR" ] || fail "Rosetta binfmt database is not a directory"
 
 case "$1" in
     enable) enable_rosetta ;;

@@ -22,6 +22,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 BASE_IMAGE=${HAMN_GUEST_BASE_IMAGE:-}
 BASE_SHA256=${HAMN_GUEST_BASE_SHA256:-}
 OUTPUT=${HAMN_GUEST_OUTPUT:-}
+BASELINE_OUTPUT=${HAMN_GUEST_BASELINE_OUTPUT:-}
 VIRT_CUSTOMIZE=${HAMN_VIRT_CUSTOMIZE:-virt-customize}
 QEMU_IMG=${HAMN_QEMU_IMG:-qemu-img}
 VIRT_RESIZE=${HAMN_VIRT_RESIZE:-virt-resize}
@@ -55,6 +56,12 @@ for artifact in "$OUTPUT" "$OUTPUT.sha256" "$OUTPUT.packages-before.tsv" \
     [ ! -e "$artifact" ] && [ ! -L "$artifact" ] ||
         fail "guest image output already exists: $artifact"
 done
+if [ -n "$BASELINE_OUTPUT" ]; then
+    python3 "$ROOT/guest/image/image_evidence.py" check "$BASELINE_OUTPUT" \
+        "$OUTPUT" "$OUTPUT.sha256" "$OUTPUT.packages-before.tsv" \
+        "$OUTPUT.packages-after.tsv" "$OUTPUT.size-report.json" \
+        "$OUTPUT.size-report.budget-proposal.json"
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/hamn-guest-image.XXXXXX") ||
     fail "cannot create image build workspace"
@@ -155,6 +162,10 @@ fi
 BASELINE=$WORK/baseline.img
 "$QEMU_IMG" convert -q -f qcow2 -O qcow2 \
     -o compression_type=zlib -c "$STAGE" "$BASELINE"
+if [ -n "$BASELINE_OUTPUT" ]; then
+    "$QEMU_IMG" compare -q -f qcow2 -F qcow2 "$STAGE" "$BASELINE" ||
+        fail "baseline export changed provisioned guest-visible bytes"
+fi
 "$GUESTFISH" --ro --format=qcow2 -a "$STAGE" -i \
     command 'dpkg-query -W -f=${Package}\t${Version}\t${Installed-Size}\n' \
     >"$OUTPUT.packages-before.tsv"
@@ -201,6 +212,11 @@ COMPACT=
 printf '%s  %s\n' "$(sha256_file "$OUTPUT")" "$(basename "$OUTPUT")" \
     >"$OUTPUT.sha256"
 chmod 0644 "$OUTPUT" "$OUTPUT.sha256"
+if [ -n "$BASELINE_OUTPUT" ]; then
+    # Preserve the actual pre-cleanup artifact only after every existing gate.
+    python3 "$ROOT/guest/image/image_evidence.py" publish \
+        "$BASELINE" "$BASELINE_OUTPUT" "$OUTPUT.size-report.json"
+fi
 if [ "$REVIEW_ONLY" = 1 ]; then
     echo "built review-only guest image; review size and physical runtime evidence before distribution: $OUTPUT"
 else

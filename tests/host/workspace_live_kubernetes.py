@@ -161,6 +161,8 @@ def kubernetes(root, runtime, create=True):
         assert config.read_bytes() == before, 'TUI selection changed kubeconfig'
         assert 'preserved-cli' in kubectl('get','configmap','tui-proof','-n','workspace-proof','-o','json')
         guarded_mutations(root, runtime, config, env)
+        from workspace_live_management import management_review
+        management_review(root, runtime, config, env, name)
         (root / 'kubernetes-version.json').write_text(kubectl('version','-o','json'))
         print('PASS: live Kubernetes query, apply, interactive exec, port-forward and unchanged kubeconfig', flush=True)
     finally:

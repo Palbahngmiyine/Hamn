@@ -62,6 +62,12 @@ def scenario(workspace):
         write_rows(harness, [alpha, beta, row('marker-paste', 'id-d')])
         harness.send(b'R', 'marker-paste')
         harness.send(b'/\x1b[200~beta\x1b[201~\r', 'beta')
+        os.write(harness.master, b'd:FILTER_BARRIER')
+        harness.until(':FILTER_BARRIER')
+        assert 'Confirm delete' not in harness.screen.text()
+        os.write(harness.master, b'\x1b')
+        harness.wait(lambda: ':FILTER_BARRIER' not in harness.screen.text())
+        os.write(harness.master, b'j')
         harness.send(b'd', expected)
         harness.send(b'n', 'beta')
         harness.send(b'l', 'Follow latest 200 lines')
@@ -104,6 +110,10 @@ def compose_navigation():
         source = PEER.replace("if 'get' in args or 'ps' in args:", "if 'compose' in args:\n print(json.dumps([{'Name':'review-project','Status':'running(1)','ConfigFiles':'compose.yml'}]))\nelif 'get' in args or 'ps' in args:")
         peer.write_text(f'#!{sys.executable}\n' + source)
         harness.send(b':compose ls\r', 'review-project')
+        harness.send(b'm', 'Resource actions')
+        assert 'Project containers' in harness.screen.text()
+        assert 'related-pods' not in harness.screen.text() and 'inspect' not in harness.screen.text()
+        harness.send(b'\x1b', 'review-project')
         harness.send(b'\r', 'project-service')
         queries = [args for _, args in harness.calls() if 'ps' in args and '--filter' in args]
         assert queries[-1][queries[-1].index('--filter') + 1] == 'label=com.docker.compose.project=review-project', queries

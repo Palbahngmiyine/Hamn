@@ -89,7 +89,7 @@ Pod 로그에는 `--container`·`--previous`를 사용할 수 있습니다.
 
 ## 연결과 소유권
 
-Docker 요청은 API 버전 협상 후 `~/.hamn/<profile>/docker.sock`으로 직접 전달합니다.
+프로필 Docker API 요청은 API 버전 협상 후 `~/.hamn/<profile>/docker.sock`으로 직접 전달합니다.
 변경 전 컨테이너 이름을 고정 ID로 해석하고, 컨테이너 삭제 시 볼륨은 보존합니다.
 Docker 공개 포트의 포워딩은 기존 C 관찰기가 소유하며 외부 도구도 같은 소켓을 사용합니다.
 

@@ -14,13 +14,16 @@ import os
 from pathlib import Path
 import random
 import selectors
+import shlex
 import shutil
 import signal
+import socketserver
 import stat
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -28,6 +31,26 @@ from test_upgrade_support import HttpFixture, ROOT, manifest, upgrade
 
 SEED = 20260921
 SUPPORT = ROOT / "scripts/upgrade_support.py"
+
+
+@contextlib.contextmanager
+def network_tripwire(root):
+    """Observe any attempted TLS connection, independently of curl's path."""
+    requests = root / "unexpected-request"
+
+    class Handler(socketserver.BaseRequestHandler):
+        def handle(self):
+            requests.write_text("unexpected network connection")
+
+    with socketserver.TCPServer(("127.0.0.1", 0), Handler) as server:
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            yield server.server_address[1], requests
+        finally:
+            server.shutdown()
+            worker.join(timeout=2)
+            assert not worker.is_alive(), "network observation thread survived"
 
 # Exact parser from scripts/update-host.sh at ed7a7023c073bb3cc3dc248f4acd1583424ce9e3
 # (source blob b38ff62947c5b7a1362150c8723fc75ddb9870a3). Freeze the old consumer
@@ -309,6 +332,15 @@ class GeneratedAcquisition(unittest.TestCase):
 
 
 class GeneratedTransactions(unittest.TestCase):
+    def test_network_tripwire_observes_absolute_curl_connections(self):
+        with tempfile.TemporaryDirectory(prefix="hamn-network-tripwire-") as temporary:
+            with network_tripwire(Path(temporary)) as (port, requests):
+                result = subprocess.run(['/usr/bin/curl', '--disable', '--noproxy', '*',
+                    '--connect-timeout', '2', '--max-time', '3',
+                    f'https://127.0.0.1:{port}/forbidden'], capture_output=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(requests.exists(), 'connection observer was insensitive')
+
     def snapshot(self, profile):
         result = {}
         for path in [profile, *sorted(profile.rglob("*"))]:
@@ -321,8 +353,11 @@ class GeneratedTransactions(unittest.TestCase):
         rng = random.Random(SEED + 3)
         for case, point in enumerate(("PREPARED", "AFTER_GUEST_SELECTION")):
             with self.subTest(seed=SEED + 3, case=case, interruption=point), \
-                    tempfile.TemporaryDirectory(prefix="hamn-property-transaction-") as temporary:
+                    tempfile.TemporaryDirectory(prefix="hamn-property-transaction-") as temporary, \
+                    contextlib.ExitStack() as services:
                 root = Path(temporary).resolve()
+                native = root / "native-hamn"
+                shutil.copy2(Path(os.environ.get("HAMN", ROOT / "build/hamn")).resolve(), native)
                 home = root / "home"
                 home.mkdir()
                 bindir, datadir = home / "bin", home / "source"
@@ -330,10 +365,14 @@ class GeneratedTransactions(unittest.TestCase):
                 (release / "bin").mkdir(parents=True)
                 version = "1." + ".".join(str(rng.randrange(10000)) for _ in range(2))
                 # The existing real-binary CLI suite owns frontend coverage.
-                # This executable supplies only the installer's version contract;
-                # install-host/update-host/receipt/journal code remains unchanged.
+                # Only the version is generated; all private support operations
+                # execute the frozen real native implementation.
                 binary = release / "bin/hamn"
-                binary.write_text(f'#!/bin/sh\n[ "$#" = 1 ] && [ "$1" = --version ] || exit 64\nprintf "%s\\n" "hamn {version}"\n')
+                binary.write_text('#!/bin/sh\nif [ "$#" = 1 ] && [ "$1" = --version ]; then\n'
+                                  f'  printf "%s\\n" "hamn {version}"\n'
+                                  'elif [ "${1:-}" = __install-support ]; then\n'
+                                  f'  exec {shlex.quote(str(native))} "$@"\n'
+                                  'else exit 64; fi\n')
                 binary.chmod(0o755)
                 for directory in ("scripts", "packaging"):
                     shutil.copytree(ROOT / directory, release / directory)
@@ -385,17 +424,12 @@ class GeneratedTransactions(unittest.TestCase):
                     self.assertEqual(os.readlink(command), active)
                     self.assertEqual([self.snapshot(profile) for profile in profiles], before_profiles)
 
-                # A network trap makes zero Payload independent of reported
-                # counters. Healthy/cached states must never call curl.
-                transport = root / "transport"
-                transport.mkdir()
-                requests = root / "unexpected-request"
-                curl = transport / "curl"
-                curl.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nPath({str(requests)!r}).write_text("unexpected network")\nraise SystemExit(97)\n')
-                curl.chmod(0o755)
-                env["PATH"] = f"{transport}:{os.environ.get('PATH', '')}"
+                # Native curl has an absolute path. Observe the actual endpoint
+                # instead of relying on PATH interception or reported counters.
+                port, requests = services.enter_context(network_tripwire(root))
+                env.update(NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
                 for name in ("host", "guestImage"):
-                    value["artifacts"][name]["url"] = f"https://fixture.test/forbidden/{name}"
+                    value["artifacts"][name]["url"] = f"https://127.0.0.1:{port}/forbidden/{name}"
                 private_json(manifest_path, value)
                 result = invoke()
                 self.assertEqual(result["status"], "up-to-date")

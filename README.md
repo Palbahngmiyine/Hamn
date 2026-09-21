@@ -27,6 +27,10 @@ curl -fsSL --proto '=https' --tlsv1.2 \
 hamn
 ```
 
+The release installer needs only macOS system tools and the downloaded Hamn
+executable. Python, Homebrew, Rust, and Xcode Command Line Tools are not required
+for installation or updates.
+
 For source builds, see [Development](docs/DEVELOPMENT.md).
 Signed release installation is described in [release setup](docs/RELEASE-SETUP.md).
 

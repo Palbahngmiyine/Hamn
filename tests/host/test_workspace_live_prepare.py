@@ -4,10 +4,45 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from test_workspace_live import REPO, prepare
+from test_workspace_live import REPO, prepare, start_isolated
 
 
 class Preparation(unittest.TestCase):
+    def test_profile_is_created_with_home_sharing_disabled_before_start(self):
+        with tempfile.TemporaryDirectory(prefix='hamn-live-sharing-') as directory:
+            class Runtime:
+                home = Path(directory)
+                calls = []
+                def call(self, *words, **options):
+                    self.calls.append(words)
+                    config = self.home / '.hamn/verify/config.yaml'
+                    if words == ('vm', 'create'):
+                        config.parent.mkdir(parents=True)
+                        config.write_text('cpu: 4\nmountHome: true\n')
+                    if words == ('vm', 'start'):
+                        self.assert_disabled = 'mountHome: false' in config.read_text()
+                        return {'state': 'running'}
+                    return {'state': 'stopped', 'mountHome': 'mountHome: true' in config.read_text()}
+            runtime = Runtime()
+            start_isolated(runtime)
+            self.assertTrue(runtime.assert_disabled)
+            self.assertEqual(runtime.calls, [('vm', 'create'), ('vm', 'status'), ('vm', 'start'), ('vm', 'status')])
+
+    def test_running_profile_with_home_sharing_is_not_modified(self):
+        with tempfile.TemporaryDirectory(prefix='hamn-live-sharing-') as directory:
+            class Runtime:
+                home = Path(directory)
+                def call(self, *words, **options):
+                    assert words == ('vm', 'status')
+                    return {'state': 'running'}
+            runtime = Runtime()
+            config = runtime.home / '.hamn/verify/config.yaml'
+            config.parent.mkdir(parents=True)
+            config.write_text('mountHome: true\n')
+            with self.assertRaisesRegex(AssertionError, 'running validation profile'):
+                start_isolated(runtime)
+            self.assertEqual(config.read_text(), 'mountHome: true\n')
+
     def test_resume_reuses_a_read_only_candidate_and_rejects_changed_bytes(self):
         with tempfile.TemporaryDirectory(prefix='hamn-live-prepare-') as directory:
             root = Path(directory)

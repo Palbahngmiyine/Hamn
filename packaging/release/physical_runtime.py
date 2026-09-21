@@ -77,7 +77,7 @@ class Runtime:
             'busybox:1.37', 'sha256sum', '/data/sentinel', profile=profile).split()[0]
         return result
 
-    def terminal(self, retiring=None):
+    def terminal(self):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 100, 0, 0))
         before = terminal_settings(slave)
@@ -85,8 +85,8 @@ class Runtime:
             env=dict(self.environment, TERM='xterm-256color'), start_new_session=True)
         output = bytearray()
         try:
-            deadline = time.monotonic() + (630 if retiring else 15)
-            while b'Hamn' not in output or (retiring and self.call('vm', 'status', profile=retiring)['migration'] != 'current'):
+            deadline = time.monotonic() + 15
+            while b'Hamn' not in output:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
                     raise RuntimeError('TUI did not render before the deadline')
@@ -106,6 +106,23 @@ class Runtime:
                 child.wait(timeout=10)
             os.close(master)
             os.close(slave)
+
+    def retire_running(self, profile):
+        """Prove TUI entry is read-only before explicitly confirming retirement."""
+        before = self.call('vm', 'status', profile=profile)
+        fields = ('state', 'migration', 'lastOperation')
+        if not all(key in before for key in fields) or before['state'] != 'running' or before['migration'] != 'pending':
+            raise RuntimeError('running legacy fixture must have pending retirement')
+        self.terminal()
+        after = self.call('vm', 'status', profile=profile)
+        if any(key not in after or after[key] != before[key] for key in fields):
+            raise RuntimeError('TUI entry changed legacy state before confirmation')
+        # A running VM does not establish that this is the running-K3s case.
+        self.ssh("timeout 190 sh -c 'until systemctl is-active --quiet k3s.service && "
+                 "systemctl is-enabled --quiet k3s.service && "
+                 "k3s kubectl --request-timeout=5s get --raw=/readyz >/dev/null; "
+                 "do sleep 1; done'", profile=profile)
+        self.call('vm', 'migrate', profile=profile, yes=True)
 
     def verify_retired(self, profile):
         script = '''

@@ -2,6 +2,18 @@
 
 See [INSTALLATION.ko.md](INSTALLATION.ko.md) for Korean.
 
+The published installer and updater use macOS system commands, including the
+built-in Bash and zsh shells, and support code compiled into the same Hamn
+executable. No Python, Perl, Ruby, Homebrew, Rust, or Xcode Command Line Tools
+installation is needed on the macOS host. The bootstrap verifies the
+archive's pinned SHA-256 with the system `openssl`, reads only its executable
+through system `tar` into a private file, then uses that authenticated executable
+to validate the complete archive before extracting it. Manifest validation,
+receipt compatibility, install locks, recovery metadata and generation collection
+run inside Hamn. Before that executable is available, stock `zsh/system` owns
+host-download locking and bounded partial writes. Developer builds, release
+assembly and tests still require their documented toolchain.
+
 Use the [official installer](../README.md#install) for a first installation or
 an incompatible older updater. For a managed installation:
 
@@ -47,11 +59,27 @@ requires verified host reinstallation. No version string alone authorizes reuse.
 Downloads live under `~/.hamn/cache/downloads/`, indexed by SHA-256. Owner-only
 locks serialize each digest. Safe partial files resume with Range and a recorded
 validator when available; a rejected or ignored Range gets one clean retry.
-Size or digest mismatch is never published. The standalone installer embeds the
-same acquisition helper and also reuses verified host bytes. No telemetry is sent.
+Size or digest mismatch is never published. The standalone installer's stock-shell
+host bootstrap shares the digest lock and verified artifact cache with Hamn's
+native downloader. Once the host is authenticated, its native updater acquires
+the guest image. No telemetry is sent.
 Manual transfers allow 15 seconds to connect and 600 seconds total per request.
 Network failures are no longer retried three times automatically; rerun the command
 to resume a safe v3 partial. V2 failures restart the full download.
+
+Managed installs collect obsolete generations after commit, retaining the active
+and immediately previous generation, open executables/support files, and recovery
+references. Install and update transactions serialize on both target roots. A
+pending recovery journal, failed process scan, or uncertain ownership defers
+collection; retrying installation/update retries cleanup. Interrupted retirement
+is also retried. Unmarked directories, incomplete staging copies, external package
+manager files, profiles and guest images are outside collection. Do not manually
+launch inactive generation paths during collection. Older updater scripts do not
+participate in the new transaction locks; finish those before installing this fix.
+Generations predating this retention policy are preserved: their recovery roots
+in other HOME directories cannot be enumerated. Existing accumulated generations
+require separate review; automatic collection bounds new unnecessary generations.
+
 
 A successful interactive TUI exit may display cached update information and
 schedule a detached manifest check. No network is awaited by the TUI, and checks
@@ -63,9 +91,17 @@ An automatic request has a 2-second connect and 5-second total deadline. Cache
 files are `~/.hamn/cache/update-check-v1.json` and `update-notice-v1.json`.
 
 The updater serializes recovery and publication and uses a durable journal.
-Readers recover journal v1 and v2; v2 records whether the host was changed so
-selection-only repair does not rewrite the binary pointer. Retry an interrupted
-mutation with the same original options, including `--manifest`. Recovery can
+New journal v3 records the exact attempted generation before the installer
+publishes its command link. Recovery changes state only when the active target
+is the recorded prior or attempted generation; a later installation from another
+HOME is preserved. Selection-only repair never rewrites the binary pointer.
+Readers still accept v1/v2 journals when the active target remains the recorded
+prior generation. If a legacy journal cannot prove ownership of a changed target,
+recovery fails without changing either selection or retiring the journal; explicit
+inspection of the journal and generation history is required; retrying alone
+cannot resolve this ambiguity. Do not delete that
+evidence or force a binary rollback to bypass the check. Retry an interrupted
+mutation from its original HOME with the same options, including `--manifest`. Recovery can
 itself fail and leaves a pending journal that blocks unsafe VM startup. Updates
 do not restart VMs or replace existing profile disks. Binary rollback cannot
 restore guest state or retired legacy K3s data. First-install failure has no prior

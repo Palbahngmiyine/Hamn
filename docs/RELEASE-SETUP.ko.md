@@ -63,8 +63,13 @@ HAMN_LEGACY_STOPPED_FIXTURE='/absolute/path/fixtures/stopped'
 각 fixture에는 정지한 격리 구형 프로필의 `disk.img`, `config.yaml`, `id_ed25519`,
 `id_ed25519.pub`, `efi-vars.bin`, `machine-id.bin`, `mac-addr`, `expected.json`이
 필요합니다. 이 파일들을 커밋하지 않습니다. 설정의 `mounts`, `provision`은 빈
-목록이어야 합니다. 검증기는 HOME 공유를 끄고 디스크를 복제하며 원본을 부팅하지
-않습니다. `expected.json`에는 `k3sState`(`running` 또는 `stopped`)와 해당 fixture에서
+목록이어야 합니다. 검증기는 디스크를 복제하며 원본을 부팅하지 않습니다.
+running 복제본만 `mountHome`을 켜고 검증기가 새로 만든 비공개 임시 HOME을 공유합니다.
+실제 사용자 HOME은 공유하지 않습니다. 이는 구형 버전의 기본 입력을 유지하기 위한 것으로,
+v0.0.1은 모든 공유를 끄면 잘못된 null cloud-init mounts를 생성합니다.
+stopped 복제본은 HOME 공유를 끈 상태를 유지합니다. 구형 시작 검사를 우회하기 위해
+seed·deployment marker·게스트 소스·원본 fixture를 수정하지 않습니다.
+`expected.json`에는 `k3sState`(`running` 또는 `stopped`)와 해당 fixture에서
 실제로 수집한 `docker` 스냅샷을 기록합니다. 컨테이너·이미지·볼륨·네트워크 식별자와
 검증용 볼륨 데이터 해시를 포함합니다. 정확한 스키마는 `physical_runtime.py`에
 정의합니다. Docker 기본 bridge의 ID는 데몬 재시작 때 바뀌므로 기본 네트워크는
@@ -73,7 +78,10 @@ HAMN_LEGACY_STOPPED_FIXTURE='/absolute/path/fixtures/stopped'
 쓰지 않습니다. running fixture는 K3s를 활성화한 뒤 VM을 정지하고, stopped
 fixture는 K3s 데이터를 유지하되 K3s를 비활성화한 상태입니다.
 
-검증기는 running fixture를 고정한 구형 바이너리로 시작한 뒤 후보 TUI를 실행합니다.
+검증기는 running fixture를 고정한 구형 바이너리로 시작한 뒤 후보 TUI를 열고 종료합니다.
+TUI 진입 전후 VM 상태·전환 대기 상태·마지막 작업이 그대로인지 확인하고, 게스트 K3s
+서비스의 실행·활성화와 API 준비 완료를 별도로 기다린 다음
+`hamn --headless vm migrate --profile <복제본> --yes`로 전환을 명시적으로 승인합니다.
 stopped fixture는 후보 헤드리스 인터페이스로 시작합니다. 두 경우 모두 전환 완료,
 Docker 스냅샷 보존, 테스트 VM 정리를 확인해야 합니다. Kubernetes 검증기는 고유
 namespace를 만들고 제거하며 원본 kubeconfig가 동일한지 확인합니다. 기본값은
@@ -121,7 +129,8 @@ DNS를 검사하며 runner 이미지의 네트워크 변경으로 발생한 실�
 호스트에 포함하는 것과 같은 qcow2 decoder를 빌드하고, 추출한 raw SHA-256을
 `qemu-img` 결과와 비교합니다. `guest/image/build-ubuntu-24.04-arm64.sh`는 build
 package와 재생성 가능한 내용을 제거하기 전, 동일하게 준비된 파일시스템에서 압축
-baseline을 생성합니다. 따라서 전후 측정에 같은 package 버전을 사용합니다.
+baseline을 생성합니다. 따라서 전후 측정은 한 번 provision한 package 집합에서
+시작하며, 별도 빌드 사이의 저장소 package 버전까지 고정한다는 뜻은 아닙니다.
 runtime package를 보호한 상태에서 gcc/make와 불필요한 build 의존성, apt·로그·임시
 파일을 제거하고 최초 부팅 상태를 초기화한 뒤 free block을 discard합니다. 압축에는
 zlib를 사용하고 가상 디스크는 8 GiB로 유지합니다. 바이트 동등성은 정리한 stage와
@@ -132,6 +141,12 @@ builder는 최소 `max(64 MiB, 5%)` 감소, 2 GiB 미만의 압축 크기, decod
 `<image>.packages-before.tsv`, `<image>.packages-after.tsv`를 기록합니다.
 report는 실제 크기·해시를 기반 이미지 digest와 소스 revision에 연결하며, 이미지와
 함께 release evidence와 attestation에 포함합니다.
+
+측정 전용 소스 snapshot은 해당 snapshot의 근거이며, 이후 PR revision이나 최종
+release candidate의 검증을 대신하지 않습니다. 게시 단계는 정확한 이미지 크기·digest와
+함께 report의 `sourceRevision`이 후보 commit과 같은지 확인합니다. 릴리스 소스나
+budget이 바뀌면 최종 commit에서 배포 산출물을 다시 빌드하고 검증합니다.
+이전 report의 revision을 바꾸거나 다른 이미지·호스트 byte의 런타임 증거를 재사용하지 않습니다.
 
 첫 실측 결과를 검토한 뒤 `guest/image/release-size-budget.json`을 만들어야 합니다.
 격리된 builder에서 일반 base image/hash/output 입력과 함께
@@ -144,9 +159,34 @@ report는 실제 크기·해시를 기반 이미지 digest와 소스 revision에
 `guest/image/verify-release-size.py IMAGE SIZE_REPORT REVIEWED_BUDGET`으로
 정확한 이미지와 report를 다시 검증합니다.
 
-Hosted 구조 검사는 부팅이나 기능 동등성의 증거가 아닙니다. 최적화한 정확한 산출물로
+실제 before/after 런타임 검증에는 같은 빌드에서
+`HAMN_GUEST_BASELINE_OUTPUT=/owned/output/hamn-baseline.img`도 지정합니다.
+이 선택 옵션은 정리 전 provisioned 이미지와 `.sha256` 파일을 mode 0600으로
+보존합니다. 크기 report의 baseline과 대조하고 기존 이미지 gate를 모두 통과한
+뒤에만 완성된 파일을 공개합니다. 기존 파일, symlink, 다른 사용자에게 쓰기를 허용한 디렉터리,
+후보 산출물과 겹치는 경로를 거부합니다. baseline은 검토 증거이며 배포 자산이 아닙니다.
+
+Linux arm64 builder에서 재현 가능한 정리 변형 두 개를 생성하려면 다음을 실행합니다.
+
+```sh
+python3 guest/tests/image_build_variations.py \
+  --baseline /owned/output/hamn-baseline.img \
+  --size-report /owned/output/hamn-guest.img.size-report.json \
+  --output-directory /owned/output/variations --seed 20260921
+```
+
+출력 디렉터리는 없어야 합니다. fixture는 삭제 가능한 로그, apt 캐시, 임시 파일,
+첫 부팅 식별자를 변형하고 정리·패키지 목록 비교·압축·decoder/reference·GPT·크기
+gate를 다시 실행합니다. `variations.json`에는 생성 입력별 이미지 digest와 물리
+런타임 검증 대기 상태를 기록합니다. baseline, 일반 후보, 각 변형 이미지를 각각
+소유가 분명한 일회용 profile에서 부팅하여 기능 동등성을 검증해야 하며, 구조 검사
+통과만으로 해당 검증을 완료한 것으로 처리하지 않습니다.
+
+Hosted 구조 검사는 부팅이나 기능 동등성의 증거가 아닙니다. 자동 게시 workflow가
+선택적 수동 gate를 실행하지 않더라도 이 이미지 최적화의 수용에는 물리 검증이 필요합니다.
+최적화한 정확한 산출물로
 Docker API·CLI, Compose, Buildx, containerd/runc/CNI, amd64 binfmt, opt-in Rosetta,
-재부팅 후 데이터 보존을 별도 확인해야 합니다. 합성 크기 fixture나 sparse 디스크의
+외부 Kubernetes 연결, 구형 K3s 전환과 재부팅 후 데이터 보존을 별도 확인해야 합니다. 합성 크기 fixture나 sparse 디스크의
 로컬 테스트는 이미지 크기 감소나 VM 동작을 입증하지 않습니다. Linux 빌드나 물리
 검증을 실행하지 못했을 때 임의의 baseline·budget으로 대신하지 않습니다.
 

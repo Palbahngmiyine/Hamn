@@ -67,8 +67,13 @@ HAMN_LEGACY_STOPPED_FIXTURE='/absolute/path/fixtures/stopped'
 Each fixture directory contains a stopped, isolated legacy profile's
 `disk.img`, `config.yaml`, `id_ed25519`, `id_ed25519.pub`, `efi-vars.bin`,
 `machine-id.bin`, `mac-addr`, and `expected.json`. Never commit these files.
-The config must have empty `mounts` and `provision` lists. The harness disables
-HOME sharing and clones fixture disks; it never boots the originals.
+The config must have empty `mounts` and `provision` lists. The harness clones
+fixture disks and never boots the originals. Only the running clone enables
+`mountHome`, sharing the harness's newly created private temporary HOME;
+the real user HOME is never shared. This preserves the old default input:
+v0.0.1 emits invalid null cloud-init mounts when all sharing is disabled.
+The stopped clone keeps HOME sharing disabled. No seed, deployment marker,
+guest source, or original fixture is changed to bypass legacy startup checks.
 `expected.json` records `k3sState` (`running` or `stopped`) and a `docker`
 snapshot captured from that fixture, including container/image/volume/network
 identities and sentinel volume content hashes. See `physical_runtime.py` for
@@ -79,7 +84,11 @@ snapshots are not evidence. The running fixture enables K3s before shutdown;
 the stopped fixture contains K3s data but has K3s disabled.
 
 The harness starts the running fixture with the pinned legacy binary before
-launching the candidate TUI. It starts the stopped fixture with the candidate
+launching and quitting the candidate TUI. It verifies that TUI entry leaves
+the VM state, pending migration and last operation unchanged. It independently
+waits for the guest K3s service to be active/enabled and its API ready, then explicitly
+confirms `hamn --headless vm migrate --profile <clone> --yes`.
+It starts the stopped fixture with the candidate
 headless interface. Both must finish retirement, preserve Docker snapshots,
 and leave no live test VM. The Kubernetes harness creates and removes a
 unique test namespace and verifies the source kubeconfig is unchanged.
@@ -129,8 +138,9 @@ The trusted Linux arm64 builder also needs `build-essential` and `zlib1g-dev`:
 it compiles the same qcow2 decoder shipped in the host and compares extracted
 raw SHA-256 with `qemu-img`. `guest/image/build-ubuntu-24.04-arm64.sh` captures
 a compressed baseline from the provisioned filesystem before removing build
-packages and regenerable content. Thus both measurements use the same package
-versions. Cleanup protects runtime packages, purges gcc/make and unused build
+packages and regenerable content. Both measurements therefore start from one
+provisioned package set; this does not pin repository packages across separate
+builds. Cleanup protects runtime packages, purges gcc/make and unused build
 dependencies, resets first-boot state, and discards free filesystem blocks.
 The compact image uses zlib and retains an 8 GiB virtual disk. Byte equivalence
 applies between the cleaned stage and its compact representation; deleting
@@ -142,6 +152,13 @@ It writes `<image>.size-report.json` and package inventories at
 `<image>.packages-before.tsv` and `<image>.packages-after.tsv`. The report binds
 actual byte counts and hashes to the base digest and source revision. These
 artifacts accompany the image in release evidence and attestation.
+
+A measurement-only source snapshot establishes evidence for that snapshot, not
+for a later PR revision or release candidate. Publication requires the report's
+`sourceRevision` to equal the candidate commit as well as matching the exact image
+size and digest. After the release source or budget changes, build and validate
+the release artifacts from that final commit. Do not relabel an earlier report
+or reuse runtime evidence for different image or host bytes.
 
 The first measured result needs human review before creating
 `guest/image/release-size-budget.json`. On the isolated builder, set
@@ -155,10 +172,38 @@ increases require a new footprint review; missing budgets fail closed.
 Publication independently verifies the exact image/report with
 `guest/image/verify-release-size.py IMAGE SIZE_REPORT REVIEWED_BUDGET`.
 
+For actual before/after runtime validation, also set
+`HAMN_GUEST_BASELINE_OUTPUT=/owned/output/hamn-baseline.img` during that build.
+The optional export preserves the provisioned image before cleanup and its
+`.sha256` sidecar with mode 0600. It verifies the baseline against the size
+report and publishes complete files only after the existing image gates pass.
+Existing outputs, symlinks, directories writable by other users, and overlaps with candidate
+artifacts are rejected. The baseline is review evidence, not a release asset.
+
+To generate two reproducible cleanup variations on the Linux arm64 builder:
+
+```sh
+python3 guest/tests/image_build_variations.py \
+  --baseline /owned/output/hamn-baseline.img \
+  --size-report /owned/output/hamn-guest.img.size-report.json \
+  --output-directory /owned/output/variations --seed 20260921
+```
+
+The output directory must not exist. The fixture varies disposable logs, apt
+cache files, temporary files, and first-boot identities; it reruns cleanup,
+package-inventory comparison, compaction, decoder/reference, GPT and size gates.
+`variations.json` binds each image digest to its generated inputs and marks
+physical runtime validation pending. Boot the baseline, normal candidate and
+each generated image in separately owned disposable profiles before claiming
+functional equivalence; structural success alone does not satisfy that check.
+
 Hosted structural checks do not establish boot or functional equivalence.
+Physical validation remains necessary for this image-optimization acceptance,
+even though the automated publication workflow does not run that optional manual gate.
 Acceptance evidence for the optimized image must separately cover Docker API,
-CLI, Compose, Buildx, containerd/runc/CNI, amd64 binfmt, opt-in Rosetta, and
-reboot data preservation on the exact artifact. Local tests with synthetic
+CLI, Compose, Buildx, containerd/runc/CNI, amd64 binfmt, opt-in Rosetta, external
+Kubernetes connectivity, legacy K3s retirement and reboot data preservation on
+the exact artifact. Local tests with synthetic
 size fixtures or sparse disks do not establish image-size savings or VM
 behavior. Do not substitute a fabricated baseline or budget when that Linux
 build or physical validation has not run.

@@ -120,13 +120,13 @@ else
 fi
 python3 - "$ROOT/packaging/release/install.sh.in" "$INSTALLER" \
     "$VERSION" "$COMMIT" "$HOST_URL" "$HOST_HASH" "$GUEST_URL" \
-    "$GUEST_HASH" "$HOST_ARTIFACT" "$GUEST_ARTIFACT" "$ROOT/scripts/upgrade_support.py" <<'PY'
-import json
+    "$GUEST_HASH" "$HOST_ARTIFACT" "$GUEST_ARTIFACT" <<'PY'
 import os
+import shlex
 import sys
 
 (template_path, output_path, version, commit, host_url, host_hash,
- guest_url, guest_hash, host_path, guest_path, support_path) = sys.argv[1:]
+ guest_url, guest_hash, host_path, guest_path) = sys.argv[1:]
 with open(template_path, encoding="utf-8") as source:
     rendered = source.read()
 values = {
@@ -142,12 +142,7 @@ values = {
 for placeholder, value in values.items():
     if rendered.count(placeholder) != 1:
         raise SystemExit("installer template placeholder is malformed: " + placeholder)
-    rendered = rendered.replace(placeholder, json.dumps(value))
-with open(support_path, encoding="utf-8") as source:
-    support = source.read()
-if rendered.count("__HAMN_UPGRADE_SUPPORT__") != 1:
-    raise SystemExit("installer support placeholder is malformed")
-rendered = rendered.replace("__HAMN_UPGRADE_SUPPORT__", support)
+    rendered = rendered.replace(placeholder, shlex.quote(value))
 if "__HAMN_" in rendered:
     raise SystemExit("installer template has an unresolved placeholder")
 with open(output_path, "w", encoding="utf-8", newline="\n") as output:
