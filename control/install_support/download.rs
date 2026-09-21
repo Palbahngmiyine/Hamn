@@ -205,9 +205,34 @@ fn atomic_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     sync_directory(parent)
 }
 
-/// The returned descriptor owns the lock until dropped. Nonblocking contention
-/// is an error; callers may treat it as an already-running automatic refresh.
-pub(super) fn lock(path: &Path, blocking: bool) -> Result<File> {
+/// Own the critical section, including when another thread forks while its
+/// descriptor is open. Closing only our descriptor would let the inherited
+/// open-file description keep the lock alive until that child exits or execs.
+pub(super) struct DownloadLock {
+    file: File,
+}
+
+impl Drop for DownloadLock {
+    fn drop(&mut self) {
+        loop {
+            // The descriptor is owned by this guard and remains open throughout
+            // Drop. Unlock the shared description before File closes our copy.
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+                break;
+            }
+            let error = io::Error::last_os_error();
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::Interrupted,
+                "cannot unlock release cache: {error}"
+            );
+        }
+    }
+}
+
+/// The returned guard owns the lock until dropped. Nonblocking contention is
+/// an error; callers may treat it as an already-running automatic refresh.
+pub(super) fn lock(path: &Path, blocking: bool) -> Result<DownloadLock> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -222,12 +247,15 @@ pub(super) fn lock(path: &Path, blocking: bool) -> Result<File> {
     if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
         return Err(io::Error::last_os_error().into());
     }
+    // Every error after successful acquisition must explicitly unlock too,
+    // including a changed or unsafe path discovered during identity validation.
+    let guard = DownloadLock { file };
     let current = safe_file(path, true, None)?;
     require(
         identity.dev() == current.dev() && identity.ino() == current.ino(),
         "cache lock changed while locking",
     )?;
-    Ok(file)
+    Ok(guard)
 }
 
 pub(super) fn digest(path: &Path) -> Result<String> {

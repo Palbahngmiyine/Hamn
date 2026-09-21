@@ -40,6 +40,102 @@ impl Workspace {
     }
 }
 
+#[test]
+fn forked_child_cannot_extend_a_completed_download_lock() {
+    let root = Workspace::new();
+    let path = root.path().join("lock");
+    let held = lock(&path, false).unwrap();
+    assert!(lock(&path, false).is_err());
+    let mut release = [0; 2];
+    let mut ready = [0; 2];
+    assert_eq!(unsafe { libc::pipe(release.as_mut_ptr()) }, 0);
+    assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+    for fd in release.into_iter().chain(ready) {
+        assert_eq!(
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+            0
+        );
+    }
+    let child = unsafe { libc::fork() };
+    assert!(child >= 0);
+    if child == 0 {
+        // A multithreaded test runner may own Rust/allocator locks at fork.
+        // The child uses only async-signal-safe libc and exits without Drop.
+        unsafe {
+            libc::close(release[1]);
+            libc::close(ready[0]);
+            let byte = 1_u8;
+            if libc::write(ready[1], (&byte as *const u8).cast(), 1) != 1 {
+                libc::_exit(2);
+            }
+            let mut event = libc::pollfd {
+                fd: release[0],
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let received = libc::poll(&mut event, 1, 5000);
+            if received <= 0 {
+                libc::_exit(3);
+            }
+            if libc::write(ready[1], (&byte as *const u8).cast(), 1) != 1 {
+                libc::_exit(4);
+            }
+            libc::_exit(0);
+        }
+    }
+    unsafe {
+        libc::close(release[0]);
+        libc::close(ready[1]);
+    }
+    let mut event = libc::pollfd {
+        fd: ready[0],
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let signaled = unsafe { libc::poll(&mut event, 1, 5000) };
+    let mut byte = 0_u8;
+    let read = if signaled > 0 {
+        unsafe { libc::read(ready[0], (&mut byte as *mut u8).cast(), 1) }
+    } else {
+        -1
+    };
+    drop(held);
+    // The child still holds the inherited open-file description. Releasing
+    // our completed critical section must not depend on that child's lifetime.
+    let reacquired = lock(&path, false);
+    // Use bytes rather than EOF: other concurrent fork tests can inherit these
+    // pipe writers too, but must not extend either synchronization barrier.
+    let released = unsafe { libc::write(release[1], (&byte as *const u8).cast(), 1) };
+    unsafe { libc::close(release[1]) };
+    event.revents = 0;
+    let finished = unsafe { libc::poll(&mut event, 1, 5000) };
+    let acknowledged = if finished > 0 {
+        unsafe { libc::read(ready[0], (&mut byte as *mut u8).cast(), 1) }
+    } else {
+        -1
+    };
+    if acknowledged != 1 {
+        unsafe { libc::kill(child, libc::SIGKILL) };
+    }
+    unsafe { libc::close(ready[0]) };
+    let mut status = 0;
+    let reaped = loop {
+        let result = unsafe { libc::waitpid(child, &mut status, 0) };
+        if result >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            break result;
+        }
+    };
+    assert_eq!((signaled, read, byte), (1, 1, 1));
+    assert_eq!((released, finished, acknowledged), (1, 1, 1));
+    assert_eq!(reaped, child);
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+    assert!(
+        reacquired.is_ok(),
+        "completed lock remained busy: {:?}",
+        reacquired.err()
+    );
+}
+
 #[derive(Clone, Copy)]
 enum Mode {
     Normal,
