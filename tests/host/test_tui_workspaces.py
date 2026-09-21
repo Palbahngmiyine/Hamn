@@ -85,7 +85,7 @@ else:
                 assert not (root / '.hamn').exists()
                 send(b'1\r', b'fixture-container')
                 prefs = root / '.hamn/tui.json'
-                assert json.loads(prefs.read_text()) == {'version':1,'defaultWorkspace':'containers'}
+                assert json.loads(prefs.read_text()) == {'version':1,'defaultWorkspace':'containers', 'recentTargets':[{'kind':'hamn','name':'default'}]}
                 assert prefs.stat().st_mode & 0o777 == 0o600
                 send(b'e', b'external')
                 send(b'\r', b'Docker context external')
@@ -121,7 +121,7 @@ else:
     assert sum('exec' in args for _, args in calls) == 1, calls
     assert [args for _, args in calls if 'hamnfixture' in args] == [['hamnfixture', '--custom-option', 'value']], calls
     assert all('--format' not in args for _, args in calls if '-q' in args or 'exec' in args)
-    assert sorted(p.name for p in (root / '.hamn').iterdir()) == ['tui.json'], 'TUI entry created VM state'
+    assert sorted(p.name for p in (root / '.hamn').iterdir()) in (['tui.json'], ['tui.json', 'tui.lock']), 'TUI entry created VM state'
     run(saved=True, terminate_cli=True)
     run(saved=True, terminate_cli='exited')
 print('PASS: workspace persistence, isolated scopes, native output, PTY input/detach and exact-once CLI dispatch')

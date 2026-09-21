@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install one signed, compatible Hamn release without rebuilding it locally.
+# Install one HTTPS/digest-verified compatible release without rebuilding it.
 set -euo pipefail
 export LC_ALL=C
 
@@ -15,7 +15,7 @@ progress() {
 }
 
 usage() {
-    echo "usage: update-host.sh --bindir DIR --datadir DIR [--manifest URL_OR_PATH] [--bootstrap]" >&2
+    echo "usage: update-host.sh --bindir DIR --datadir DIR [--manifest URL_OR_PATH] [--bootstrap] [--check-only] [--force] [--current-version VERSION] [--output-json]" >&2
     exit 2
 }
 
@@ -51,42 +51,19 @@ path_absent() {
     [ ! -e "$1" ] && [ ! -L "$1" ]
 }
 
-fetch() {
-    local source=$1 destination=$2
-    local curl_output=(--silent)
-    if [ -t 2 ] || [ "${HAMN_UPDATE_PROGRESS:-0}" = 1 ]; then
-        curl_output=(--progress-bar)
-    fi
-    case "$source" in
-    https://*)
-        curl --fail --show-error --location "${curl_output[@]}" --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
-            -o "$destination" "$source"
-        ;;
-    file://*)
-        [ "${HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS:-0}" = 1 ] ||
-            fail "local artifacts are disabled"
-        local path=${source#file://}
-        safe_regular "$path" || fail "unsafe local artifact: $path"
-        cp "$path" "$destination"
-        ;;
-    /*)
-        [ "${HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS:-0}" = 1 ] ||
-            fail "local artifacts are disabled"
-        safe_regular "$source" || fail "unsafe local artifact: $source"
-        cp "$source" "$destination"
-        ;;
-    *)
-        fail "artifact URL must use HTTPS"
-        ;;
-    esac
-}
-
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 source_root=$(cd "$script_dir/.." && pwd -P)
 bindir=
 datadir=
 manifest_ref=
 bootstrap=0
+check_only=0
+force=0
+output_json=0
+result_file=
+current_version=
+support=$script_dir/upgrade_support.py
+safe_regular "$support" || fail "generation-local upgrade support is missing or unsafe"
 while [ "$#" -gt 0 ]; do
     case "$1" in
     --bindir)
@@ -109,9 +86,37 @@ while [ "$#" -gt 0 ]; do
         bootstrap=1
         shift
         ;;
+    --check-only) [ "$check_only" = 0 ] || usage; check_only=1; shift ;;
+    --force) [ "$force" = 0 ] || usage; force=1; shift ;;
+    --output-json) [ "$output_json" = 0 ] || usage; output_json=1; shift ;;
+    --result-file)
+        [ "$#" -ge 2 ] && [ -z "$result_file" ] || usage
+        result_file=$2; shift 2 ;;
+    --current-version)
+        [ "$#" -ge 2 ] && [ -z "$current_version" ] || usage
+        current_version=$2; shift 2 ;;
     *) usage ;;
     esac
 done
+[ "$check_only" = 0 ] || [ "$force" = 0 ] || usage
+if [ "$check_only" = 1 ]; then
+    [ -n "$current_version" ] || usage
+    if [ -z "$manifest_ref" ]; then
+        safe_regular "$source_root/packaging/release/update-manifest-url" || fail "missing manifest pointer"
+        manifest_ref=$(cat "$source_root/packaging/release/update-manifest-url")
+    fi
+    # This branch precedes directory creation, locks, journal recovery and all
+    # installation inspection. A check cannot repair an interrupted mutation.
+    if [ -n "$result_file" ]; then
+        safe_private_regular "$result_file" || fail "unsafe upgrade result file"
+        exec >"$result_file"
+    fi
+    exec python3 "$support" check --manifest "$manifest_ref" \
+        --current-version "$current_version" --macos "$(sw_vers -productVersion)" \
+        --architecture "$(uname -m)" --target "$(readlink "$bindir/hamn")"
+fi
+[ -z "$current_version" ] || python3 "$support" version "$current_version" 2>/dev/null || \
+    fail "upgrade requires a stable managed release; reinstall with the official installer"
 [ -n "$bindir" ] && [ -n "$datadir" ] || usage
 
 hamn_link=$bindir/hamn
@@ -162,6 +167,26 @@ if [ ! -d "$cache" ]; then
 fi
 safe_directory "$cache" || fail "unsafe Hamn image cache"
 
+# Serialize recovery and publication, not merely the installer cutover. The
+# descriptor remains owned by this shell and survives helper subprocesses.
+# install-host owns descriptors 8/9; use 7 so an interrupted parent cannot let
+# recovery race a still-running installer that inherited the transaction lock.
+transaction_lock=$cache/.hamn-upgrade.lock
+if path_absent "$transaction_lock"; then
+    (umask 077; set -C; : >"$transaction_lock") 2>/dev/null || true
+fi
+safe_private_regular "$transaction_lock" || fail "unsafe upgrade lock"
+lock_identity=$(stat -f '%d:%i' "$transaction_lock")
+exec 7<>"$transaction_lock"
+/usr/bin/perl -MFcntl=:flock -e '
+    open(my $fh, "<&=7") or exit 1;
+    my @s = stat($fh);
+    @s && "$s[0]:$s[1]" eq $ARGV[0] or exit 1;
+    flock($fh, LOCK_EX) or exit 1;
+' "$lock_identity" || fail "cannot acquire safe upgrade lock"
+safe_private_regular "$transaction_lock" && \
+    [ "$(stat -f '%d:%i' "$transaction_lock")" = "$lock_identity" ] || fail "upgrade lock changed while locking"
+
 guest_selection=$cache/guest-image.json
 update_journal=$cache/.hamn-update-transaction
 journal_directory=$update_journal
@@ -170,6 +195,8 @@ journal_selection_state=
 journal_old_target=
 journal_attempt=
 journal_stage=
+host_mutation=1
+journal_host_mutation=1
 
 managed_generation_target() {
     local target=$1 relative generation_root
@@ -202,6 +229,16 @@ load_update_journal() {
     state=$(cat "$journal_directory/state") || return 1
     attempt=$(cat "$journal_directory/attempt") || return 1
     [[ "$attempt" =~ ^[A-Za-z0-9]{6}$ ]] || return 1
+    journal_host_mutation=1
+    if [[ "$state" = $'version=2\n'* ]]; then
+        case "$state" in
+        *$'\nhostMutation=0') journal_host_mutation=0 ;;
+        *$'\nhostMutation=1') journal_host_mutation=1 ;;
+        *) return 1 ;;
+        esac
+        state=${state%$'\nhostMutation='?}
+        state=${state/#version=2/version=1}
+    fi
     case "$state" in
     $'version=1\nbootstrap=0\nselection=present')
         journal_bootstrap=0
@@ -225,6 +262,7 @@ load_update_journal() {
         ;;
     *) return 1 ;;
     esac
+    [ "$journal_host_mutation" = 1 ] || [ "$journal_bootstrap" = 0 ] || return 1
     if [ "$journal_selection_state" = present ]; then
         safe_private_regular "$journal_directory/previous-selection" || return 1
     else
@@ -383,7 +421,9 @@ rollback_update_journal() {
     journal_directory=$update_journal
     load_update_journal || return 1
     restore_guest_selection_from_journal || return 1
-    restore_binary_link_from_journal || return 1
+    if [ "$journal_host_mutation" = 1 ]; then
+        restore_binary_link_from_journal || return 1
+    fi
     recovery_summary="prior binary and guest image selection were restored"
     if [ "$journal_bootstrap" = 1 ]; then
         recovery_summary="guest image selection was restored; no previous binary was recorded, so a published command may remain"
@@ -469,9 +509,10 @@ prepare_update_journal() {
         return 1
     }
     {
-        printf 'version=1\n'
+        printf 'version=2\n'
         printf 'bootstrap=%s\n' "$bootstrap"
         printf 'selection=%s\n' "$selection_state"
+        printf 'hostMutation=%s\n' "$host_mutation"
     } >"$journal_stage/state"
     printf '%s\n' "$journal_attempt" >"$journal_stage/attempt"
     chmod 0600 "$journal_stage/state" "$journal_stage/attempt" || {
@@ -534,6 +575,18 @@ test_after_journal_retire_barrier() {
     IFS= read -r _ <"$release"
 }
 
+test_transaction_barrier() {
+    local name=$1 ready_name release_name ready release
+    ready_name=HAMN_TEST_UPDATE_${name}_READY_FIFO
+    release_name=HAMN_TEST_UPDATE_${name}_RELEASE_FIFO
+    ready=${!ready_name:-}
+    release=${!release_name:-}
+    [ -z "$ready" ] && [ -z "$release" ] && return 0
+    [ -n "$ready" ] && [ -n "$release" ] && [ -p "$ready" ] && [ -p "$release" ] || return 1
+    printf 'ready\n' >"$ready"
+    IFS= read -r _ <"$release"
+}
+
 interrupted_update() {
     local signal=${1:-TERM} status
     trap - HUP INT TERM
@@ -582,99 +635,28 @@ cleanup() {
 }
 trap cleanup EXIT
 manifest=$work/manifest.json
+counts=$work/counts
+mkdir -m 0700 "$counts"
+if [ -z "$current_version" ]; then
+    if [ -n "$old_target" ]; then
+        current_version=$("$old_target" --version) || fail "cannot read installed version"
+        current_version=${current_version#hamn }
+    else
+        current_version=0.0.0
+    fi
+fi
 progress "Checking release metadata..."
-fetch "$manifest_ref" "$manifest" || fail "release metadata download failed; check your connection and retry"
-
-if ! python3 - "$manifest" "$(sw_vers -productVersion)" "$(uname -m)" <<'PY' \
-    >"$work/manifest-fields"
-import json
-import re
-import sys
-
-
-def pairs(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate key: " + key)
-        result[key] = value
-    return result
-
-
-def version(value):
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", value):
-        raise ValueError("invalid macOS version")
-    return tuple(int(part) for part in value.split("."))
-
-
-def require_keys(value, keys, label):
-    if not isinstance(value, dict) or set(value) != set(keys):
-        raise ValueError(label + " has an invalid schema")
-
-
-def artifact(value, label):
-    require_keys(value, ("url", "sha256"), label)
-    url = value["url"]
-    digest = value["sha256"]
-    if not isinstance(url, str) or not url or any(ord(ch) < 33 or ord(ch) > 126 for ch in url):
-        raise ValueError(label + " URL is invalid")
-    if not re.fullmatch(r"[0-9a-f]{64}", digest if isinstance(digest, str) else ""):
-        raise ValueError(label + " SHA-256 is invalid")
-    return url, digest
-
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as source:
-        manifest = json.load(source, object_pairs_hook=pairs,
-                             parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-    # v0.1.x published repository as optional descriptive metadata. Accept
-    # that exact extension, while retaining strict rejection of unknown keys.
-    if isinstance(manifest, dict) and "repository" in manifest:
-        repository = manifest.pop("repository")
-        if not isinstance(repository, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-            raise ValueError("release repository is invalid")
-    require_keys(manifest, ("schemaVersion", "channel", "version", "commit",
-                            "validationMode", "compatibility", "artifacts"),
-                 "manifest")
-    if manifest["schemaVersion"] != 2 or manifest["channel"] != "stable":
-        raise ValueError("manifest is not a stable schema v2 release")
-    if not isinstance(manifest["version"], str) or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", manifest["version"]):
-        raise ValueError("release version is invalid")
-    if not isinstance(manifest["commit"], str) or \
-            not re.fullmatch(r"[0-9a-f]{40}", manifest["commit"]):
-        raise ValueError("release commit is invalid")
-    if manifest["validationMode"] not in ("github-hosted-no-vm", "physical-apple-silicon"):
-        raise ValueError("release validation mode is invalid")
-    compatibility = manifest["compatibility"]
-    require_keys(compatibility, ("os", "architecture", "minimumMacOS"), "compatibility")
-    if compatibility["os"] != "darwin" or compatibility["architecture"] != "arm64":
-        raise ValueError("manifest is not compatible with Apple Silicon macOS")
-    current = version(sys.argv[2])
-    minimum = version(compatibility["minimumMacOS"])
-    current = current + (0,) * (3 - len(current))
-    minimum = minimum + (0,) * (3 - len(minimum))
-    if current < minimum:
-        raise ValueError("macOS is below the release minimum")
-    if sys.argv[3] not in ("arm64", "arm64e"):
-        raise ValueError("host architecture is not Apple Silicon")
-    artifacts = manifest["artifacts"]
-    require_keys(artifacts, ("host", "guestImage"), "artifacts")
-    host_url, host_hash = artifact(artifacts["host"], "host artifact")
-    guest_url, guest_hash = artifact(artifacts["guestImage"], "guest image artifact")
-except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-    raise SystemExit("hamn update: invalid immutable release manifest: " + str(error))
-
-print(manifest["version"])
-print(host_url)
-print(host_hash)
-print(guest_url)
-print(guest_hash)
-PY
-then
+if ! manifest_bytes=$(python3 "$support" manifest --manifest "$manifest_ref" \
+    --current-version "$current_version" --macos "$(sw_vers -productVersion)" \
+    --architecture "$(uname -m)" --output "$manifest"); then
     progress "No new release was installed. See the official installer recovery instructions:"
     progress "https://github.com/Palbahngmiyine/Hamn#install"
     exit 1
 fi
+printf '{"downloadedBytes":%s,"resumedBytes":0,"reusedBytes":0,"source":"manifest"}\n' \
+    "$manifest_bytes" >"$counts/manifest.json"
+chmod 0600 "$counts/manifest.json"
+python3 "$support" fields "$manifest" >"$work/manifest-fields"
 {
     IFS= read -r release_version
     IFS= read -r host_url
@@ -682,145 +664,62 @@ fi
     IFS= read -r guest_url
     IFS= read -r guest_hash
 } <"$work/manifest-fields"
-[ -n "$host_url" ] && [ -n "$host_hash" ] && [ -n "$guest_url" ] &&
-    [ -n "$guest_hash" ] || fail "immutable manifest fields are incomplete"
+status=$(python3 "$support" status "$manifest" "$current_version" "$cache" "$old_target") || fail "unsupported installed version"
+[ "$status" != ahead ] || fail "stable downgrade is not permitted"
+finish_result() {
+    if [ "$output_json" = 1 ]; then
+        if [ -n "$result_file" ]; then
+            safe_private_regular "$result_file" || fail "unsafe upgrade result file"
+            python3 "$support" result "$manifest" "$current_version" "$1" "$counts" >"$result_file"
+        else
+            python3 "$support" result "$manifest" "$current_version" "$1" "$counts"
+        fi
+    fi
+}
 
 # A receipt is advisory: absent, malformed, unsafe, or stale evidence forces the
 # normal verified install. It binds release identities to the installed files;
 # a version string alone never permits skipping downloads. Each generation owns
 # its private receipt, so rollback restores the previous receipt with the link.
 release_receipt() {
-    python3 - "$1" "$2" "$release_version" "$host_hash" "$guest_hash" "$cache" <<'PY_RECEIPT'
-import hashlib
-import json
-import os
-from pathlib import Path
-import stat
-import sys
-import tempfile
-
-mode, target, version, host_hash, guest_hash, cache = sys.argv[1:]
-generation = Path(target).parent.parent
-receipt = generation / ".hamn-release.json"
-
-
-def owned(path, directory=False):
-    info = path.lstat()
-    valid = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
-    if not valid or info.st_uid != os.getuid() or (not directory and info.st_nlink != 1):
-        raise ValueError("unsafe release evidence")
-    return info
-
-
-def digest(path):
-    owned(path)
-    result = hashlib.sha256()
-    with path.open("rb") as source:
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            result.update(block)
-    return result.hexdigest()
-
-
-def installed_digest():
-    # Include updater and packaging bytes and executable modes, not just hamn.
-    entries = []
-    def visit(path, name):
-        info = path.lstat()
-        if stat.S_ISDIR(info.st_mode):
-            owned(path, directory=True)
-            entries.append((name, stat.S_IMODE(info.st_mode), None))
-            for child in sorted(path.iterdir()):
-                visit(child, name + "/" + child.name)
-        else:
-            entries.append((name, stat.S_IMODE(info.st_mode), digest(path)))
-    owned(generation, directory=True)
-    visit(generation / "bin", "bin")
-    for name in ("scripts", "packaging"):
-        visit(generation / "share/hamn/src" / name, name)
-    return hashlib.sha256(json.dumps(entries, separators=(",", ":")).encode()).hexdigest()
-
-
-try:
-    identity = {"schemaVersion": 1, "version": version, "hostSHA256": host_hash,
-                "guestSHA256": guest_hash}
-    if mode == "check":
-        info = owned(receipt)
-        if stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096:
-            raise ValueError("invalid receipt")
-        recorded = json.loads(receipt.read_text())
-        if not isinstance(recorded, dict) or set(recorded) != set(identity) | {"installedSHA256"}:
-            raise ValueError("invalid receipt schema")
-        if any(recorded[key] != value for key, value in identity.items()):
-            raise ValueError("different release")
-        if recorded["installedSHA256"] != installed_digest():
-            raise ValueError("installed files changed")
-        cache = Path(cache)
-        selection = cache / "guest-image.json"
-        if owned(selection).st_size > 4096:
-            raise ValueError("invalid selection")
-        name = "hamn-guest-" + guest_hash + ".img"
-        if json.loads(selection.read_text()) != {"schemaVersion": 1, "file": name, "sha256": guest_hash}:
-            raise ValueError("different image selection")
-        marker = cache / (name + ".verified")
-        if owned(marker).st_size > 128 or marker.read_text().strip() != guest_hash:
-            raise ValueError("invalid image verification marker")
-        if digest(cache / name) != guest_hash:
-            raise ValueError("cached image changed")
-    elif mode == "write":
-        identity["installedSHA256"] = installed_digest()
-        fd, temporary = tempfile.mkstemp(prefix=".hamn-release-", dir=generation)
-        try:
-            with os.fdopen(fd, "w") as output:
-                json.dump(identity, output, sort_keys=True, separators=(",", ":"))
-                output.write("\n")
-                output.flush()
-                os.fsync(output.fileno())
-            # Never replace a pre-existing file or follow a receipt symlink.
-            os.link(temporary, receipt)
-        finally:
-            os.unlink(temporary)
-    else:
-        raise ValueError("unknown receipt operation")
-except (OSError, ValueError, TypeError, RecursionError) as error:
-    if mode == "write":
-        print("hamn update: cannot record installed release: " + str(error), file=sys.stderr)
-    sys.exit(1)
-PY_RECEIPT
+    if [ "$1" = write ]; then
+        python3 "$support" receipt "$manifest" "$1" "$2" "$cache"
+    else
+        python3 "$support" receipt "$manifest" "$1" "$2" "$cache" 2>/dev/null
+    fi
 }
 
 if [ -n "$old_target" ] && [ "$managed_marker" = version=1 ]; then
     progress "Checking installed release and cached image..."
-    if release_receipt check "$old_target" &&
+    if [ "$force" = 0 ] && release_receipt check "$old_target" &&
         [ "$(readlink "$hamn_link")" = "$old_target" ] && path_absent "$update_journal"; then
         progress "Unchanged Hamn ${release_version#v}: installed files and guest image match this release."
         progress "No further artifact downloads or installation were needed."
+        python3 "$support" reuse-counts "$manifest" "$cache" "$counts" both
+        finish_result up-to-date
         exit 0
     fi
 fi
 
 previous_version=
-if [ -n "$old_target" ] && managed_generation_target "$old_target"; then
-    previous_version=$("$old_target" --version) || fail "cannot read installed version"
-    previous_version=${previous_version#hamn }
+[ -z "$old_target" ] || previous_version=$current_version
+if [ "$force" = 0 ] && [ "$status" = repair-required ] && \
+    [ -n "$old_target" ] && release_receipt host-check "$old_target"; then
+    host_mutation=0
+    python3 "$support" reuse-counts "$manifest" "$cache" "$counts" host
 fi
-if [ -n "$previous_version" ]; then
-    progress "Release: $previous_version -> ${release_version#v}"
-else
-    progress "Installing Hamn ${release_version#v}"
-fi
+progress "Release: ${previous_version:-not installed} -> ${release_version#v}"
 progress "Existing VMs are not restarted; existing profile disks keep their guest root."
-host_archive=$work/host.tar.gz
-guest_download=$work/guest.img
-progress "Downloading host archive..."
-fetch "$host_url" "$host_archive" || fail "host download failed; check your connection and retry"
-progress "Downloading guest image (this may take several minutes)..."
-fetch "$guest_url" "$guest_download" || fail "guest image download failed; check your connection and retry"
+if [ "$host_mutation" = 1 ]; then
+    progress "Downloading host archive (verified cache is reused)..."
+    host_archive=$(python3 "$support" acquire "$manifest" host "$cache" "$counts/host.json") || fail "host acquisition failed; check your connection and retry"
+fi
+progress "Downloading guest image (verified cache is reused)..."
+guest_download=$(python3 "$support" acquire "$manifest" guestImage "$cache" "$counts/guestImage.json") || fail "guest image acquisition failed; check your connection and retry"
 progress "Verifying archive and image SHA-256..."
-[ "$(sha256_file "$host_archive")" = "$host_hash" ] ||
-    fail "host artifact SHA-256 mismatch"
-[ "$(sha256_file "$guest_download")" = "$guest_hash" ] ||
-    fail "guest image SHA-256 mismatch"
-
+[ "$(sha256_file "$guest_download")" = "$guest_hash" ] || fail "guest image SHA-256 mismatch"
+if [ "$host_mutation" = 1 ]; then
+[ "$(sha256_file "$host_archive")" = "$host_hash" ] || fail "host artifact SHA-256 mismatch"
 progress "Extracting verified host archive..."
 artifact_root=$(python3 - "$host_archive" "$work/extract" <<'PY'
 import os
@@ -869,11 +768,18 @@ artifact=$work/extract/$artifact_root
 
 [ "$("$artifact/bin/hamn" --version)" = "hamn ${release_version#v}" ] ||
     fail "host binary version does not match the release manifest"
+fi
 
 progress "Staging verified guest image..."
 guest_name=hamn-guest-$guest_hash.img
 guest_target=$cache/$guest_name
 guest_marker=$guest_target.verified
+if [ -e "$guest_target" ] || [ -L "$guest_target" ]; then
+    safe_regular "$guest_target" || fail "cached guest image is unsafe"
+    if [ "$(sha256_file "$guest_target")" != "$guest_hash" ]; then
+        rm "$guest_target" || fail "cannot remove damaged owned guest image"
+    fi
+fi
 if [ ! -e "$guest_target" ]; then
     guest_stage=$cache/.$guest_name.update.$$
     cp "$guest_download" "$guest_stage"
@@ -902,7 +808,12 @@ prepare_update_journal "$new_selection" ||
 trap 'interrupted_update HUP' HUP
 trap 'interrupted_update INT' INT
 trap 'interrupted_update TERM' TERM
+if ! test_transaction_barrier PREPARED; then
+    rollback_update_journal || fail "prepared transaction barrier recovery failed"
+    fail "prepared transaction barrier failed"
+fi
 
+if [ "$host_mutation" = 1 ]; then
 if ! env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     /bin/bash "$artifact/scripts/install-host.sh" "$artifact/bin/hamn" \
     "$bindir" "$datadir" >"$work/host-install.log" 2>&1; then
@@ -930,12 +841,17 @@ if ! managed_generation_target "$installed_target" ||
     fail "release receipt failed; update transaction recovered"
 fi
 /bin/sync
+fi
 
 if ! commit_guest_selection_from_journal; then
     trap - HUP INT TERM
     rollback_update_journal ||
         fail "guest image commit failed and the recovery journal could not be applied"
     fail "guest image commit failed; $recovery_summary"
+fi
+if ! test_transaction_barrier AFTER_GUEST_SELECTION; then
+    rollback_update_journal || fail "guest selection barrier recovery failed"
+    fail "guest selection barrier failed"
 fi
 
 if ! retire_update_journal completed; then
@@ -960,6 +876,17 @@ if [ -n "$previous_version" ]; then
 else
     progress "Installed Hamn ${release_version#v}"
 fi
-progress "Command: $hamn_link"
 progress "Guest image verified and selected for new profile disks. Existing VMs were not restarted."
-progress "Verify: $hamn_link --version"
+
+# The notice is advisory and never authorizes installation. Drop it only after
+# a successful transaction; an unsafe entry is left for explicit repair.
+python3 - "$cache/update-notice-v1.json" <<'PY_NOTICE'
+import os, stat, sys
+try:
+    info = os.lstat(sys.argv[1])
+    if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1:
+        os.unlink(sys.argv[1])
+except FileNotFoundError:
+    pass
+PY_NOTICE
+if [ "$host_mutation" = 0 ]; then finish_result repaired; else finish_result updated; fi

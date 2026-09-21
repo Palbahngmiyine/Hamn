@@ -167,16 +167,38 @@ if not isinstance(checks, dict) or checks.get("testLocalMacOS") is not True or \
     raise SystemExit("hosted validation capabilities are invalid")
 PY
 
+SIZE_REPORT=$EVIDENCE_DIR/guest-image-size-report.json
+SIZE_BUDGET=$ROOT/guest/image/release-size-budget.json
+if [ -n "${HAMN_TEST_RELEASE_SIZE_BUDGET:-}" ]; then
+    [ "${HAMN_RELEASE_ALLOW_LOCAL:-0}" = 1 ] && [ -z "${GITHUB_ACTIONS:-}" ] ||
+        fail "test size budget is forbidden in release workflows"
+    SIZE_BUDGET=$HAMN_TEST_RELEASE_SIZE_BUDGET
+fi
+python3 "$ROOT/guest/image/verify-release-size.py" \
+    "$CANDIDATE_DIR/$GUEST_FILE" "$SIZE_REPORT" "$SIZE_BUDGET" ||
+    fail "guest image size evidence or reviewed release budget is missing or invalid"
+python3 - "$SIZE_REPORT" "$COMMIT" <<'PY_SIZE_SOURCE'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    report = json.load(source)
+if report.get("sourceRevision") != sys.argv[2]:
+    raise SystemExit("guest image size report belongs to a different source revision")
+PY_SIZE_SOURCE
+
 HOST_HASH=$(sha256_file "$CANDIDATE_DIR/$HOST_FILE")
 GUEST_HASH=$(sha256_file "$CANDIDATE_DIR/$GUEST_FILE")
 MANIFEST=$OUTPUT_DIR/hamn-update-manifest.json
 python3 - "$MANIFEST" "$version" "$RELEASE_REPOSITORY" "$COMMIT" \
-    "$BASE_URL" "$HOST_FILE" "$HOST_HASH" "$GUEST_FILE" "$GUEST_HASH" <<'PY'
+    "$BASE_URL" "$HOST_FILE" "$HOST_HASH" "$GUEST_FILE" "$GUEST_HASH" \
+    "$CANDIDATE_DIR" "$ROOT" <<'PY'
 import json
+import os
 import sys
 
 (path, version, repository, commit, base, host_name, host_hash, guest_name,
- guest_hash) = sys.argv[1:]
+ guest_hash, candidate_dir, root) = sys.argv[1:]
+sys.path.insert(0, os.path.join(root, "scripts"))
+from upgrade_support import parse_manifest
 value = {
     "schemaVersion": 2,
     "channel": "stable",
@@ -192,6 +214,16 @@ value = {
     },
 }
 with open(path, "w", encoding="utf-8", newline="\n") as output:
+    json.dump(value, output, sort_keys=True, separators=(",", ":"))
+    output.write("\n")
+parse_manifest(json.dumps(value).encode(), "13.0", "arm64")
+value["schemaVersion"] = 3
+value["artifacts"]["host"]["size"] = os.path.getsize(os.path.join(candidate_dir, host_name))
+value["artifacts"]["guestImage"].update(
+    size=os.path.getsize(os.path.join(candidate_dir, guest_name)),
+    format="qcow2", compression="zlib", virtualSize=8 * 1024 ** 3)
+parse_manifest(json.dumps(value).encode(), "13.0", "arm64")
+with open(path.replace(".json", "-v3.json"), "w", encoding="utf-8", newline="\n") as output:
     json.dump(value, output, sort_keys=True, separators=(",", ":"))
     output.write("\n")
 PY

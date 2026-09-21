@@ -18,7 +18,13 @@ int docker_observer_parse_inspect(const char *json,
                                   struct port_spec specs[], int *count,
                                   size_t capacity);
 
-/* Read the running-container Docker API snapshot through this profile socket. */
+/* Parse a complete running-container list (Id and Ports). On error specs/count
+ * are untouched. At most 2048 containers / MAX_PORTS published IPv4 TCP/UDP
+ * mappings; unsupported IPv6/SCTP and exposed-only ports create no relay. */
+int docker_observer_parse_list(const char *json, struct port_spec specs[],
+                               int *count, size_t capacity);
+
+/* One bounded list request through the private profile socket. */
 int docker_observer_read_snapshot(const struct profile *profile,
                                   struct port_spec specs[], int *count,
                                   size_t capacity);

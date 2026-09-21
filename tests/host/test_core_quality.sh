@@ -424,9 +424,13 @@ grep -Fq 'BASE_URL="https://github.com/${RELEASE_REPOSITORY}/releases/download/$
 grep -Fq 'candidate artifact directory contains unexpected entries' \
     "$ROOT/packaging/release/publish-release.sh" ||
     fail "keyless promotion does not reject unbound candidate files"
-grep -Fq 'CANONICAL_MANIFEST_URL="https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/hamn-update-manifest.json"' \
+grep -Fq 'CANONICAL_MANIFEST_URL="https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/hamn-update-manifest-v3.json"' \
     "$ROOT/packaging/release/build-candidate.sh" ||
-    fail "candidate does not embed the immutable latest manifest URL"
+    fail "candidate does not embed the latest v3 manifest URL"
+for manifest in hamn-update-manifest.json hamn-update-manifest-v3.json; do
+    printf '%s\n' "$publish_job" | grep -Fq "\"\$publish/$manifest\"" ||
+        fail "promotion omits a compatible manifest asset: $manifest"
+done
 if rg -n 'HAMN_UPDATE_PUBLIC_KEY|hamn-update-manifest\.json\.sig' \
     "$ROOT/packaging/release/build-candidate.sh" \
     "$ROOT/packaging/release/install.sh.in" \
@@ -508,15 +512,22 @@ printf '%s\n' "$help" |
     fail "help does not describe profile deletion semantics"
 printf '%s\n' "$help" | grep -Fq 'system uninstall permanently removes all Hamn data.' ||
     fail "help does not describe uninstall data deletion"
-if printf '%s\n' "$help" | grep -Fq -- '--force'; then
-    fail "CLI help advertises a removed force-delete option"
-fi
 if printf '%s\n' "$help" | grep -Eq 'internal commands:|^[[:space:]]+(vmrun|qcow2-extract)[[:space:]]'; then
     fail "CLI help exposes internal lifecycle or image commands"
 fi
 if "$ROOT/build/hamn" delete --force >/dev/null 2>&1; then
     fail "CLI accepted a removed force-delete option"
 fi
+force_home=$(mktemp -d "${TMPDIR:-/tmp}/hamn-force-rejection.XXXXXX")
+trap 'rm -rf "$force_home"' EXIT
+if force_delete_output=$(HOME="$force_home" "$ROOT/build/hamn" \
+    --headless vm delete --profile fixture --yes --force 2>&1); then
+    fail "CLI accepted upgrade-only force for VM deletion"
+fi
+printf '%s\n' "$force_delete_output" |
+    grep -Fq -- '--check and --force are only supported for system upgrade/update' ||
+    fail "force deletion was not rejected before dispatch"
+[ ! -e "$force_home/.hamn" ] || fail "invalid force deletion touched profile state"
 
 for private_path in .env .env.local release.pem release.p12 release.pfx \
     release.key id_rsa id_ecdsa id_ed25519; do

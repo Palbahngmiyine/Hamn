@@ -112,3 +112,7 @@ Kubernetes apply·exec·port-forward를 확인합니다. kind 클러스터를 �
 정지하며 HOME은 검사할 수 있게 남깁니다. `--root`는 소유한 테스트 환경만 재사용하고
 `--keep-running`은 추가 진단을 위해 주 테스트 VM을 유지합니다. 증거 확인 후 해당
 테스트 디렉터리를 정리하세요. 사용자 프로필을 테스트 fixture로 쓰면 안 됩니다.
+
+외부 context 전송을 검증하는 로컬 control 테스트에는 Docker CLI가 필요합니다.
+테스트 소유 Unix 소켓만 사용하며 Docker daemon·VM은 시작하지 않습니다.
+Nix CI 셸은 `docker-client`, macOS 의존성 스크립트는 Homebrew `docker` CLI를 제공합니다.

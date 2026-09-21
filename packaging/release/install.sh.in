@@ -13,6 +13,8 @@ readonly HAMN_HOST_URL=__HAMN_HOST_URL__
 readonly HAMN_HOST_SHA256=__HAMN_HOST_SHA256__
 readonly HAMN_GUEST_URL=__HAMN_GUEST_URL__
 readonly HAMN_GUEST_SHA256=__HAMN_GUEST_SHA256__
+readonly HAMN_HOST_SIZE=__HAMN_HOST_SIZE__
+readonly HAMN_GUEST_SIZE=__HAMN_GUEST_SIZE__
 
 fail() {
     echo "hamn install: $*" >&2
@@ -29,33 +31,13 @@ safe_regular() {
     [ "$(stat -f '%u:%l' "$path")" = "$(id -u):1" ]
 }
 
-fetch() {
-    local source=$1 destination=$2
-    local curl_output=(--silent)
-    if [ -t 2 ]; then curl_output=(--progress-bar); fi
-    case "$source" in
-    https://*)
-        curl --fail --show-error --location "${curl_output[@]}" --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
-            -o "$destination" "$source"
-        ;;
-    file://*|/*)
-        [ "${HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS:-0}" = 1 ] ||
-            fail "local artifacts are disabled"
-        local path=${source#file://}
-        safe_regular "$path" || fail "unsafe local artifact: $path"
-        cp "$path" "$destination"
-        ;;
-    *) fail "artifact URL must use HTTPS" ;;
-    esac
-}
-
 if [ "$#" -gt 0 ]; then
     if [ "$#" = 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
         echo "Install Hamn ${HAMN_VERSION#v} for Apple Silicon macOS."
         echo "Usage: bash install.sh"
         echo "Downloads and verifies the host archive and guest image, then installs to ~/.local/bin."
         echo "Existing VMs are not restarted; existing profile disks keep their guest root."
-        echo "For updates: hamn --headless system update --yes"
+        echo "For updates: hamn upgrade (or hamn --headless system update --yes)"
         exit 0
     fi
     fail "unknown arguments; use bash install.sh --help"
@@ -67,6 +49,11 @@ fi
 [[ "$HAMN_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "embedded release commit is invalid"
 [[ "$HAMN_HOST_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "embedded host digest is invalid"
 [[ "$HAMN_GUEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "embedded guest digest is invalid"
+# Reject foreign commands before creating cache state or downloading anything.
+# The verified updater performs the complete generation ownership check again.
+if [ -e "$HOME/.local/bin/hamn" ] && [ ! -L "$HOME/.local/bin/hamn" ]; then
+    fail "existing hamn is not a managed generation; migrate it with make install before using the release installer"
+fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/hamn-install.XXXXXX") ||
     fail "cannot create installer workspace"
@@ -76,9 +63,33 @@ cleanup() {
 trap cleanup EXIT
 
 echo "hamn install: Preparing Hamn ${HAMN_VERSION#v}" >&2
+cat >"$work/upgrade_support.py" <<'HAMN_EMBEDDED_UPGRADE_SUPPORT'
+__HAMN_UPGRADE_SUPPORT__
+HAMN_EMBEDDED_UPGRADE_SUPPORT
+chmod 0600 "$work/upgrade_support.py"
+python3 - "$work/bootstrap.json" "$HAMN_VERSION" "$HAMN_COMMIT" "$HAMN_HOST_URL" \
+    "$HAMN_HOST_SHA256" "$HAMN_HOST_SIZE" "$HAMN_GUEST_URL" "$HAMN_GUEST_SHA256" "$HAMN_GUEST_SIZE" <<'PY_BOOTSTRAP'
+import json, sys
+path, version, commit, host, host_hash, host_size, guest, guest_hash, guest_size = sys.argv[1:]
+value = {"schemaVersion":3,"channel":"stable","version":version,"commit":commit,
+    "validationMode":"github-hosted-no-vm",
+    "compatibility":{"os":"darwin","architecture":"arm64","minimumMacOS":"13.0"},
+    "artifacts":{"host":{"url":host,"sha256":host_hash,"size":int(host_size)},
+    "guestImage":{"url":guest,"sha256":guest_hash,"size":int(guest_size),"format":"qcow2","compression":"zlib","virtualSize":8*1024**3}}}
+with open(path,"w") as output: json.dump(value,output)
+PY_BOOTSTRAP
+# Bootstrap embeds the exact shared acquisition implementation so repeated
+# installers obey the same digest lock, resume and byte validation contract.
+python3 - "$work" "$HOME" <<'PY_CACHE'
+import sys
+sys.path.insert(0, sys.argv[1])
+from upgrade_support import cache_root
+cache_root(sys.argv[2])
+PY_CACHE
 echo "hamn install: Downloading host archive..." >&2
-host_archive=$work/host.tar.gz
-fetch "$HAMN_HOST_URL" "$host_archive" || fail "host download failed; check your connection and rerun this installer"
+host_archive=$(HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=${HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS:-0} \
+    python3 "$work/upgrade_support.py" acquire "$work/bootstrap.json" host \
+    "$HOME/.hamn/cache" "$work/host-counts.json") || fail "host download failed; check your connection and rerun this installer"
 echo "hamn install: Verifying host archive SHA-256..." >&2
 [ "$(sha256_file "$host_archive")" = "$HAMN_HOST_SHA256" ] ||
     fail "host artifact SHA-256 mismatch"
@@ -129,13 +140,13 @@ artifact=$work/extract/$artifact_root
 
 manifest=$work/manifest.json
 python3 - "$manifest" "$HAMN_VERSION" "$HAMN_COMMIT" "$host_archive" \
-    "$HAMN_HOST_SHA256" "$HAMN_GUEST_URL" "$HAMN_GUEST_SHA256" <<'PY'
+    "$HAMN_HOST_SHA256" "$HAMN_GUEST_URL" "$HAMN_GUEST_SHA256" "$HAMN_HOST_SIZE" "$HAMN_GUEST_SIZE" <<'PY'
 import json
 import sys
 
-path, version, commit, host, host_hash, guest, guest_hash = sys.argv[1:]
+path, version, commit, host, host_hash, guest, guest_hash, host_size, guest_size = sys.argv[1:]
 value = {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "channel": "stable",
     "version": version,
     "commit": commit,
@@ -146,8 +157,9 @@ value = {
         "minimumMacOS": "13.0",
     },
     "artifacts": {
-        "host": {"url": "file://" + host, "sha256": host_hash},
-        "guestImage": {"url": guest, "sha256": guest_hash},
+        "host": {"url": "file://" + host, "sha256": host_hash, "size": int(host_size)},
+        "guestImage": {"url": guest, "sha256": guest_hash, "size": int(guest_size),
+                       "format": "qcow2", "compression": "zlib", "virtualSize": 8 * 1024 ** 3},
     },
 }
 with open(path, "w", encoding="utf-8", newline="\n") as output:

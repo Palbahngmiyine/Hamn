@@ -97,6 +97,7 @@ HOME_DIR=$WORK/home
 BINDIR=$WORK/bin
 DATADIR=$WORK/share/hamn/src
 mkdir -p "$HOME_DIR"
+make host VERSION=0.0.1 >/dev/null
 cp "$HAMN" "$WORK/old-hamn"
 chmod 0755 "$WORK/old-hamn"
 bash "$INSTALL" "$WORK/old-hamn" "$BINDIR" "$DATADIR" \
@@ -107,7 +108,7 @@ MANAGED_DATADIR=$(cd "$DATADIR" && pwd -P)
 
 MANIFEST_2=$(build_release 0.0.2 'immutable guest image v0.0.2' normal)
 run_update "$MANIFEST_2" >"$WORK/update.out" 2>"$WORK/update.err"
-grep -Fq "Updated Hamn: $ORIGINAL_VERSION -> 0.0.2" "$WORK/update.err"
+grep -Fq "Updated Hamn: 0.0.1 -> 0.0.2" "$WORK/update.err"
 grep -Fq '"completed":true' "$WORK/update.out"
 new_target=$(readlink "$BINDIR/hamn")
 [ "$new_target" != "$old_target" ] || {

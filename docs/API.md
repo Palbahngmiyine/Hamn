@@ -8,7 +8,7 @@ through a PTY and are not additional headless operations.
 ## Response contract
 
 ```json
-{"schemaVersion":1,"requestId":"example","ok":true,"target":{"profile":"work","context":null,"namespace":null,"name":null},"data":[],"error":null}
+{"schemaVersion":1,"requestId":"example","ok":true,"target":{"profile":"work","context":null,"namespace":null,"name":null,"dockerConfig":null},"data":[],"error":null}
 ```
 
 Errors have `ok:false`, `data:null`, and `error:{"code":"...","message":"..."}`.
@@ -33,6 +33,9 @@ before retrying. Hamn never claims to undo an accepted server mutation.
 
 VM status retains existing fields and adds `dockerStatus` (`ready`, `preparing`,
 `unavailable`, `recoveryRequired`) and `lastOperation` (null when absent).
+`mountHome`, `homeReadOnly`, `mountInotify`, `rosetta` and `fileEvents` expose
+configured sharing/translation settings; `fileEvents` is `disabled` or
+`best-effort-existing-files`, not a full hot-reload guarantee.
 `state:running` describes the VM process only; `ready` requires Docker `/_ping`.
 `lastOperation` includes `schemaVersion`, `operationId`, `operation`, `status`,
 `phase`, `startedVm`, `exitCode`, and `error`. While running, exit/error may be absent.
@@ -64,11 +67,16 @@ latest operation record, which may now describe the completed stop.
 | Kubernetes details | `k8s <resource> inspect <name>` for every listed resource and namespaces; JSON object and YAML |
 | Kubernetes logs | `k8s pods logs` |
 | Kubernetes mutations | `k8s deployments scale/restart`, `statefulsets scale/restart`, `daemonsets restart`, `pods delete` |
-| Maintenance | `system update`, `system uninstall` |
+| Maintenance | `system upgrade`, `system update`, `system uninstall` |
 
-VM and Docker requests require `--profile`, except `vm list`. VM create and
+VM requests require `--profile`, except `vm list`. Docker requests require exactly
+one of `--profile` or `--context`. External contexts use Docker CLI authentication
+and transport; `--docker-config` optionally selects its configuration directory.
+They do not query or mutate Hamn profiles. VM create and
 configure accept `--cpu`, `--memory` (GiB), and `--disk` (GiB). `vm diagnostics`
-accepts `--path` for an archive. `system update` accepts `--manifest`.
+accepts `--path` for an archive. `system upgrade` and its `system update` alias accept
+`--manifest`, `--check` (read-only, no `--yes` required), and `--force`
+(same-version reinstall, still requires `--yes`). `--check` conflicts with `--force`.
 Use `hamn --headless system update --help` for update-specific usage and recovery.
 See [installation and update experience](INSTALLATION.md) for progress and compatibility.
 `vm env` returns Docker connection information, not shell text.
@@ -85,10 +93,15 @@ Mutations cannot use `--watch`, `--follow`, or `--all-namespaces`.
 
 ## Connections and ownership
 
-Docker API requests go directly to `~/.hamn/<profile>/docker.sock`, after Engine
+Profile Docker API requests go directly to `~/.hamn/<profile>/docker.sock`, after Engine
 API version negotiation. Container names resolve to immutable IDs before
 mutation. Removal preserves volumes. The C port observer still owns forwarded
 Docker-published ports. External Docker tools may connect to this same socket.
+For `--context`, a private temporary socket proxies the existing Engine API client
+through `docker --context <name> system dial-stdio`; Docker owns TLS/SSH/context
+configuration. The response schema, ID resolution and mutation error contract stay
+the same. Deadline/cancellation kills and reaps only owned CLI groups and removes
+the temporary socket. An unavailable context never falls back to a profile or default.
 
 Kubernetes loads an explicit `--kubeconfig`, otherwise `KUBECONFIG`, otherwise
 `~/.kube/config`. Context and namespace selection never write those files.

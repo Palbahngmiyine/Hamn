@@ -11,7 +11,8 @@ use `hamn --headless` for JSON and NDJSON automation.
 - A kubeconfig for Kubernetes operations. These work independently of the VM.
 
 TUI container browsing requires Docker CLI; Kubernetes browsing requires kubectl.
-Headless SDK operations do not require these CLIs. Compose, buildx, and plugins
+Headless profile Docker and Kubernetes SDK operations do not require these CLIs;
+external Docker `--context` operations require Docker CLI. Compose, buildx, and plugins
 remain external installations. Docker Desktop is not required.
 
 ## Install
@@ -45,6 +46,7 @@ hamn --headless capabilities
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
 hamn --headless vm start --profile work --yes
 hamn --headless docker containers list --profile work
+hamn --headless docker containers list --context remote
 hamn --headless docker containers logs api --profile work --follow
 hamn --headless k8s contexts list
 hamn --headless k8s pods list --context dev --namespace default
@@ -89,3 +91,20 @@ installation files. [Configuration](docs/CONFIGURATION.md) describes persistence
 Container creation, Compose, exec, Kubernetes apply, and port-forward use the
 installed native CLIs in the TUI. They are not added to the headless SDK operation
 set. Hamn does not provide an MCP server.
+
+
+## Upgrade
+
+```sh
+hamn upgrade --check
+hamn upgrade
+hamn upgrade --force --output json
+```
+
+`hamn update` is an alias; `hamn --headless system update --yes` remains supported.
+Only a managed installation can be changed. The updater rejects stable downgrades,
+reuses verified artifacts, repairs a missing same-version guest image separately,
+and preserves existing profile disks. `--force` permits a same-version host reinstall.
+After a successful interactive TUI exit, a cached update notice may appear; release
+checks run in the background and never install an update. Set `HAMN_NO_UPDATE_CHECK=1`
+to disable them. See [installation](docs/INSTALLATION.md) for integrity and recovery.

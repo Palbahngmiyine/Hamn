@@ -13,6 +13,9 @@
  *
  * 성공 시 0, 실패 시 -1을 반환하고 *err에 malloc된 메시지를 채운다.
  */
+/* Descriptor variant retains the verified input identity; caller owns fd. */
+int qcow2_extract_fd(int source_fd, const char *out_path, char **err);
+
 int qcow2_extract(const char *in_path, const char *out_path, char **err);
 
 #endif

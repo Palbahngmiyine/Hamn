@@ -3,6 +3,8 @@ use std::{ffi::CString, io::IsTerminal, os::unix::ffi::OsStrExt};
 mod capabilities;
 mod core;
 mod docker;
+mod docker_context;
+mod upgrade;
 mod exec_auth;
 mod headless;
 mod kubeconfig;
@@ -40,6 +42,8 @@ fn main() {
     ) {
         std::process::exit(internal());
     }
+    let args: Vec<_> = std::env::args_os().collect();
+    if upgrade::is_command(&args) { std::process::exit(upgrade::run_cli(&args)); }
     if let Some(help) = model::update_help(&std::env::args_os().collect::<Vec<_>>()) {
         print!("{help}");
         return;
@@ -93,6 +97,7 @@ fn main() {
                 eprintln!("hamn: {error}");
                 std::process::exit(1);
             }
+            upgrade::after_tui();
             return;
         }
         let message = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {

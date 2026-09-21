@@ -123,6 +123,46 @@ The ephemeral Linux builder removes optional `passt` so libguestfs consistently
 uses QEMU SLIRP networking. Image assembly checks DNS with a 30-second deadline
 before package installation; runner-image networking changes must fail visibly.
 
+### Guest image size evidence
+
+The trusted Linux arm64 builder also needs `build-essential` and `zlib1g-dev`:
+it compiles the same qcow2 decoder shipped in the host and compares extracted
+raw SHA-256 with `qemu-img`. `guest/image/build-ubuntu-24.04-arm64.sh` captures
+a compressed baseline from the provisioned filesystem before removing build
+packages and regenerable content. Thus both measurements use the same package
+versions. Cleanup protects runtime packages, purges gcc/make and unused build
+dependencies, resets first-boot state, and discards free filesystem blocks.
+The compact image uses zlib and retains an 8 GiB virtual disk. Byte equivalence
+applies between the cleaned stage and its compact representation; deleting
+packages intentionally changes bytes relative to the pre-cleanup baseline.
+
+The builder requires savings of at least `max(64 MiB, 5%)`, a compressed size
+below 2 GiB, decoder/reference equality, protective MBR and GPT CRC checks.
+It writes `<image>.size-report.json` and package inventories at
+`<image>.packages-before.tsv` and `<image>.packages-after.tsv`. The report binds
+actual byte counts and hashes to the base digest and source revision. These
+artifacts accompany the image in release evidence and attestation.
+
+The first measured result needs human review before creating
+`guest/image/release-size-budget.json`. On the isolated builder, set
+`HAMN_GUEST_SIZE_REVIEW_ONLY=1` alongside the normal base image/hash/output
+inputs to produce a review candidate and
+`<image>.size-report.budget-proposal.json`. This mode still enforces minimum
+savings and all structural checks, but its `reviewOnly: true` report cannot be
+published. After reviewing the actual footprint and runtime evidence, commit
+the approved proposal as the budget and build a normal candidate. Budget
+increases require a new footprint review; missing budgets fail closed.
+Publication independently verifies the exact image/report with
+`guest/image/verify-release-size.py IMAGE SIZE_REPORT REVIEWED_BUDGET`.
+
+Hosted structural checks do not establish boot or functional equivalence.
+Acceptance evidence for the optimized image must separately cover Docker API,
+CLI, Compose, Buildx, containerd/runc/CNI, amd64 binfmt, opt-in Rosetta, and
+reboot data preservation on the exact artifact. Local tests with synthetic
+size fixtures or sparse disks do not establish image-size savings or VM
+behavior. Do not substitute a fabricated baseline or budget when that Linux
+build or physical validation has not run.
+
 `make release-gate` takes `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, and an
 empty `OUTPUT_DIR`, plus the validator inputs above. Checkout must be clean
 and match the candidate source. It never rebuilds the RC. If source changes

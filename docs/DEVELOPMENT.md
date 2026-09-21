@@ -117,3 +117,8 @@ apply/exec/port-forward. It deletes the kind cluster and stops its VMs; the test
 HOME remains available for inspection. `--root` resumes only an owned test root;
 `--keep-running` retains the main test VM for additional diagnosis. Remove that
 owned test directory after reviewing evidence. Never use a user profile as a fixture.
+
+The local control suite requires Docker CLI for the external-context transport
+fixture. It connects only to the test-owned Unix socket; no Docker daemon or VM
+is started. The Nix CI shell includes `docker-client`, and the macOS dependency
+setup script installs the Homebrew `docker` CLI formula.

@@ -156,7 +156,7 @@ def main():
         harness.send(b'\r', '[Kubernetes]')
         harness.until('format-fixture')
         assert config.read_bytes() == before, 'query changed kubeconfig'
-        assert sorted(p.name for p in (harness.root / '.hamn').iterdir()) == ['tui.json']
+        assert sorted(p.name for p in (harness.root / '.hamn').iterdir()) in (['tui.json'], ['tui.json', 'tui.lock'])
         print('PASS: grouped kubectl output/watch and explicit server retained by selected detail; SIGINT and restoration')
     finally:
         if direct_watch and direct_watch.poll() is None:

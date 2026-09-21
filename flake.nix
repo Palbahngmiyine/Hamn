@@ -57,6 +57,7 @@
         (actionlintFor pkgs)
         bash
         curl
+        docker-client
         git
         gnumake
         jq

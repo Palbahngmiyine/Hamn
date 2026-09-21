@@ -45,6 +45,25 @@ GITHUB_RUN_ATTEMPT="$workflow_attempt" \
 
 host=$candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 host_hash=$(sha256 "$host")
+# Synthetic fixture evidence exercises the gate; it is never production image
+# measurement and is only accepted through the explicit local-test boundary.
+python3 - "$candidate/hamn-v0.0.1-ubuntu-24.04-arm64.img" \
+    "$evidence/guest-image-size-report.json" "$WORK/size-budget.json" "$release_ref" <<'PY_SIZE'
+import hashlib, json, pathlib, sys
+image, report_path, budget_path, revision = sys.argv[1:]
+data = pathlib.Path(image).read_bytes()
+digest = hashlib.sha256(data).hexdigest()
+baseline = len(data) + 64 * 1024**2
+report = {"schemaVersion":1,"reviewOnly":False,"compressedBytes":len(data),"imageSha256":digest,
+    "baselineCompressedBytes":baseline,"baselineSha256":"1"*64,"savedBytes":64*1024**2,
+    "requiredSavingsBytes":64*1024**2,"virtualBytes":8*1024**3,"baseImageSha256":"2"*64,
+    "sourceRevision":revision,"packagesBefore":["fixture"],"packagesAfter":["fixture"],"cleanup":["fixture only"],"runtimeValidation":"not executed"}
+pathlib.Path(report_path).write_text(json.dumps(report))
+budget={"schemaVersion":1,"maximumCompressedBytes":len(data)+1,"referenceImageSha256":digest,
+    "footprintReportSha256":hashlib.sha256(pathlib.Path(report_path).read_bytes()).hexdigest()}
+pathlib.Path(budget_path).write_text(json.dumps(budget))
+PY_SIZE
+export HAMN_RELEASE_ALLOW_LOCAL=1 HAMN_TEST_RELEASE_SIZE_BUDGET="$WORK/size-budget.json"
 publish=$WORK/publish
 mkdir "$publish"
 HAMN_RELEASE_REPOSITORY="$repository" \
@@ -57,12 +76,44 @@ HAMN_EXPECTED_WORKFLOW_ATTEMPT="$workflow_attempt" \
 [ "$(sha256 "$host")" = "$host_hash" ]
 [ ! -e "$publish/hamn-update-manifest.json.sig" ]
 [ ! -e "$publish/validation-evidence.json.sig" ]
+# Consume the publisher's exact manifests through the real updater. Transport
+# only substitutes immutable fixture bytes for the declared HTTPS URLs.
+mkdir "$WORK/transport" "$WORK/contract-home"
+cat >"$WORK/transport/curl" <<'PY_CURL'
+#!/usr/bin/env python3
+import os, pathlib, sys
+args=sys.argv[1:]
+assert args[args.index('--proto')+1] == '=https'
+assert args[args.index('--proto-redir')+1] == '=https'
+source=pathlib.Path(os.environ['HAMN_PUBLISH_FIXTURE']) / args[-1].rsplit('/',1)[-1]
+data=source.read_bytes()
+if '--dump-header' in args:
+    pathlib.Path(args[args.index('--dump-header')+1]).write_text('HTTP/1.1 200 OK\r\nContent-Length: '+str(len(data))+'\r\n\r\n')
+if args[args.index('-o')+1] == '-': sys.stdout.buffer.write(data)
+else: pathlib.Path(args[args.index('-o')+1]).write_bytes(data)
+PY_CURL
+chmod 0755 "$WORK/transport/curl"
+for manifest_name in hamn-update-manifest.json hamn-update-manifest-v3.json; do
+    HOME="$WORK/contract-home" PATH="$WORK/transport:$PATH" \
+    HAMN_PUBLISH_FIXTURE="$candidate" HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
+        bash "$ROOT/scripts/update-host.sh" --bootstrap --output-json \
+        --bindir "$WORK/contract-home/bin" --datadir "$WORK/contract-home/src" \
+        --manifest "$publish/$manifest_name" >"$WORK/$manifest_name.result"
+    python3 - "$WORK/$manifest_name.result" <<'PY_RESULT'
+import json, sys
+with open(sys.argv[1]) as source: result=json.load(source)
+assert result['completed'] is True and result['latestVersion']=='0.0.1'
+assert result['profileDisksChanged'] is False
+PY_RESULT
+done
 python3 - "$publish/hamn-update-manifest.json" "$release_ref" \
-    "$publish/hosted-validation-evidence.json" "$source_tree" <<'PY'
+    "$publish/hosted-validation-evidence.json" "$source_tree" \
+    "$publish/hamn-update-manifest-v3.json" "$candidate" <<'PY'
 import json
+import os
 import sys
 
-manifest_path, commit, evidence_path, tree = sys.argv[1:]
+manifest_path, commit, evidence_path, tree, v3_path, candidate = sys.argv[1:]
 with open(manifest_path, encoding="utf-8") as source:
     manifest = json.load(source)
 if manifest.get("schemaVersion") != 2 or manifest.get("version") != "v0.0.1" or \
@@ -79,7 +130,45 @@ with open(evidence_path, encoding="utf-8") as source:
 if evidence.get("physicalE2E") is not False or \
         evidence.get("sourceTree") != tree:
     raise SystemExit("hosted evidence overstates validation")
+with open(v3_path, encoding="utf-8") as source:
+    v3 = json.load(source)
+assert v3["schemaVersion"] == 3
+for name in ("host", "guestImage"):
+    old, new = manifest["artifacts"][name], v3["artifacts"][name]
+    assert old["sha256"] == new["sha256"] and old["url"] == new["url"]
+    assert new["size"] == os.path.getsize(os.path.join(candidate, new["url"].rsplit("/", 1)[1]))
 PY
+
+# Missing reviewed evidence and review-only reports must fail at publication,
+# even when all candidate and hosted-validation identities are otherwise valid.
+cp "$evidence/guest-image-size-report.json" "$WORK/size-report.backup"
+for size_failure in missing-budget review-only; do
+    rejected=$WORK/$size_failure
+    mkdir "$rejected"
+    test_budget=$WORK/size-budget.json
+    if [ "$size_failure" = missing-budget ]; then
+        test_budget=$WORK/absent-budget.json
+    else
+        python3 - "$evidence/guest-image-size-report.json" <<'PY_REVIEW'
+import json, pathlib, sys
+path=pathlib.Path(sys.argv[1]); value=json.loads(path.read_text())
+value['reviewOnly']=True; path.write_text(json.dumps(value))
+PY_REVIEW
+    fi
+    if HAMN_TEST_RELEASE_SIZE_BUDGET="$test_budget" \
+        HAMN_RELEASE_REPOSITORY="$repository" \
+        HAMN_EXPECTED_WORKFLOW_RUN="$workflow_run" \
+        HAMN_EXPECTED_WORKFLOW_ATTEMPT="$workflow_attempt" \
+        bash "$ROOT/packaging/release/publish-release.sh" \
+        v0.0.1 v0.0.1-rc.417123456 "$release_ref" "$input" "$rejected" \
+        >"$WORK/$size_failure.out" 2>"$WORK/$size_failure.err"; then
+        echo "FAIL: promotion accepted $size_failure image evidence" >&2
+        exit 1
+    fi
+    grep -Fq 'guest image size evidence or reviewed release budget is missing or invalid' "$WORK/$size_failure.err"
+    [ ! -e "$rejected/hamn-update-manifest.json" ]
+done
+cp "$WORK/size-report.backup" "$evidence/guest-image-size-report.json"
 
 wrong_run=$WORK/wrong-run
 mkdir "$wrong_run"

@@ -39,6 +39,12 @@ static cJSON *profile_snapshot(const char *name)
         !cJSON_AddNumberToObject(value, "cpus", profile.cpus) ||
         !cJSON_AddNumberToObject(value, "memoryMiB", profile.mem_mib) ||
         !cJSON_AddNumberToObject(value, "diskGiB", profile.disk_gib) ||
+        !cJSON_AddBoolToObject(value, "mountHome", profile.mount_home) ||
+        !cJSON_AddBoolToObject(value, "homeReadOnly", profile.home_read_only) ||
+        !cJSON_AddBoolToObject(value, "mountInotify", profile.mount_inotify) ||
+        !cJSON_AddBoolToObject(value, "rosetta", profile.rosetta) ||
+        !cJSON_AddStringToObject(value, "fileEvents", profile.mount_inotify ?
+            "best-effort-existing-files" : "disabled") ||
         !cJSON_AddStringToObject(value, "ip", state.ip)) {
         cJSON_Delete(value);
         return NULL;

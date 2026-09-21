@@ -3,7 +3,7 @@
 //! the group is terminated. Completion, read failure and cancellation all clean
 //! the group and reap its leader. Deliberately detached sessions are not owned.
 use std::{io, process::{ExitStatus, Stdio}};
-use tokio::{process::{Child, ChildStderr, ChildStdout, Command}, signal::unix::{Signal, SignalKind}};
+use tokio::{process::{Child, ChildStderr, ChildStdin, ChildStdout, Command}, signal::unix::{Signal, SignalKind}};
 
 pub struct QueryProcess {
     child: Child,
@@ -13,12 +13,24 @@ pub struct QueryProcess {
 }
 
 impl QueryProcess {
-    pub fn spawn(mut command: Command) -> io::Result<(Self, ChildStdout, ChildStderr)> {
+    pub fn spawn(command: Command) -> io::Result<(Self, ChildStdout, ChildStderr)> {
+        Self::spawn_with_input(command, false)
+    }
+
+    /// A caller owns the input pipe; dropping the process still terminates and
+    /// reaps its entire original group before the PID can be reused.
+    pub fn spawn_piped(command: Command) -> io::Result<(Self, ChildStdin, ChildStdout, ChildStderr)> {
+        let (mut process, stdout, stderr) = Self::spawn_with_input(command, true)?;
+        let stdin = process.child.stdin.take().expect("query stdin is piped");
+        Ok((process, stdin, stdout, stderr))
+    }
+
+    fn spawn_with_input(mut command: Command, piped: bool) -> io::Result<(Self, ChildStdout, ChildStderr)> {
         // Subscribe before spawning; the first waitid also catches a child that
         // exits before the signal stream is polled. Other children's signals
         // only cause another observation of this exact, unreaped child.
         let exited = tokio::signal::unix::signal(SignalKind::child())?;
-        let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped())
+        let mut child = command.stdin(if piped { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped())
             .stderr(Stdio::piped()).process_group(0).kill_on_drop(false).spawn()?;
         let pid = child.id().expect("new child has a PID") as libc::pid_t;
         let stdout = child.stdout.take().expect("query stdout is piped");

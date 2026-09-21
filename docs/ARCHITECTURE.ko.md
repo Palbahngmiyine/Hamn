@@ -6,21 +6,19 @@ Hamn은 Rust 제어 계층과 정적으로 링크한 C/Objective-C 가상화 코
 ## 공통 제어 서비스
 
 ```text
-Ratatui/Crossterm TUI ─┐
-                      ├─ 타입화된 요청 → 공통 서비스 → 결과 / 이벤트
-Clap 헤드리스 CLI ────┘                       │
-                         ┌───────────────────┼───────────────────┐
-                         ▼                   ▼                   ▼
-                    C worker             Bollard             kube-rs
-                   같은 실행 파일      Docker Engine     외부 Kubernetes
-                         │               Unix 소켓           kubeconfig
-                         ▼
-                   프로필 VM 수명주기
-                Virtualization.framework
+TUI VM / structured requests ─┐
+                             ├─ Request → service → C worker / Bollard / kube-rs
+Headless operations ─────────┘
+TUI Docker / Kubernetes lists ── native CLI → bounded JSON query → tables
+TUI native commands ─────────── owned PTY sessions → Docker / kubectl / plugins
+Docker --context (headless) ──── Bollard → private socket → Docker CLI transport
 ```
 
 `control/`은 두 프런트엔드, 작업 검증, JSON 응답, API 클라이언트, 제한된 로그 큐와
-취소를 담당합니다. TUI와 헤드리스는 같은 서비스를 사용합니다. 화면 전환 시 이전
+취소를 담당합니다. VM·구조화된 요청은 서비스를 공유합니다. TUI 네이티브 목록과
+명령은 외부 Docker·kubectl을 쓰며, 목록은 제한된 수명의 JSON 조회, 대화형 명령은
+소유권을 가진 PTY 세션으로 실행합니다. Kubernetes 선택 변경은 guarded kubectl
+경로에서 UID·resourceVersion을 검사합니다. 화면 전환 시 이전
 대상의 늦은 응답을 버리고, 네트워크 요청은 비동기로 실행합니다.
 
 `host/core/control.h`의 C 함수는 새 `__core-worker` 프로세스에서만 호출합니다.
@@ -41,11 +39,13 @@ C supervisor는 worker가 사라져도 잠금을 유지하며 하위 프로세�
 
 Docker API는 SSH로 전달한 프로필 Unix 소켓을 통해 게스트 dockerd에 도달합니다.
 Docker는 공용 containerd의 `moby` 네임스페이스를 사용하며, C 포트 관찰기는 공개
-TCP·UDP 포트를 계속 조정합니다. 외부 Docker CLI·Compose·buildx·SDK·Testcontainers도
+IPv4 TCP·UDP Ports를 한 번의 컨테이너 목록 응답에서 검증한 뒤 완전한 snapshot만
+반영합니다. 컨테이너마다 inspect를 반복하지 않습니다. 외부 Docker CLI·Compose·buildx·SDK·Testcontainers도
 같은 소켓을 사용합니다. Hamn은 외부 도구의 현재 context를 바꾸지 않습니다.
 레지스트리 자격 증명은 외부 클라이언트가 관리하고 홈 공유는 자격 증명 격리 경계가 아닙니다.
 
-Kubernetes는 선택한 외부 context에 kube-rs로 접속합니다. Hamn VM, 게스트 CRI,
+헤드리스 Kubernetes는 kube-rs, TUI 네이티브 탐색은 kubectl로 선택한 외부 context에
+접속합니다. Hamn VM, 게스트 CRI,
 Hamn API 포워딩은 사용하지 않습니다. kubeconfig·자격 증명은 로컬에서 읽고 원본
 파일은 바꾸지 않습니다. 변경은 객체 식별자·resourceVersion 사전 조건으로 보호하고,
 변경 요청이 반복되지 않도록 자동 HTTP 재시도를 끕니다.
@@ -55,6 +55,20 @@ Hamn API 포워딩은 사용하지 않습니다. kubeconfig·자격 증명은 �
 서명된 Ubuntu 24.04 arm64 이미지가 hamnd, Docker, 공용 containerd, runc, CNI,
 binfmt와 일반 게스트 helper를 소유합니다. 서명 없는 이미지 대체 경로나 시작 시
 게스트 코드를 빌드하기 위한 호스트 소스 마운트는 없습니다.
+
+새 프로필 디스크는 `host/image/raw_cache.c`를 사용합니다. 이미지 digest별 캐시
+묶음에 sparse raw base와 extractor 버전·가상 크기·SHA-256 marker를 저장합니다.
+digest별 lock 대기는 60초로 제한하며, 비공개 stage와 파일·디렉터리 fsync 후
+원자적으로 게시합니다. 재사용 시 소유자, 권한, hard link 수, 크기와 이미지·raw
+hash를 검증합니다. 중단된 stage는 같은 lock 아래에서 복구합니다. 이 캐시는
+네트워크 요청을 하지 않습니다.
+
+APFS에서는 파일 descriptor를 받는 `clonefile(2)` 계열의 `fclonefileat`로 복제한 뒤
+해당 디스크를 요청 크기로 확장합니다. `EXDEV`, `ENOTSUP`, `EOPNOTSUPP`에만
+검증된 이미지 descriptor의 sparse extraction으로 전환합니다. 권한·무결성·I/O
+오류는 실패로 처리합니다. 기존 디스크는 rebase하거나 교체하지 않으며, 설정 크기를
+명시적으로 늘린 경우에만 기존 inode를 확장합니다. 전체 hash 검증에는 최초 생성과
+재사용 모두 I/O가 필요하므로 저장 공간 공유가 항상 더 빠른 생성을 뜻하지는 않습니다.
 
 구형 프로필은 SSH 준비 직후 일반 provisioning보다 먼저 K3s 전환을 시작합니다.
 기존 EFI 부팅을 유지하므로 SSH 준비 전에는 구 K3s가 잠시 실행될 수 있습니다.

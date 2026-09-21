@@ -42,7 +42,7 @@ fi
 grep -Fq 'release candidate must build on Apple Silicon arm64' \
     "$WORK/non-arm64.err"
 CANONICAL_REPOSITORY=example/hamn
-CANONICAL_MANIFEST_URL="https://github.com/$CANONICAL_REPOSITORY/releases/latest/download/hamn-update-manifest.json"
+CANONICAL_MANIFEST_URL="https://github.com/$CANONICAL_REPOSITORY/releases/latest/download/hamn-update-manifest-v3.json"
 GITHUB_REPOSITORY="$CANONICAL_REPOSITORY" \
 RELEASE_REF="$RELEASE_REF" \
 RELEASE_TAG=v0.0.1-rc.1 \
@@ -159,7 +159,7 @@ printf '%s' \
 HOME_DIR=$WORK/home
 mkdir -p "$HOME_DIR"
 HOME="$HOME_DIR" bash "$WORK/candidate/install.sh" --help >"$WORK/help.out"
-grep -Fq 'For updates: hamn --headless system update --yes' "$WORK/help.out"
+grep -Fq 'For updates: hamn upgrade (or hamn --headless system update --yes)' "$WORK/help.out"
 [ ! -e "$HOME_DIR/.local" ] && [ ! -e "$HOME_DIR/.hamn" ]
 if HOME="$HOME_DIR" bash "$WORK/candidate/install.sh" --unknown >"$WORK/unknown.out" 2>"$WORK/unknown.err"; then
     echo "FAIL: bootstrap accepted an unknown option" >&2
@@ -239,13 +239,21 @@ grep -Fq 'migrate it with make install' "$WORK/legacy.err"
 [ ! -L "$WORK/legacy-home/.local/bin/hamn" ]
 [ ! -e "$WORK/legacy-home/.hamn" ]
 printf 'tampered\n' >>"$HOST_ARTIFACT"
+# A verified digest cache is independent of later origin damage.
+HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
+    bash "$WORK/candidate/install.sh" >"$WORK/cached.out" 2>"$WORK/cached.err"
+grep -Fq 'Unchanged Hamn 0.0.1' "$WORK/cached.err"
+[ "$(readlink "$HOME_DIR/.local/bin/hamn")" = "$installed_target" ]
+# Without those verified bytes, reject the corrupted origin before cutover.
+rm "$HOME_DIR/.hamn/cache/downloads/$HOST_HASH.artifact"
 if HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     bash "$WORK/candidate/install.sh" >"$WORK/tampered.out" \
     2>"$WORK/tampered.err"; then
     echo "FAIL: bootstrap accepted a modified host artifact" >&2
     exit 1
 fi
-grep -Fq 'host artifact SHA-256 mismatch' "$WORK/tampered.err"
+grep -Eq 'exceeds size limit|artifact size or SHA-256 mismatch' "$WORK/tampered.err"
 [ "$(readlink "$HOME_DIR/.local/bin/hamn")" = "$installed_target" ]
+[ ! -e "$HOME_DIR/.hamn/cache/downloads/$HOST_HASH.artifact" ]
 
 echo "PASS: candidate artifacts bootstrap atomically from immutable release metadata"

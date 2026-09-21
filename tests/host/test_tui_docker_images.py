@@ -84,9 +84,14 @@ def main():
             calls = lambda: [json.loads(line) for line in (root / 'native-calls').read_text().splitlines()]
             before = len(calls())
             harness.send((':docker ' + ' '.join(args) + '\r').encode(), f'Exit code {direct.returncode}')
+            # Process exit and PTY output arrive independently. Keep the full
+            # output oracle, but allow the remaining output events to render.
+            expected_lines = [' '.join(line.split()) for line in (direct.stdout + direct.stderr).splitlines()]
+            harness.wait(lambda: all(line in ' '.join(harness.screen.text().split())
+                for line in expected_lines))
             screen = harness.screen.text()
             # Returning from the preceding terminal refreshes the original list.
-            refresh = target + ['images', '--format', '{{json .}}']
+            refresh = target + ['images', '--format', '{{json .}}', '--no-trunc']
             assert [call for call in calls()[before:] if call != refresh] == [args], calls()[before:]
             assert 'docker terminal' in screen, screen
             for line in (direct.stdout + direct.stderr).splitlines():
@@ -96,6 +101,10 @@ def main():
             if '--no-trunc' in command:
                 assert image_id in screen, screen
             harness.send(b'\r', '[Containers]')
+            # A redraw may arrive in fragments. Do not let the previous exit
+            # footer satisfy the next command's completion check.
+            harness.wait(lambda: 'docker terminal' not in harness.screen.text()
+                and 'Exit code' not in harness.screen.text())
             print('PASS:', command, 'matches installed CLI output and exit', direct.returncode)
         print('PASS: installed Docker digests/full IDs/tree retain original argv, output and exit code; ordinary images remain selectable')
     finally:

@@ -115,6 +115,41 @@ Workflow는 다음 순서로 실행합니다.
 네트워크를 일관되게 사용하도록 합니다. 이미지 조립은 패키지 설치 전에 30초 제한으로
 DNS를 검사하며 runner 이미지의 네트워크 변경으로 발생한 실패를 숨기지 않습니다.
 
+### 게스트 이미지 크기 증거
+
+신뢰된 Linux arm64 builder에는 `build-essential`과 `zlib1g-dev`도 필요합니다.
+호스트에 포함하는 것과 같은 qcow2 decoder를 빌드하고, 추출한 raw SHA-256을
+`qemu-img` 결과와 비교합니다. `guest/image/build-ubuntu-24.04-arm64.sh`는 build
+package와 재생성 가능한 내용을 제거하기 전, 동일하게 준비된 파일시스템에서 압축
+baseline을 생성합니다. 따라서 전후 측정에 같은 package 버전을 사용합니다.
+runtime package를 보호한 상태에서 gcc/make와 불필요한 build 의존성, apt·로그·임시
+파일을 제거하고 최초 부팅 상태를 초기화한 뒤 free block을 discard합니다. 압축에는
+zlib를 사용하고 가상 디스크는 8 GiB로 유지합니다. 바이트 동등성은 정리한 stage와
+그 압축 결과 사이에서 확인합니다. package를 제거하기 전 baseline과는 내용이 다릅니다.
+
+builder는 최소 `max(64 MiB, 5%)` 감소, 2 GiB 미만의 압축 크기, decoder와 reference
+일치, protective MBR와 GPT CRC 검사를 요구합니다. `<image>.size-report.json`과
+`<image>.packages-before.tsv`, `<image>.packages-after.tsv`를 기록합니다.
+report는 실제 크기·해시를 기반 이미지 digest와 소스 revision에 연결하며, 이미지와
+함께 release evidence와 attestation에 포함합니다.
+
+첫 실측 결과를 검토한 뒤 `guest/image/release-size-budget.json`을 만들어야 합니다.
+격리된 builder에서 일반 base image/hash/output 입력과 함께
+`HAMN_GUEST_SIZE_REVIEW_ONLY=1`을 지정하면 검토 후보와
+`<image>.size-report.budget-proposal.json`을 생성합니다. 이 모드도 최소 감소량과
+구조 검사를 강제하지만 `reviewOnly: true` report로는 게시할 수 없습니다.
+실제 footprint와 런타임 증거를 검토한 후 승인한 proposal을 budget으로 commit하고
+일반 후보를 빌드합니다. budget 상향에는 새 footprint 검토가 필요하며, budget이
+없으면 실패합니다. 게시 단계는
+`guest/image/verify-release-size.py IMAGE SIZE_REPORT REVIEWED_BUDGET`으로
+정확한 이미지와 report를 다시 검증합니다.
+
+Hosted 구조 검사는 부팅이나 기능 동등성의 증거가 아닙니다. 최적화한 정확한 산출물로
+Docker API·CLI, Compose, Buildx, containerd/runc/CNI, amd64 binfmt, opt-in Rosetta,
+재부팅 후 데이터 보존을 별도 확인해야 합니다. 합성 크기 fixture나 sparse 디스크의
+로컬 테스트는 이미지 크기 감소나 VM 동작을 입증하지 않습니다. Linux 빌드나 물리
+검증을 실행하지 못했을 때 임의의 baseline·budget으로 대신하지 않습니다.
+
 `make release-gate`에는 `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, 빈
 `OUTPUT_DIR`와 위 검증기 입력이 필요합니다. Checkout은 깨끗해야 하며 후보 소스와
 같아야 합니다. RC를 다시 빌드하지 않습니다. 검증 후 소스가 바뀌면 새 후보를 만들고

@@ -23,7 +23,12 @@ impl Invocation {
         let mut command = tokio::process::Command::new(self.program());
         command.args(&self.args);
         if structured && self.resource.is_some() {
-            if self.workspace == Workspace::Containers { command.args(["--format", "{{json .}}"]); }
+            if self.workspace == Workspace::Containers {
+                command.args(["--format", if self.resource.as_deref() == Some("projects") { "json" } else { "{{json .}}" }]);
+                if matches!(self.resource.as_deref(), Some("containers" | "images" | "networks")) {
+                    command.arg("--no-trunc");
+                }
+            }
             else { command.args(["-o", "json"]); }
         }
         command
@@ -75,6 +80,7 @@ fn resource(args: &[String], workspace: Workspace) -> Option<String> {
         match words.as_slice() {
             ["ps", ..] | ["container", "ls" | "ps" | "list", ..] => Some("containers".into()),
             ["images", ..] | ["image", "ls" | "list", ..] => Some("images".into()),
+            ["compose", "ls" | "list", ..] => Some("projects".into()),
             ["volume", "ls" | "list", ..] => Some("volumes".into()),
             ["network", "ls" | "list", ..] => Some("networks".into()),
             _ => None,
@@ -82,7 +88,7 @@ fn resource(args: &[String], workspace: Workspace) -> Option<String> {
     } else {
         if has(args, &["--output", "-o", "--watch", "-w", "--watch-only", "--raw", "--output-watch-events", "--no-headers", "--show-labels", "--label-columns", "-L", "--show-kind"], workspace) || kube_short_output(args) { return None; }
         match words.as_slice() {
-            ["get", resource, ..] if ["pods", "po", "pod", "deployments", "deploy", "deployment", "services", "svc", "service", "namespaces", "ns", "nodes", "no", "statefulsets", "sts", "daemonsets", "ds", "events", "jobs", "cronjobs", "ingresses", "pvcs"].contains(resource) => Some((*resource).into()),
+            ["get", resource, ..] if !resource.is_empty() && resource.bytes().all(|c| c.is_ascii_alphanumeric() || b".-".contains(&c)) && !resource.starts_with('-') => Some((*resource).into()),
             _ => None,
         }
     }
@@ -260,24 +266,48 @@ pub async fn query(invocation: &Invocation) -> Result<Value> {
         .map_err(|e| Failure::new("cliUnavailable", format!("{}: {e}", invocation.program())))?;
     async fn read(reader: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
         let mut bytes = Vec::new(); reader.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes).await?;
-        if bytes.len() > 16 * 1024 * 1024 { return Err(std::io::Error::other("CLI output exceeds 16 MiB")); }
+        if bytes.len() > 16 * 1024 * 1024 { return Err(std::io::Error::other("CLI output exceeds 16 MiB; / filters fetched rows only. Narrow with --namespace, --selector or --field-selector.")); }
         Ok(bytes)
     }
     let (status, out, err) = tokio::try_join!(child.wait(), read(stdout), read(stderr)).map_err(|e| Failure::new("cliError", e))?;
     if !status.success() { return Err(Failure::new("cliError", format!("{} exited {}: {}", invocation.program(), status, String::from_utf8_lossy(&err)))); }
-    if out.len() > 16 * 1024 * 1024 { return Err(Failure::new("responseTooLarge", "CLI output exceeds 16 MiB")); }
+    if out.len() > 16 * 1024 * 1024 { return Err(Failure::new("responseTooLarge", "CLI output exceeds 16 MiB; / filters fetched rows only. Narrow with --namespace, --selector or --field-selector.")); }
     if invocation.workspace == Workspace::Containers {
         let rows: std::result::Result<Vec<Value>, _> = out.split(|b| *b == b'\n').filter(|line| !line.is_empty()).map(serde_json::from_slice).collect();
-        rows.map(Value::Array).map_err(|e| Failure::new("cliProtocol", e))
+        let rows = rows.map_err(|e| Failure::new("cliProtocol", e))?;
+        if invocation.resource.as_deref() == Some("projects") && rows.len() == 1 && rows[0].is_array() {
+            Ok(rows.into_iter().next().unwrap())
+        } else { Ok(Value::Array(rows)) }
     } else {
-        let value: Value = serde_json::from_slice(&out).map_err(|e| Failure::new("cliProtocol", e))?;
-        Ok(if value["items"].is_array() { value["items"].clone() } else { Value::Array(vec![value]) })
+        let mut value: Value = serde_json::from_slice(&out).map_err(|e| Failure::new("cliProtocol", e))?;
+        Ok(if value["items"].is_array() { value["items"].take() } else { Value::Array(vec![value]) })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn structured_queries_keep_full_ids_and_generic_resources_readable() {
+        let mut state = State::new(Default::default());
+        state.workspace = Workspace::Containers;
+        for input in ["ps", "images", "network ls"] {
+            let query = parse(input, &state).unwrap();
+            let command = query.command(true);
+            assert!(command.as_std().get_args().any(|arg| arg == "--no-trunc"));
+            assert!(!query.command(false).as_std().get_args().any(|arg| arg == "--no-trunc"));
+        }
+        let projects = parse("compose ls", &state).unwrap();
+        assert_eq!(projects.resource.as_deref(), Some("projects"));
+        assert!(projects.command(true).as_std().get_args().any(|arg| arg == "json"));
+        for input in ["volume ls", "context ls"] {
+            assert!(!parse(input, &state).unwrap().command(true).as_std().get_args().any(|arg| arg == "--no-trunc"));
+        }
+        state.workspace = Workspace::Kubernetes;
+        assert_eq!(parse("get certificates.cert-manager.io -l app=test", &state).unwrap().resource.as_deref(), Some("certificates.cert-manager.io"));
+        assert!(parse("get certificates.cert-manager.io -o yaml", &state).unwrap().resource.is_none());
+        assert!(parse("get pods,services", &state).unwrap().resource.is_none());
+    }
     #[test]
     fn consumed_values_cannot_override_ui_scope_or_select_output_mode() {
         let mut state = State::new(Default::default());

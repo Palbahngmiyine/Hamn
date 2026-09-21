@@ -64,6 +64,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
+            build-essential zlib1g-dev \
             dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual
           # libguestfs auto-selects passt when runner images preinstall it.
           # Keep the QEMU SLIRP backend used by the appliance DNS contract.
@@ -148,10 +149,16 @@ jobs:
             "$guest_output" "$RUNNER_TEMP/hamn-guest.img"
           sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 \
             "$guest_output.sha256" "$RUNNER_TEMP/hamn-guest.img.sha256"
+          for suffix in size-report.json packages-before.tsv packages-after.tsv; do
+            sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 \
+              "$guest_output.$suffix" "$RUNNER_TEMP/hamn-guest.img.$suffix"
+          done
       - name: Attest completed guest image
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/hamn-guest.img
+          subject-path: |
+            ${{ runner.temp }}/hamn-guest.img
+            ${{ runner.temp }}/hamn-guest.img.size-report.json
       - name: Upload completed guest image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -159,6 +166,9 @@ jobs:
           path: |
             ${{ runner.temp }}/hamn-guest.img
             ${{ runner.temp }}/hamn-guest.img.sha256
+            ${{ runner.temp }}/hamn-guest.img.size-report.json
+            ${{ runner.temp }}/hamn-guest.img.packages-before.tsv
+            ${{ runner.temp }}/hamn-guest.img.packages-after.tsv
           if-no-files-found: error
           retention-days: 14
 
@@ -231,6 +241,12 @@ jobs:
             CANDIDATE_DIR="$RUNNER_TEMP/hamn-candidate" \
             OUTPUT_DIR="$RUNNER_TEMP/hamn-evidence"
           NIX_SHELL
+          cp "$RUNNER_TEMP/hamn-guest/hamn-guest.img.size-report.json" \
+            "$RUNNER_TEMP/hamn-evidence/guest-image-size-report.json"
+          cp "$RUNNER_TEMP/hamn-guest/hamn-guest.img.packages-before.tsv" \
+            "$RUNNER_TEMP/hamn-evidence/guest-image-packages-before.tsv"
+          cp "$RUNNER_TEMP/hamn-guest/hamn-guest.img.packages-after.tsv" \
+            "$RUNNER_TEMP/hamn-evidence/guest-image-packages-after.tsv"
       - name: Attest exact candidate artifact provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
@@ -238,7 +254,9 @@ jobs:
       - name: Attest hosted validation evidence
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/hamn-evidence/hosted-validation-evidence.json
+          subject-path: |
+            ${{ runner.temp }}/hamn-evidence/hosted-validation-evidence.json
+            ${{ runner.temp }}/hamn-evidence/guest-image-size-report.json
       - name: Upload exact candidate bytes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -303,6 +321,12 @@ jobs:
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
+          gh attestation verify \
+            "$RUNNER_TEMP/hamn-release-input/hamn-evidence/guest-image-size-report.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
       - name: Verify hosted evidence and generate immutable manifest
         shell: bash
         env:
@@ -320,7 +344,9 @@ jobs:
       - name: Attest immutable update manifest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/hamn-publish/hamn-update-manifest.json
+          subject-path: |
+            ${{ runner.temp }}/hamn-publish/hamn-update-manifest.json
+            ${{ runner.temp }}/hamn-publish/hamn-update-manifest-v3.json
       - name: Create and verify draft release
         shell: bash
         env:
@@ -340,6 +366,7 @@ jobs:
             "$candidate/hamn-${STABLE_TAG}.spdx.json" \
             "$candidate/install.sh" \
             "$publish/hamn-update-manifest.json" \
+            "$publish/hamn-update-manifest-v3.json" \
             "$publish/hosted-validation-evidence.json" \
             "$publish/candidate.json" \
             "$publish/SHA256SUMS" \
@@ -360,7 +387,7 @@ jobs:
               "hamn-" + tag + "-darwin-arm64.tar.gz",
               "hamn-" + tag + "-ubuntu-24.04-arm64.img",
               "hamn-" + tag + ".spdx.json",
-              "install.sh", "hamn-update-manifest.json",
+              "install.sh", "hamn-update-manifest.json", "hamn-update-manifest-v3.json",
               "hosted-validation-evidence.json", "candidate.json",
               "SHA256SUMS", "promoted-from-rc",
           }

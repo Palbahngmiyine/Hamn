@@ -132,7 +132,7 @@ with Path(os.environ['HOME'], 'native-calls').open('a') as out:
         harness.send(b'\r', 'Namespace: test')
         assert 'Context: old-cluster' in harness.screen.text(), harness.screen.text()
         assert config.read_bytes() == direct_config.read_bytes()
-        assert sorted(p.name for p in (root / '.hamn').iterdir()) == ['tui.json']
+        assert sorted(p.name for p in (root / '.hamn').iterdir()) in (['tui.json'], ['tui.json', 'tui.lock'])
         print('PASS: create plugins retain exact argv/exit/count; built-ins, aliases and literal data keep UI namespace')
     finally:
         harness.close()

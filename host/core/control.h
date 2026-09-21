@@ -14,6 +14,12 @@ int hamn_control_delete(const char *profile);
 int hamn_control_migrate(const char *profile);
 int hamn_control_diagnostics(const char *profile, const char *path, char **result);
 int hamn_control_update(const char *manifest);
+/* manifest is optional borrowed NUL-terminated UTF-8. check_only and force are
+ * booleans and cannot both be true. Result owns at most 16 KiB of UTF-8 JSON;
+ * release with hamn_control_free. Call in the fresh core worker only. Checks do
+ * not acquire payloads or repair journals. Mutations require a managed symlink. */
+int hamn_control_upgrade(const char *manifest, int check_only, int force,
+                         char **result);
 int hamn_control_uninstall(int confirmed);
 
 #endif

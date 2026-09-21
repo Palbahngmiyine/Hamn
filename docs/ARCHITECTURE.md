@@ -6,22 +6,19 @@ C/Objective-C virtualization core. [API](API.md) describes the public requests.
 ## Shared control plane
 
 ```text
-Ratatui/Crossterm TUI ─┐
-                      ├─ typed Request → service → typed result / events
-Clap headless CLI ────┘                       │
-                         ┌───────────────────┼───────────────────┐
-                         ▼                   ▼                   ▼
-                    C worker             Bollard             kube-rs
-                  same executable      Docker Engine     external Kubernetes
-                         │               Unix socket          kubeconfig
-                         ▼
-                 profile VM lifecycle
-                 Virtualization.framework
+TUI VM / structured requests ─┐
+                             ├─ Request → service → C worker / Bollard / kube-rs
+Headless operations ─────────┘
+TUI Docker / Kubernetes lists ── native CLI → bounded JSON query → tables
+TUI native commands ─────────── owned PTY sessions → Docker / kubectl / plugins
+Docker --context (headless) ──── Bollard → private socket → Docker CLI transport
 ```
 
 `control/` contains both frontends, operation validation, JSON envelopes, API
-clients, bounded log streams, and cancellation. A TUI operation uses exactly
-the same service as its headless equivalent. A view generation discards late
+clients, bounded log streams, and cancellation. VM and structured requests share the service. TUI native resource lists and
+commands use installed Docker/kubectl: lists have bounded query lifetimes, while
+interactive commands run in separately owned PTY sessions. Kubernetes selected
+mutations still enforce UID/resourceVersion through the guarded kubectl path. A view generation discards late
 responses from a previously selected target. Network calls run asynchronously.
 
 C functions in `host/core/control.h` execute only in a fresh `__core-worker`
@@ -44,13 +41,15 @@ and reap subprocesses when an operation worker disappears.
 
 Docker API requests flow through the profile's SSH-forwarded Unix socket to
 guest dockerd. Docker uses system containerd's `moby` namespace. The C port
-observer continues to reconcile published TCP and UDP ports. External Docker
+observer validates published IPv4 TCP/UDP Ports from one container-list request
+and commits only complete snapshots, without a per-container inspect loop. External Docker
 CLI, Compose, buildx, SDKs and Testcontainers use the same public socket;
 Hamn does not switch their current context. Registry credentials remain the
 external client's responsibility. The home share is not a credential-isolation
 boundary.
 
-Kubernetes uses a kube-rs client against the selected external context. It does
+Headless Kubernetes uses kube-rs; native TUI browsing uses kubectl against the
+selected external context. It does
 not use the Hamn VM, guest CRI, or a Hamn API forward. Kubeconfig merging and
 credentials are read locally; context selection does not rewrite source files.
 Mutations resolve object identity and use resource-version/UID preconditions.
@@ -61,6 +60,22 @@ Automatic HTTP retries are disabled to avoid replaying a mutation.
 The signed Ubuntu 24.04 arm64 image owns hamnd, Docker, shared containerd, runc,
 CNI, binfmt and normal guest helpers. There is no unsigned cloud-image fallback
 or source-directory mount used to build guest code during VM startup.
+
+New profile disks use `host/image/raw_cache.c`. A digest-keyed cache bundle
+contains the sparse raw base and an extractor-version, virtual-size and SHA-256
+marker. A per-digest lock bounds waiting to 60 seconds; private staging, file
+and directory fsync, and atomic publication prevent incomplete bases from
+becoming visible. Reuse validates ownership, modes, link count, size and both
+image/raw hashes. Interrupted staging is recovered under the same lock.
+This cache performs no network requests.
+
+APFS provisioning uses `fclonefileat`, the descriptor-based `clonefile(2)`
+operation, then grows the private disk to the requested size. Only `EXDEV`,
+`ENOTSUP` and `EOPNOTSUPP` permit direct sparse extraction from the verified
+image descriptor. Permission, integrity and I/O errors fail closed. An existing
+profile disk is never rebased or replaced; only an explicit larger configured
+size grows its existing inode. Full hash validation adds first-use and reuse
+I/O, so shared storage does not imply universally faster profile creation.
 
 For a legacy profile, SSH readiness starts managed K3s retirement before normal
 provisioning. The existing EFI boot path is preserved; old K3s can briefly run

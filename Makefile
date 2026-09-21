@@ -187,10 +187,13 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(B
 	$(PROFILE_READ_TEST)
 	HAMN=$(HOST_BIN) python3 tests/host/test_core_worker.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_docker_api.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_docker_context.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_exec_auth.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_navigation.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui_review_improvements.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui_session_management.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_workspaces.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_outcomes.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_native_regressions.py
@@ -257,6 +260,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST)
+	bash tests/host/test_raw_cache.sh
 	$(CTLSOCK_TEST)
 	$(FS_TEST)
 	$(SEED_MOUNTS_TEST)
@@ -278,6 +282,7 @@ test-guest-deployment: host
 	bash guest/tests/test_configure_rosetta.sh
 	bash guest/tests/test_verify_image_contract.sh
 	bash guest/tests/test_guest_image_builder.sh
+	python3 guest/tests/test_image_size.py
 
 test-diagnostics: host
 	HAMN=$(HOST_BIN) bash tests/host/test_diagnostics.sh
@@ -289,6 +294,10 @@ test-uninstall: host
 	HAMN=$(HOST_BIN) bash tests/host/test_uninstall.sh
 
 test-update: host
+	python3 tests/host/test_upgrade_support.py
+	python3 tests/host/test_upgrade_properties.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_update_check.py
+	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_cli.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_update_ux.py
 	HAMN=$(HOST_BIN) bash tests/host/test_update.sh
 

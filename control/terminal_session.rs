@@ -7,10 +7,14 @@ use ratatui::{layout::{Constraint, Layout}, widgets::Paragraph};
 const INPUT_LIMIT: usize = 4 * 1024 * 1024;
 pub enum Event { Output(Vec<u8>), Exited(i32), Ended, InputProgress }
 pub struct Session {
+    pub id: u64,
     pub invocation: Invocation,
     pub parser: vt100::Parser<Replies>,
     pub exit: Option<i32>,
     child: tokio::process::Child,
+    pid: libc::pid_t,
+    exited: tokio::signal::unix::Signal,
+    armed: bool,
     master: Arc<AsyncFd<OwnedFd>>,
     output: mpsc::Receiver<io::Result<Vec<u8>>>,
     reader: tokio::task::JoinHandle<()>,
@@ -37,13 +41,15 @@ impl Session {
         }
         if unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } != 0 { return Err(io::Error::last_os_error()); }
         command.stdin(Stdio::from(slave.try_clone()?)).stdout(Stdio::from(slave.try_clone()?)).stderr(Stdio::from(slave));
-        command.env("TERM", "xterm-256color").kill_on_drop(true);
+        command.env("TERM", "xterm-256color").kill_on_drop(false);
         unsafe { command.pre_exec(|| {
             if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 { return Err(io::Error::last_os_error()); }
             Ok(())
         }); }
-        let child = command.spawn()?;
+        let exited = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
         let master = Arc::new(AsyncFd::new(master)?);
+        let child = command.spawn()?;
+        let pid = child.id().expect("new PTY child has a PID") as libc::pid_t;
         let source = master.clone();
         let (sender, output) = mpsc::channel(64);
         let reader = tokio::spawn(async move {
@@ -66,8 +72,9 @@ impl Session {
                 }
             }
         });
-        Ok(Self { invocation, parser: vt100::Parser::new_with_callbacks(rows, cols, 10000, Replies::default()),
-            exit: None, child, master, output, reader, ended: false,
+        static SESSION_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Ok(Self { id: SESSION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed), invocation, parser: vt100::Parser::new_with_callbacks(rows, cols, 10000, Replies::default()),
+            exit: None, child, pid, exited, armed: true, master, output, reader, ended: false,
             input: VecDeque::new(), input_closed: false, input_error: None })
     }
     pub async fn next(&mut self) -> io::Result<Event> {
@@ -77,10 +84,11 @@ impl Session {
                 Some(bytes) => Ok(Event::Output(bytes?)),
                 None => { self.ended = true; Ok(Event::Ended) },
             },
-            result = self.child.wait(), if self.exit.is_none() => {
+            result = wait_owned(&mut self.child, self.pid, &mut self.exited), if self.exit.is_none() => {
                 use std::os::unix::process::ExitStatusExt;
                 let status = result?;
                 let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(0));
+                self.armed = false;
                 self.exit = Some(code);
                 self.close_input("CLI exited");
                 Ok(Event::Exited(code))
@@ -138,10 +146,9 @@ impl Session {
         self.parser.screen_mut().set_size(rows, cols); Ok(())
     }
     pub fn signal(&mut self, signal: i32) -> io::Result<()> {
-        if self.exit.is_none() && self.child.try_wait()?.is_none() {
-            if let Some(pid) = self.child.id() {
-                if unsafe { libc::kill(-(pid as i32), signal) } < 0 { return Err(io::Error::last_os_error()); }
-            }
+        if self.armed && unsafe { libc::kill(-self.pid, signal) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) { return Err(error); }
         }
         Ok(())
     }
@@ -150,7 +157,7 @@ impl Session {
         frame.render_widget(Paragraph::new(crate::tui_state::clean(&format!("Hamn | {} terminal\n{}", self.invocation.program(), self.invocation.target))), areas[0]);
         frame.render_widget(terminal_io::Screen(self.parser.screen()), areas[1]);
         let status = self.exit.map(|code| format!("Exit code {code} | PgUp/PgDn scroll | Enter / Esc returns to the resource list"))
-            .unwrap_or_else(|| "Input goes to CLI | Ctrl+Alt+C interrupts/discards input | Shift+PgUp/PgDn scroll".into());
+            .unwrap_or_else(|| "Input to CLI | Ctrl+Alt+B browser | Ctrl+Alt+S sessions | Ctrl+Alt+C interrupt | Shift+PgUp/PgDn scroll".into());
         let status = self.input_error.as_ref().map_or(status.clone(), |error| match self.exit {
             Some(code) => format!("Exit code {code} | {error} | Enter/Esc returns"),
             None => format!("{error} | Ctrl+Alt+C interrupts"),
@@ -179,10 +186,50 @@ async fn flush_input(master: &AsyncFd<OwnedFd>, queue: &mut VecDeque<u8>) -> io:
     }
 }
 
+// Keep the leader unreaped until its owned process group has been stopped;
+// otherwise a reused PID could refer to an unrelated process during cleanup.
+fn has_exited(pid: libc::pid_t) -> io::Result<bool> {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) { continue; }
+            return Err(error);
+        }
+        return Ok(unsafe { info.si_pid() } == pid);
+    }
+}
+fn kill_owned_group(pid: libc::pid_t) -> io::Result<()> {
+    // The unreaped direct child reserves this PID/PGID throughout both calls.
+    if unsafe { libc::kill(pid, libc::SIGKILL) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) { return Err(error); }
+    }
+    if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 { return Ok(()); }
+    let error = io::Error::last_os_error();
+    #[cfg(target_os = "macos")]
+    if error.raw_os_error() == Some(libc::EPERM) && has_exited(pid)? {
+        let mut members = [0 as libc::pid_t; 2];
+        let count = unsafe { libc::proc_listpgrppids(pid, members.as_mut_ptr().cast(), std::mem::size_of_val(&members) as libc::c_int) };
+        if count == 1 && members[0] == pid { return Ok(()); }
+    }
+    if error.raw_os_error() == Some(libc::ESRCH) { Ok(()) } else { Err(error) }
+}
+async fn wait_owned(child: &mut tokio::process::Child, pid: libc::pid_t, exited: &mut tokio::signal::unix::Signal) -> io::Result<std::process::ExitStatus> {
+    while !has_exited(pid)? { exited.recv().await.ok_or_else(|| io::Error::other("PTY child exit stream closed"))?; }
+    kill_owned_group(pid)?;
+    child.wait().await
+}
 impl Drop for Session {
     fn drop(&mut self) {
-        let _ = self.signal(libc::SIGHUP);
         self.reader.abort();
+        if !self.armed { return; }
+        if let Err(error) = kill_owned_group(self.pid) { eprintln!("hamn: cannot terminate terminal process group: {error}"); }
+        loop {
+            if unsafe { libc::waitpid(self.pid, std::ptr::null_mut(), 0) } >= 0 { break; }
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::EINTR) { eprintln!("hamn: cannot reap terminal child: {error}"); break; }
+        }
     }
 }
 

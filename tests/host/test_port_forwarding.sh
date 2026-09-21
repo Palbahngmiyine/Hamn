@@ -44,6 +44,8 @@ export PORT_TEST_DIR="$PROFILE"
 export PORT_TEST_EVENTS="$EVENTS"
 
 "$TEST_BIN" inspect-fixtures
+"$TEST_BIN" list-fixtures
+python3 "$REPO_ROOT/tests/host/test_observer_requests.py" "$TEST_BIN" "$WORK"
 "$TEST_BIN" snapshot-fixture "$PROFILE"
 
 UDP_EXECUTABLE=${HAMN_UDP_EXECUTABLE:-$TEST_BIN}
@@ -120,7 +122,7 @@ fi
 grep -q $'^add\t127.0.0.1\t48101$' "$EVENTS"
 grep -q $'^cancel\t127.0.0.1\t48101$' "$EVENTS"
 
-# The Docker observer synchronizes a complete inspect snapshot. New mappings
+# The Docker observer synchronizes a complete list snapshot. New mappings
 # become committed only after their host listener exists; a repeat is
 # idempotent, removed mappings are stopped, and an ambiguous snapshot changes
 # nothing.

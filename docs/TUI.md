@@ -7,7 +7,7 @@ changes the saved default. Each workspace retains its target and browsing state.
 Install Docker CLI for container browsing and kubectl for Kubernetes browsing.
 Compose, buildx, kubectl plugins, and any exec credential helpers remain external
 installations. Hamn still ships as one executable. Headless SDK operations retain
-their existing contract and do not require these CLI installations.
+their existing contract; only external Docker `--context` operations require Docker CLI.
 
 ## Navigation
 
@@ -17,7 +17,10 @@ their existing contract and do not require these CLI installations.
 | `/`, arrows or `j/k` | Filter visible rows and select a resource |
 | Enter, `l`, `g` | Inspect, logs, statistics where supported |
 | `s`, `t`, `r`, `d` | Resource start, stop, restart, delete where supported |
-| `m` or `?` | Actions and command help |
+| `m`, `?` | Contextual action menu; command help |
+| `p`, `R`, `[`, `]` | Pause refresh, refresh now, decrease/increase interval (1–60 seconds) |
+| `b`, `f`, `F` | Recent targets, toggle favorite, favorite targets |
+| Ctrl+Alt+B, Ctrl+Alt+S | Return to browser with CLI running; open owned sessions |
 | Tab, `,` | Switch workspace; change default workspace |
 | `e` | Choose Hamn profile / external Docker context, or Kubernetes context |
 | `n` | Choose Kubernetes namespace |
@@ -55,6 +58,8 @@ ps -a --filter label=app=api
 docker images
 volume ls
 network ls
+compose ls
+get certificates.cert-manager.io
 pods
 get pods -A
 kubectl get deployments -n dev --sort-by=.metadata.name
@@ -183,5 +188,44 @@ with an error. Recovery never deletes Docker containers, images, or volumes.
 `"kubernetes"`. Writes use a private temporary file, file synchronization, atomic
 rename, directory synchronization, and mode `0600`. Invalid versions, malformed
 JSON, unsafe permissions, and symlink reads show an error and return to selection.
-Choosing again writes a valid preference file. Workspace connection selections
-are session-local; this file only persists the default workspace.
+Choosing again writes a valid preference file. The backward-compatible version 1
+document also stores optional `recentTargets` and `favorites`. Writers hold the
+private `~/.hamn/tui.lock`; concurrent edits return a busy/retry error instead of
+blocking the UI or silently losing another instance's changes. Active sessions
+remain local to the running TUI and are not restored after exit.
+
+
+## Triage, refresh and sessions
+
+Selection follows stable resource identity across refresh and ordering changes.
+If the object disappears, is replaced, or its identity is ambiguous, selection
+clears until you choose another row. Docker volumes, Compose projects and Hamn
+profiles expose names rather than immutable UIDs in their list APIs, so recreation
+with the same name between polls cannot be distinguished. Pasted filters behave
+like typed filters.
+Pod rows show readiness, restart count and waiting/termination reasons. Events
+show type, reason and message; nodes show readiness and active conditions.
+Deployments, StatefulSets and DaemonSets show ready, updated and available counts.
+Other resource kinds retain the generic status table.
+
+`m` offers only applicable actions. `l` opens a log menu with a 200-line tail and
+timestamps; Pod logs allow container and previous-instance selection. Typed log
+commands retain their own arguments. Compose project Enter opens containers
+filtered by the project label. Workload and Pod menus navigate to selector-scoped
+Pods and UID-scoped Events. Custom Kubernetes resource lists are readable tables;
+unknown types expose no selected-object mutation shortcut.
+
+Refresh defaults to 2 seconds with a 30-second query deadline. `p` pauses it,
+`R` refreshes immediately, and `[`/`]` adjust the interval. Failures back off up to
+60 seconds. The header distinguishes loading, pause, errors and last successful
+refresh. `:refresh-timeout 30` changes the deadline (1–300 seconds). For the 16 MiB
+query limit, narrow Kubernetes queries using `--namespace`, `--selector` or
+`--field-selector`; `/` filters only rows already fetched.
+
+Ctrl+Alt+B returns to browsing while a CLI session keeps running. Ctrl+Alt+S lists
+owned sessions with targets/status; Enter resumes one and `d` terminates that
+session. Ordinary Tab and other keys still go to the active CLI. Quitting cleans
+up all owned sessions; it does not stop independently owned VMs.
+Command-entry Up/Down recalls in-memory history. Recent/favorite targets (up to 32
+each) use the private atomic `~/.hamn/tui.json`; commands and credentials are not
+persisted. Sharing and translation settings are visible in VM status details.

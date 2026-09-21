@@ -25,6 +25,11 @@ with tempfile.TemporaryDirectory(prefix="hamn-worker-") as directory:
     assert "Err" in call("vm create", profile="test")
     assert not (Path(directory) / ".hamn").exists()
     created = call("vm create", profile="test", yes=True, cpu=2, memory=2)
+    assert created["Ok"]["mountHome"] is True
+    assert created["Ok"]["homeReadOnly"] is False
+    assert created["Ok"]["mountInotify"] is False
+    assert created["Ok"]["rosetta"] is False
+    assert created["Ok"]["fileEvents"] == "disabled"
     assert created["Ok"]["cpus"] == 2
     assert created["Ok"]["memoryMiB"] == 2048
     assert call("vm create", profile="test", yes=True, cpu=10)["Err"]["code"] == "conflict"

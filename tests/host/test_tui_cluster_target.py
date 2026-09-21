@@ -77,7 +77,7 @@ def main():
             assert requests[-1][0] == 'alternate' and '/pods/' + name in requests[-1][1], requests
             harness.send(b'\r', '[Kubernetes]')
         assert config.read_bytes() == before
-        assert sorted(p.name for p in (root / '.hamn').iterdir()) == ['tui.json']
+        assert sorted(p.name for p in (root / '.hamn').iterdir()) in (['tui.json'], ['tui.json', 'tui.lock'])
         print('PASS: both cluster override spellings select the alternate API and appear in list, confirmation and detail PTY; kubeconfig unchanged')
     finally:
         harness.close()

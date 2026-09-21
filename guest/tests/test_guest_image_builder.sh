@@ -44,13 +44,15 @@ fi
 # untracked shared/ file must not become an immutable image input.
 REPO=$WORK/repo
 mkdir -p "$REPO"
-git -C "$PROJECT_ROOT" archive --format=tar HEAD -- guest vendor |
+git -C "$PROJECT_ROOT" archive --format=tar HEAD -- guest vendor host/image |
     tar -C "$REPO" -xf -
-cp "$BUILDER" "$REPO/guest/image/build-ubuntu-24.04-arm64.sh"
+cp "$GUEST_ROOT"/image/*.sh "$GUEST_ROOT"/image/*.py "$GUEST_ROOT"/image/*.c \
+    "$GUEST_ROOT"/image/*.json "$REPO/guest/image/"
+cp "$PROJECT_ROOT"/host/image/qcow2.{c,h} "$REPO/host/image/"
 git -C "$REPO" init -q
 git -C "$REPO" config user.name hamn-test
 git -C "$REPO" config user.email hamn-test@example.invalid
-git -C "$REPO" add guest vendor
+git -C "$REPO" add guest vendor host
 git -C "$REPO" commit -qm 'guest image source fixture'
 mkdir "$REPO/shared"
 printf 'must not be archived\n' >"$REPO/shared/untracked-input"
@@ -71,7 +73,7 @@ EOF
 cat >"$WORK/virt-customize" <<'EOF'
 #!/bin/bash
 set -euo pipefail
-printf '%s\n' "$@" >"$HAMN_TEST_VIRT_ARGUMENTS"
+printf '%s\n' "$@" >>"$HAMN_TEST_VIRT_ARGUMENTS"
 for argument in "$@"; do
     case "$argument" in
         *:/tmp/hamn-guest-sources.tar.gz)
@@ -81,7 +83,7 @@ for argument in "$@"; do
             ;;
     esac
 done
-exit 1
+exit 0
 EOF
 cat >"$WORK/qemu-img" <<'EOF'
 #!/bin/bash
@@ -115,6 +117,10 @@ EOF
 cat >"$WORK/guestfish" <<'EOF'
 #!/bin/bash
 set -euo pipefail
+case " $* " in
+    *" command "*) printf 'docker.io\t28.0\t12345\n'; exit 0 ;;
+    *" fstrim "*) [[ " $* " == *" discard:enable "* ]]; exit 0 ;;
+esac
 commands=$(cat)
 case "$commands" in
     *"vfs-label /dev/sda3"*)
@@ -145,7 +151,7 @@ GUESTFISH_RESIZE_ARGUMENTS=$WORK/guestfish-resize-arguments
 GUESTFISH_RESIZE_COMMANDS=$WORK/guestfish-resize-commands
 printf 'base image fixture\n' >"$BASE"
 BASE_SHA256=$(shasum -a 256 "$BASE" | awk '{print $1}')
-PATH="$WORK/bin:$PATH" \
+if PATH="$WORK/bin:$PATH" \
 HAMN_GUEST_BASE_IMAGE="$BASE" \
 HAMN_GUEST_BASE_SHA256="$BASE_SHA256" \
 HAMN_GUEST_OUTPUT="$OUTPUT" \
@@ -161,7 +167,12 @@ HAMN_TEST_GUESTFISH_LABEL_ARGUMENTS="$GUESTFISH_LABEL_ARGUMENTS" \
 HAMN_TEST_GUESTFISH_LABEL_COMMANDS="$GUESTFISH_LABEL_COMMANDS" \
 HAMN_TEST_GUESTFISH_RESIZE_ARGUMENTS="$GUESTFISH_RESIZE_ARGUMENTS" \
 HAMN_TEST_GUESTFISH_RESIZE_COMMANDS="$GUESTFISH_RESIZE_COMMANDS" \
-"$REPO/guest/image/build-ubuntu-24.04-arm64.sh"
+"$REPO/guest/image/build-ubuntu-24.04-arm64.sh" >"$WORK/build.out" 2>"$WORK/build.err"; then
+    echo "FAIL: empty synthetic image passed actual extraction validation" >&2
+    exit 1
+fi
+grep -Fq 'qcow2: file too small' "$WORK/build.err"
+[ ! -e "$OUTPUT" ]
 
 grep -Fxq 8G "$QEMU_ARGUMENTS"
 grep -Fxq convert "$QEMU_ARGUMENTS"
@@ -209,4 +220,4 @@ git -C "$REPO" ls-tree -r --name-only HEAD -- guest vendor |
     LC_ALL=C sort >"$WORK/tracked-files"
 diff -u "$WORK/tracked-files" "$WORK/archive-files"
 
-echo "PASS: guest image builder uses only tracked immutable-image sources"
+echo "PASS: tracked immutable sources, configured compaction, and invalid image publication rejection"

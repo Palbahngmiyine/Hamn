@@ -27,7 +27,9 @@ unsafe extern "C" {
         path: *const libc::c_char,
         result: *mut *mut libc::c_char,
     ) -> i32;
-    fn hamn_control_update(manifest: *const libc::c_char) -> i32;
+    // C borrows the optional NUL-terminated manifest for this call. It returns
+    // owned UTF-8 JSON through result; release only with hamn_control_free.
+    fn hamn_control_upgrade(manifest: *const libc::c_char, check_only: i32, force: i32, result: *mut *mut libc::c_char) -> i32;
     fn hamn_control_uninstall(confirmed: i32) -> i32;
     fn log_last_error() -> *const libc::c_char;
     fn cli_set_invocation_path(path: *const libc::c_char);
@@ -101,8 +103,8 @@ fn execute(request: &Request) -> Result<Value> {
                 path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),
                 &mut output,
             ),
-            "system update" => {
-                hamn_control_update(manifest.as_ref().map_or(std::ptr::null(), |m| m.as_ptr()))
+            "system update" | "system upgrade" => {
+                hamn_control_upgrade(manifest.as_ref().map_or(std::ptr::null(), |m| m.as_ptr()), i32::from(request.check), i32::from(request.force), &mut output)
             }
             "system uninstall" => hamn_control_uninstall(i32::from(request.yes)),
             "vm start" => hamn_control_start(pointer, cpu, memory, disk),

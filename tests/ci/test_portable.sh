@@ -25,7 +25,7 @@ for package in build-essential coreutils curl git jq openssh-client python3 ripg
 done
 
 macos_plan=$(HAMN_CI_OS=macOS HAMN_CI_DRY_RUN=1 bash "$SETUP")
-[ "$macos_plan" = 'os=macOS formulae=jq actionlint ripgrep' ] ||
+[ "$macos_plan" = 'os=macOS formulae=jq actionlint ripgrep docker' ] ||
     fail "unexpected macOS dependency plan: $macos_plan"
 if grep -Eq '(^|[^[:alnum:]_])(swift|xcrun)([^[:alnum:]_]|$)' "$SETUP" >/dev/null; then
     fail "CLI-only CI setup still requires a removed Desktop build tool"

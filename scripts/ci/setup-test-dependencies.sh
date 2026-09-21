@@ -39,7 +39,7 @@ case "$runner_os" in
         required_commands=(bash cc curl git jq make python3 rg ruby sha256sum)
         ;;
     macOS|Darwin)
-        formulae=(jq actionlint ripgrep)
+        formulae=(jq actionlint ripgrep docker)
         if [ "$dry_run" -eq 1 ]; then
             printf 'os=macOS formulae=%s\n' "${formulae[*]}"
             exit 0
@@ -58,7 +58,7 @@ case "$runner_os" in
             brew install "${missing_formulae[@]}"
         fi
         required_commands=(
-            actionlint bash clang codesign git jq make python3 rg ruby shasum
+            actionlint bash clang codesign docker git jq make python3 rg ruby shasum
         )
         ;;
     *)

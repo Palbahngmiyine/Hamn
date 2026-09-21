@@ -75,7 +75,7 @@ def exercise(exit_mode, command=None):
                 os.kill(process.pid, signal.SIGWINCH)
                 os.write(master, b":contexts\r")
                 until(b"k8s contexts list")
-                assert sorted(p.name for p in (Path(directory) / ".hamn").iterdir()) == ["tui.json"], "hidden confirmation executed a mutation"
+                assert sorted(p.name for p in (Path(directory) / ".hamn").iterdir()) in (["tui.json"], ["tui.json", "tui.lock"]), "hidden confirmation executed a mutation"
                 os.write(master, b"q")
             elif exit_mode == "interrupt":
                 os.write(master, b"\x03")
@@ -110,7 +110,7 @@ def exercise(exit_mode, command=None):
             until(b"\x1b[?1049l")
             assert process.wait(timeout=5) == (101 if exit_mode == "panic" else 0)
             assert terminal_settings(slave) == before, ("terminal settings were not restored", before, terminal_settings(slave), bytes(output[-3000:]))
-            assert not (Path(directory) / ".hamn").exists() or sorted(p.name for p in (Path(directory) / ".hamn").iterdir()) == ["tui.json"], "TUI observation changed profile state"
+            assert not (Path(directory) / ".hamn").exists() or sorted(p.name for p in (Path(directory) / ".hamn").iterdir()) in (["tui.json"], ["tui.json", "tui.lock"]), "TUI observation changed profile state"
         finally:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)

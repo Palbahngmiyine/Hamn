@@ -71,7 +71,13 @@ if args[-1].endswith('host.tar.gz') and not (root / 'download-observed').exists(
         channel.sendall(b'ready')
         assert channel.recv(1) == b'!'
 source = root / args[-1].rsplit('/', 1)[-1]
-pathlib.Path(args[args.index('-o') + 1]).write_bytes(source.read_bytes())
+data = source.read_bytes()
+if '--dump-header' in args:
+    pathlib.Path(args[args.index('--dump-header') + 1]).write_text('HTTP/1.1 200 OK\\r\\nContent-Length: ' + str(len(data)) + '\\r\\n\\r\\n')
+if args[args.index('-o') + 1] == '-':
+    sys.stdout.buffer.write(data)
+else:
+    pathlib.Path(args[args.index('-o') + 1]).write_bytes(data)
 ''')
         curl.chmod(0o755)
         env = {**os.environ, 'HOME': str(home), 'PATH': str(transport) + ':' + os.environ['PATH'],
@@ -120,8 +126,7 @@ pathlib.Path(args[args.index('-o') + 1]).write_bytes(source.read_bytes())
             assert b'Existing VMs were not restarted' in received
             assert b'.hamn-generations/' not in received and b'file://' not in received
             args = (work / 'curl-args').read_text()
-            assert ('--progress-bar' in args) == terminal, args
-            assert ('--silent' in args) != terminal, args
+            assert '--silent' in args and '--proto-redir =https' in args, args
             active = os.readlink(bindir / 'hamn')
             assert active != original
             selection = home / '.hamn/cache/guest-image.json'
@@ -161,8 +166,10 @@ pathlib.Path(args[args.index('-o') + 1]).write_bytes(source.read_bytes())
                 result = update()
                 assert result.returncode == 0, (damage, result.stderr)
                 assert b'Unchanged Hamn' not in result.stderr, damage
-                assert len((work / 'curl-args').read_text().splitlines()) == calls + 2, damage
-                assert os.readlink(bindir / 'hamn') != active, damage
+                # Both payloads are cached. Only damaged host integrity requires
+                # a generation reinstall; guest selection repair preserves it.
+                assert len((work / 'curl-args').read_text().splitlines()) == calls, damage
+                assert (os.readlink(bindir / 'hamn') == active) == (damage == 'selection changed'), damage
                 active = os.readlink(bindir / 'hamn')
                 assert selection.read_bytes() == saved
 
@@ -170,7 +177,7 @@ pathlib.Path(args[args.index('-o') + 1]).write_bytes(source.read_bytes())
             cached_guest = home / '.hamn/cache' / json.loads(saved)['file']
             cached_guest.write_bytes(b'corrupted')
             result = update()
-            assert result.returncode != 0 and b'cached guest image SHA-256 mismatch' in result.stderr
+            assert result.returncode == 0 and json.loads(result.stdout)['data']['status'] == 'repaired', result.stderr
             assert b'Unchanged Hamn' not in result.stderr
             assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
             cached_guest.write_bytes(guest.read_bytes())
@@ -208,7 +215,7 @@ pathlib.Path(args[args.index('-o') + 1]).write_bytes(source.read_bytes())
                 result = subprocess.run([bindir / 'hamn', '--headless', 'system', 'update', '--yes',
                                          '--manifest', manifest_path], env=env, capture_output=True, timeout=15)
                 assert result.returncode != 0 and not json.loads(result.stdout)['ok']
-                expected = b'version does not match' if failure == 'version' else b'guest image SHA-256 mismatch'
+                expected = b'version does not match' if failure == 'version' else b'guest image acquisition failed'
                 assert expected in result.stderr, result.stderr
                 assert b'Updated Hamn:' not in result.stderr
                 assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved

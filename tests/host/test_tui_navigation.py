@@ -89,7 +89,7 @@ def exercise(action):
                 os.write(master, b'q')
                 until(b'\x1b[?1049l')
                 assert child.wait(timeout=5) == 0
-                assert sorted(p.name for p in (Path(directory) / '.hamn').iterdir()) == ['tui.json']
+                assert sorted(p.name for p in (Path(directory) / '.hamn').iterdir()) in (['tui.json'], ['tui.json', 'tui.lock'])
             finally:
                 if child.poll() is None:
                     os.killpg(child.pid, signal.SIGKILL)

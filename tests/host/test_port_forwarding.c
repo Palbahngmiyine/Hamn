@@ -340,6 +340,51 @@ static int inspect_parser_fixtures(void)
     return 0;
 }
 
+static int list_parser_fixtures(void)
+{
+    const char *valid = "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"127.0.0.1\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]";
+    const char *invalid[] = {
+        "{}",
+        "[",
+        "null",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": null}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"127.0.0.1\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}, {\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"127.0.0.1\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]",
+        "[{\"Id\": \"../bad\", \"Ports\": []}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"invalid:ip\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": false, \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"127.0.0.1\", \"PrivatePort\": 80, \"PublicPort\": 0, \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"127.0.0.1\", \"PrivatePort\": 80, \"PublicPort\": 65536, \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"127.0.0.1\", \"PrivatePort\": 80, \"PublicPort\": 1.5, \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"127.0.0.1\", \"PrivatePort\": 80, \"PublicPort\": \"80\", \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"127.0.0.1\", \"PrivatePort\": 0, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]",
+        "[{\"Id\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"Ports\": [{\"IP\": \"127.0.0.1\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"unknown\"}, {\"PrivatePort\": 81, \"Type\": \"tcp\"}, {\"IP\": \"::\", \"PrivatePort\": 80, \"PublicPort\": 48240, \"Type\": \"tcp\"}, {\"IP\": \"0.0.0.0\", \"PrivatePort\": 53, \"PublicPort\": 48241, \"Type\": \"udp\"}]}]",
+        "[{\"Id\":\"aaaaaaaaaaaa\",\"Ports\":[],\"Ports\":[]}]",
+        "[{\"Id\":\"aaaaaaaaaaaa\",\"Id\":\"bbbbbbbbbbbb\",\"Ports\":[]}]",
+        "[{\"Id\":\"aaaaaaaaaaaa\",\"Ports\":[{\"IP\":\"0.0.0.0\",\"PrivatePort\":80,\"PublicPort\":80,\"PublicPort\":81,\"Type\":\"tcp\"}]}]",
+    };
+    struct port_spec specs[DOCKER_OBSERVER_MAX_PORTS] = {0};
+    int count = 0;
+    if (docker_observer_parse_list(valid, specs, &count, DOCKER_OBSERVER_MAX_PORTS) ||
+        count != 2 || specs[0].host_port != 48240 || specs[0].container_port != 80 ||
+        specs[0].protocol != PORT_TCP || strcmp(specs[0].host_ip, "127.0.0.1") ||
+        specs[1].protocol != PORT_UDP || specs[1].host_port != 48241)
+        return 1;
+    struct port_spec saved[DOCKER_OBSERVER_MAX_PORTS];
+    memcpy(saved, specs, sizeof(saved));
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        if (docker_observer_parse_list(invalid[i], specs, &count, DOCKER_OBSERVER_MAX_PORTS) == 0 ||
+            count != 2 || memcmp(saved, specs, sizeof(saved)))
+            return 1;
+    }
+    if (docker_observer_parse_list(valid, specs, &count, 1) == 0 ||
+        count != 2 || memcmp(saved, specs, sizeof(saved)))
+        return 1;
+    if (docker_observer_parse_list("[]", specs, &count, DOCKER_OBSERVER_MAX_PORTS) || count)
+        return 1;
+    return 0;
+}
+
 static int fixture_write_all(int fd, const char *text, size_t length)
 {
     while (length > 0) {
@@ -357,17 +402,11 @@ static int fixture_write_all(int fd, const char *text, size_t length)
 static int snapshot_fixture_server(const char *path, int ready_fd)
 {
     static const char *const bodies[] = {
-        ("[{\"Id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},"
-         "{\"Id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}]"),
-        "{\"NetworkSettings\":{\"Ports\":{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"48250\"}]}}}",
-        "{\"NetworkSettings\":{\"Ports\":{\"53/udp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"48251\"}]}}}",
+        "[{\"Id\":\"aaaaaaaaaaaa\",\"Ports\":[{\"IP\":\"127.0.0.1\",\"PrivatePort\":80,\"PublicPort\":48250,\"Type\":\"tcp\"}]},"
+        "{\"Id\":\"bbbbbbbbbbbb\",\"Ports\":[{\"IP\":\"0.0.0.0\",\"PrivatePort\":53,\"PublicPort\":48251,\"Type\":\"udp\"}]}]",
         "{\"Type\":\"container\",\"Action\":\"start\"}",
     };
-    static const char *const targets[] = {
-        "GET /containers/json HTTP/1.1",
-        "GET /containers/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/json HTTP/1.1",
-        "GET /containers/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/json HTTP/1.1",
-    };
+    static const char *const targets[] = { "GET /containers/json HTTP/1.1" };
     int listener = socket(AF_UNIX, SOCK_STREAM, 0);
     struct sockaddr_un address = { .sun_family = AF_UNIX };
     if (listener < 0 || strlen(path) >= sizeof(address.sun_path))
@@ -389,7 +428,7 @@ static int snapshot_fixture_server(const char *path, int ready_fd)
         char request[512] = {0}, response[2048];
         ssize_t read_count = client < 0 ? -1 : read(client, request,
                                                      sizeof(request) - 1);
-        int length = i == 0 || i == 3 ?
+        int length = i == 0 ?
             snprintf(response, sizeof(response),
                      "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
                      "Connection: close\r\n\r\n%zx\r\n%s\r\n0\r\n\r\n",
@@ -398,7 +437,7 @@ static int snapshot_fixture_server(const char *path, int ready_fd)
                      "HTTP/1.1 200 OK\r\nContent-Length: %zu\r\n"
                      "Connection: close\r\n\r\n%s",
                      strlen(bodies[i]), bodies[i]);
-        const char *expected_target = i == 3 ?
+        const char *expected_target = i == 1 ?
             strstr(request, "GET /events?since=") : strstr(request, targets[i]);
         int valid = read_count > 0 && expected_target &&
             length >= 0 && length < (int)sizeof(response) &&
@@ -463,6 +502,17 @@ static int inspect_snapshot_fixture(const char *directory)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && strcmp(argv[1], "list-fixtures") == 0)
+        return list_parser_fixtures();
+    if (argc == 3 && strcmp(argv[1], "read-snapshot") == 0) {
+        struct profile p = {0};
+        struct port_spec ports[DOCKER_OBSERVER_MAX_PORTS] = {0};
+        int count = 0;
+        if (snprintf(p.dir, sizeof(p.dir), "%s", argv[2]) >= (int)sizeof(p.dir)) return 1;
+        if (docker_observer_read_snapshot(&p, ports, &count, DOCKER_OBSERVER_MAX_PORTS)) return 1;
+        printf("%d\n", count);
+        return 0;
+    }
     if (argc > 1 && strcmp(argv[1], "udp-forward") == 0)
         return cmd_udp_forward(argc - 1, argv + 1);
     if (argc == 2 && strcmp(argv[1], "ignore-sigterm") == 0)

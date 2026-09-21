@@ -44,9 +44,14 @@ pub async fn execute_stream(
             request,
         )?));
     }
-    let managed = request.words.first().is_some_and(|word| word == "vm") && request.mutates();
+    // Upgrade workers own a transactional shell/helper tree. Like VM workers,
+    // cancellation must reach C's signal forwarding and wait for its result;
+    // dropping an outer timeout would kill only the worker and orphan helpers.
+    let managed = (request.words.first().is_some_and(|word| word == "vm") && request.mutates())
+        || matches!(request.operation().as_str(), "system update" | "system upgrade");
     let mut migration_error = None;
         if request.mutates()
+            && !(request.words.first().is_some_and(|word| word == "docker") && request.context.is_some())
             && matches!(
                 request.words.first().map(String::as_str),
                 Some("vm" | "docker")
@@ -66,6 +71,7 @@ pub async fn execute_stream(
     if cancel.is_cancelled() { return Err(cancellation_failure(migration_error)); }
     let run = async {
         if request.words.first().is_some_and(|word| word == "docker") {
+            if request.context.is_some() { return crate::docker_context::execute(request, events.as_ref()).await; }
             let mut status_request = request.clone();
             status_request.words = vec!["vm".into(), "status".into()];
             status_request.follow = false;

@@ -11,7 +11,8 @@ Hamn은 하나의 macOS 실행 파일로 Linux VM, VM의 Docker Engine, 외부 K
 - Kubernetes에는 kubeconfig가 필요하며 Hamn VM과 독립적으로 사용할 수 있습니다.
 
 TUI 컨테이너 탐색에는 Docker CLI, Kubernetes 탐색에는 kubectl이 필요합니다.
-헤드리스 SDK 작업은 이 CLI들을 요구하지 않습니다. Compose·buildx·플러그인은
+프로필 Docker·Kubernetes 헤드리스 SDK 작업은 이 CLI들을 요구하지 않지만,
+외부 Docker `--context` 요청에는 Docker CLI가 필요합니다. Compose·buildx·플러그인은
 외부 설치 의존성이며 Docker Desktop은 필요하지 않습니다.
 
 ## 설치
@@ -45,6 +46,7 @@ hamn --headless capabilities
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
 hamn --headless vm start --profile work --yes
 hamn --headless docker containers list --profile work
+hamn --headless docker containers list --context remote
 hamn --headless docker containers logs api --profile work --follow
 hamn --headless k8s contexts list
 hamn --headless k8s pods list --context dev --namespace default
@@ -85,3 +87,20 @@ containerd content 저장소, 사용자 마운트, 원본 kubeconfig는 보존�
 
 컨테이너 생성·Compose·exec·Kubernetes apply·port-forward는 TUI에서 외부 CLI로
 실행하며 헤드리스 SDK 작업 집합에는 추가하지 않습니다. MCP 서버는 제공하지 않습니다.
+
+
+## 업그레이드
+
+```sh
+hamn upgrade --check
+hamn upgrade
+hamn upgrade --force --output json
+```
+
+`hamn update`는 별칭이며 `hamn --headless system update --yes`도 유지합니다.
+관리 설치만 변경하고 stable 다운그레이드는 거부합니다. 검증된 파일은 재사용하며
+동일 버전의 게스트 이미지만 없으면 따로 복구하고 기존 프로필 디스크는 보존합니다.
+`--force`는 동일 버전 호스트 재설치를 허용합니다. 대화형 TUI가 성공적으로 끝나면
+캐시된 새 버전 안내를 표시할 수 있습니다. 백그라운드 확인은 자동 설치를 수행하지
+않으며 `HAMN_NO_UPDATE_CHECK=1`로 끌 수 있습니다.
+무결성과 복구 계약은 [설치](docs/INSTALLATION.ko.md)를 참고하세요.

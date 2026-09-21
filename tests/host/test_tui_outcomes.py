@@ -21,7 +21,11 @@ def invalid_preferences_return_to_choice(fifo):
         harness.send(b'1\r', 'old-target-row')
         prefs = harness.root / '.hamn/tui.json'
         assert prefs.is_file()
-        assert json.loads(prefs.read_text()) == {'version': 1, 'defaultWorkspace': 'containers'}
+        assert json.loads(prefs.read_text()) == {
+            'version': 1,
+            'defaultWorkspace': 'containers',
+            'recentTargets': [{'kind': 'hamn', 'name': 'default'}],
+        }
         assert prefs.stat().st_mode & 0o777 == 0o600
     finally:
         harness.close()
@@ -78,7 +82,7 @@ def hidden_workspace_warning_survives_cancel_and_exit():
             assert value in text, text
         assert len(requests) == 1, requests
         assert requests[0][1]['preconditions'] == {'uid': 'uid-original', 'resourceVersion': '1'}
-        assert sorted(p.name for p in (harness.root / '.hamn').iterdir()) == ['tui.json']
+        assert sorted(p.name for p in (harness.root / '.hamn').iterdir()) in (['tui.json'], ['tui.json', 'tui.lock'])
     finally:
         release.set()
         harness.close()

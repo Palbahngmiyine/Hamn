@@ -56,7 +56,7 @@ MANIFEST_URL=${HAMN_RELEASE_MANIFEST_URL:-}
 if [ -n "$RELEASE_REPOSITORY" ]; then
     [[ "$RELEASE_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
         fail "GITHUB_REPOSITORY is invalid"
-    CANONICAL_MANIFEST_URL="https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/hamn-update-manifest.json"
+    CANONICAL_MANIFEST_URL="https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/hamn-update-manifest-v3.json"
     if [ -n "$MANIFEST_URL" ] && [ "$MANIFEST_URL" != "$CANONICAL_MANIFEST_URL" ]; then
         fail "HAMN_RELEASE_MANIFEST_URL must match the canonical GitHub Release manifest URL"
     fi
@@ -120,12 +120,13 @@ else
 fi
 python3 - "$ROOT/packaging/release/install.sh.in" "$INSTALLER" \
     "$VERSION" "$COMMIT" "$HOST_URL" "$HOST_HASH" "$GUEST_URL" \
-    "$GUEST_HASH" <<'PY'
+    "$GUEST_HASH" "$HOST_ARTIFACT" "$GUEST_ARTIFACT" "$ROOT/scripts/upgrade_support.py" <<'PY'
 import json
+import os
 import sys
 
 (template_path, output_path, version, commit, host_url, host_hash,
- guest_url, guest_hash) = sys.argv[1:]
+ guest_url, guest_hash, host_path, guest_path, support_path) = sys.argv[1:]
 with open(template_path, encoding="utf-8") as source:
     rendered = source.read()
 values = {
@@ -135,11 +136,18 @@ values = {
     "__HAMN_HOST_SHA256__": host_hash,
     "__HAMN_GUEST_URL__": guest_url,
     "__HAMN_GUEST_SHA256__": guest_hash,
+    "__HAMN_HOST_SIZE__": str(os.path.getsize(host_path)),
+    "__HAMN_GUEST_SIZE__": str(os.path.getsize(guest_path)),
 }
 for placeholder, value in values.items():
     if rendered.count(placeholder) != 1:
         raise SystemExit("installer template placeholder is malformed: " + placeholder)
     rendered = rendered.replace(placeholder, json.dumps(value))
+with open(support_path, encoding="utf-8") as source:
+    support = source.read()
+if rendered.count("__HAMN_UPGRADE_SUPPORT__") != 1:
+    raise SystemExit("installer support placeholder is malformed")
+rendered = rendered.replace("__HAMN_UPGRADE_SUPPORT__", support)
 if "__HAMN_" in rendered:
     raise SystemExit("installer template has an unresolved placeholder")
 with open(output_path, "w", encoding="utf-8", newline="\n") as output:

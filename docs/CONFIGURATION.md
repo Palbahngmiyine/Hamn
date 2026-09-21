@@ -6,8 +6,9 @@ This is the canonical English configuration reference. See
 ## Profile selection and location
 
 Profile state lives under `~/.hamn/<profile>/`, with mode `0700` directories.
-Headless VM and Docker operations require an explicit `--profile`; `vm list`
-needs no profile. The TUI maintains its own selection, initially `default`.
+Headless VM operations require an explicit `--profile`; `vm list` needs none.
+Docker operations require exactly one `--profile` or external `--context`;
+`--docker-config` applies only to context-based operations. The TUI maintains its own selection, initially `default`.
 There is no positional-profile or `HAMN_PROFILE` fallback in the public API.
 
 Profile names may contain only letters, digits, `_`, and `-`. `cache`, `.` and
@@ -190,3 +191,17 @@ export TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal
 
 Docker CLI, Compose, buildx, and SDK clients share the public Docker socket.
 There is no public containerd socket.
+
+
+## Upgrade checks and artifact caches
+
+Successful interactive TUI exit may show cached update information and schedule
+one background metadata check. Successful checks are fresh for 24 hours; failures
+back off for 6 hours and the same-version notice is limited to once per 24 hours.
+Headless/internal modes, nonterminal output, CI and `HAMN_NO_UPDATE_CHECK=1` disable
+this behavior. It never installs automatically and sends no telemetry.
+Private metadata lives in `~/.hamn/cache/update-check-v1.json` and
+`update-notice-v1.json`. Verified downloads use SHA-256-addressed files under
+`~/.hamn/cache/downloads`; only validated sizes/digests can be reused or published.
+See [installation](INSTALLATION.md) for manual `upgrade --check`, `--force`, repair
+and compatibility with `--headless system update --yes`.
