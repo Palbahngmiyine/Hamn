@@ -22,6 +22,7 @@ mod release_candidate;
 mod release_consumer;
 mod release_gate;
 mod release_github;
+mod release_network;
 mod release_physical;
 mod release_repository_preflight;
 mod release_request;
@@ -110,6 +111,7 @@ const SUITES: &[Suite] = &[
     ("release-candidate", release_candidate::main),
     ("release-repository-preflight", release_repository_preflight::main),
     ("public-export", public_export::main),
+    ("release-network", release_network::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
@@ -140,6 +142,7 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("create-shadow-plugin", tui_create_plugins::shadow_plugin),
     ("release-uname", crate::support::release_driver::uname),
     ("release-preflight-gh", release_repository_preflight::gh),
+    ("release-network-sudo", release_network::sudo),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

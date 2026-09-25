@@ -519,7 +519,7 @@ test-release-publish: hamn-dev
 test-release-version: hamn-dev
 	$(HAMN_DEV) test release-version
 	$(HAMN_DEV) test release-github
-	bash tests/host/test_release_network.sh
+	$(HAMN_DEV) test release-network
 
 test-release-request: hamn-dev
 	$(HAMN_DEV) test release-request
