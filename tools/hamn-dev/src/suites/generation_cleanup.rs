@@ -156,7 +156,7 @@ fn generations_are_bounded_and_collected_only_when_unreferenced() {
     recovery_metadata_preserves_generations(&roots, &binary, &third, &fourth);
     transaction_lock_spans_recovery_and_publication(&roots, &binary);
     running_executable_is_kept(&roots, &binary);
-    earlier_layout_generation_is_never_collected(&roots);
+    released_layout_generations_are_collected_only_with_their_marker(&roots);
 
     // An owned, unreferenced generation is collected without the retired
     // pre-0.1.2 `.hamn-retention` opt-in marker (never written any more).
@@ -296,19 +296,29 @@ fn running_executable_is_kept(roots: &Roots, binary: &Path) {
     assert!(!running.exists(), "an exited executable was never collected");
 }
 
-/// A generation of the earlier layout (version 1 marker, `share/hamn/src`)
-/// is of unknown ownership to this Hamn: collection never removes it.
-fn earlier_layout_generation_is_never_collected(roots: &Roots) {
+/// An unreferenced generation of the migrated Hamn 0.1.x layout (the exact
+/// version 1 marker for these roots, with its `share/hamn/src` tree) is
+/// collected like this layout's; a version 1 generation whose marker names
+/// other roots is of unknown ownership and remains.
+fn released_layout_generations_are_collected_only_with_their_marker(roots: &Roots) {
     let current = roots.active_generation();
     let name = current.file_name().unwrap().to_str().unwrap();
-    let earlier = current.with_file_name(format!("{}-EARLY1", &name[..64]));
-    copy_tree(&current, &earlier);
-    let marker = earlier.join(".hamn-generation");
-    let text = fs::read_to_string(&marker).unwrap();
-    assert!(text.starts_with("version=2\n"), "{text}");
-    fs::write(&marker, text.replacen("version=2", "version=1", 1)).unwrap();
-    fs::create_dir_all(earlier.join("share/hamn/src/packaging/release")).unwrap();
+    let released = current.with_file_name(format!("{}-REL001", &name[..64]));
+    let foreign = current.with_file_name(format!("{}-REL002", &name[..64]));
+    for (generation, roots_text) in [(&released, None), (&foreign, Some("bindir_id=0"))] {
+        copy_tree(&current, generation);
+        let marker = generation.join(".hamn-generation");
+        let text = fs::read_to_string(&marker).unwrap();
+        assert!(text.starts_with("version=2\n"), "{text}");
+        let mut text = text.replacen("version=2", "version=1", 1);
+        if let Some(other) = roots_text {
+            text = text.replacen("bindir_id=", other, 1);
+        }
+        fs::write(&marker, text).unwrap();
+        fs::create_dir_all(generation.join("share/hamn/src/packaging/release")).unwrap();
+    }
     roots.collect(None);
-    assert!(earlier.join("bin/hamn").is_file(), "an earlier-layout generation was collected");
-    fs::remove_dir_all(&earlier).unwrap();
+    assert!(!released.exists(), "an unreferenced 0.1.x generation was never collected");
+    assert!(foreign.join("bin/hamn").is_file(), "a 0.1.x generation of other roots was collected");
+    fs::remove_dir_all(&foreign).unwrap();
 }

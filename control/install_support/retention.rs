@@ -1,8 +1,9 @@
 //! Obsolete-generation collection, under the caller's transaction locks for
 //! both canonical install roots. Keeps the active generation, its recorded
 //! predecessor, the caller's `keep` targets, anything a process has open, and
-//! generations named by a pending recovery root. Generations of unknown
-//! ownership (including the earlier version 1 marker layout) remain;
+//! generations named by a pending recovery root. A generation is collected
+//! only with the exact marker for these roots, of this layout or of the
+//! migrated Hamn 0.1.x layout; generations of unknown ownership remain;
 //! marker-last retirement is retryable. Reports removals and deferrals to the
 //! caller, which decides where they are shown.
 use super::{Result, files, generation, locks, manifest::hexadecimal, require};
@@ -272,9 +273,13 @@ pub(super) fn collect(transaction: &locks::Transaction, keep: &[&str]) -> Result
             if files::owned(&marker, false, Some(0o600)).is_err() {
                 return Ok(false);
             }
-            // Only this layout's exact marker for these roots proves
-            // ownership; other layouts and roots are left alone.
-            if files::text(&marker)? != generation::marker_text(&name[..64], roots)? {
+            // Only the exact marker for these roots, of this layout or of
+            // the migrated 0.1.x layout, proves ownership; other layouts and
+            // roots are left alone.
+            let text = files::text(&marker)?;
+            if text != generation::marker_text(&name[..64], roots)?
+                && text != generation::released_marker_text(&name[..64], roots)?
+            {
                 return Ok(false);
             }
             for p in children(&path)? {

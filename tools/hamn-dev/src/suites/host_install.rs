@@ -27,7 +27,10 @@ pub fn main(filters: &[String]) -> ExitCode {
                 fresh_install_with_spaces_publishes_a_generation_without_docker,
             ),
             case("pre_generation_installs_are_refused_unchanged", pre_generation_installs_are_refused_unchanged),
-            case("earlier_layout_generation_is_refused_unchanged", earlier_layout_generation_is_refused_unchanged),
+            case(
+                "unverifiable_released_generation_is_refused_unchanged",
+                unverifiable_released_generation_is_refused_unchanged,
+            ),
             case(
                 "foreign_unmanaged_and_tampered_paths_are_preserved",
                 foreign_unmanaged_and_tampered_paths_are_preserved,
@@ -293,10 +296,12 @@ fn pre_generation_installs_are_refused_unchanged() {
     );
 }
 
-/// A generation of the earlier layout (version 1 marker; Hamn 0.1.2 and
-/// earlier kept shell scripts under share/hamn/src) cannot be upgraded in
-/// place: the refusal says to reinstall with install.sh and changes nothing.
-fn earlier_layout_generation_is_refused_unchanged() {
+/// A generation marked as the Hamn 0.1.x layout (version 1 marker) that
+/// fails the checks its installer applied (here: no `share/hamn/src`
+/// scripts) is not migrated: the refusal says what to move aside and to
+/// reinstall with install.sh, and changes nothing. The `released-migration`
+/// suite migrates genuine 0.1.2 installs.
+fn unverifiable_released_generation_is_refused_unchanged() {
     let work = Work::new();
     let (bindir, datadir) = (work.root.join("earlier-bin"), work.root.join("earlier-share/hamn/src"));
     work.install(&work.hamn, &bindir, &datadir);
@@ -307,8 +312,8 @@ fn earlier_layout_generation_is_refused_unchanged() {
     fs::write(&marker, text.replacen("version=2", "version=1", 1)).unwrap();
     fs::create_dir_all(generation.join("share/hamn/src/packaging/release")).unwrap();
     let message = format!(
-        "{}/hamn points to a Hamn generation of an earlier installation layout (Hamn 0.1.2 or earlier, or a pre-release build), \
-         which this Hamn cannot upgrade in place; move {}/hamn and {} aside, then reinstall with install.sh",
+        "{}/hamn points to a Hamn 0.1.x generation that fails the ownership checks it was installed with, \
+         so this Hamn cannot migrate it; move {}/hamn and {} aside, then reinstall with install.sh",
         fs::canonicalize(&bindir).unwrap().display(),
         fs::canonicalize(&bindir).unwrap().display(),
         canonical_data(&datadir).display()

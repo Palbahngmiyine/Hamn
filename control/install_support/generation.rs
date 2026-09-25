@@ -10,10 +10,17 @@
 //! the active generation's `bin/hamn`; `DATADIR/.hamn-managed` (`version=1`)
 //! marks the data root.
 //!
-//! Earlier layouts are refused, never adopted: pre-generation installs (a
-//! standalone `hamn`, `.hamn-binary.sha256`, an empty data marker) and
-//! generations of the version 1 marker (Hamn 0.1.2 and earlier, which carried
-//! `share/hamn/src` scripts). The refusal names what to move aside.
+//! The released layout (Hamn 0.1.x, marker `version=1`) differs only inside
+//! the generation: it carried the updater's scripts and packaging under
+//! `share/hamn/src` and no manifest pointer. A link to such a generation is
+//! migrated like any managed link, but only when the generation passes every
+//! check Hamn 0.1.2's installer applied before replacing it (ownership, modes,
+//! link counts, binary digest, the scripts and packaging directories, and the
+//! exact marker for these roots). It stays as the predecessor, so a failed or
+//! interrupted migration restores it, and is collected later like any other
+//! owned generation. A version 1 generation that fails those checks, and
+//! pre-generation installs (a standalone `hamn`, `.hamn-binary.sha256`, an
+//! empty data marker), are refused unchanged with what to move aside.
 //!
 //! Transaction. The caller holds the transaction locks; `install` holds both
 //! install locks throughout. The generation is staged beside its final name,
@@ -40,6 +47,8 @@ pub(super) const POINTER: &str = "share/hamn/update-manifest-url";
 const MARKER: &str = ".hamn-generation";
 /// The generation layout this Hamn writes and reads.
 const LAYOUT: &str = "2";
+/// The layout of Hamn 0.1.x generations, which this Hamn migrates.
+const RELEASED_LAYOUT: &str = "1";
 const INSTALL_URL: &str = "https://github.com/Palbahngmiyine/Hamn#install";
 
 /// The files a generation is made from.
@@ -60,26 +69,40 @@ pub(super) struct Installed {
     pub(super) target: String,
 }
 
-/// The ownership marker text of a generation of `binary_sha256` in `roots`.
-pub(super) fn marker_text(binary_sha256: &str, roots: &Roots) -> Result<String> {
+fn layout_marker_text(layout: &str, binary_sha256: &str, roots: &Roots) -> Result<String> {
     Ok(format!(
-        "version={LAYOUT}\nbinary_sha256={binary_sha256}\nbindir_id={}\ndatadir_id={}\n",
+        "version={layout}\nbinary_sha256={binary_sha256}\nbindir_id={}\ndatadir_id={}\n",
         files::path_hash(files::utf8(&roots.bindir)?),
         files::path_hash(files::utf8(&roots.datadir)?)
     ))
 }
 
-/// The `version=` of an owned 0600 marker, if any.
+/// The ownership marker text of a generation of `binary_sha256` in `roots`.
+pub(super) fn marker_text(binary_sha256: &str, roots: &Roots) -> Result<String> {
+    layout_marker_text(LAYOUT, binary_sha256, roots)
+}
+
+/// The marker text Hamn 0.1.x wrote for a generation of `binary_sha256`.
+pub(super) fn released_marker_text(binary_sha256: &str, roots: &Roots) -> Result<String> {
+    layout_marker_text(RELEASED_LAYOUT, binary_sha256, roots)
+}
+
+/// The `version=` a marker claims, whatever its ownership or mode. This only
+/// classifies a generation (to explain a refusal); it proves nothing.
 fn marker_version(generation: &Path) -> Option<String> {
     let marker = generation.join(MARKER);
-    files::owned(&marker, false, Some(0o600)).ok()?;
+    if !fs::symlink_metadata(&marker).is_ok_and(|m| m.is_file() && m.len() <= 4096) {
+        return None;
+    }
     let text = files::text(&marker).ok()?;
     text.lines()
         .find_map(|line| line.strip_prefix("version="))
         .map(str::to_owned)
 }
 
-fn marker_valid(generation: &Path, expected_hash: &str, roots: &Roots) -> bool {
+/// An owned single-link 0600 marker of `layout` naming exactly this binary
+/// digest and these roots: each field once, no other lines.
+fn marker_valid(generation: &Path, layout: &str, expected_hash: &str, roots: &Roots) -> bool {
     let marker = generation.join(MARKER);
     if files::owned(&marker, false, Some(0o600)).is_err() {
         return false;
@@ -108,7 +131,7 @@ fn marker_valid(generation: &Path, expected_hash: &str, roots: &Roots) -> bool {
     };
     values
         == [
-            Some(LAYOUT),
+            Some(layout),
             Some(expected_hash),
             Some(files::path_hash(bin).as_str()),
             Some(files::path_hash(data).as_str()),
@@ -122,7 +145,27 @@ fn generation_valid(generation: &Path, expected_hash: &str, roots: &Roots) -> bo
         && files::owned(&generation.join("bin"), true, None).is_ok()
         && files::owned(&binary, false, Some(0o755)).is_ok()
         && files::digest(&binary).is_ok_and(|digest| digest == expected_hash)
-        && marker_valid(generation, expected_hash, roots)
+        && marker_valid(generation, LAYOUT, expected_hash, roots)
+}
+
+/// A Hamn 0.1.x generation of `expected_hash` owned by these roots: exactly
+/// the checks Hamn 0.1.2's installer applied before it replaced one (an
+/// owned 0755 directory; an owned 0755 single-link executable of that
+/// digest; `share/hamn/src/scripts` and `share/hamn/src/packaging` as real
+/// directories with the executable updater script; the exact version 1
+/// marker for these roots).
+fn released_generation_valid(generation: &Path, expected_hash: &str, roots: &Roots) -> bool {
+    let binary = generation.join("bin/hamn");
+    let source = generation.join("share/hamn/src");
+    let real_directory = |path: &Path| fs::symlink_metadata(path).is_ok_and(|m| m.is_dir());
+    files::owned(generation, true, Some(0o755)).is_ok()
+        && files::owned(&binary, false, Some(0o755)).is_ok()
+        && files::digest(&binary).is_ok_and(|digest| digest == expected_hash)
+        && real_directory(&source.join("scripts"))
+        && real_directory(&source.join("packaging"))
+        && fs::metadata(source.join("scripts/update-host.sh"))
+            .is_ok_and(|m| m.is_file() && m.mode() & 0o111 != 0)
+        && marker_valid(generation, RELEASED_LAYOUT, expected_hash, roots)
 }
 
 /// How the command link relates to the managed generations.
@@ -142,36 +185,45 @@ fn named_generation(target: &str, root: &Path) -> Option<(PathBuf, String)> {
     journal::generation_name(name).then(|| (root.join(name), name[..64].to_owned()))
 }
 
-/// A link into a generation of the earlier (version 1 marker) layout.
-fn previous_layout(target: &str, roots: &Roots) -> bool {
-    named_generation(target, &roots.datadir.join(".hamn-generations"))
-        .is_some_and(|(generation, _)| marker_version(&generation).as_deref() == Some("1"))
+/// Whether `target` names a generation whose marker claims the released
+/// (0.1.x) layout, valid or not.
+fn claims_released_layout(target: &str, roots: &Roots) -> bool {
+    named_generation(target, &roots.datadir.join(".hamn-generations")).is_some_and(
+        |(generation, _)| marker_version(&generation).as_deref() == Some(RELEASED_LAYOUT),
+    )
 }
 
-/// The refusal for a command link into an earlier-layout generation.
-pub(super) fn previous_layout_message(link: &Path, datadir: &Path) -> String {
+/// The refusal for a command link into a Hamn 0.1.x generation that fails
+/// the checks it was installed with.
+fn released_layout_refusal(link: &Path, datadir: &Path) -> String {
     format!(
-        "{} points to a Hamn generation of an earlier installation layout (Hamn 0.1.2 or earlier, or a pre-release build), \
-         which this Hamn cannot upgrade in place; move {} and {} aside, then reinstall with install.sh: {INSTALL_URL}",
+        "{} points to a Hamn 0.1.x generation that fails the ownership checks it was installed with, \
+         so this Hamn cannot migrate it; move {} and {} aside, then reinstall with install.sh: {INSTALL_URL}",
         link.display(),
         link.display(),
         datadir.display()
     )
 }
 
-/// Whether the active link of `roots` names an earlier-layout generation.
-pub(super) fn active_is_previous_layout(roots: &Roots) -> bool {
-    fs::read_link(roots.bindir.join("hamn"))
-        .ok()
-        .and_then(|target| target.to_str().map(|t| previous_layout(t, roots)))
-        .unwrap_or(false)
+/// The refusal when the active link of `roots` names a generation marked as
+/// the released (0.1.x) layout that cannot be migrated.
+pub(super) fn unmigratable_released_layout(roots: &Roots) -> Option<String> {
+    let link = roots.bindir.join("hamn");
+    let target = fs::read_link(&link).ok()?;
+    let target = target.to_str()?;
+    (claims_released_layout(target, roots) && managed_link_valid(&link, roots).is_none())
+        .then(|| released_layout_refusal(&link, &roots.datadir))
 }
 
+/// The target of `link` when it names a valid generation of these roots, of
+/// this layout or of the released 0.1.x layout this Hamn migrates.
 fn managed_link_valid(link: &Path, roots: &Roots) -> Option<String> {
     let target = fs::read_link(link).ok()?;
     let target = target.to_str()?.to_owned();
     let (generation, hash) = named_generation(&target, &roots.datadir.join(".hamn-generations"))?;
-    generation_valid(&generation, &hash, roots).then_some(target)
+    (generation_valid(&generation, &hash, roots)
+        || released_generation_valid(&generation, &hash, roots))
+    .then_some(target)
 }
 
 fn link_identity(link: &Path) -> Result<(u64, u64, u32, u32, u64)> {
@@ -324,14 +376,12 @@ pub(super) fn install(
     let current = if files::absent(&link) {
         Link::Absent
     } else if fs::symlink_metadata(&link)?.file_type().is_symlink() {
-        let target = fs::read_link(&link)?.to_str().map(str::to_owned);
-        if target
-            .as_deref()
-            .is_some_and(|target| previous_layout(target, roots))
-        {
-            return Err(previous_layout_message(&link, &roots.datadir).into());
-        }
+        // A valid 0.1.x generation is migrated like any managed link: it
+        // becomes the predecessor that rollback restores.
         let Some(target) = managed_link_valid(&link, roots) else {
+            if let Some(refusal) = unmigratable_released_layout(roots) {
+                return Err(refusal.into());
+            }
             return Err(format!("refusing foreign hamn symlink: {}", link.display()).into());
         };
         require(managed, "managed hamn symlink has no data ownership marker")?;
@@ -564,8 +614,157 @@ mod tests {
             .to_path_buf()
     }
 
+    /// A Hamn 0.1.x generation of `binary` in `roots` as its installer left
+    /// it (see `released_generation_valid`), linked as the command.
+    fn released_install(roots: &Roots, binary: &[u8]) -> String {
+        let hash = files::hash(binary);
+        fs::create_dir_all(&roots.datadir).unwrap();
+        fs::write(roots.datadir.join(".hamn-managed"), "version=1\n").unwrap();
+        fs::set_permissions(
+            roots.datadir.join(".hamn-managed"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let generation = roots
+            .datadir
+            .join(format!(".hamn-generations/{hash}-Abc123"));
+        for directory in [
+            "bin",
+            "share/hamn/src/scripts",
+            "share/hamn/src/packaging/release",
+        ] {
+            fs::create_dir_all(generation.join(directory)).unwrap();
+        }
+        let executable = |path: PathBuf, bytes: &[u8]| {
+            fs::write(&path, bytes).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        executable(generation.join("bin/hamn"), binary);
+        executable(
+            generation.join("share/hamn/src/scripts/update-host.sh"),
+            b"#!/bin/bash\n",
+        );
+        fs::write(
+            generation.join(MARKER),
+            released_marker_text(&hash, roots).unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(generation.join(MARKER), fs::Permissions::from_mode(0o600)).unwrap();
+        let target = format!("{}/bin/hamn", generation.display());
+        std::os::unix::fs::symlink(&target, roots.bindir.join("hamn")).unwrap();
+        target
+    }
+
     #[test]
-    fn earlier_layout_and_foreign_links_are_refused_without_changes() {
+    fn released_generation_is_migrated_and_kept_as_the_predecessor() {
+        let t = Temp::new();
+        let (roots, source) = setup(&t);
+        let old = released_install(&roots, b"#!/bin/sh\necho hamn 0.1.2\n");
+        let old_bytes = fs::read(&old).unwrap();
+        let transaction = locks::Transaction::acquire(&roots).unwrap();
+        let payload = Payload {
+            binary: source,
+            pointer: None,
+        };
+        let migrated = install(&payload, &transaction, None).unwrap();
+        assert_eq!(
+            fs::read_link(&migrated.link).unwrap(),
+            Path::new(&migrated.target)
+        );
+        let generation = generation_of(&migrated.target);
+        assert!(
+            fs::read_to_string(generation.join(MARKER))
+                .unwrap()
+                .starts_with("version=2\n")
+        );
+        assert_eq!(
+            fs::read_to_string(generation.join(".hamn-previous-target")).unwrap(),
+            format!("{old}\n")
+        );
+        assert_eq!(
+            fs::read(&old).unwrap(),
+            old_bytes,
+            "the 0.1.x predecessor changed"
+        );
+        assert!(unmigratable_released_layout(&roots).is_none());
+    }
+
+    #[test]
+    fn released_generation_failing_its_checks_is_refused_unchanged() {
+        let t = Temp::new();
+        let (roots, source) = setup(&t);
+        let old = released_install(&roots, b"#!/bin/sh\necho hamn 0.1.2\n");
+        let generation = generation_of(&old);
+        let transaction = locks::Transaction::acquire(&roots).unwrap();
+        let payload = Payload {
+            binary: source,
+            pointer: None,
+        };
+        let scripts = generation.join("share/hamn/src/scripts");
+        let alias = t.0.join("hamn-alias");
+        let tamperings: [(&str, &dyn Fn(bool)); 4] = [
+            ("a second link to the binary", &|on| {
+                if on {
+                    fs::hard_link(&old, &alias).unwrap();
+                } else {
+                    fs::remove_file(&alias).unwrap();
+                }
+            }),
+            ("a group-writable generation", &|on| {
+                let mode = if on { 0o775 } else { 0o755 };
+                fs::set_permissions(&generation, fs::Permissions::from_mode(mode)).unwrap();
+            }),
+            ("missing updater scripts", &|on| {
+                if on {
+                    fs::rename(&scripts, t.0.join("scripts-aside")).unwrap();
+                } else {
+                    fs::rename(t.0.join("scripts-aside"), &scripts).unwrap();
+                }
+            }),
+            ("a marker for other roots", &|on| {
+                let marker = generation.join(MARKER);
+                let text = fs::read_to_string(&marker).unwrap();
+                let (from, to) = if on {
+                    ("bindir_id=", "bindir_id=0")
+                } else {
+                    ("bindir_id=0", "bindir_id=")
+                };
+                fs::write(&marker, text.replacen(from, to, 1)).unwrap();
+            }),
+        ];
+        for (what, tamper) in tamperings {
+            tamper(true);
+            let refusal = unmigratable_released_layout(&roots).expect(what);
+            assert!(
+                refusal.contains("Hamn 0.1.x generation that fails")
+                    && refusal.contains("reinstall with install.sh"),
+                "{what}: {refusal}"
+            );
+            let error = install(&payload, &transaction, None)
+                .err()
+                .unwrap()
+                .to_string();
+            assert_eq!(error, refusal, "{what}");
+            assert_eq!(
+                fs::read_link(roots.bindir.join("hamn")).unwrap(),
+                Path::new(&old),
+                "{what}"
+            );
+            let generations: Vec<_> = fs::read_dir(roots.datadir.join(".hamn-generations"))
+                .unwrap()
+                .collect();
+            assert_eq!(
+                generations.len(),
+                1,
+                "{what}: a refused migration staged a generation"
+            );
+            tamper(false);
+        }
+        assert!(unmigratable_released_layout(&roots).is_none());
+    }
+
+    #[test]
+    fn unverifiable_released_and_foreign_links_are_refused_without_changes() {
         let t = Temp::new();
         let (roots, source) = setup(&t);
         let transaction = locks::Transaction::acquire(&roots).unwrap();
@@ -576,13 +775,14 @@ mod tests {
         let installed = install(&payload, &transaction, None).unwrap();
         let marker = generation_of(&installed.target).join(MARKER);
         let saved = fs::read_to_string(&marker).unwrap();
+        // A version 1 marker on a generation without the 0.1.x scripts.
         fs::write(&marker, saved.replacen("version=2", "version=1", 1)).unwrap();
         let error = install(&payload, &transaction, None)
             .err()
             .unwrap()
             .to_string();
         assert!(
-            error.contains("earlier installation layout")
+            error.contains("Hamn 0.1.x generation that fails the ownership checks")
                 && error.contains("reinstall with install.sh"),
             "{error}"
         );

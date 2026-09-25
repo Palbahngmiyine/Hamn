@@ -370,8 +370,10 @@ fn refresh(bootstrap_entry: bool, roots: &Roots) -> Step<Installation> {
     if !target.starts_with(&root) || !target.ends_with("/bin/hamn") {
         return fail("managed hamn link points outside its generation root");
     }
-    if generation::active_is_previous_layout(roots) {
-        return fail(generation::previous_layout_message(&link, datadir));
+    // A valid Hamn 0.1.x generation proceeds and is migrated by the host
+    // install; one that fails its checks is refused before any download.
+    if let Some(refusal) = generation::unmigratable_released_layout(roots) {
+        return fail(refusal);
     }
     Ok(Installation {
         bootstrap: false,

@@ -404,17 +404,18 @@ fn local_candidate_bootstraps_exact_bytes_and_refuses_unsafe_installs() {
     assert_eq!(fs::read_link(&command).unwrap(), target);
     fs::write(&data_marker, "version=1\n").unwrap();
 
-    // A generation of the earlier layout (Hamn 0.1.2 or earlier) is refused
-    // with reinstall advice, even at the same release; nothing changes.
+    // A generation marked as the Hamn 0.1.x layout that fails the checks
+    // its installer applied (it has no share/hamn/src scripts) is refused
+    // with reinstall advice before any download; nothing changes.
     let marker = generation.join(".hamn-generation");
     let marker_text = fs::read_to_string(&marker).unwrap();
     fs::write(&marker, marker_text.replacen("version=2", "version=1", 1)).unwrap();
     let selection = fs::read(cache.join("guest-image.json")).unwrap();
     let earlier = bootstrap(&installer, &home, &tmp, system, &[], &local);
-    assert_ne!(earlier.returncode, 0, "bootstrap adopted an earlier-layout generation");
+    assert_ne!(earlier.returncode, 0, "bootstrap adopted an unverifiable 0.1.x generation");
     let stderr = earlier.stderr();
     assert!(
-        stderr.contains("points to a Hamn generation of an earlier installation layout")
+        stderr.contains("points to a Hamn 0.1.x generation that fails the ownership checks")
             && stderr.contains("then reinstall with install.sh"),
         "{stderr}"
     );
