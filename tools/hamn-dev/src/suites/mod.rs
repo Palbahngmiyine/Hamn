@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 mod single_binary;
 mod tui_cluster_target;
+mod tui_docker_all;
 mod tui_kubectl_output;
 mod tui_native_regressions;
 mod tui_tls_target;
@@ -15,6 +16,7 @@ type Fixture = fn(&str, &[String]) -> ExitCode;
 const SUITES: &[Suite] = &[
     ("single-binary", single_binary::main),
     ("tui-cluster-target", tui_cluster_target::main),
+    ("tui-docker-all", tui_docker_all::main),
     ("tui-kubectl-output", tui_kubectl_output::main),
     ("tui-native-regressions", tui_native_regressions::main),
     ("tui-tls-target", tui_tls_target::main),
@@ -23,6 +25,7 @@ const SUITES: &[Suite] = &[
 const FIXTURES: &[(&str, Fixture)] = &[
     ("native-regressions", tui_native_regressions::fixture),
     ("exec-real", crate::support::real_cli::exec_real),
+    ("docker-api-1.47", tui_docker_all::docker_api_1_47),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

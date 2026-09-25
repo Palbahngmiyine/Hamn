@@ -228,7 +228,7 @@ test-control-tui: host
 	python3 tests/host/test_workspace_live_prepare.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_workspace_management.py
 	python3 tests/host/test_workspace_live_external_contexts.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_all.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-all
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_images.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_config.py
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-kubectl-output

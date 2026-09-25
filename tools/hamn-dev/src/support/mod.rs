@@ -1,5 +1,6 @@
 //! Shared test support: PTYs, the screen recorder, temporary directories and
 //! the TUI harness.
+pub mod docker_engine;
 pub mod http;
 pub mod kube_api;
 pub mod pty;
