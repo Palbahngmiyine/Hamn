@@ -65,7 +65,7 @@ fn public_start_retries_the_installed_binary_once(previous_unknown: bool) {
     let envelope = api_fixtures::parse(result.stdout.lines().last().expect("an envelope line"));
     assert_eq!(envelope["data"]["bootstrapRetry"], json!(true), "{envelope}");
     let calls: Vec<Value> = fs::read_to_string(root.join("calls")).unwrap().lines().map(api_fixtures::parse).collect();
-    assert_eq!(calls, [json!(["--headless", "system", "update", "--yes"]), json!(["__core-worker", utf8(&updater)])], "{calls:?}");
+    assert_eq!(calls, [json!(["--headless", "system", "upgrade", "--yes"]), json!(["__core-worker", utf8(&updater)])], "{calls:?}");
     let record = api_fixtures::parse(&fs::read_to_string(root.join(".hamn/bootstrap/operation.json")).unwrap());
     assert!(record["status"] == "restartRequired" && record["exitCode"] == 3, "{record}");
     assert!(record["phase"] == "signed-image-ready" && record["error"] == "", "{record}");
@@ -85,14 +85,14 @@ fn public_start_retries_the_installed_binary_once(previous_unknown: bool) {
 }
 
 /// The installed `hamn` as the worker and frontend invoke it: `--headless
-/// system update --yes` fills the private image cache, and the retried
+/// system upgrade --yes` fills the private image cache, and the retried
 /// `__core-worker` ends the start before VM work. Every call is appended to
 /// `$HOME/calls`.
 pub fn updater_fixture(_program: &str, args: &[String]) -> ExitCode {
     let root = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
     let mut calls = OpenOptions::new().create(true).append(true).open(root.join("calls")).unwrap();
     writeln!(calls, "{}", py_json(&args)).unwrap();
-    if args == ["--headless", "system", "update", "--yes"] {
+    if args == ["--headless", "system", "upgrade", "--yes"] {
         let cache = root.join(".hamn/cache");
         fs::create_dir_all(&cache).unwrap();
         let digest = "0123456789abcdef".repeat(4);
