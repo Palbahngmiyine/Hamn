@@ -155,6 +155,15 @@ void hamn_control_free(char *result)
     cJSON_free(result);
 }
 
+#ifndef HAMN_VERSION
+#error "the build must define HAMN_VERSION"
+#endif
+
+const char *hamn_version(void)
+{
+    return HAMN_VERSION;
+}
+
 int hamn_control_configure(const char *name, unsigned cpus,
                            unsigned memory_gib, unsigned disk_gib, int create)
 {

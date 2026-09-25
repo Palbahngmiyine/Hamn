@@ -55,7 +55,9 @@ class RustSdk(unittest.TestCase):
                         self.assertEqual(args, ['-isysroot', str(sdk)] if effective else [])
                         native_args = (root / 'make-args').read_text().splitlines()
                         version = Path('version.txt').read_text().strip()
-                        self.assertIn('cargo:rustc-env=HAMN_VERSION=' + version, result.stdout)
+                        # Rust reads the version from the C core at run time.
+                        self.assertIn('VERSION=' + version, native_args)
+                        self.assertNotIn('cargo:rustc-env=HAMN_VERSION', result.stdout)
                         self.assertEqual([arg for arg in native_args if arg.startswith('SDKROOT=')],
                                          ['SDKROOT=' + str(sdk)] if effective else [])
 
@@ -67,22 +69,25 @@ class RustSdk(unittest.TestCase):
             (root / 'version.txt').write_text('0.1.0\n')
             runtime = root / 'runtime.a'
             runtime.touch()
-            for name, content in [('make', '#!/bin/sh\nexit 0\n'),
+            for name, content in [('make', '#!/bin/sh\nprintf "%s\\n" "$@" > "$TEST_MAKE_ARGS"\n'),
                                   ('clang', '#!/bin/sh\nprintf "%s\\n" "$TEST_RUNTIME"\n')]:
                 path = root / name
                 path.write_text(content)
                 path.chmod(0o700)
+            make_args = root / 'make-args'
             env = dict(os.environ, PATH=str(root) + ':' + os.environ['PATH'],
                        CARGO_CFG_TARGET_OS='macos', CARGO_MANIFEST_DIR=str(root),
-                       OUT_DIR=str(root / 'out'), TEST_RUNTIME=str(runtime))
+                       OUT_DIR=str(root / 'out'), TEST_RUNTIME=str(runtime),
+                       TEST_MAKE_ARGS=str(make_args))
             for key in ['HAMN_VERSION', 'SDKROOT', 'HAMN_SYSTEM_SDKROOT']:
                 env.pop(key, None)
             result = subprocess.run([script], env=env, text=True, capture_output=True, check=True)
-            self.assertIn('cargo:rustc-env=HAMN_VERSION=0.1.0', result.stdout)
+            self.assertIn('VERSION=0.1.0', make_args.read_text().splitlines())
             self.assertIn('cargo:rerun-if-changed=version.txt', result.stdout)
+            self.assertIn('cargo:rerun-if-env-changed=HAMN_VERSION', result.stdout)
             env['HAMN_VERSION'] = '0.1.0-dev'
             result = subprocess.run([script], env=env, text=True, capture_output=True, check=True)
-            self.assertIn('cargo:rustc-env=HAMN_VERSION=0.1.0-dev', result.stdout)
+            self.assertIn('VERSION=0.1.0-dev', make_args.read_text().splitlines())
 
 
 if __name__ == '__main__':

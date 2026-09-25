@@ -59,7 +59,8 @@ fn main() {
         runtime.parent().unwrap().display()
     );
     println!("cargo:rustc-link-lib=static=clang_rt.osx");
-    println!("cargo:rustc-env=HAMN_VERSION={version}");
+    // The version reaches Rust only through the C core (hamn_version), so a
+    // version change rebuilds the C core and relinks; Rust code is unchanged.
     for path in [
         "host",
         "vendor",

@@ -21,5 +21,8 @@ int hamn_control_update(const char *manifest);
 int hamn_control_upgrade(const char *manifest, int check_only, int force,
                          char **result);
 int hamn_control_uninstall(int confirmed);
+/* The build's release version: a static NUL-terminated ASCII string, valid for
+ * the whole process. Unlike the calls above, safe from any process or thread. */
+const char *hamn_version(void);
 
 #endif

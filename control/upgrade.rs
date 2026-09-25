@@ -262,7 +262,7 @@ pub fn after_tui() {
     {
         return;
     }
-    let Some(current) = stable(env!("HAMN_VERSION")) else {
+    let Some(current) = stable(crate::core::version()) else {
         return;
     };
     let Some((helper, pointer)) = managed_helper() else {
@@ -372,7 +372,7 @@ pub fn after_tui() {
         return;
     };
     if let Ok(mut child) =
-        checker_command(&helper, &home, manifest.trim(), env!("HAMN_VERSION")).spawn()
+        checker_command(&helper, &home, manifest.trim(), crate::core::version()).spawn()
     {
         // The scheduler exits after spawning a detached checker; wait/reap in
         // a helper thread, never wait for release network in the foreground.

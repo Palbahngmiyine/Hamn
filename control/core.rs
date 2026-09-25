@@ -36,8 +36,22 @@ unsafe extern "C" {
         result: *mut *mut libc::c_char,
     ) -> i32;
     fn hamn_control_uninstall(confirmed: i32) -> i32;
+    // A static NUL-terminated ASCII string, valid for the whole process.
+    fn hamn_version() -> *const libc::c_char;
     fn log_last_error() -> *const libc::c_char;
     fn cli_set_invocation_path(path: *const libc::c_char);
+}
+
+/// The build's release version, compiled into the C core. Reading it at run
+/// time keeps a version-only rebuild to a relink of this crate.
+pub fn version() -> &'static str {
+    // SAFETY: hamn_version returns a non-null pointer to a static
+    // NUL-terminated string that lives for the whole process.
+    let version = unsafe { CStr::from_ptr(hamn_version()) }
+        .to_str()
+        .expect("the compiled Hamn version is ASCII");
+    assert!(!version.is_empty(), "the compiled Hamn version is empty");
+    version
 }
 
 fn query(profile: Option<&CString>) -> Result<Value> {
