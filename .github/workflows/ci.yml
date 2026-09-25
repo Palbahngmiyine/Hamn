@@ -51,6 +51,10 @@ jobs:
         shard: [1, 2, 3, 4, 5]
     env:
       CARGO_PROFILE: ci
+      # A second macOS user runs one updater lane beside the runner's (see
+      # CI_MACOS_SHARD_<n>_USER in the Makefile).
+      CI_MACOS_LANE_UID: '5900'
+      CI_MACOS_LANE_HOME: /private/tmp/hamn-lane
     steps:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -63,6 +67,16 @@ jobs:
           [ "$RUNNER_OS" = macOS ]
           [ "$RUNNER_ARCH" = ARM64 ]
           [ "$(uname -m)" = arm64 ]
+      # Generation cleanup's process scan (a non-root lsof) sees only its own
+      # user's processes, so this user's updater gates cannot disturb the
+      # runner's, and the other way round.
+      - name: Create the second updater-lane user
+        run: |
+          sudo dscl . -create /Users/hamn-lane
+          sudo dscl . -create /Users/hamn-lane UniqueID "$CI_MACOS_LANE_UID"
+          sudo dscl . -create /Users/hamn-lane PrimaryGroupID 20
+          sudo dscl . -create /Users/hamn-lane NFSHomeDirectory "$CI_MACOS_LANE_HOME"
+          sudo install -d -o "$CI_MACOS_LANE_UID" -g staff -m 0700 "$CI_MACOS_LANE_HOME"
       # The Nix installer runs `{ ...; cat /etc/zshrc; } | tee /etc/zshrc`.
       # Reading the APFS-compressed original while tee truncates it can fail
       # with "Attribute not found" (run 36128173174, attempt 2), so store it

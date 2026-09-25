@@ -271,7 +271,10 @@ ruby -ryaml -e '
         shard.dig("strategy", "matrix", "shard").map(&:to_s) == ARGV.fetch(1).split &&
         shard.dig("strategy", "fail-fast") == false
     abort "only PR CI may select the fast ci Cargo profile" unless
-        shard.fetch("env") == { "CARGO_PROFILE" => "ci" }
+        shard.fetch("env")["CARGO_PROFILE"] == "ci"
+    abort "the second updater lane needs its user and home" unless
+        shard.fetch("env").keys.sort == %w[CARGO_PROFILE CI_MACOS_LANE_HOME CI_MACOS_LANE_UID] &&
+        shard.fetch("steps").any? { |step| step["run"].to_s.include?(%q(UniqueID "$CI_MACOS_LANE_UID")) }
     required = jobs.fetch("macos")
     abort "the required macOS check must fail unless every shard passes" unless
         required.fetch("name") == "macOS build and regression gates" &&

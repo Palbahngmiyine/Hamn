@@ -415,5 +415,7 @@ def check(terminal):
 
 
 if __name__ == '__main__':
-    check(False)
-    check(True)
+    # The two modes share no state; CI runs them as separate gates.
+    modes = {'redirected': False, 'pty': True}
+    for mode in sys.argv[1:] or modes:
+        check(modes[mode])
