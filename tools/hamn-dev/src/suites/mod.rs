@@ -6,6 +6,7 @@ use std::process::ExitCode;
 mod core_worker;
 mod docker_api;
 mod docker_context;
+mod kubernetes_api;
 mod single_binary;
 mod tui_native_regressions;
 
@@ -16,6 +17,7 @@ const SUITES: &[Suite] = &[
     ("core-worker", core_worker::main),
     ("docker-api", docker_api::main),
     ("docker-context", docker_context::main),
+    ("kubernetes-api", kubernetes_api::main),
     ("single-binary", single_binary::main),
     ("tui-native-regressions", tui_native_regressions::main),
 ];

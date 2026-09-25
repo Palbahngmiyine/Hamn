@@ -211,7 +211,7 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test core-worker
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test docker-api
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test docker-context
-	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test kubernetes-api
 	HAMN=$(HOST_BIN) python3 tests/host/test_exec_auth.py
 
 # The TUI, workspace and packaging regressions of test-control, after test-control-native.
@@ -508,7 +508,7 @@ release-gate:
 	bash packaging/release/release-gate.sh
 
 test-kubernetes-cli: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test kubernetes-api
 	python3 tests/host/test_k3s_retirement.py
 	bash guest/tests/test_configure_containerd.sh
 
