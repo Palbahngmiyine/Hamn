@@ -293,3 +293,143 @@ pub fn verify_draft_release(args: &[String]) -> Result<(), String> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::support::tmp::TempDir;
+
+    const COMMIT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TREE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const NAMES: [&str; 4] = [
+        "hamn-v0.0.1-darwin-arm64.tar.gz",
+        "hamn-v0.0.1-ubuntu-24.04-arm64.img",
+        "hamn-v0.0.1.spdx.json",
+        "install.sh",
+    ];
+
+    /// A candidate directory for v0.0.1-rc.7 with bound checksums.
+    fn candidate(root: &Path) {
+        for name in NAMES {
+            fs::write(root.join(name), name).unwrap();
+        }
+        let artifacts: Vec<Value> =
+            NAMES.iter().map(|name| json!({"name": name, "sha256": sha256_file(&root.join(name)).unwrap()})).collect();
+        let candidate = json!({"schemaVersion": 1, "kind": "hamn-release-candidate", "tag": "v0.0.1-rc.7",
+            "version": "v0.0.1", "commit": COMMIT, "sourceTree": TREE, "artifacts": artifacts});
+        fs::write(root.join("candidate.json"), canonical_json(&candidate)).unwrap();
+        let sums: String = NAMES
+            .iter()
+            .chain(&["candidate.json"])
+            .map(|name| format!("{}  {name}\n", sha256_file(&root.join(name)).unwrap()))
+            .collect();
+        fs::write(root.join("SHA256SUMS"), sums).unwrap();
+    }
+
+    fn promotion<'a>() -> Promotion<'a> {
+        Promotion {
+            stable_tag: "v0.0.1",
+            candidate_tag: "v0.0.1-rc.7",
+            commit: COMMIT,
+            tree: TREE,
+            run: "41",
+            attempt: "2",
+            artifacts: NAMES,
+        }
+    }
+
+    /// `value` with each top-level field of `change` replaced, or merged
+    /// into when both are objects.
+    fn changed(value: &Value, change: &Value) -> Value {
+        let mut value = value.clone();
+        for (key, replacement) in change.as_object().unwrap() {
+            match (value.get_mut(key), replacement) {
+                (Some(Value::Object(section)), Value::Object(fields)) => section.extend(fields.clone()),
+                _ => value[key] = replacement.clone(),
+            }
+        }
+        value
+    }
+
+    #[test]
+    fn hosted_evidence_claims_only_what_ran_and_promotion_binds_it() {
+        let directory = TempDir::new("hamn-release-hosted-");
+        let root = directory.path().join("candidate");
+        fs::create_dir(&root).unwrap();
+        candidate(&root);
+        let evidence = evidence_for(&root, "v0.0.1-rc.7", COMMIT, TREE, "41", "2").unwrap();
+        assert_eq!(evidence["physicalE2E"], json!(false));
+        assert!(evidence["checks"].get("k3sE2E").is_none());
+        let path = directory.path().join("evidence.json");
+        let write_evidence = |value: &Value| fs::write(&path, canonical_json(value)).unwrap();
+        write_evidence(&evidence);
+        verify_hosted(&root, &path, &promotion()).unwrap();
+        for (change, message) in [
+            (json!({"physicalE2E": true}), "identity mismatch"),
+            (json!({"tag": "v0.0.1-rc.8"}), "identity mismatch"),
+            (json!({"workflow": {"run": "41", "attempt": "3"}}), "workflow provenance mismatch"),
+            (json!({"checks": {"vmLifecycle": true}}), "capabilities are invalid"),
+            (json!({"checks": {"testLocalMacOS": false}}), "capabilities are invalid"),
+            (json!({"candidate": {"checksumsSha256": "0".repeat(64)}}), "binding mismatch"),
+            (json!({"legacy": {}}), "schema is invalid"),
+        ] {
+            write_evidence(&changed(&evidence, &change));
+            let error = verify_hosted(&root, &path, &promotion()).unwrap_err();
+            assert!(error.contains(message), "{change}: {error}");
+        }
+        write_evidence(&evidence);
+        // Nothing unbound or linked may sit beside the candidate files.
+        fs::write(root.join("extra"), "unbound").unwrap();
+        assert!(verify_hosted(&root, &path, &promotion()).unwrap_err().contains("unexpected entries"));
+        fs::remove_file(root.join("extra")).unwrap();
+        fs::rename(root.join("install.sh"), directory.path().join("install.sh")).unwrap();
+        std::os::unix::fs::symlink(directory.path().join("install.sh"), root.join("install.sh")).unwrap();
+        assert!(verify_hosted(&root, &path, &promotion()).unwrap_err().contains("unsafe entry"));
+    }
+
+    #[test]
+    fn hosted_evidence_requires_the_candidate_identity_and_checksum_set() {
+        let directory = TempDir::new("hamn-release-hosted-");
+        let root = directory.path();
+        candidate(root);
+        assert!(evidence_for(root, "v0.0.1-rc.8", COMMIT, TREE, "local", "local").unwrap_err().contains("identity"));
+        assert!(evidence_for(root, "v0.0.1-rc.7", TREE, TREE, "local", "local").unwrap_err().contains("identity"));
+        let sums = fs::read_to_string(root.join("SHA256SUMS")).unwrap();
+        let fewer: String = sums.lines().skip(1).map(|line| format!("{line}\n")).collect();
+        fs::write(root.join("SHA256SUMS"), fewer).unwrap();
+        assert!(evidence_for(root, "v0.0.1-rc.7", COMMIT, TREE, "local", "local").unwrap_err().contains("incomplete"));
+    }
+
+    #[test]
+    fn draft_release_must_bind_exactly_the_keyless_assets() {
+        let directory = TempDir::new("hamn-release-draft-");
+        let path = directory.path().join("release.json");
+        let assets = [
+            "hamn-v0.0.1-darwin-arm64.tar.gz",
+            "hamn-v0.0.1-ubuntu-24.04-arm64.img",
+            "hamn-v0.0.1.spdx.json",
+            "install.sh",
+            "hamn-update-manifest-v3.json",
+            "hosted-validation-evidence.json",
+            "candidate.json",
+            "SHA256SUMS",
+            "promoted-from-rc",
+        ];
+        let release = |names: &[&str], draft: bool| {
+            json!({"tagName": "v0.0.1", "targetCommitish": COMMIT, "isDraft": draft, "isPrerelease": false,
+                "assets": names.iter().map(|name| json!({"name": name})).collect::<Vec<_>>()})
+        };
+        let verify = |value: &Value| {
+            fs::write(&path, value.to_string()).unwrap();
+            verify_draft_release(&[path.to_string_lossy().into_owned(), "v0.0.1".into(), COMMIT.into()])
+        };
+        verify(&release(&assets, true)).unwrap();
+        assert!(verify(&release(&assets, false)).is_err());
+        assert!(verify(&release(&assets[1..], true)).is_err());
+        let mut with_v2 = assets.to_vec();
+        with_v2.push("hamn-update-manifest.json");
+        assert!(verify(&release(&with_v2, true)).is_err(), "the removed v2 manifest must not be published");
+        assert!(verify(&changed(&release(&assets, true), &json!({"targetCommitish": TREE}))).is_err());
+        assert!(verify(&changed(&release(&assets, true), &json!({"isPrerelease": true}))).is_err());
+    }
+}
