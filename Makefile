@@ -35,9 +35,10 @@ HOST_DEPS   := $(HOST_OBJS:.o=.d)
 HOST_TEST_OBJS := $(filter-out $(BUILD)/host/main.o,$(HOST_OBJS))
 # Only these objects compile in the release version, so a version change
 # rebuilds them and relinks instead of rebuilding the whole C core.
+VERSION_CFLAGS := -DHAMN_VERSION=\"$(VERSION)\"
 VERSIONED_OBJS := $(BUILD)/host/cmd/cmd_update.o $(BUILD)/host/cmd/cmd_diagnostics.o \
 	$(BUILD)/host/core/control.o
-$(VERSIONED_OBJS): CFLAGS += -DHAMN_VERSION=\"$(VERSION)\"
+$(VERSIONED_OBJS): CFLAGS += $(VERSION_CFLAGS)
 LIFECYCLE_LOCK_TEST := $(BUILD)/tests/test_lifecycle_lock
 CTLSOCK_TEST := $(BUILD)/tests/test_ctlsock
 FS_TEST := $(BUILD)/tests/test_fs
@@ -144,10 +145,12 @@ $(SSH_OPTIONS_TEST): tests/host/test_ssh_options.c $(HOST_TEST_OBJS)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
 		$(LDFLAGS) -o $@
 
+# Compiles every host source itself, including VERSIONED_OBJS' sources.
 $(START_DOCKER_CONTEXT_RETRY_TEST): tests/host/test_start_docker_context_retry.c \
-		host/cmd/cmd_start.c $(HOST_C_SRCS)
+		host/cmd/cmd_start.c $(HOST_C_SRCS) $(VERSION_STAMP) \
+		$(BUILD)/generated/k3s_retirement.h
 	@mkdir -p $(dir $@)
-	clang -DHAMN_TEST $(filter-out -MMD -MP,$(CFLAGS)) $< \
+	clang -DHAMN_TEST $(filter-out -MMD -MP,$(CFLAGS)) $(VERSION_CFLAGS) $< \
 		$(filter-out host/main.c host/cmd/cmd_start.c,$(HOST_C_SRCS)) \
 		host/cmd/cmd_start.c $(HOST_M_SRCS) $(LDFLAGS) -o $@
 
@@ -283,9 +286,8 @@ CI_MACOS_SHARD_1 := test-update-recovery test-port-forwarding \
 	test-kubernetes-cli test-diagnostics test-release-gate test-workflows
 CI_MACOS_SHARD_1_USER := test-update-cli
 CI_MACOS_SHARD_2 := test-update-ux-redirected test-update-native test-uninstall \
-	test-release-publish
-CI_MACOS_SHARD_2_USER := test-update-ux-pty test-install-bootstrap \
-	test-update-check
+	test-update-check test-release-publish
+CI_MACOS_SHARD_2_USER := test-update-ux-pty test-install-bootstrap
 CI_MACOS_SHARD_3 := test-install-cleanup test-install-script \
 	test-control-native test-profile-state test-hosted-validation
 CI_MACOS_SHARD_3_USER :=
@@ -300,11 +302,14 @@ CI_MACOS_LEAVES := $(foreach shard,$(CI_MACOS_SHARDS),$(CI_MACOS_SHARD_$(shard))
 CI_MACOS_SIDE_GATES := test-control-native test-control-tui \
 	test-profile-state test-guest-deployment test-port-forwarding \
 	test-kubernetes-cli test-diagnostics test-release-gate test-workflows
+# test-update-check stays with the runner: its TUI fixtures start
+# /usr/bin/python3, and under a freshly created user the TUI did not get
+# their output before the test's deadline (run 36135535709).
 CI_MACOS_USER_GATES := test-install-script test-install-cleanup \
 	test-install-system-tools test-install-bootstrap test-uninstall \
 	test-update-properties test-update-native test-update-concurrency \
-	test-update-recovery test-update-check test-update-cli \
-	test-update-ux-redirected test-update-ux-pty
+	test-update-recovery test-update-cli test-update-ux-redirected \
+	test-update-ux-pty
 CI_MACOS_ALONE_GATES := test-update-script test-release-artifacts \
 	test-release-publish test-hosted-validation
 ci_macos_side = $(filter $(CI_MACOS_SIDE_GATES),$(CI_MACOS_SHARD_$(1)))
