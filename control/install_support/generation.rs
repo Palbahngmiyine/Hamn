@@ -26,9 +26,11 @@
 //! install locks throughout. The generation is staged beside its final name,
 //! flushed, marked last and renamed into place; with an update journal its
 //! target is then recorded durably; only then is the link replaced by one
-//! atomic rename. A failure (or SIGKILL) before that rename leaves the
-//! previous link; a complete unpublished generation may remain until
-//! collection. Nothing is collected here; callers run `retention::collect`.
+//! rename of a staged link over it (`publish_link`), so the command always
+//! names either the previous or the new generation. A failure (or SIGKILL)
+//! before that rename leaves the previous link; a complete unpublished
+//! generation may remain until collection. Nothing is collected here;
+//! callers run `retention::collect`.
 use super::{
     Result, files, interrupt,
     journal::{self, Loaded},
@@ -224,6 +226,18 @@ fn managed_link_valid(link: &Path, roots: &Roots) -> Option<String> {
     (generation_valid(&generation, &hash, roots)
         || released_generation_valid(&generation, &hash, roots))
     .then_some(target)
+}
+
+/// Replaces the command `link` by the staged symbolic link `staged` with
+/// one rename(2), so `link` always names the previous or the new target and
+/// ends up as the very inode that was staged. `exclusive` requires that no
+/// command exists (the first installation).
+fn publish_link(staged: &Path, link: &Path, exclusive: bool) -> Result<()> {
+    if exclusive {
+        files::rename_exclusive(staged, link)
+    } else {
+        Ok(fs::rename(staged, link)?)
+    }
 }
 
 fn link_identity(link: &Path) -> Result<(u64, u64, u32, u32, u64)> {
@@ -520,10 +534,13 @@ pub(super) fn install(
             fs::read_link(&staged_link)? == Path::new(&target),
             "staged link differs",
         )?;
+        // The staged link is complete and the command still names the
+        // previous target (or nothing): the last point before the commit.
+        interrupt::barrier("LINK_STAGED")?;
         match &current {
             Link::Absent => {
                 require(files::absent(&link), "hamn path changed before commit")?;
-                files::rename_exclusive(&staged_link, &link)
+                publish_link(&staged_link, &link, true)
                     .map_err(|_| "hamn path changed before commit")?;
             }
             Link::Managed {
@@ -535,7 +552,7 @@ pub(super) fn install(
                         && link_identity(&link).ok() == Some(*identity),
                     "managed hamn path changed before commit",
                 )?;
-                fs::rename(&staged_link, &link)?;
+                publish_link(&staged_link, &link, false)?;
             }
         }
         Ok(())
@@ -761,6 +778,33 @@ mod tests {
             tamper(false);
         }
         assert!(unmigratable_released_layout(&roots).is_none());
+    }
+
+    #[test]
+    fn publish_link_renames_the_staged_inode_over_the_command() {
+        use std::os::unix::fs::symlink;
+        let t = Temp::new();
+        let (link, staged, spare) = (t.0.join("hamn"), t.0.join("staged"), t.0.join("spare"));
+        symlink("/old/bin/hamn", &link).unwrap();
+        symlink("/new/bin/hamn", &staged).unwrap();
+        let staged_inode = fs::symlink_metadata(&staged).unwrap().ino();
+        publish_link(&staged, &link, false).unwrap();
+        assert!(
+            files::absent(&staged),
+            "the staged link was copied, not moved"
+        );
+        assert_eq!(fs::read_link(&link).unwrap(), Path::new("/new/bin/hamn"));
+        assert_eq!(
+            fs::symlink_metadata(&link).unwrap().ino(),
+            staged_inode,
+            "the command was recreated instead of replaced by one rename"
+        );
+        // A first installation never replaces an existing command.
+        symlink("/spare/bin/hamn", &spare).unwrap();
+        assert!(publish_link(&spare, &link, true).is_err());
+        assert_eq!(fs::read_link(&link).unwrap(), Path::new("/new/bin/hamn"));
+        assert_eq!(fs::symlink_metadata(&link).unwrap().ino(), staged_inode);
+        assert!(fs::read_link(&spare).is_ok());
     }
 
     #[test]

@@ -45,6 +45,10 @@ pub fn main(filters: &[String]) -> ExitCode {
                 kill_before_or_after_the_link_rename_keeps_one_complete_target,
             ),
             case("concurrent_installers_serialize_before_staging", concurrent_installers_serialize_before_staging),
+            case(
+                "link_publication_renames_the_staged_link_over_the_command",
+                link_publication_renames_the_staged_link_over_the_command,
+            ),
             case("overlapping_roots_are_refused", overlapping_roots_are_refused),
             case("make_install_publishes_the_built_executable", make_install_publishes_the_built_executable),
         ],
@@ -428,10 +432,13 @@ fn kill_before_or_after_the_link_rename_keeps_one_complete_target() {
     work.install(&work.hamn, &bindir, &datadir);
     let before_target = fs::read_link(bindir.join("hamn")).unwrap();
     let one = work.replacement("replacement-one");
-    kill_at(&work, "BEFORE_LINK_PUBLICATION", &one, &bindir, &datadir);
-    assert_eq!(fs::read_link(bindir.join("hamn")).unwrap(), before_target);
-    assert!(before_target.is_file());
-    assert_managed_install(&bindir, &datadir, &work.hamn);
+    // Before the staged link exists, and with it staged but not renamed.
+    for point in ["BEFORE_LINK_PUBLICATION", "LINK_STAGED"] {
+        kill_at(&work, point, &one, &bindir, &datadir);
+        assert_eq!(fs::read_link(bindir.join("hamn")).unwrap(), before_target, "{point}");
+        assert!(before_target.is_file());
+        assert_managed_install(&bindir, &datadir, &work.hamn);
+    }
     work.install(&one, &bindir, &datadir);
     assert_managed_install(&bindir, &datadir, &one);
     assert!(before_target.is_file(), "the predecessor was removed");
@@ -465,6 +472,50 @@ fn concurrent_installers_serialize_before_staging() {
     let result = second.finish(RUN);
     assert_eq!(result.returncode, 0, "{}", result.stderr());
     assert_managed_install(&bindir, &datadir, &work.hamn);
+}
+
+/// The command is replaced by one rename of the staged link: at the last
+/// point before the commit (`LINK_STAGED`) the command is unchanged, and
+/// afterwards it is the very inode that was staged. Deleting and recreating
+/// the command (a window with no command) would publish a different inode.
+fn link_publication_renames_the_staged_link_over_the_command() {
+    let work = Work::new();
+    let (bindir, datadir) = (work.root.join("atomic-bin"), work.root.join("atomic-share/hamn/src"));
+    let link = bindir.join("hamn");
+    let staged_links = || -> Vec<PathBuf> {
+        fs::read_dir(&bindir)
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.file_name().unwrap().to_string_lossy().starts_with(".hamn-link."))
+                    .map(|stage| stage.join("link"))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for (round, source) in [("first", work.hamn.clone()), ("replacement", work.replacement("atomic-replacement"))] {
+        let before = fs::read_link(&link).ok();
+        let barrier = Barrier::new(&work.root, "LINK_STAGED", &format!("atomic-{round}"));
+        let mut command = work.command(&source, &bindir, &datadir);
+        let child = Group::spawn(barrier.apply(&mut command));
+        barrier.await_ready(Duration::from_secs(20), "the staged command link");
+        assert_eq!(fs::read_link(&link).ok(), before, "{round}: the command changed before its commit");
+        let staged = staged_links();
+        assert_eq!(staged.len(), 1, "{round}: {staged:?}");
+        let staged_inode = fs::symlink_metadata(&staged[0]).unwrap().ino();
+        let staged_target = fs::read_link(&staged[0]).unwrap();
+        barrier.release(RUN);
+        let result = child.finish(RUN);
+        assert_eq!(result.returncode, 0, "{round}: {}", result.stderr());
+        assert_eq!(fs::read_link(&link).unwrap(), staged_target, "{round}");
+        assert_eq!(
+            fs::symlink_metadata(&link).unwrap().ino(),
+            staged_inode,
+            "{round}: the command was recreated instead of replaced by one rename of the staged link"
+        );
+        assert!(staged_links().is_empty(), "{round}: a link stage remains");
+        assert_managed_install(&bindir, &datadir, &source);
+    }
 }
 
 fn overlapping_roots_are_refused() {
