@@ -21,22 +21,31 @@ AGENT_BIN := build/hamnd-agent
 AGENT_TEST_BIN := build/hamnd-agent-test
 CRI_STATUS_TEST := build/test_cri_status
 
-# Strict JSON used by guest-side C tools.
+# Strict JSON used by guest-side C tools such as the in-guest helper.
 STRICT_JSON := json/strict_json.c json/strict_json.h
-STRICT_JSON_TEST := $(TEST_BUILD)/test_strict_json
+GUEST_JSON_BIN := build/guest-json
 
-all: $(AGENT_BIN)
+STRICT_JSON_TEST := $(TEST_BUILD)/test_strict_json
+GUEST_TEST_FIXTURE := $(TEST_BUILD)/guest-test-fixture
+
+all: $(AGENT_BIN) $(GUEST_JSON_BIN)
 
 $(AGENT_BIN): $(AGENT_SRCS) Makefile
 	@mkdir -p build
 	$(CC) -Iagent $(CFLAGS) $(AGENT_SRCS) -pthread -o $@
 
+$(GUEST_JSON_BIN): json/guest_json.c $(STRICT_JSON) Makefile
+	@mkdir -p build
+	$(CC) $(CFLAGS) json/guest_json.c json/strict_json.c -lm -o $@
+
 install: install-common
 
-install-common: $(AGENT_BIN)
+install-common: $(AGENT_BIN) $(GUEST_JSON_BIN)
 	install -d -m 0755 $(DESTDIR)/usr/local/bin
 	install -m 0755 $(AGENT_BIN) $(DESTDIR)/usr/local/bin/hamnd
 	install -d -m 0755 $(DESTDIR)/usr/local/libexec/hamn
+	install -m 0755 $(GUEST_JSON_BIN) \
+		$(DESTDIR)/usr/local/libexec/hamn/guest-json
 	install -m 0755 scripts/configure-containerd.sh \
 		$(DESTDIR)/usr/local/libexec/hamn/configure-containerd
 	install -m 0755 scripts/configure-docker.sh \
@@ -58,8 +67,13 @@ $(AGENT_TEST_BIN): $(AGENT_SRCS) Makefile
 	@mkdir -p build
 	$(CC) $(CFLAGS) -DHAMN_TEST $(AGENT_SRCS) -pthread -o $@
 
-test-agent: $(AGENT_TEST_BIN)
-	bash tests/test_agent.sh $(AGENT_TEST_BIN)
+$(GUEST_TEST_FIXTURE): tests/guest_test_fixture.c $(STRICT_JSON) Makefile
+	@mkdir -p $(TEST_BUILD)
+	$(CC) $(CFLAGS) $(SANITIZE) -I. tests/guest_test_fixture.c \
+		json/strict_json.c -lm -o $@
+
+test-agent: $(AGENT_TEST_BIN) $(GUEST_TEST_FIXTURE)
+	bash tests/test_agent.sh $(AGENT_TEST_BIN) $(GUEST_TEST_FIXTURE)
 
 $(CRI_STATUS_TEST): tests/test_cri_status.c agent/api/cri_status.c \
 		agent/api/cri_status.h Makefile

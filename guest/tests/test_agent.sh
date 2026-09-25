@@ -2,6 +2,8 @@
 set -euo pipefail
 
 AGENT_BIN=$1
+# guest-test-fixture (guest/Makefile) sends raw requests and checks JSON.
+FIXTURE=${2:?usage: test_agent.sh AGENT_BIN GUEST_TEST_FIXTURE}
 WORK=$(mktemp -d)
 SOCK="$WORK/agent.sock"
 PID=
@@ -66,18 +68,7 @@ if [ "$ready" -ne 1 ]; then
     exit 1
 fi
 
-python3 - "$WORK/status.json" <<'PY'
-import json
-import sys
-status = json.load(open(sys.argv[1], encoding="utf-8"))
-assert status["agentVersion"] == "0.0.1"
-assert status["protocolVersion"] == 3
-assert status["dockerSocket"] == "/var/run/docker.sock"
-assert status["criSocket"] == "unix:///run/containerd/containerd.sock"
-assert status["kubernetesNamespace"] == "k8s.io"
-assert isinstance(status["dockerReady"], bool)
-assert isinstance(status["criReady"], bool)
-PY
+"$FIXTURE" agent-status "$WORK/status.json"
 curl --fail --silent --head --max-time 2 --unix-socket "$SOCK" \
     http://localhost/_ping >/dev/null
 
@@ -85,63 +76,42 @@ curl --fail --silent --show-error --max-time 2 --unix-socket "$SOCK" \
     -X POST -H 'Content-Type: application/json' \
     --data '{"tag":"home","path":"nested/file.txt","mtimeSec":1700000000,"mtimeNsec":9}' \
     http://localhost/v1/mount-inotify >/dev/null
-python3 - "$MOUNT_ROOT/nested/file.txt" <<'PY'
-import os
-import sys
+[ "$("$FIXTURE" mtime-ns "$MOUNT_ROOT/nested/file.txt")" = 1700000000000000009 ]
 
-stamp = os.stat(sys.argv[1]).st_mtime_ns
-assert stamp == 1700000000000000009, stamp
-PY
+# Raw requests: printf %b turns the literal \r\n in REQUEST into CRLF.
+expect_status() {
+    local status=$1 request=$2 line
+    printf '%b' "$request" >"$WORK/request"
+    line=$("$FIXTURE" unix-request "$SOCK" <"$WORK/request")
+    case "$line" in
+        *" $status "*) ;;
+        *)
+            echo "FAIL: expected HTTP $status, got '$line' for: $request" >&2
+            exit 1
+            ;;
+    esac
+}
 
-python3 - "$SOCK" <<'PY'
-import socket
-import sys
+expect_status 200 'GET /v1/status HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\nConnection: close\r\n\r\n'
 
-path = sys.argv[1]
+for body in \
+    '{"tag":"home","path":"../nested/file.txt","mtimeSec":1700000000,"mtimeNsec":9}' \
+    '{"tag":"home","path":"nested/file.txt","mtimeSec":1.5,"mtimeNsec":9}' \
+    '{"tag":"home","path":"nested/file.txt","mtimeSec":1700000000,"mtimeNsec":9,"extra":true}' \
+    '{"tag":"home","tag":"home","path":"nested/file.txt","mtimeSec":1700000000,"mtimeNsec":9}'; do
+    expect_status 400 "POST /v1/mount-inotify HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: ${#body}\r\nConnection: close\r\n\r\n$body"
+done
 
-def request(raw):
-    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(2)
-    client.connect(path)
-    client.sendall(raw)
-    client.shutdown(socket.SHUT_WR)
-    response = b""
-    while True:
-        chunk = client.recv(4096)
-        if not chunk:
-            break
-        response += chunk
-    client.close()
-    return response.split(b"\r\n", 1)[0]
+for header in \
+    'Content-Length: 1x\r\n' \
+    'Content-Length:\r\n' \
+    'Content-Length: 18446744073709551616\r\n' \
+    'Content-Length: 0\r\nContent-Length: 0\r\n' \
+    'Transfer-Encoding: chunked\r\n'; do
+    expect_status 400 "GET /v1/status HTTP/1.1\r\nHost: local\r\n${header}Connection: close\r\n\r\n"
+done
 
-valid = b"GET /v1/status HTTP/1.1\r\nHost: local\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-assert b" 200 " in request(valid)
-
-mount_invalid = [
-    b'{"tag":"home","path":"../nested/file.txt","mtimeSec":1700000000,"mtimeNsec":9}',
-    b'{"tag":"home","path":"nested/file.txt","mtimeSec":1.5,"mtimeNsec":9}',
-    b'{"tag":"home","path":"nested/file.txt","mtimeSec":1700000000,"mtimeNsec":9,"extra":true}',
-    b'{"tag":"home","tag":"home","path":"nested/file.txt","mtimeSec":1700000000,"mtimeNsec":9}',
-]
-for body in mount_invalid:
-    raw = b"POST /v1/mount-inotify HTTP/1.1\r\nHost: local\r\nContent-Type: application/json\r\nContent-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body
-    assert b" 400 " in request(raw), body
-
-invalid_headers = [
-    b"Content-Length: 1x\r\n",
-    b"Content-Length:\r\n",
-    b"Content-Length: 18446744073709551616\r\n",
-    b"Content-Length: 0\r\nContent-Length: 0\r\n",
-    b"Transfer-Encoding: chunked\r\n",
-]
-for header in invalid_headers:
-    raw = b"GET /v1/status HTTP/1.1\r\nHost: local\r\n" + header + \
-        b"Connection: close\r\n\r\n"
-    assert b" 400 " in request(raw), header
-
-long_query = b"GET /v1/status?x=" + b"a" * 1024 + \
-    b" HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n"
-assert b" 400 " in request(long_query)
-PY
+long_query=$(printf '%1024s' '' | tr ' ' a)
+expect_status 400 "GET /v1/status?x=$long_query HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n"
 
 echo "OK: hamnd agent Docker/CRI status boundary passed"
