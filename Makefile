@@ -238,7 +238,7 @@ test-control-tui: host
 	python3 tests/host/test_workspace_kubernetes_assertions.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_tls_target.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_backpressure.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_guarded_delete.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-guarded-delete
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py
 	python3 tests/host/test_k3s_retirement.py
 	cargo test --locked -p hamn-dev

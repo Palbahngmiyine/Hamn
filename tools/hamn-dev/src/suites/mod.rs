@@ -6,6 +6,7 @@ use std::process::ExitCode;
 mod native_flag_inventory;
 mod single_binary;
 mod tui;
+mod tui_guarded_delete;
 mod tui_native_regressions;
 mod tui_navigation;
 mod tui_workspaces;
@@ -17,6 +18,7 @@ const SUITES: &[Suite] = &[
     ("native-flag-inventory", native_flag_inventory::main),
     ("single-binary", single_binary::main),
     ("tui", tui::main),
+    ("tui-guarded-delete", tui_guarded_delete::main),
     ("tui-native-regressions", tui_native_regressions::main),
     ("tui-navigation", tui_navigation::main),
     ("tui-workspaces", tui_workspaces::main),
@@ -24,6 +26,7 @@ const SUITES: &[Suite] = &[
 
 const FIXTURES: &[(&str, Fixture)] = &[
     ("native-regressions", tui_native_regressions::fixture),
+    ("tui-guarded-delete", tui_guarded_delete::fixture),
     ("tui-workspaces", tui_workspaces::fixture),
 ];
 
