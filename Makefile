@@ -189,7 +189,7 @@ test-control-rust: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
 
 test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(BUILD)/tests/test_proc_deadline $(BUILD)/tests/test_ssh_deadline
-	python3 tests/host/test_control_signed_bootstrap.py
+	$(HAMN_DEV) test control-signed-bootstrap
 	python3 tests/host/test_tui_create_plugins.py
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_operation.c host/core/operation.c host/core/log.c host/util/fs.c vendor/cjson/cJSON.c -o $(BUILD)/tests/test_operation
 	$(BUILD)/tests/test_operation

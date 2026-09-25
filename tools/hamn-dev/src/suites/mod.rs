@@ -3,6 +3,7 @@
 //! contain a filter (all cases without filters).
 use std::process::ExitCode;
 
+mod control_signed_bootstrap;
 mod core_worker;
 mod docker_api;
 mod docker_context;
@@ -16,6 +17,7 @@ type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
+    ("control-signed-bootstrap", control_signed_bootstrap::main),
     ("core-worker", core_worker::main),
     ("docker-api", docker_api::main),
     ("docker-context", docker_context::main),
@@ -27,6 +29,7 @@ const SUITES: &[Suite] = &[
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
+    ("control-signed-bootstrap", control_signed_bootstrap::updater_fixture),
     ("core-worker-external-cli", core_worker::external_cli_fixture),
     ("exec-auth", exec_auth::fixture),
     ("native-regressions", tui_native_regressions::fixture),
