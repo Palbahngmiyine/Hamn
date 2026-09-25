@@ -5,12 +5,14 @@ set -euo pipefail
 unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
+# Candidate builds replace build/hamn; restore the version this test found.
+original_version=$("$ROOT/build/hamn" --version 2>/dev/null | awk '{print $2}') || original_version=
 WORK=$(mktemp -d /tmp/hamn-release-artifacts.XXXXXX)
 CACHED_INPUT=$(mktemp "$ROOT/packaging/release/.artifact-fixture.XXXXXX.log")
 cleanup() {
     rm -f "$CACHED_INPUT"
     rm -rf "$WORK"
-    make -C "$ROOT" host VERSION=0.0.1-dev >/dev/null
+    [ -z "$original_version" ] || make -C "$ROOT" host VERSION="$original_version" >/dev/null
 }
 trap cleanup EXIT
 

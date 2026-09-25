@@ -2,10 +2,12 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd -P)
+# Candidate builds replace build/hamn; restore the version this test found.
+original_version=$("$ROOT/build/hamn" --version 2>/dev/null | awk '{print $2}') || original_version=
 WORK=$(mktemp -d /tmp/hamn-hosted-validation.XXXXXX)
 cleanup() {
     rm -rf "$WORK"
-    make -C "$ROOT" host VERSION=0.0.1-dev >/dev/null
+    [ -z "$original_version" ] || make -C "$ROOT" host VERSION="$original_version" >/dev/null
 }
 trap cleanup EXIT
 
