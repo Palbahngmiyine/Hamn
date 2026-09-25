@@ -14,6 +14,7 @@ mod kubernetes_api;
 mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
+mod port_forwarding;
 mod profile_yaml;
 mod qcow2;
 mod release_consumer;
@@ -57,6 +58,7 @@ const SUITES: &[Suite] = &[
     ("diagnostics", diagnostics::main),
     ("docker-readiness", docker_readiness::main),
     ("observer-requests", observer_requests::main),
+    ("port-forwarding", port_forwarding::main),
     ("remote-cancel-boundaries", remote_cancel_boundaries::main),
     ("release-github", release_github::main),
     ("release-physical", release_physical::main),

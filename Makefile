@@ -42,6 +42,7 @@ VERSIONED_OBJS := $(BUILD)/host/cmd/cmd_update.o $(BUILD)/host/cmd/cmd_diagnosti
 	$(BUILD)/host/core/control.o
 $(VERSIONED_OBJS): CFLAGS += $(VERSION_CFLAGS)
 LIFECYCLE_LOCK_TEST := $(BUILD)/tests/test_lifecycle_lock
+VMRUN_IDENTITY_TEST := $(BUILD)/tests/test_vmrun_identity
 CTLSOCK_TEST := $(BUILD)/tests/test_ctlsock
 FS_TEST := $(BUILD)/tests/test_fs
 SEED_MOUNTS_TEST := $(BUILD)/tests/test_cloudinit_mounts
@@ -113,6 +114,11 @@ $(BUILD)/%.o: %.m
 	clang $(OBJCFLAGS) -c $< -o $@
 
 $(LIFECYCLE_LOCK_TEST): tests/host/test_lifecycle_lock.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
+		$(LDFLAGS) -o $@
+
+$(VMRUN_IDENTITY_TEST): tests/host/test_vmrun_identity.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
 		$(LDFLAGS) -o $@
@@ -406,7 +412,7 @@ print-ci-macos-shards:
 	@echo $(CI_MACOS_SHARDS)
 
 test-port-forwarding: hamn-dev
-	HAMN_DEV=$(HAMN_DEV) bash tests/host/test_port_forwarding.sh
+	$(HAMN_DEV) test port-forwarding
 
 test-qcow2: host
 	@test -n "$(HAMN_QCOW2_IMAGE)" || { \
@@ -417,7 +423,7 @@ test-qcow2: host
 test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
-		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST)
+		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST)
 	rm -rf $(BUILD)/tests/raw-cache-data && mkdir -p $(BUILD)/tests/raw-cache-data
 	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
 	rm -rf $(BUILD)/tests/raw-cache-data
@@ -430,6 +436,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(SSH_OPTIONS_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
 	$(LIFECYCLE_LOCK_TEST)
+	$(VMRUN_IDENTITY_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	bash guest/tests/test_guest_deployment_transaction.sh
 

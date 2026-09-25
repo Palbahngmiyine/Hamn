@@ -143,6 +143,17 @@ static int ownership_parse(const char *ownership,
     return 0;
 }
 
+/*
+ * port-forwards.tsv holds one record per line, written only by
+ * records_save():
+ *   protocol host_ip host_port container_port pid start_sec start_usec
+ *   ownership owner_pid owner_start_sec owner_start_usec
+ * separated by tabs. The relay pid/start token identifies a UDP relay (TCP
+ * records carry pid 0); the owner fields identify the wrapper generation of a
+ * pending record. Any other record shape, including the pre-release 5-, 7-
+ * and 8-field ones, is corrupt: the whole load fails, so no caller rewrites
+ * the file or signals a process on partial evidence.
+ */
 static int records_load(const struct profile *p,
                         struct forward_record records[], int *count)
 {
@@ -167,44 +178,7 @@ static int records_load(const struct profile *p,
                             &record.owner_pid, &record.owner_start_sec,
                             &record.owner_start_usec,
                             &consumed);
-        if (parsed != 11) {
-            record.owner_pid = 0;
-            record.owner_start_sec = 0;
-            record.owner_start_usec = 0;
-            parsed = sscanf(line,
-                            "%7s\t%63s\t%u\t%u\t%d\t%" SCNu64
-                            "\t%" SCNu64 "\t%23s%n",
-                            protocol, record.spec.host_ip,
-                            &record.spec.host_port,
-                            &record.spec.container_port, &record.pid,
-                            &record.start_sec, &record.start_usec, ownership,
-                            &consumed);
-        }
-        if ((parsed == 8 || parsed == 11) &&
-            ownership_parse(ownership, &record) != 0) {
-            fclose(f);
-            return -1;
-        }
-        if (parsed != 8 && parsed != 11) {
-            record.start_sec = 0;
-            record.start_usec = 0;
-            parsed = sscanf(line,
-                            "%7s\t%63s\t%u\t%u\t%d\t%" SCNu64
-                            "\t%" SCNu64 "%n",
-                            protocol, record.spec.host_ip,
-                            &record.spec.host_port,
-                            &record.spec.container_port, &record.pid,
-                            &record.start_sec, &record.start_usec, &consumed);
-            if (parsed != 7) {
-                record.start_sec = 0;
-                record.start_usec = 0;
-                parsed = sscanf(line, "%7s\t%63s\t%u\t%u\t%d%n", protocol,
-                                record.spec.host_ip, &record.spec.host_port,
-                                &record.spec.container_port, &record.pid,
-                                &consumed);
-            }
-        }
-        if (parsed != 5 && parsed != 7 && parsed != 8 && parsed != 11) {
+        if (parsed != 11 || ownership_parse(ownership, &record) != 0) {
             fclose(f);
             return -1;
         }

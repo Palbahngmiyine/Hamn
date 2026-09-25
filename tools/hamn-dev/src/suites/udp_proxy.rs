@@ -39,26 +39,33 @@ pub fn main(args: &[String]) -> ExitCode {
         eprintln!("udp-proxy: {}: {error}", work.display());
         return ExitCode::FAILURE;
     }
-    let mut cases: Vec<Case> = Vec::new();
+    let summary = if production {
+        "production UDP relay isolates its 64-flow boundary"
+    } else {
+        "UDP relay recovers faults and isolates its 64-flow boundary"
+    };
+    runner::run("udp-proxy", summary, cases(&binary, &work, production), filters)
+}
+
+/// The relay cases for `binary`, keeping pidfiles in the existing directory
+/// `work`; with `production`, only the flow boundary. The port-forwarding
+/// suite runs them against its compiled driver or `HAMN_UDP_EXECUTABLE`.
+pub fn cases(binary: &Path, work: &Path, production: bool) -> Vec<Case> {
     let tests: [(&str, Test); 4] = [
         ("send_recovery", send_recovery),
         ("recv_recovery", recv_recovery),
         ("poll_failure", poll_failure),
         ("flow_limit_and_eviction", flow_limit_and_eviction),
     ];
+    let mut cases: Vec<Case> = Vec::new();
     for (name, test) in tests {
         if production && name != "flow_limit_and_eviction" {
             continue;
         }
-        let (binary, work) = (binary.clone(), work.clone());
+        let (binary, work) = (binary.to_path_buf(), work.to_path_buf());
         cases.push(case(name, move || test(&binary, &work)));
     }
-    let summary = if production {
-        "production UDP relay isolates its 64-flow boundary"
-    } else {
-        "UDP relay recovers faults and isolates its 64-flow boundary"
-    };
-    runner::run("udp-proxy", summary, cases, filters)
+    cases
 }
 
 fn fail(message: String) -> ! {
