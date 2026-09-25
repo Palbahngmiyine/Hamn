@@ -3,12 +3,15 @@
 //! contain a filter (all cases without filters).
 use std::process::ExitCode;
 
+mod bootstrap_acquire;
 mod control_signed_bootstrap;
 mod core_worker;
 mod docker_api;
 mod docker_context;
 mod docker_readiness;
 mod exec_auth;
+mod generation_cleanup;
+mod install_system_tools;
 mod kubernetes_api;
 mod native_flag_inventory;
 mod native_query_lifetime;
@@ -91,6 +94,9 @@ const SUITES: &[Suite] = &[
     ("tui-docker-images", tui_docker_images::main),
     ("tui-kubectl-output", tui_kubectl_output::main),
     ("tui-tls-target", tui_tls_target::main),
+    ("bootstrap-acquire", bootstrap_acquire::main),
+    ("generation-cleanup", generation_cleanup::main),
+    ("install-system-tools", install_system_tools::main),
     ("upgrade-cli", upgrade_cli::main),
     ("upgrade-concurrency", upgrade_concurrency::main),
     ("upgrade-native", upgrade_native::main),
@@ -126,6 +132,8 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("create-plugins-kubectl", tui_create_plugins::kubectl_recorded),
     ("create-plugin", tui_create_plugins::plugin),
     ("create-shadow-plugin", tui_create_plugins::shadow_plugin),
+    ("generation-wait", generation_cleanup::waiting_executable),
+    ("bootstrap-curl", bootstrap_acquire::curl_fixture),
     ("update-check-cli", update_check::cli_fixture),
 ];
 

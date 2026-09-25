@@ -416,13 +416,13 @@ test-install-script: host
 	HAMN=$(HOST_BIN) bash tests/host/test_install.sh
 
 test-install-cleanup: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_generation_cleanup.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test generation-cleanup
 
 test-install-system-tools: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_install_system_tools.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test install-system-tools
 
 test-install-bootstrap: host
-	python3 tests/host/test_bootstrap_acquire.py
+	$(HAMN_DEV) test bootstrap-acquire
 
 test-uninstall: host
 	HAMN=$(HOST_BIN) bash tests/host/test_uninstall.sh
