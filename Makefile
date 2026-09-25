@@ -275,7 +275,9 @@ LOCAL_MACOS_LEAVES := $(foreach gate,$(LOCAL_MACOS_GATES),$(or $($(gate)_PARTS),
 #   which only read the checkout. With CI_MACOS_LANE_UID set (CI creates that
 #   user) it runs beside the main lane as that user, without rebuilding
 #   build/hamn; otherwise it runs after the main lane;
-# - CI_MACOS_ALONE_GATES last: they rebuild build/hamn as other versions.
+# - CI_MACOS_ALONE_GATES last, with nothing beside them: they rebuild
+#   build/hamn as other versions, or (test-control-rust) hold cancellation
+#   deadline tests that timed out beside other lanes (run 36140673204).
 # Balance by measured durations; check-ci-macos-shards proves the shards
 # partition the leaves and every lane holds only gates of its class.
 CI_MACOS_SHARDS := 1 2 3 4 5
@@ -283,17 +285,18 @@ CI_MACOS_SHARDS := 1 2 3 4 5
 # beside at most one heavy updater lane. test-control-rust stays on shard 4,
 # whose Cargo cache carries target/debug.
 CI_MACOS_SHARD_1 := test-update-recovery test-port-forwarding \
-	test-kubernetes-cli test-diagnostics test-release-gate test-workflows
+	test-kubernetes-cli test-diagnostics test-release-gate test-workflows \
+	test-guest-deployment test-release-publish
 CI_MACOS_SHARD_1_USER := test-update-cli
 CI_MACOS_SHARD_2 := test-update-ux-redirected test-update-native test-uninstall \
-	test-update-check test-release-publish
+	test-update-check
 CI_MACOS_SHARD_2_USER := test-update-ux-pty test-install-bootstrap
 CI_MACOS_SHARD_3 := test-install-cleanup test-install-script \
 	test-control-native test-profile-state test-hosted-validation
 CI_MACOS_SHARD_3_USER :=
 CI_MACOS_SHARD_4 := test-core-quality test-portable test-public-export \
 	test-release-version test-release-request test-release-repository-preflight \
-	test-control-rust test-control-tui test-guest-deployment
+	test-control-tui test-control-rust
 CI_MACOS_SHARD_4_USER := test-install-system-tools test-update-concurrency \
 	test-update-properties
 CI_MACOS_SHARD_5 := host test-update-script test-release-artifacts
@@ -311,7 +314,7 @@ CI_MACOS_USER_GATES := test-install-script test-install-cleanup \
 	test-update-recovery test-update-cli test-update-ux-redirected \
 	test-update-ux-pty
 CI_MACOS_ALONE_GATES := test-update-script test-release-artifacts \
-	test-release-publish test-hosted-validation
+	test-release-publish test-hosted-validation test-control-rust
 ci_macos_side = $(filter $(CI_MACOS_SIDE_GATES),$(CI_MACOS_SHARD_$(1)))
 ci_macos_alone = $(filter $(CI_MACOS_ALONE_GATES),$(CI_MACOS_SHARD_$(1)))
 ci_macos_main = $(filter-out $(CI_MACOS_SIDE_GATES) $(CI_MACOS_ALONE_GATES),$(CI_MACOS_SHARD_$(1)))
