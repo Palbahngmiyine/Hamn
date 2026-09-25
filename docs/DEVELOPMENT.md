@@ -7,10 +7,30 @@ headless interface, and Docker/Kubernetes clients. C11 owns VM lifecycle,
 profiles, images, SSH, and forwarding. Objective-C stays in `host/vz/`.
 The GNU11 guest agent is part of the immutable Ubuntu image.
 
+## Test environment
+
+Install Apple's command-line developer tools and [Nix](https://nixos.org/download/)
+with flakes enabled once. The locked `flake.nix` provides everything else: the
+Rust release in `rust-toolchain.toml` with rustfmt and clippy, Python, Ruby, jq,
+ripgrep, actionlint, Git, GNU Make, OpenSSH, and Docker CLI with its Compose and
+buildx plugins. No Homebrew, apt, or Rust installer step is needed.
+
+```sh
+nix develop                                          # interactive development shell
+nix develop .#ci --command make -j1 test-local-macos # every local macOS gate
+nix develop .#live                                   # also kubectl and kind
+```
+
+On macOS the shells use Apple's `/usr/bin` compiler, linker, and `codesign`,
+export the system SDK as `SDKROOT` (never a Nix SDK), and place the macOS
+userland (`stat`, `sed`, `find`, `tar`) ahead of stdenv's GNU tools because
+Hamn's scripts target it. Pinned Nix tools stay first on `PATH`. CI runs the
+same shells, and `make test-core-quality` checks this resolution inside them.
+
 ## Build
 
-Install the macOS command-line developer tools and the Rust toolchain pinned
-in `rust-toolchain.toml`, then run:
+Inside `nix develop` (or with the Apple command-line developer tools and the
+Rust toolchain pinned in `rust-toolchain.toml`), run:
 
 ```sh
 make host
@@ -44,7 +64,8 @@ make test-local-macos
 Docker/Kubernetes APIs, K3s retirement, terminal restoration in a PTY, and
 binary publication. `test-release-gate` tests the evidence contract without a
 VM. Neither is physical release proof. `test-local-macos` runs the local
-source, guest, installation, update, and release gates; it requires actionlint.
+source, guest, installation, update, and release gates; it requires actionlint,
+which the Nix shells provide.
 Run Make gates serially: packaging/update fixtures temporarily build other
 versions into the public `build/hamn` path.
 
@@ -108,8 +129,8 @@ For real VM, Docker, Compose, buildx, and disposable kind/Kubernetes validation:
 python3 tests/host/test_workspace_live.py --binary build/hamn --cache "$HOME/.hamn/cache"
 ```
 
-Install Docker CLI, its Compose/buildx plugins, kubectl, and kind first. The cache
-must contain the selected signed guest image and verification marker. The harness
+Run it inside `nix develop .#live`, which provides Docker CLI with its
+Compose/buildx plugins, kubectl, and kind. The cache must contain the selected signed guest image and verification marker. The harness
 creates an owned `/tmp` HOME, uses only its explicit Docker socket, and records
 binary/image hashes and results there. It checks backup/socket recovery, data
 preservation, cancellation/forced worker exit, native PTY commands, and Kubernetes
@@ -120,5 +141,4 @@ owned test directory after reviewing evidence. Never use a user profile as a fix
 
 The local control suite requires Docker CLI for the external-context transport
 fixture. It connects only to the test-owned Unix socket; no Docker daemon or VM
-is started. The Nix CI shell includes `docker-client`, and the macOS dependency
-setup script installs the Homebrew `docker` CLI formula.
+is started. Every Nix shell includes `docker-client`.

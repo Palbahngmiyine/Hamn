@@ -7,9 +7,30 @@ Hamn은 Apple Silicon macOS 13 이상을 지원합니다. Rust는 Ratatui TUI,
 수명주기·프로필·이미지·SSH·포워딩을 담당하며 Objective-C는 `host/vz/`에만
 둡니다. GNU11 게스트 에이전트는 불변 Ubuntu 이미지에 포함됩니다.
 
+## 테스트 환경
+
+Apple 명령줄 개발 도구와 flakes를 활성화한 [Nix](https://nixos.org/download/)를
+한 번 설치합니다. 나머지는 잠긴 `flake.nix`가 제공합니다. `rust-toolchain.toml`의
+Rust 릴리스와 rustfmt·clippy, Python, Ruby, jq, ripgrep, actionlint, Git, GNU Make,
+OpenSSH, Compose·buildx 플러그인을 포함한 Docker CLI입니다. Homebrew·apt·Rust
+설치 도구 단계는 필요하지 않습니다.
+
+```sh
+nix develop                                          # 대화형 개발 셸
+nix develop .#ci --command make -j1 test-local-macos # 모든 로컬 macOS 검증
+nix develop .#live                                   # kubectl과 kind 추가
+```
+
+macOS 셸은 Apple `/usr/bin`의 컴파일러·링커·`codesign`을 사용하고 시스템 SDK를
+`SDKROOT`로 지정합니다(Nix SDK는 사용하지 않음). Hamn 스크립트가 macOS 사용자
+영역을 기준으로 하므로 `stat`, `sed`, `find`, `tar` 같은 macOS 도구를 stdenv의 GNU
+도구보다 앞에 둡니다. 고정한 Nix 도구는 `PATH` 맨 앞에 유지합니다. CI도 같은 셸을
+사용하며 `make test-core-quality`가 셸 안에서 이 해석 결과를 확인합니다.
+
 ## 빌드
 
-macOS 명령줄 개발 도구와 `rust-toolchain.toml`에 고정한 Rust를 설치합니다.
+`nix develop` 안에서(또는 Apple 명령줄 개발 도구와 `rust-toolchain.toml`에 고정한
+Rust를 설치한 환경에서) 실행합니다.
 
 ```sh
 make host
@@ -43,7 +64,7 @@ make test-local-macos
 K3s 전환, PTY 터미널 복구와 바이너리 게시를 검사합니다. `test-release-gate`는
 VM 없이 증거 계약을 검사합니다. 둘 다 물리 환경 릴리스 증거는 아닙니다.
 `test-local-macos`는 로컬 소스·게스트·설치·업데이트·릴리스 검증을 실행하며
-`actionlint`가 필요합니다. 패키징·업데이트 테스트가 공개 `build/hamn` 경로에
+Nix 셸이 제공하는 `actionlint`가 필요합니다. 패키징·업데이트 테스트가 공개 `build/hamn` 경로에
 다른 버전을 일시적으로 빌드하므로 Make 검증은 순서대로 실행합니다.
 
 ## 게스트 이미지와 전환
@@ -104,7 +125,8 @@ fork/exit 동작은 worker에 격리합니다. TUI 종료가 별도 소유 VM su
 python3 tests/host/test_workspace_live.py --binary build/hamn --cache "$HOME/.hamn/cache"
 ```
 
-Docker CLI·Compose/buildx 플러그인·kubectl·kind를 먼저 설치합니다. 캐시에는 선택한
+Compose/buildx 플러그인을 포함한 Docker CLI·kubectl·kind를 제공하는
+`nix develop .#live` 안에서 실행합니다. 캐시에는 선택한
 서명된 게스트 이미지와 검증 마커가 필요합니다. 검증기는 `/tmp`에 소유권을 기록한
 HOME을 만들고 그 환경의 명시적 Docker 소켓만 사용하며 실행 파일·이미지 해시와 결과를
 저장합니다. 백업·소켓 복구, 데이터 보존, 취소·worker 강제 종료, 네이티브 PTY 명령,
@@ -115,4 +137,4 @@ Kubernetes apply·exec·port-forward를 확인합니다. kind 클러스터를 �
 
 외부 context 전송을 검증하는 로컬 control 테스트에는 Docker CLI가 필요합니다.
 테스트 소유 Unix 소켓만 사용하며 Docker daemon·VM은 시작하지 않습니다.
-Nix CI 셸은 `docker-client`, macOS 의존성 스크립트는 Homebrew `docker` CLI를 제공합니다.
+모든 Nix 셸은 `docker-client`를 포함합니다.
