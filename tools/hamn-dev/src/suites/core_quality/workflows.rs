@@ -178,13 +178,17 @@ pub fn ci_workflow_requires_every_shard() {
     let mut keys: Vec<Option<&str>> =
         env.as_mapping().map_or(Vec::new(), |env| env.keys().map(Value::as_str).collect());
     keys.sort();
+    // Every updater gate owns its HOME and install roots, so all lanes run as
+    // the runner's own user and no second macOS user is created.
     let steps = required(&shard, "steps", "macos-shard");
-    let creates_user = steps.as_sequence().expect("macos-shard steps").iter().any(|step| {
-        step.get("run").and_then(ruby_to_s).unwrap_or_default().contains(r#"UniqueID "$CI_MACOS_LANE_UID""#)
-    });
+    let creates_user = steps
+        .as_sequence()
+        .expect("macos-shard steps")
+        .iter()
+        .any(|step| step.get("run").and_then(ruby_to_s).unwrap_or_default().contains("dscl"));
     assert!(
-        keys == [Some("CARGO_PROFILE"), Some("CI_MACOS_LANE_HOME"), Some("CI_MACOS_LANE_UID")] && creates_user,
-        "the second updater lane needs its user and home"
+        keys == [Some("CARGO_PROFILE")] && !creates_user,
+        "CI shards must run every lane as the runner's user with only CARGO_PROFILE set"
     );
     let gate = required(&jobs, "macos", "jobs");
     let mut shards_env = Mapping::new();
