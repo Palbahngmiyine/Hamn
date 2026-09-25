@@ -600,12 +600,37 @@ fn common_partial_metadata_rejects_ambiguous_or_unbounded_lines() {
     }
 }
 
+// The 108 generated acquisitions run as four tests so the test harness can
+// run them in parallel; each test replays the whole seed sequence and runs
+// the cases with `case % GENERATED_PARTS == part`.
+const GENERATED_PARTS: u64 = 4;
+
 #[test]
-fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
+fn generated_native_acquisition_preserves_content_ranges_and_accounting_part_0() {
+    generated_native_acquisition(0);
+}
+
+#[test]
+fn generated_native_acquisition_preserves_content_ranges_and_accounting_part_1() {
+    generated_native_acquisition(1);
+}
+
+#[test]
+fn generated_native_acquisition_preserves_content_ranges_and_accounting_part_2() {
+    generated_native_acquisition(2);
+}
+
+#[test]
+fn generated_native_acquisition_preserves_content_ranges_and_accounting_part_3() {
+    generated_native_acquisition(3);
+}
+
+fn generated_native_acquisition(part: u64) {
     // Feature: automatic-upgrade-and-image-optimization, Properties 4, 6, 12.
     // Seed 20260921; 108 bounded real acquisitions over nine cache states,
     // alternating host/guest limits, with independent HTTP byte counts and
     // system OpenSSL digest checks. This is not an all-input proof.
+    assert!(part < GENERATED_PARTS);
     let mut seed = 20260921u64;
     let mut next = || {
         seed = seed
@@ -613,9 +638,9 @@ fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
             .wrapping_add(1442695040888963407);
         seed
     };
-    for case in 0..108 {
-        let root = Workspace::new();
-        let cache = cache_root(root.path()).unwrap();
+    for case in 0..108u64 {
+        // Draw every case's inputs in the original order, including skipped
+        // cases, so each case sees the same values in every part.
         let size = match case {
             0 => 1,
             1 => 2,
@@ -625,6 +650,17 @@ fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
             _ => 2 + (next() % 65535) as usize,
         };
         let payload: Vec<u8> = (0..size).map(|_| (next() >> 32) as u8).collect();
+        let prefix = if size == 1 {
+            0
+        } else {
+            1 + next() as usize % (size - 1)
+        };
+        let oversized_size = (case % 9 == 4).then(|| u64::MAX - next() % 1024);
+        if case % GENERATED_PARTS != part {
+            continue;
+        }
+        let root = Workspace::new();
+        let cache = cache_root(root.path()).unwrap();
         let fixture = Fixture::with_payload(root.path(), payload);
         let mut artifact = fixture.artifact();
         let name = if case % 2 == 0 { "host" } else { "guestImage" };
@@ -632,11 +668,6 @@ fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
         let final_path = downloads.join(format!("{}.artifact", artifact.sha256));
         let partial_path = downloads.join(format!(".{}.partial", artifact.sha256));
         let metadata_path = downloads.join(format!(".{}.validator", artifact.sha256));
-        let prefix = if size == 1 {
-            0
-        } else {
-            1 + next() as usize % (size - 1)
-        };
         // Expected results derive from the cache state, not the implementation.
         let mut expected_downloaded = size;
         let mut expected_reused = 0;
@@ -680,7 +711,7 @@ fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
             }
             4 => {
                 let mut oversized = artifact.clone();
-                oversized.size = Some(u64::MAX - next() % 1024);
+                oversized.size = oversized_size;
                 assert!(acquire_with_curl(&cache, &oversized, name, &fixture.curl).is_err());
                 assert!(
                     fixture.requests().is_empty(),
