@@ -230,7 +230,7 @@ test-control-tui: host
 	python3 tests/host/test_workspace_live_external_contexts.py
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-all
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-images
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_config.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-config
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-kubectl-output
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-cluster-target
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_picker_restore.py
