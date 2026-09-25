@@ -217,14 +217,14 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 # The TUI, workspace and packaging regressions of test-control, after test-control-native.
 test-control-tui: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_navigation.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_review_improvements.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_session_management.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-review-improvements
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-session-management
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_workspaces.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_outcomes.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-outcomes
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-native-regressions
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_quoting.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_reload.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_native_query_lifetime.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-quoting
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-reload
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test native-query-lifetime
 	python3 tests/host/test_workspace_live_prepare.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_workspace_management.py
 	python3 tests/host/test_workspace_live_external_contexts.py
@@ -233,11 +233,11 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_config.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_kubectl_output.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_cluster_target.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_picker_restore.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_environment_actions.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-picker-restore
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-environment-actions
 	python3 tests/host/test_workspace_kubernetes_assertions.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_tls_target.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_backpressure.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-backpressure
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_guarded_delete.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py
 	python3 tests/host/test_k3s_retirement.py
