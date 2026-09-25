@@ -567,9 +567,15 @@ int vm_process_abort_spawned(struct vm_spawned_process *spawned,
     return wait_spawned_gone(spawned, 30);
 }
 
+/*
+ * A vmrun control socket's status reply:
+ *   {"state":"running","pid":123,"start_sec":1,"start_usec":2}
+ * start_sec/start_usec are vmrun's own OS start token (v0.0.1 and later always
+ * report them). A reply without them cannot tell the owned supervisor from a
+ * process that reused its PID, so it is uncertain, never a match.
+ */
 struct ctl_status {
     int pid;
-    int has_start_identity;
     uint64_t start_sec;
     uint64_t start_usec;
 };
@@ -603,24 +609,17 @@ static enum ctl_status_result ctl_status_read(
     int valid = cJSON_IsString(state) && state->valuestring[0] &&
                 cJSON_IsNumber(pid) && pid->valuedouble >= 2 &&
                 pid->valuedouble <= INT_MAX &&
-                pid->valuedouble == (double)(int)pid->valuedouble;
-    int has_sec = cJSON_IsNumber(sec);
-    int has_usec = cJSON_IsNumber(usec);
-    if (has_sec != has_usec)
-        valid = 0;
-    if (has_sec &&
-        (sec->valuedouble < 0 ||
-         sec->valuedouble > 9007199254740991.0 ||
-         usec->valuedouble < 0 ||
-         usec->valuedouble >= 1000000 ||
-         sec->valuedouble != (double)(uint64_t)sec->valuedouble ||
-         usec->valuedouble != (double)(uint64_t)usec->valuedouble))
-        valid = 0;
+                pid->valuedouble == (double)(int)pid->valuedouble &&
+                cJSON_IsNumber(sec) && cJSON_IsNumber(usec) &&
+                sec->valuedouble >= 1 &&
+                sec->valuedouble <= 9007199254740991.0 &&
+                usec->valuedouble >= 0 && usec->valuedouble < 1000000 &&
+                sec->valuedouble == (double)(uint64_t)sec->valuedouble &&
+                usec->valuedouble == (double)(uint64_t)usec->valuedouble;
     if (valid) {
         status->pid = (int)pid->valuedouble;
-        status->has_start_identity = has_sec;
-        status->start_sec = has_sec ? (uint64_t)sec->valuedouble : 0;
-        status->start_usec = has_usec ? (uint64_t)usec->valuedouble : 0;
+        status->start_sec = (uint64_t)sec->valuedouble;
+        status->start_usec = (uint64_t)usec->valuedouble;
     }
     cJSON_Delete(j);
     return valid ? CTL_STATUS_VALID : CTL_STATUS_UNCERTAIN;
@@ -629,11 +628,8 @@ static enum ctl_status_result ctl_status_read(
 static int ctl_status_matches(const struct ctl_status *status,
                               const struct process_identity *identity)
 {
-    if (status->pid != identity->pid)
-        return 0;
-    if (!status->has_start_identity)
-        return 1; /* legacy vmrun: active ctl + persisted OS start identity */
-    return status->start_sec == identity->start_sec &&
+    return status->pid == identity->pid &&
+           status->start_sec == identity->start_sec &&
            status->start_usec == identity->start_usec;
 }
 
@@ -659,9 +655,7 @@ static enum vm_process_state ctl_identity_adopt(
                                  identity.executable_uuid) != 0)
         return VM_PROCESS_UNVERIFIED;
     identity.has_executable_identity = 1;
-    if (status->has_start_identity &&
-        (status->start_sec != identity.start_sec ||
-         status->start_usec != identity.start_usec))
+    if (!ctl_status_matches(status, &identity))
         return VM_PROCESS_UNVERIFIED;
 
     int stored_pid = -1;

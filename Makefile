@@ -42,6 +42,7 @@ VERSIONED_OBJS := $(BUILD)/host/cmd/cmd_update.o $(BUILD)/host/cmd/cmd_diagnosti
 	$(BUILD)/host/core/control.o
 $(VERSIONED_OBJS): CFLAGS += $(VERSION_CFLAGS)
 LIFECYCLE_LOCK_TEST := $(BUILD)/tests/test_lifecycle_lock
+VMRUN_IDENTITY_TEST := $(BUILD)/tests/test_vmrun_identity
 CTLSOCK_TEST := $(BUILD)/tests/test_ctlsock
 FS_TEST := $(BUILD)/tests/test_fs
 SEED_MOUNTS_TEST := $(BUILD)/tests/test_cloudinit_mounts
@@ -107,6 +108,11 @@ $(BUILD)/%.o: %.m
 	clang $(OBJCFLAGS) -c $< -o $@
 
 $(LIFECYCLE_LOCK_TEST): tests/host/test_lifecycle_lock.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
+		$(LDFLAGS) -o $@
+
+$(VMRUN_IDENTITY_TEST): tests/host/test_vmrun_identity.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
 		$(LDFLAGS) -o $@
@@ -395,7 +401,7 @@ test-qcow2: host
 test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
-		$(START_DOCKER_CONTEXT_RETRY_TEST)
+		$(START_DOCKER_CONTEXT_RETRY_TEST) $(VMRUN_IDENTITY_TEST)
 	bash tests/host/test_raw_cache.sh
 	$(CTLSOCK_TEST)
 	$(FS_TEST)
@@ -406,6 +412,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(SSH_OPTIONS_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
 	$(LIFECYCLE_LOCK_TEST)
+	$(VMRUN_IDENTITY_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	bash guest/tests/test_guest_deployment_transaction.sh
 
