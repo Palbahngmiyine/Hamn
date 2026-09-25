@@ -405,8 +405,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(MANAGED_GUEST_IMAGE_TEST)
 	$(SSH_OPTIONS_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
-	HAMN=$(HOST_BIN) LIFECYCLE_LOCK_TEST=$(LIFECYCLE_LOCK_TEST) \
-		bash tests/host/test_profile_yaml.sh
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	bash guest/tests/test_guest_deployment_transaction.sh
 
 test-guest-deployment: host

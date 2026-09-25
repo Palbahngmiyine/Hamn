@@ -9,6 +9,7 @@ mod docker_api;
 mod docker_context;
 mod exec_auth;
 mod kubernetes_api;
+mod profile_yaml;
 mod single_binary;
 mod start_preflight;
 mod tui_native_regressions;
@@ -23,6 +24,7 @@ const SUITES: &[Suite] = &[
     ("docker-context", docker_context::main),
     ("exec-auth", exec_auth::main),
     ("kubernetes-api", kubernetes_api::main),
+    ("profile-yaml", profile_yaml::main),
     ("single-binary", single_binary::main),
     ("start-preflight", start_preflight::main),
     ("tui-native-regressions", tui_native_regressions::main),
