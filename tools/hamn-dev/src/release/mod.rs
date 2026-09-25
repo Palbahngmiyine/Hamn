@@ -1,10 +1,17 @@
 //! `hamn-dev release SUBCOMMAND ...`: release candidate assembly, evidence
-//! contracts, promotion checks, Release Please coordination and the
-//! physical validation harness. The shell drivers in packaging/release and
-//! the release workflows call these subcommands; none of them is shipped.
+//! contracts, promotion checks, Release Please coordination, repository
+//! preflight and the physical validation gate and harness. The Makefile's
+//! release targets, packaging/release/publish-release.sh and the release
+//! workflows call these subcommands; none of them is shipped.
+//!
+//! Drivers named `(env)` below take their inputs from environment variables
+//! (documented on each) and run in the checkout of the working directory;
+//! see [`checkout`].
 pub mod archive;
 pub mod candidate;
+pub mod checkout;
 pub mod contract;
+pub mod export;
 pub mod files;
 pub mod github;
 pub mod hosted;
@@ -21,19 +28,10 @@ use std::path::Path;
 type Command = fn(&[String]) -> Result<(), String>;
 
 const COMMANDS: &[(&str, &str, Command)] = &[
-    (
-        "render-installer",
-        "TEMPLATE OUTPUT VERSION COMMIT HOST_URL HOST_SHA256 GUEST_URL GUEST_SHA256 HOST_PATH GUEST_PATH",
-        candidate::render_installer,
-    ),
-    (
-        "write-sbom",
-        "OUTPUT VERSION COMMIT TREE COMMIT_EPOCH HOST_NAME HOST_SHA256 GUEST_NAME GUEST_SHA256",
-        candidate::write_sbom,
-    ),
-    ("write-candidate", "OUTPUT TAG VERSION COMMIT TREE (NAME SHA256)x4", candidate::write_candidate),
+    ("build-candidate", "(env)", candidate::build_candidate),
+    ("hosted-validation", "(env)", hosted::hosted_validation),
+    ("gate", "(env)", physical::gate),
     ("validate-candidate", "DIR TAG COMMIT TREE", validate_candidate),
-    ("hosted-evidence", "CANDIDATE_DIR OUTPUT TAG COMMIT TREE RUN ATTEMPT", hosted::hosted_evidence),
     (
         "verify-hosted",
         "CANDIDATE_DIR EVIDENCE STABLE_TAG RC_TAG COMMIT TREE RUN ATTEMPT HOST GUEST SBOM INSTALLER",
@@ -48,11 +46,11 @@ const COMMANDS: &[(&str, &str, Command)] = &[
         "--hamn HAMN --context CONTEXT [--kubeconfig PATH] --output PATH [--host-network]",
         kubernetes::main,
     ),
-    ("resolve-version", "ROOT PREVIOUS_REF COMMIT RUN_ID OUTPUT", version::resolve_version),
-    ("current-version", "ROOT", version::current_version),
+    ("resolve-release", "PREVIOUS_REF (env)", version::resolve_release),
+    ("recover-release", "(env)", version::recover_release),
     ("check-version-state", "ROOT", version::check_version_state),
-    ("preflight-rulesets", "RULESETS_JSON OUTPUT", preflight::rulesets),
-    ("preflight-repository", "REPOSITORY RESPONSES_DIR", preflight::repository),
+    ("preflight-repository", "(env)", preflight::repository),
+    ("export-public-source", "OUTPUT_DIRECTORY", export::main),
     ("complete-pr", "TAG COMMIT", github::complete_command),
     ("pr-ready", "", github::ready_command),
 ];

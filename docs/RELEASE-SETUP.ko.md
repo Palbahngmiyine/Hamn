@@ -10,7 +10,7 @@
 활성화합니다. `main`에 PR·선형 이력·portable/macOS 검증을 요구하고 `v*` 태그의
 삭제와 non-fast-forward 변경을 금지합니다. Action을 전체 commit SHA로 고정하고
 기본 GITHUB_TOKEN은 읽기 전용으로 둡니다. 허용하는 Action 소유자는
-`preflight-release-repository.sh` 검사와 일치해야 합니다.
+`hamn-dev release preflight-repository` 검사와 일치해야 합니다.
 
 `hamn-promotion` 환경을 만들고 관리자 우회를 끄며 `main`에서만 배포를
 허용합니다. 환경에 secret이나 variable을 두지 않습니다. 저장소 secret은
@@ -42,12 +42,17 @@ Manifest의 버전이 아직 게시되지 않았거나 draft 상태라면 Releas
 
 ## 릴리스 도구
 
-`packaging/release`의 릴리스 스크립트는 셸 조율만 맡고 JSON·증거·버전·GitHub
-검사는 `hamn-dev release`(`tools/hamn-dev`, 배포하지 않음)에 맡깁니다. Make
-target이 이를 빌드하여 절대 경로를 `HAMN_DEV`로 전달하고, 릴리스 workflow는
-`rust-toolchain.toml`에 고정한 toolchain으로 `cargo build --locked -p hamn-dev`를
-실행해 빌드합니다. 하위 명령 없이 `hamn-dev release`를 실행하면 하위 명령과
-인자 목록을 출력합니다.
+릴리스 driver는 `hamn-dev release`(`tools/hamn-dev`, 배포하지 않음)의 하위
+명령입니다. `make release-candidate`·`make release-hosted-validation`·
+`make release-gate`는 각각 `build-candidate`·`hosted-validation`·`gate`를
+실행하고, 릴리스 workflow는 `resolve-release`와 `recover-release`를 실행합니다.
+`preflight-repository`와 `export-public-source`도 같은 하위 명령입니다. 각 하위
+명령은 Make target과 workflow가 전달하는 환경 변수로 입력을 받고 현재 작업
+디렉터리의 checkout에서 실행합니다. `packaging/release/publish-release.sh`는 셸
+조율을 유지하고 검사는 `HAMN_DEV`로 전달된 `hamn-dev release`에 맡깁니다. Make
+target이 `hamn-dev`를 빌드하고, 릴리스 workflow는 `rust-toolchain.toml`에 고정한
+toolchain으로 `cargo build --locked -p hamn-dev`를 실행해 빌드합니다. 하위 명령
+없이 `hamn-dev release`를 실행하면 하위 명령과 인자 목록을 출력합니다.
 
 ## 선택적 수동 물리 검증
 
@@ -66,8 +71,9 @@ HAMN_E2E_CONTEXT='dedicated-test-context'
 HAMN_E2E_KUBECONFIG='/absolute/path/test-kubeconfig'
 ```
 
-`make release-gate`는 checkout에서 `hamn-dev`를 빌드하고
-`hamn-dev release physical-e2e`를 실행합니다. 검증기는 정확한 후보 host archive의
+`make release-gate`는 checkout에서 `hamn-dev`를 빌드하고 아래 이미지 크기 증거
+절에 적은 입력으로 `hamn-dev release gate`를 실행합니다. gate는 checkout과 후보를
+확인한 뒤 `hamn-dev release physical-e2e` 검증기를 실행합니다. 검증기는 정확한 후보 host archive의
 모든 항목을 검사한 뒤 풀고, archive 안 실행 파일의 서명·의존성·버전을 확인한 다음
 `/private/tmp` 아래 비공개 임시 HOME에서 실행합니다. 사용자 VM이나 kubeconfig는
 사용하지 않습니다. 후보 게스트 이미지로 격리 프로필 두 개를 만들어 시작하고,
@@ -104,9 +110,8 @@ digest를 검증한 후보 archive의 실행 파일, 즉 설치된 client와 같
 
 ```sh
 make hamn-dev
-HAMN_DEV="$PWD/target/release/hamn-dev" \
 HAMN_RELEASE_REPOSITORY=Palbahngmiyine/Hamn \
-  bash packaging/release/preflight-release-repository.sh
+  target/release/hamn-dev release preflight-repository
 ```
 
 보호 정책, 배포 환경, 저장소 runner 부재, secret/variable 이름, Actions 권한, 불변 릴리스를

@@ -35,7 +35,7 @@ RELEASE_TAG=v0.0.1-rc.417123456 \
 OUTPUT_DIR="$candidate" \
 HAMN_GUEST_IMAGE="$WORK/guest.img" \
 HAMN_RELEASE_ALLOW_DIRTY=1 \
-    bash "$ROOT/packaging/release/build-candidate.sh" >/dev/null
+    "$HAMN_DEV" release build-candidate >/dev/null
 
 RELEASE_REF="$release_ref" \
 RELEASE_TAG=v0.0.1-rc.417123456 \
@@ -43,7 +43,7 @@ CANDIDATE_DIR="$candidate" \
 OUTPUT_DIR="$evidence" \
 GITHUB_RUN_ID="$workflow_run" \
 GITHUB_RUN_ATTEMPT="$workflow_attempt" \
-    bash "$ROOT/packaging/release/hosted-validation.sh" >/dev/null
+    "$HAMN_DEV" release hosted-validation >/dev/null
 
 host=$candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 host_hash=$(sha256 "$host")

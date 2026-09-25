@@ -5,7 +5,8 @@
 //! or physical end-to-end run. Promotion accepts only evidence from the same
 //! workflow run and attempt, for the same candidate bytes, with exactly
 //! those capability claims.
-use super::files::{canonical_json, read_json, sha256_file, write};
+use super::checkout::{Checkout, empty_output_directory, existing_directory, is_positive_decimal, required, variable};
+use super::files::{canonical_json, read_json, set_mode, sha256_file, write, write_new};
 use super::syntax::{candidate_tag_version, is_artifact_name, is_hex};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
@@ -17,14 +18,76 @@ pub const HOSTED_PASSED: [&str; 4] = ["testLocalMacOS", "artifactHashes", "archi
 /// Capabilities hosted evidence must record as not exercised.
 pub const HOSTED_NOT_EXERCISED: [&str; 3] = ["vmLifecycle", "dockerE2E", "colimaCoexistence"];
 
-/// `hosted-evidence CANDIDATE_DIR OUTPUT TAG COMMIT TREE RUN ATTEMPT`
-pub fn hosted_evidence(args: &[String]) -> Result<(), String> {
-    let [directory, output, tag, commit, tree, run, attempt] = args else {
-        return Err("usage: hamn-dev release hosted-evidence CANDIDATE_DIR OUTPUT TAG COMMIT TREE RUN ATTEMPT".into());
+/// `hosted-validation`: binds a hosted regression run to exact candidate
+/// bytes. Inputs (environment): `RELEASE_REF` (must name the checked-out
+/// commit), `RELEASE_TAG` (`vX.Y.Z-rc.N`), `CANDIDATE_DIR`, `OUTPUT_DIR`
+/// (created; must be empty) and `GITHUB_RUN_ID`/`GITHUB_RUN_ATTEMPT`
+/// (positive decimals, or both unset for `local`). Every artifact must
+/// match `SHA256SUMS` before OUTPUT_DIR receives
+/// `hosted-validation-evidence.json` (mode 0644), its only effect.
+pub fn hosted_validation(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: hamn-dev release hosted-validation (inputs are environment variables)".into());
+    }
+    validate_hosted().map_err(|error| format!("hosted validation: {error}"))
+}
+
+fn validate_hosted() -> Result<(), String> {
+    let [reference, tag, candidate_dir, output_dir] = required(
+        ["RELEASE_REF", "RELEASE_TAG", "CANDIDATE_DIR", "OUTPUT_DIR"],
+        "RELEASE_REF, RELEASE_TAG, CANDIDATE_DIR, and OUTPUT_DIR are required",
+    )?;
+    if candidate_tag_version(&tag).is_none() {
+        return Err("RELEASE_TAG must be a release candidate tag".into());
+    }
+    let local = |name: &str| variable(name).map(|value| if value.is_empty() { "local".to_owned() } else { value });
+    let (run, attempt) = (local("GITHUB_RUN_ID")?, local("GITHUB_RUN_ATTEMPT")?);
+    let recorded = is_positive_decimal(&run) && is_positive_decimal(&attempt);
+    if !recorded && !(run == "local" && attempt == "local") {
+        return Err("workflow run and attempt must be positive decimals".into());
+    }
+    let candidate_dir = existing_directory(&candidate_dir, "CANDIDATE_DIR is unsafe")?;
+    let checkout = Checkout::current()?;
+    let commit = checkout.commit(&reference).map_err(|_| "RELEASE_REF is not a commit")?;
+    if commit != checkout.head()? {
+        return Err("RELEASE_REF does not match the checked-out commit".into());
+    }
+    let tree = checkout.tree(&commit).map_err(|_| "cannot resolve source tree")?;
+    let output_dir = empty_output_directory(&output_dir)?;
+    let regular =
+        |name: &str| fs::symlink_metadata(candidate_dir.join(name)).is_ok_and(|info| info.file_type().is_file());
+    if !regular("candidate.json") || !regular("SHA256SUMS") {
+        return Err("candidate metadata is missing".into());
+    }
+    if !checksums_match(candidate_dir) {
+        return Err("candidate artifact hashes do not match".into());
+    }
+    let evidence = evidence_for(candidate_dir, &tag, &commit, &tree, &run, &attempt)?;
+    let path = output_dir.join("hosted-validation-evidence.json");
+    write_new(&path, canonical_json(&evidence).as_bytes())?;
+    set_mode(&path, 0o644)?;
+    println!("bound hosted validation to exact candidate {tag}");
+    Ok(())
+}
+
+/// `shasum -a 256 -c SHA256SUMS` in `directory`: at least one
+/// `SHA256  NAME` (or binary-mode `SHA256 *NAME`) line, each naming a plain
+/// file in `directory` with that digest. Anything else is a mismatch.
+fn checksums_match(directory: &Path) -> bool {
+    let Ok(listed) = fs::read_to_string(directory.join("SHA256SUMS")) else {
+        return false;
     };
-    let directory = Path::new(directory);
-    let evidence = evidence_for(directory, tag, commit, tree, run, attempt)?;
-    write(Path::new(output), canonical_json(&evidence).as_bytes())
+    let mut lines = listed.lines().filter(|line| !line.is_empty()).peekable();
+    lines.peek().is_some()
+        && lines.all(|line| {
+            let (digest, rest) = line.split_at_checked(64).unwrap_or(("", ""));
+            let name = rest.strip_prefix("  ").or_else(|| rest.strip_prefix(" *"));
+            name.is_some_and(|name| {
+                is_hex(digest, 64)
+                    && is_artifact_name(name)
+                    && sha256_file(&directory.join(name)).is_ok_and(|actual| actual == digest)
+            })
+        })
 }
 
 pub fn evidence_for(
@@ -398,6 +461,29 @@ mod tests {
         let fewer: String = sums.lines().skip(1).map(|line| format!("{line}\n")).collect();
         fs::write(root.join("SHA256SUMS"), fewer).unwrap();
         assert!(evidence_for(root, "v0.0.1-rc.7", COMMIT, TREE, "local", "local").unwrap_err().contains("incomplete"));
+    }
+
+    #[test]
+    fn checksum_verification_follows_shasum_check_for_plain_names() {
+        let directory = TempDir::new("hamn-release-sums-");
+        let root = directory.path();
+        fs::write(root.join("a"), "first").unwrap();
+        fs::write(root.join("b"), "second").unwrap();
+        let (a, b) = (sha256_file(&root.join("a")).unwrap(), sha256_file(&root.join("b")).unwrap());
+        let sums = |text: String| {
+            fs::write(root.join("SHA256SUMS"), text).unwrap();
+            checksums_match(root)
+        };
+        assert!(sums(format!("{a}  a\n{b}  b\n")));
+        assert!(sums(format!("{a} *a\n{b}  b")), "binary-mode markers and a missing final newline are accepted");
+        assert!(!sums(String::new()), "an empty list verifies nothing");
+        assert!(!sums(format!("{b}  a\n")), "wrong digest");
+        assert!(!sums(format!("{a}  a\n{b}  missing\n")), "missing file");
+        assert!(!sums(format!("{a}  a\n{b} b\n")), "malformed separator");
+        assert!(!sums(format!("{}  a\n", a.to_uppercase())), "digests are lowercase hex");
+        assert!(!sums(format!("{a}  a\n{b}  ../b\n")), "only plain names in the candidate directory");
+        fs::remove_file(root.join("SHA256SUMS")).unwrap();
+        assert!(!checksums_match(root));
     }
 
     #[test]

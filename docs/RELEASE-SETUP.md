@@ -11,7 +11,7 @@ scanning, push protection, and immutable releases enabled. Require pull
 requests, linear history, and portable/macOS checks on `main`; protect `v*`
 tags against deletion and non-fast-forward changes. Pin Actions to full commit
 SHAs and keep the default GITHUB_TOKEN read-only. Allow only the Actions
-owners checked by `preflight-release-repository.sh`.
+owners checked by `hamn-dev release preflight-repository`.
 
 Create the `hamn-promotion` environment. Disable admin bypass and allow
 only `main`, without environment secrets or variables. `RELEASE_PLEASE_TOKEN`
@@ -45,10 +45,16 @@ Version override semantics: [Release Please documentation](https://github.com/go
 
 ## Release tooling
 
-The release scripts in `packaging/release` keep their shell orchestration and
-delegate JSON, evidence, version and GitHub checks to `hamn-dev release`
-(`tools/hamn-dev`, never shipped). The Make targets build it and pass its
-absolute path as `HAMN_DEV`; the release workflows build it with
+The release drivers are `hamn-dev release` subcommands (`tools/hamn-dev`,
+never shipped): `build-candidate`, `hosted-validation` and `gate` behind
+`make release-candidate`, `make release-hosted-validation` and
+`make release-gate`; `resolve-release` and `recover-release` in the release
+workflow; `preflight-repository`; and `export-public-source`. They read their
+inputs from the environment variables that the Make targets and workflows
+pass, and they run in the checkout of the working directory.
+`packaging/release/publish-release.sh` keeps its shell orchestration and
+delegates its checks to `hamn-dev release` through `HAMN_DEV`. The Make
+targets build `hamn-dev`; the release workflows build it with
 `cargo build --locked -p hamn-dev` using the toolchain pinned in
 `rust-toolchain.toml`. `hamn-dev release` without a subcommand lists the
 subcommands and their arguments.
@@ -72,7 +78,9 @@ HAMN_E2E_KUBECONFIG='/absolute/path/test-kubeconfig'
 ```
 
 `make release-gate` builds `hamn-dev` from the checkout and runs
-`hamn-dev release physical-e2e`. The harness unpacks the exact candidate host
+`hamn-dev release gate` with the inputs listed under the image size evidence
+below. The gate checks the checkout and the candidate, then runs the
+`hamn-dev release physical-e2e` harness. The harness unpacks the exact candidate host
 archive after checking every member, verifies the archived executable's
 signature, dependencies and version, and runs it in a private temporary HOME
 under `/private/tmp`; no user VM or kubeconfig is used. It creates and starts
@@ -113,9 +121,8 @@ Run the read-only settings check after configuration:
 
 ```sh
 make hamn-dev
-HAMN_DEV="$PWD/target/release/hamn-dev" \
 HAMN_RELEASE_REPOSITORY=Palbahngmiyine/Hamn \
-  bash packaging/release/preflight-release-repository.sh
+  target/release/hamn-dev release preflight-repository
 ```
 
 It checks protections, the promotion environment, absence of repository runners, secret/variable names,

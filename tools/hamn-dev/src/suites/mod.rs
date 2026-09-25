@@ -10,16 +10,24 @@ mod docker_api;
 mod docker_context;
 mod docker_readiness;
 mod exec_auth;
+mod hosted_validation;
 mod kubernetes_api;
 mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
 mod port_forwarding;
 mod profile_yaml;
+mod public_export;
 mod qcow2;
+mod release_candidate;
 mod release_consumer;
+mod release_gate;
 mod release_github;
+mod release_network;
 mod release_physical;
+mod release_repository_preflight;
+mod release_request;
+mod release_version;
 mod remote_cancel_boundaries;
 mod repository;
 mod rust_sdk;
@@ -98,6 +106,14 @@ const SUITES: &[Suite] = &[
     ("tui-docker-images", tui_docker_images::main),
     ("tui-kubectl-output", tui_kubectl_output::main),
     ("tui-tls-target", tui_tls_target::main),
+    ("release-version", release_version::main),
+    ("release-request", release_request::main),
+    ("release-gate", release_gate::main),
+    ("hosted-validation", hosted_validation::main),
+    ("release-candidate", release_candidate::main),
+    ("release-repository-preflight", release_repository_preflight::main),
+    ("public-export", public_export::main),
+    ("release-network", release_network::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
@@ -126,6 +142,9 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("create-plugins-kubectl", tui_create_plugins::kubectl_recorded),
     ("create-plugin", tui_create_plugins::plugin),
     ("create-shadow-plugin", tui_create_plugins::shadow_plugin),
+    ("release-uname", crate::support::release_driver::uname),
+    ("release-preflight-gh", release_repository_preflight::gh),
+    ("release-network-sudo", release_network::sudo),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

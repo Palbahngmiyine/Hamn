@@ -1,24 +1,100 @@
-//! Read-only checks of the GitHub repository state a keyless hosted
-//! release depends on. `preflight-release-repository.sh` fetches the API
-//! responses into a directory; these functions only judge them.
-use super::files::read_json;
+//! `preflight-repository`: read-only checks of the GitHub repository state
+//! a keyless hosted release depends on.
+//!
+//! `HAMN_RELEASE_REPOSITORY` names the repository (`owner/repository`;
+//! default: the current directory's, from `gh repo view`). Every response
+//! comes from a `gh api` GET of [`ENDPOINTS`] and of each release ruleset,
+//! each bounded by [`GH_TIMEOUT`]; nothing on GitHub is changed and only
+//! secret names, never values, are read. The checks then judge the
+//! responses; the first unmet requirement is the error.
+use super::checkout::{environment, variable};
+use super::process::{self, Spec};
+use super::runtime::which;
+use super::syntax::is_repository;
 use serde_json::{Value, json};
-use std::collections::BTreeSet;
-use std::fmt::Write as _;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::time::Duration;
 
 /// Release rulesets by name, with the label under which their details are
 /// fetched.
 const RULESETS: [(&str, &str); 2] =
     [("protect-main-and-release-workflow", "main"), ("immutable-stable-releases", "stable-immutable")];
 
-/// `preflight-rulesets RULESETS_JSON OUTPUT`: exactly the release rulesets,
-/// each active; writes `label<TAB>id` lines for the detail fetches.
-pub fn rulesets(args: &[String]) -> Result<(), String> {
-    let [source, output] = args else {
-        return Err("usage: hamn-dev release preflight-rulesets RULESETS_JSON OUTPUT".into());
+/// Responses by name: the API path below `repos/OWNER/REPOSITORY` and what
+/// a failure to read it is called.
+const ENDPOINTS: [(&str, &str, &str); 20] = [
+    ("repository", "", "repository metadata"),
+    ("collaborators", "/collaborators?affiliation=all&per_page=100", "repository collaborators"),
+    ("invitations", "/invitations", "pending repository invitations"),
+    ("deploy-keys", "/keys", "repository deploy keys"),
+    ("workflows", "/actions/workflows", "repository workflows"),
+    ("actions-permissions", "/actions/permissions", "Actions permissions"),
+    ("selected-actions", "/actions/permissions/selected-actions", "allowed Actions policy"),
+    ("workflow-permissions", "/actions/permissions/workflow", "default workflow token permissions"),
+    ("fork-approval", "/actions/permissions/fork-pr-contributor-approval", "fork workflow approval policy"),
+    ("runners", "/actions/runners", "repository runners"),
+    ("variables", "/actions/variables", "repository variables"),
+    ("repository-secrets", "/actions/secrets", "repository secrets"),
+    ("environments", "/environments", "repository environments"),
+    ("promotion", "/environments/hamn-promotion", "promotion environment"),
+    ("promotion-secrets", "/environments/hamn-promotion/secrets", "promotion environment secret names"),
+    ("promotion-variables", "/environments/hamn-promotion/variables", "promotion environment variables"),
+    ("promotion-branches", "/environments/hamn-promotion/deployment-branch-policies", "promotion branch policies"),
+    ("rulesets", "/rulesets", "repository rulesets"),
+    ("immutable-releases", "/immutable-releases", "immutable release policy"),
+    ("private-vulnerability-reporting", "/private-vulnerability-reporting", "private vulnerability reporting policy"),
+];
+
+/// Each `gh` call; the API answers well within it.
+pub const GH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// `preflight-repository`; see the module documentation.
+pub fn repository(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: hamn-dev release preflight-repository (HAMN_RELEASE_REPOSITORY=OWNER/REPOSITORY)".into());
+    }
+    let repository = preflight().map_err(|error| format!("release repository preflight: {error}"))?;
+    println!("automated release repository preflight passed for {repository}");
+    Ok(())
+}
+
+fn preflight() -> Result<String, String> {
+    let gh = which("gh", std::env::var_os("PATH").as_deref());
+    let environment = environment(&[])?;
+    let spec = Spec { environment: Some(&environment), ..Spec::default() };
+    let gh_output = |gh: &Path, args: &[&str]| process::run(gh.as_os_str(), args, &spec, GH_TIMEOUT);
+    let mut repository = variable("HAMN_RELEASE_REPOSITORY")?;
+    if repository.is_empty() {
+        let gh = gh.as_deref().ok_or("GitHub CLI (gh) is required")?;
+        let current = gh_output(gh, &["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
+            .map_err(|error| format!("cannot resolve the current GitHub repository: {error}"))?;
+        repository = current.trim_end_matches('\n').to_owned();
+    }
+    if !is_repository(&repository) {
+        return Err("HAMN_RELEASE_REPOSITORY must be owner/repository".into());
+    }
+    let gh = gh.ok_or("GitHub CLI (gh) is required")?;
+    let fetch = |endpoint: &str, description: &str| -> Result<Value, String> {
+        let text = gh_output(&gh, &["api", endpoint]).map_err(|error| format!("cannot read {description}: {error}"))?;
+        serde_json::from_str(&text).map_err(|error| format!("{description} response is not valid JSON: {error}"))
     };
-    let listed = read_json(Path::new(source))?;
+    let mut responses = BTreeMap::new();
+    for (name, path, description) in ENDPOINTS {
+        responses.insert(name.to_owned(), fetch(&format!("repos/{repository}{path}"), description)?);
+    }
+    for (label, id) in ruleset_ids(&responses["rulesets"])? {
+        let description = format!("{label} ruleset");
+        responses
+            .insert(format!("ruleset-{label}"), fetch(&format!("repos/{repository}/rulesets/{id}"), &description)?);
+    }
+    check(&repository, &Responses { responses })?;
+    Ok(repository)
+}
+
+/// The label and positive ID of each release ruleset: the listing must hold
+/// exactly the release rulesets, each active.
+fn ruleset_ids(listed: &Value) -> Result<Vec<(&'static str, u64)>, String> {
     let listed = listed.as_array().ok_or("repository ruleset response is invalid")?;
     let mut found = serde_json::Map::new();
     for ruleset in listed {
@@ -30,16 +106,18 @@ pub fn rulesets(args: &[String]) -> Result<(), String> {
     if found.keys().map(String::as_str).collect::<BTreeSet<_>>() != RULESETS.iter().map(|(name, _)| *name).collect() {
         return Err("repository release ruleset set is invalid".into());
     }
-    let mut lines = String::new();
+    let mut ids = Vec::new();
     for (name, label) in RULESETS {
         let ruleset = &found[name];
         let id = ruleset.get("id").filter(|id| id.is_i64() || id.is_u64());
         let (true, Some(id)) = (ruleset.get("enforcement") == Some(&json!("active")), id) else {
             return Err(format!("{name} must be active"));
         };
-        writeln!(lines, "{label}\t{id}").expect("writing to a String");
+        // The ID becomes part of an API path.
+        let id = id.as_u64().filter(|id| *id > 0).ok_or("repository ruleset identity is invalid")?;
+        ids.push((label, id));
     }
-    super::files::write(Path::new(output), lines.as_bytes())
+    Ok(ids)
 }
 
 fn require(condition: bool, message: &str) -> Result<(), String> {
@@ -60,13 +138,14 @@ fn strings(values: &[&str]) -> BTreeSet<String> {
     values.iter().map(|value| json!(value).to_string()).collect()
 }
 
-struct Responses<'a> {
-    directory: &'a Path,
+/// API responses by name (see [`ENDPOINTS`]; `ruleset-LABEL` for rulesets).
+struct Responses {
+    responses: BTreeMap<String, Value>,
 }
 
-impl Responses<'_> {
+impl Responses {
     fn read(&self, name: &str) -> Result<Value, String> {
-        read_json(&self.directory.join(format!("{name}.json")))
+        self.responses.get(name).cloned().ok_or_else(|| format!("{name} response is missing"))
     }
 
     /// The list under `key` of an object response.
@@ -100,18 +179,7 @@ impl Responses<'_> {
     }
 }
 
-/// `preflight-repository REPOSITORY RESPONSES_DIR`
-pub fn repository(args: &[String]) -> Result<(), String> {
-    let [repository, directory] = args else {
-        return Err("usage: hamn-dev release preflight-repository REPOSITORY RESPONSES_DIR".into());
-    };
-    check(repository, Path::new(directory))?;
-    println!("automated release repository preflight passed for {repository}");
-    Ok(())
-}
-
-fn check(repository: &str, directory: &Path) -> Result<(), String> {
-    let responses = Responses { directory };
+fn check(repository: &str, responses: &Responses) -> Result<(), String> {
     let owner_login = repository.split('/').next().unwrap_or_default();
 
     let repo = responses.read("repository")?;
