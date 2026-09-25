@@ -428,16 +428,16 @@ test-uninstall: host
 	HAMN=$(HOST_BIN) bash tests/host/test_uninstall.sh
 
 test-update-properties: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_properties.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-properties
 
 test-update-native: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_native.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-native
 
 test-update-concurrency: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_concurrency.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-concurrency
 
 test-update-recovery: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_recovery_ownership.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-recovery-ownership
 
 test-update-check: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_update_check.py

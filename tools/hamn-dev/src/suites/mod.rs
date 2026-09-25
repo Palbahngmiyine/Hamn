@@ -41,6 +41,10 @@ mod tui_ssh_timeout;
 mod tui_tls_target;
 mod tui_workspaces;
 mod udp_proxy;
+mod upgrade_concurrency;
+mod upgrade_native;
+mod upgrade_properties;
+mod upgrade_recovery_ownership;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
@@ -84,6 +88,10 @@ const SUITES: &[Suite] = &[
     ("tui-docker-images", tui_docker_images::main),
     ("tui-kubectl-output", tui_kubectl_output::main),
     ("tui-tls-target", tui_tls_target::main),
+    ("upgrade-concurrency", upgrade_concurrency::main),
+    ("upgrade-native", upgrade_native::main),
+    ("upgrade-properties", upgrade_properties::main),
+    ("upgrade-recovery-ownership", upgrade_recovery_ownership::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[

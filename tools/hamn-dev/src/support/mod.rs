@@ -16,6 +16,7 @@ pub mod screen;
 pub mod termios;
 pub mod tmp;
 pub mod tui;
+pub mod upgrade;
 
 use std::path::PathBuf;
 
