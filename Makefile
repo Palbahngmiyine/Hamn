@@ -254,17 +254,16 @@ LOCAL_MACOS_LEAVES := $(foreach gate,$(LOCAL_MACOS_GATES),$(or $($(gate)_PARTS),
 # generation cleanup scans every process of the user). Balance by measured
 # durations; check-ci-macos-shards proves the shards partition the leaves.
 CI_MACOS_SHARDS := 1 2 3 4 5
-CI_MACOS_SHARD_1 := test-update-ux test-update-check test-diagnostics \
-	test-release-gate
-CI_MACOS_SHARD_2 := test-control-native test-install-cleanup \
-	test-guest-deployment test-core-quality
-CI_MACOS_SHARD_3 := test-update-script test-update-recovery test-install-script \
-	test-install-bootstrap test-uninstall
+CI_MACOS_SHARD_1 := test-update-ux test-update-check test-install-bootstrap
+CI_MACOS_SHARD_2 := test-control-native test-guest-deployment \
+	test-port-forwarding test-core-quality
+CI_MACOS_SHARD_3 := test-update-script test-update-recovery test-install-cleanup \
+	test-install-script
 CI_MACOS_SHARD_4 := test-control-rust test-release-artifacts test-release-publish \
-	test-update-properties test-portable
+	test-hosted-validation test-portable test-release-gate
 CI_MACOS_SHARD_5 := host test-update-cli test-profile-state \
-	test-install-system-tools test-hosted-validation test-update-concurrency \
-	test-port-forwarding test-kubernetes-cli test-update-native \
+	test-update-concurrency test-update-properties test-install-system-tools \
+	test-kubernetes-cli test-update-native test-diagnostics test-uninstall \
 	test-release-repository-preflight test-release-version test-public-export \
 	test-release-request test-workflows
 CI_MACOS_LEAVES := $(foreach shard,$(CI_MACOS_SHARDS),$(CI_MACOS_SHARD_$(shard)))
