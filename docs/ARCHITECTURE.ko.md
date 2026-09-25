@@ -123,9 +123,8 @@ host path는 VM 시작 전에 canonicalize합니다. Absolute path, symlink trav
 port는 SSH ControlMaster forward를, published UDP port는 bounded host relay를 사용합니다.
 Forward 생성/제거는 transactionally reconcile합니다. Network attachment는 profile마다
 설정할 수 없습니다. `network` YAML key와 network 선택 CLI option이 없습니다.
-`host.docker.internal`은 guest Docker network에 제공되며 `host.hamn.internal`은 0.0.1
-compatibility alias입니다. Guest Docker configuration은 다음 release 제거 전에 경고를
-출력합니다.
+`host.docker.internal`은 guest Docker network에 제공됩니다. 0.0.1의
+`host.hamn.internal` alias는 제거되었습니다.
 
 ## 호환성 경계
 

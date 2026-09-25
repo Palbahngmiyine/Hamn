@@ -82,7 +82,6 @@ install -d -m 0755 "$(dirname "$CONFIG")" "$DROPIN_DIR" \
 
 # Docker Engine does not create host.docker.internal on a generic Linux host.
 # The guest DNS service owns the conventional name for every Docker network.
-# host.hamn.internal stays as a one-release compatibility alias.
 host_dns_config_tmp=$(mktemp "${HOST_DNS_CONFIG}.XXXXXX")
 trap 'rm -f "$host_dns_config_tmp"' EXIT
 cat >"$host_dns_config_tmp" <<EOF
@@ -90,7 +89,6 @@ bind-dynamic
 listen-address=172.17.0.1
 no-hosts
 address=/host.docker.internal/$gateway
-address=/host.hamn.internal/$gateway
 EOF
 host_dns_config_changed=0
 if replace_if_changed "$host_dns_config_tmp" "$HOST_DNS_CONFIG"; then
@@ -187,7 +185,6 @@ fi
 
 for _ in $(seq 1 50); do
     if "$DOCKER" version --format '{{.Server.Version}}' >/dev/null 2>&1; then
-        echo "hamn: warning: host.hamn.internal is a 0.0.1 compatibility alias and will be removed in the next release; use host.docker.internal" >&2
         exit 0
     fi
     sleep 0.1

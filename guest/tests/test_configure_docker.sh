@@ -101,12 +101,20 @@ grep -Fq '"bip": "172.17.0.1/16"' "$HAMN_DOCKER_CONFIG"
 grep -Fq '"dns": [' "$HAMN_DOCKER_CONFIG"
 grep -Fxq 'listen-address=172.17.0.1' "$HAMN_HOST_DNS_CONFIG"
 grep -Fxq 'address=/host.docker.internal/192.168.64.1' "$HAMN_HOST_DNS_CONFIG"
-grep -Fxq 'address=/host.hamn.internal/192.168.64.1' "$HAMN_HOST_DNS_CONFIG"
 grep -Fq "ExecStart=$BIN/dnsmasq --keep-in-foreground --conf-file=$HAMN_HOST_DNS_CONFIG" \
     "$HAMN_HOST_DNS_UNIT"
 grep -Fxq "ExecStart=$BIN/dockerd -H fd://" \
     "$HAMN_DOCKER_DROPIN"
-grep -Fq 'host.hamn.internal is a 0.0.1 compatibility alias' "$WORK/first.err"
+# The 0.0.1 host.hamn.internal alias is gone: the DNS configuration names only
+# host.docker.internal, and success prints no deprecation warning.
+cat >"$WORK/expected-dns.conf" <<'EOF'
+bind-dynamic
+listen-address=172.17.0.1
+no-hosts
+address=/host.docker.internal/192.168.64.1
+EOF
+cmp "$WORK/expected-dns.conf" "$HAMN_HOST_DNS_CONFIG"
+[ ! -s "$WORK/first.err" ]
 
 # User daemon settings are merged without allowing a profile to replace
 # Hamn's system containerd, Docker socket activation, host gateway, or DNS.
@@ -151,6 +159,7 @@ grep -Fxq 'restart docker.service' "$LOG"
 grep -Fxq 'restart hamn-host-dns.service' "$LOG"
 grep -Fq '"host-gateway-ip": "192.168.64.2"' "$HAMN_DOCKER_CONFIG"
 grep -Fxq 'address=/host.docker.internal/192.168.64.2' "$HAMN_HOST_DNS_CONFIG"
+! grep -Fq 'host.hamn.internal' "$HAMN_HOST_DNS_CONFIG"
 
 # Values keep the established daemon.json form: \u escapes, exact integers,
 # shortest float repr, and an explicitly true BuildKit feature.
