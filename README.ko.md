@@ -104,7 +104,7 @@ containerd content 저장소, 사용자 마운트, 원본 kubeconfig는 보존�
 ## 업그레이드
 
 ```sh
-hamn upgrade           # 최신 릴리스 설치 (별칭: hamn update)
+hamn upgrade           # 최신 릴리스 설치
 hamn upgrade --check   # 새 버전이 있는지만 확인
 ```
 
@@ -126,7 +126,7 @@ Hamn 0.1.2 is up to date.
 이미지는 이후에 만드는 VM에 사용합니다. 중단된 다운로드는 자동으로 이어받거나
 다음 `hamn upgrade`에서 이어받습니다. 실패하면 원인과 다음 조치를 한 줄로
 표시합니다. 자동화에는 `hamn upgrade --output json`이나
-`hamn --headless system update --yes`를 사용합니다. TUI를 정상 종료한 뒤 새
+`hamn --headless system upgrade --yes`를 사용합니다. TUI를 정상 종료한 뒤 새
 릴리스를 안내할 수 있지만 스스로 설치하지는 않습니다. 이 확인은
 `HAMN_NO_UPDATE_CHECK=1`로 끌 수 있습니다. 무결성, 복구, `--force`는
 [설치](docs/INSTALLATION.ko.md)를 참고하세요.

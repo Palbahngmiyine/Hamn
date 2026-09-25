@@ -108,7 +108,7 @@ set. Hamn does not provide an MCP server.
 ## Upgrade
 
 ```sh
-hamn upgrade           # install the latest release (alias: hamn update)
+hamn upgrade           # install the latest release
 hamn upgrade --check   # only report whether an update is available
 ```
 
@@ -130,7 +130,7 @@ Running VMs are not restarted and existing VM disks are not changed; the new gue
 image is used for VMs created afterwards. An interrupted download resumes
 automatically, or on the next `hamn upgrade`. Failures print one line with the
 reason and what to do next. Automation can use `hamn upgrade --output json` or
-`hamn --headless system update --yes`. After a successful TUI session Hamn may
+`hamn --headless system upgrade --yes`. After a successful TUI session Hamn may
 mention a newer release; it never installs one by itself. Set
 `HAMN_NO_UPDATE_CHECK=1` to disable that check. See
 [installation](docs/INSTALLATION.md) for integrity, recovery and `--force`.

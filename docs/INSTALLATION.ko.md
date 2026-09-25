@@ -19,11 +19,11 @@ Ruby, Homebrew, Rust, Xcode Command Line Tools를 따로 설치할 필요가 없
 hamn upgrade --check
 hamn upgrade
 hamn upgrade --force --output json
-hamn --headless system update --yes
+hamn --headless system upgrade --yes
 hamn --version
 ```
 
-`hamn update`는 `hamn upgrade`의 별칭입니다. 사용자가 직접 실행하는 `upgrade`는
+사용자가 직접 실행하는 `upgrade`는
 설치 요청이며 headless 변경에는 계속 `--yes`가 필요합니다. `--check`는 manifest만
 조회해 `up-to-date`, `repair-required`, `update-available`, `ahead`를 반환합니다.
 디렉터리 생성, 아티팩트 획득, 저널 복구와 설치 상태 변경은 하지 않습니다.
@@ -148,7 +148,7 @@ Microsoft·GitHub·Rust 재단 생태계와 Anthropic Claude Code의 공식 프�
 | --- | --- | --- |
 | [GitHub CLI](https://cli.github.com/manual/gh_extension_upgrade) | 작업별 사용법·옵션·dry-run 설명, [stderr 업데이트 알림](https://cli.github.com/manual/gh_help_environment) | 작업별 도움말, 필수 `--yes` 설명, JSON과 진행 안내 분리 |
 | [Microsoft .NET 설치기](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-install-script) | [소스](https://github.com/dotnet/install-scripts/blob/47940ac9fc30a2f2dd19167165d0bb0774625f67/src/dotnet-install.sh)의 다운로드·압축 해제·설치 버전·PATH 안내, dry-run의 재실행 명령 | 단계 안내, 재시도 방법, 필요한 경우의 PATH 안내 |
-| [Claude Code](https://docs.claude.com/en/docs/claude-code/setup) | 작은 `install.sh`가 checksum을 검증한 바이너리 하나를 받아 설치를 마무리하게 하고, `claude update\|upgrade` 한 명령으로 확인과 설치를 수행(2.1.282 `--help`와 공개 `install.sh`를 확인) | 명령 하나로 설치하고 `hamn upgrade\|update`는 제목 한 줄, 아티팩트별 진행률, 결과 한 줄을 표시 |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code/setup) | 작은 `install.sh`가 checksum을 검증한 바이너리 하나를 받아 설치를 마무리하게 하고, `claude update\|upgrade` 한 명령으로 확인과 설치를 수행(2.1.282 `--help`와 공개 `install.sh`를 확인) | 명령 하나로 설치하고 `hamn upgrade`는 제목 한 줄, 아티팩트별 진행률, 결과 한 줄을 표시 |
 | [rustup](https://rust-lang.github.io/rustup/installation/) | [버전 요약 구현](https://github.com/rust-lang/rustup/blob/454ff04cdefebc8f38f47f64b3904866f9e0660f/src/cli/common.rs)의 설치·업데이트·변경 없음·실패 구분 | 설치 전후 버전 표시, 검증된 변경 없음 결과, 반영 완료 후 성공 요약 |
 
 PTY 터미널에서 GitHub CLI 2.100.0의 `extension upgrade --help`와

@@ -1,4 +1,7 @@
-//! Version-1 receipts remain byte-compatible with the original Python tree hash.
+//! Version-1 receipts hash the installed tree as compact canonical JSON:
+//! depth-first `[path, mode, sha256-or-null]` entries (bin, scripts, packaging;
+//! children sorted), with non-ASCII characters escaped as UTF-16 `\uXXXX`
+//! units, so receipts written by every release compare byte for byte.
 //! A failed check is advisory (normal verified install); write failures abort the
 //! transaction. The caller owns the install locks and generation lifetime.
 use super::{Result, download, files, require};
@@ -144,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn python_compatible_unicode_and_surrogate_encoding() {
+    fn non_ascii_names_are_escaped_as_utf16_units() {
         assert_eq!(
             canonical_json(&json!(["한😀\n", 493, null])).unwrap(),
             r#"["\ud55c\ud83d\ude00\n",493,null]"#

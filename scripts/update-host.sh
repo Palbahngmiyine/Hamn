@@ -167,7 +167,7 @@ prune_generations() {
     # Removed generations are routine; only a deferral (stderr) is reported.
     install_support prune "$bindir" "$datadir" \
         "$old_target" "$source_root" >/dev/null ||
-        echo "hamn update: obsolete generation cleanup deferred" >&2
+        echo "$fail_prefix: obsolete generation cleanup deferred" >&2
 }
 
 hamn_link=$bindir/hamn
@@ -346,7 +346,7 @@ retire_update_journal() {
     mv "$update_journal" "$retired" || return 1
     path_absent "$update_journal" || return 1
     /bin/sync ||
-        echo "hamn update: transaction retirement is pending a filesystem flush" >&2
+        echo "$fail_prefix: transaction retirement is pending a filesystem flush" >&2
 }
 
 cleanup_deferred_journal() {
@@ -398,7 +398,7 @@ cleanup_retired_journal() {
         return 1
     fi
     /bin/sync ||
-        echo "hamn update: retired transaction cleanup is pending a filesystem flush" >&2
+        echo "$fail_prefix: retired transaction cleanup is pending a filesystem flush" >&2
     journal_directory=$previous_directory
     cleanup_deferred_journal "$deferred"
 }
@@ -466,9 +466,9 @@ rollback_update_journal() {
     # Root locks serialize current writers but do not make another HOME's older
     # journal authoritative. Check identity before changing even our selection.
     if ! journal_owns_active_generation; then
-        echo "hamn update: pending transaction does not own the active generation; preserving its journal and both selections" >&2
-        echo "hamn update: the active generation is neither the journal's previous nor its attempted generation; automatic rollback cannot prove ownership" >&2
-        echo "hamn update: manual review of the retained journal and generation history is required; retrying alone will not resolve this ambiguity" >&2
+        echo "$fail_prefix: pending transaction does not own the active generation; preserving its journal and both selections" >&2
+        echo "$fail_prefix: the active generation is neither the journal's previous nor its attempted generation; automatic rollback cannot prove ownership" >&2
+        echo "$fail_prefix: manual review of the retained journal and generation history is required; retrying alone will not resolve this ambiguity" >&2
         return 1
     fi
     restore_guest_selection_from_journal || return 1
@@ -513,11 +513,11 @@ legacy_journal_failure() {
 recover_pending_update() {
     path_absent "$update_journal" && return 0
     if ! rollback_update_journal; then
-        echo "hamn update: incomplete prior update could not be safely recovered" >&2
+        echo "$fail_prefix: incomplete prior update could not be safely recovered" >&2
         return 1
     fi
     if [ "$journal_bootstrap" = 0 ]; then
-        echo "hamn update: recovered the previous binary and guest image selection after an interrupted update" >&2
+        echo "$fail_prefix: recovered the previous binary and guest image selection after an interrupted update" >&2
     else
         progress "Recovered interrupted bootstrap: $recovery_summary"
     fi
@@ -527,7 +527,7 @@ prepare_update_journal() {
     local new_selection=$1 selection_state expected_attempt
     journal_directory=$update_journal
     path_absent "$update_journal" || {
-        echo "hamn update: another update transaction is already active" >&2
+        echo "$fail_prefix: another update transaction is already active" >&2
         return 1
     }
     journal_stage=$(mktemp -d "$cache/.hamn-update-transaction.XXXXXX") ||
@@ -681,9 +681,9 @@ interrupted_update() {
     local signal=${1:-TERM} status
     trap - HUP INT TERM
     if ! rollback_update_journal; then
-        echo "hamn update: interrupted by $signal; recovery journal remains for a later safe recovery" >&2
+        echo "$fail_prefix: interrupted by $signal; recovery journal remains for a later safe recovery" >&2
     else
-        echo "hamn update: interrupted by $signal; $recovery_summary" >&2
+        echo "$fail_prefix: interrupted by $signal; $recovery_summary" >&2
     fi
     case "$signal" in
     HUP) status=129 ;;
@@ -949,10 +949,10 @@ if ! test_after_journal_retire_barrier; then
     fail "update completion barrier failed; the completed transaction is safely retired"
 fi
 if ! cleanup_retired_journals; then
-    echo "hamn update: completed transaction cleanup is deferred; the committed binary and guest image selection are active" >&2
+    echo "$fail_prefix: completed transaction cleanup is deferred; the committed binary and guest image selection are active" >&2
 fi
 if ! cleanup_deferred_journals; then
-    echo "hamn update: completed transaction cleanup remains deferred; the committed binary and guest image selection are active" >&2
+    echo "$fail_prefix: completed transaction cleanup remains deferred; the committed binary and guest image selection are active" >&2
 fi
 
 prune_generations

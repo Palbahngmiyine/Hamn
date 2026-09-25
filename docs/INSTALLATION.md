@@ -21,11 +21,11 @@ an incompatible older updater. For a managed installation:
 hamn upgrade --check
 hamn upgrade
 hamn upgrade --force --output json
-hamn --headless system update --yes
+hamn --headless system upgrade --yes
 hamn --version
 ```
 
-`hamn update` aliases `hamn upgrade`. Explicit human `upgrade` authorizes the
+Explicit human `upgrade` authorizes the
 installation; headless mutations continue to require `--yes`. `--check` fetches
 only the manifest and reports `up-to-date`, `repair-required`, `update-available`,
 or `ahead` without creating directories, acquiring payloads, recovering a journal,
@@ -157,7 +157,7 @@ Anthropic's Claude Code. These are interaction choices, not measured usability r
 | --- | --- | --- |
 | [GitHub CLI](https://cli.github.com/manual/gh_extension_upgrade) | Operation-specific usage, flags, and dry-run explanation; [update notices use stderr](https://cli.github.com/manual/gh_help_environment). | Update-specific help, explicit `--yes`, progress separate from JSON. |
 | [Microsoft .NET installer](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-install-script) | [Source](https://github.com/dotnet/install-scripts/blob/47940ac9fc30a2f2dd19167165d0bb0774625f67/src/dotnet-install.sh) reports download, extraction, installed version, PATH advice, and a repeatable dry-run invocation. | Stage messages, actionable retry guidance, conditional PATH advice. |
-| [Claude Code](https://docs.claude.com/en/docs/claude-code/setup) | A small `install.sh` downloads one checksum-verified binary and lets it finish installation; `claude update\|upgrade` checks and installs in one command (observed: 2.1.282 `--help`, and the published `install.sh`). | One pasted command installs; `hamn upgrade\|update` prints one heading, per-artifact progress and one result line. |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code/setup) | A small `install.sh` downloads one checksum-verified binary and lets it finish installation; `claude update\|upgrade` checks and installs in one command (observed: 2.1.282 `--help`, and the published `install.sh`). | One pasted command installs; `hamn upgrade` prints one heading, per-artifact progress and one result line. |
 | [rustup](https://rust-lang.github.io/rustup/installation/) | [Version summary implementation](https://github.com/rust-lang/rustup/blob/454ff04cdefebc8f38f47f64b3904866f9e0660f/src/cli/common.rs) distinguishes installed, updated, unchanged, and failed results. | Installed-to-selected version display, verified unchanged result, and a success summary only after commit. |
 
 Terminal observations used a PTY: GitHub CLI 2.100.0 `extension upgrade --help`
