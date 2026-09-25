@@ -259,16 +259,37 @@ impl Fixture {
         fs::write(
             &curl,
             format!(
-                r#"#!/usr/bin/python3
-import os, sys
-args=sys.argv[1:]
-assert args[0] == '--disable'
-for name in ('--proto','--proto-redir'):
-    assert args[args.index(name)+1] == '=https'
-    args[args.index(name)+1] = '=http'
-assert args[-1].startswith('https://fixture.test/')
-args[-1]=args[-1].replace('https://fixture.test','http://{address}')
-os.execv('/usr/bin/curl',['curl']+args)
+                r#"#!/bin/sh
+set -eu
+# Value following a flag, e.g. value --max-time "$@".
+value() {{
+    flag=$1
+    shift
+    while [ "$#" -gt 1 ]; do
+        [ "$1" != "$flag" ] || {{ printf '%s' "$2"; return 0; }}
+        shift
+    done
+    return 1
+}}
+[ "$1" = --disable ] || exit 90
+eval "url=\${{$#}}"
+case $url in https://fixture.test/*) ;; *) exit 91 ;; esac
+#EXTRA
+policy= restricted=0
+for argument do
+    shift
+    if [ -n "$policy" ]; then
+        [ "$argument" = =https ] || exit 92
+        argument==http policy= restricted=$((restricted + 1))
+    fi
+    case $argument in
+    --proto|--proto-redir) policy=1 ;;
+    https://fixture.test/*) argument=http://{address}/${{argument#https://fixture.test/}} ;;
+    esac
+    set -- "$@" "$argument"
+done
+[ "$restricted" = 2 ] || exit 93
+exec /usr/bin/curl "$@"
 "#
             ),
         )
@@ -785,11 +806,8 @@ fn user_curl_configuration_cannot_redirect_artifact_output() {
     fs::write(
         &fixture.curl,
         original.replace(
-            "args=sys.argv[1:]",
-            &format!(
-                "args=sys.argv[1:]\nos.environ['CURL_HOME'] = {:?}",
-                root.path().to_str().unwrap()
-            ),
+            "#EXTRA",
+            &format!("export CURL_HOME='{}'", root.path().to_str().unwrap()),
         ),
     )
     .unwrap();
@@ -890,7 +908,16 @@ fn automatic_manifest_uses_short_deadlines_and_enforces_the_256_kib_limit() {
     let root = Workspace::new();
     let fixture = Fixture::new(root.path());
     let original = fs::read_to_string(&fixture.curl).unwrap();
-    fs::write(&fixture.curl, original.replace("args=sys.argv[1:]", "args=sys.argv[1:]\nassert args[args.index('--connect-timeout')+1] == '2'\nassert args[args.index('--max-time')+1] == '5'")).unwrap();
+    fs::write(
+        &fixture.curl,
+        original.replace(
+            "#EXTRA",
+            "[ \"$(value --connect-timeout \"$@\")\" = 2 ] || exit 94\n\
+             [ \"$(value --max-time \"$@\")\" = 5 ] || exit 95\n\
+             ! value --speed-limit \"$@\" >/dev/null || exit 96",
+        ),
+    )
+    .unwrap();
     let (bytes, count) =
         fetch_manifest_with_curl("https://fixture.test/manifest", true, &fixture.curl).unwrap();
     assert_eq!(bytes, fixture.payload);
