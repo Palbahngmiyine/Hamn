@@ -183,7 +183,7 @@ $(BUILD)/tests/test_ssh_deadline: tests/host/test_ssh_deadline.c $(HOST_TEST_OBJ
 # These share one debug test build: the flag inventory and test_tui.py run
 # `cargo test` binaries themselves, so they stay with `cargo test --locked`.
 test-control-rust: host
-	python3 tests/host/test_native_flag_inventory.py
+	$(HAMN_DEV) test native-flag-inventory
 	cargo test --locked
 	@test "$$(cargo tree --locked --prefix none --format '{p}' | sed -n '/^crossterm v/p' | cut -d ' ' -f 1,2 | sort -u | wc -l | tr -d ' ')" = 1
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
