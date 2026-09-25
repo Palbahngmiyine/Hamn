@@ -24,6 +24,12 @@ impl Pty {
             libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut())
         };
         assert_eq!(result, 0, "openpty: {}", io::Error::last_os_error());
+        // openpty's descriptors are inheritable; Python's are not (PEP 446).
+        // Children get the slave only as their dup2'd standard streams.
+        for fd in [master, slave] {
+            // SAFETY: F_SETFD only changes the flags of a descriptor owned here.
+            assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0, "fcntl: {}", io::Error::last_os_error());
+        }
         // SAFETY: openpty returned two new descriptors owned by nobody else.
         let pty = unsafe { Self { master: OwnedFd::from_raw_fd(master), slave: OwnedFd::from_raw_fd(slave) } };
         pty.resize(rows, cols);
@@ -58,7 +64,7 @@ pub fn fifo(path: &Path) -> OwnedFd {
     // SAFETY: the path is a valid C string.
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0, "mkfifo {}: {}", path.display(), io::Error::last_os_error());
     // SAFETY: as above; open returns a new descriptor or -1.
-    let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK) };
+    let fd = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC) };
     assert!(fd >= 0, "open {}: {}", path.display(), io::Error::last_os_error());
     // SAFETY: fd is a new descriptor owned here.
     unsafe { OwnedFd::from_raw_fd(fd) }
@@ -142,4 +148,39 @@ pub fn kill(pid: u32, signal: i32) {
 pub fn kill_group(pid: u32, signal: i32) {
     // SAFETY: killpg only sends a signal.
     unsafe { libc::killpg(pid as i32, signal) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Like Python's non-inheritable descriptors (PEP 446), the PTY and FIFO
+    /// descriptors stay with the test: a child gets only its standard
+    /// streams, so no process under test holds the master or a FIFO.
+    #[test]
+    fn children_inherit_only_their_standard_streams() {
+        let directory = crate::support::tmp::TempDir::new("hamn-dev-pty-");
+        let notice = fifo(&directory.path().join("notice"));
+        let pty = Pty::open(24, 80);
+        let fds = [pty.master.as_raw_fd(), pty.slave.as_raw_fd(), notice.as_raw_fd()];
+        // An external test(1) sees the shell's inherited descriptors in
+        // /dev/fd. A shell redirection would not do: the shell saves the
+        // descriptors it redirects on numbers from 10 up.
+        let script = format!(
+            "for fd in {} {} {}; do if /bin/test -e /dev/fd/$fd; then echo inherited-$fd; fi; done; echo checked",
+            fds[0], fds[1], fds[2]
+        );
+        let mut child = pty.spawn(Command::new("/bin/sh").args(["-c", &script]));
+        let mut output = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !output.windows(7).any(|window| window == b"checked") {
+            let remaining = deadline.checked_duration_since(Instant::now()).expect("child output deadline");
+            if !readable(&[pty.master.as_raw_fd()], remaining).is_empty() {
+                output.extend(read_some(pty.master.as_raw_fd()));
+            }
+        }
+        assert!(child.wait().unwrap().success());
+        let output = String::from_utf8_lossy(&output);
+        assert!(!output.contains("inherited"), "{fds:?}: {output}");
+    }
 }
