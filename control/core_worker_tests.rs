@@ -90,7 +90,17 @@ signal.pause()
         assert_eq!(receiver.recv().await.unwrap()["text"], "worker-ready\n");
         cancel.cancel();
         let (mut gate, _) = listener.accept().await.unwrap();
-        assert_eq!(receiver.recv().await.unwrap()["text"], "cleanup-started\n");
+        let started = receiver.recv().await.unwrap()["text"].as_str().unwrap().to_owned();
+        if started != "cleanup-started\n" {
+            // Report the fixture's whole failure, not only its first line.
+            let mut failure = started;
+            while let Ok(Some(event)) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv()).await
+            {
+                failure.push_str(event["text"].as_str().unwrap());
+            }
+            panic!("cleanup handler did not start cleanly:\n{failure}");
+        }
         assert!(!completed.load(Ordering::SeqCst));
         gate.write_all(b"x").await.unwrap();
         assert_eq!(receiver.recv().await.unwrap()["text"], "cleanup-completed\n");
