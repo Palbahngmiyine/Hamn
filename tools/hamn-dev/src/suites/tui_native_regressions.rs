@@ -176,10 +176,12 @@ pub fn fixture(program: &str, args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Appends `[program, args]` to `root/calls`.
+/// Appends `[program, args]` to `root/calls` with one write, so a test that
+/// reads the file concurrently never sees a partial line. (`writeln!` on a
+/// `File` issues a write per formatted JSON token.)
 pub fn record(root: &Path, program: &str, args: &[String]) {
     let mut calls = OpenOptions::new().create(true).append(true).open(root.join("calls")).unwrap();
-    writeln!(calls, "{}", json!([program, args])).unwrap();
+    calls.write_all(format!("{}\n", json!([program, args])).as_bytes()).unwrap();
 }
 
 /// Tells the test the query is blocked, then waits for its gate byte.
