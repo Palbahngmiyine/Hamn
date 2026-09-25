@@ -10,6 +10,7 @@ mod docker_api;
 mod docker_context;
 mod docker_readiness;
 mod exec_auth;
+mod guest_image_live;
 mod hosted_validation;
 mod kubernetes_api;
 mod native_flag_inventory;
@@ -56,6 +57,7 @@ mod tui_ssh_timeout;
 mod tui_tls_target;
 mod tui_workspaces;
 mod udp_proxy;
+mod workspace_live;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
@@ -114,6 +116,10 @@ const SUITES: &[Suite] = &[
     ("release-repository-preflight", release_repository_preflight::main),
     ("public-export", public_export::main),
     ("release-network", release_network::main),
+    ("workspace-live-checks", workspace_live::checks::main),
+    ("workspace-live", workspace_live::main),
+    ("workspace-live-management", workspace_live::management_main),
+    ("guest-image-live", guest_image_live::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
@@ -145,6 +151,9 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("release-uname", crate::support::release_driver::uname),
     ("release-preflight-gh", release_repository_preflight::gh),
     ("release-network-sudo", release_network::sudo),
+    ("workspace-live-argv", workspace_live::checks::argv_recorder),
+    ("workspace-live-exec-witness", workspace_live::exec_witness),
+    ("workspace-management-kubectl", workspace_live::checks::management_kubectl),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

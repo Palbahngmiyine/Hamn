@@ -229,7 +229,6 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_early_exit.c -o $(BUILD)/tests/test_proc_early_exit
 	$(BUILD)/tests/test_proc_early_exit
 	$(HAMN_DEV) test remote-cancel-boundaries
-	python3 tests/host/workspace_live_transport.py
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test start-preflight
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_cancellation.c host/util/proc.c -o $(BUILD)/tests/test_proc_cancellation
 	$(BUILD)/tests/test_proc_cancellation
@@ -254,9 +253,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-quoting
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-reload
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test native-query-lifetime
-	python3 tests/host/test_workspace_live_prepare.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_workspace_management.py
-	python3 tests/host/test_workspace_live_external_contexts.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test workspace-live-checks
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-all
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-images
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-config
@@ -264,7 +261,6 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-cluster-target
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-picker-restore
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-environment-actions
-	python3 tests/host/test_workspace_kubernetes_assertions.py
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-tls-target
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-backpressure
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-guarded-delete
