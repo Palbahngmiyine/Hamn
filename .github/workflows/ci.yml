@@ -66,9 +66,26 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      # Nix verifies every locked input against flake.lock; this cache of
+      # fetched inputs and evaluations only avoids unpacking them again.
+      - name: Restore Nix fetcher cache
+        id: nix-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/nix
+          key: nix-fetch-macos-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-fetch-macos-
       - name: Realize the locked Nix shell
         run: nix develop .#ci --command true
-      # Cargo still decides freshness; a cache only avoids recompiling.
+      - name: Save Nix fetcher cache
+        if: matrix.shard == 1 && steps.nix-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/nix
+          key: ${{ steps.nix-cache.outputs.cache-primary-key }}
+      # Cargo still decides freshness; a cache only avoids recompiling. Each
+      # shard restores only its own builds, so only the shard that runs
+      # `cargo test` carries target/debug.
       - name: Restore Cargo build cache
         id: cargo-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -79,10 +96,8 @@ jobs:
             ~/.cargo/git/db
             target/ci
             target/debug
-          key: cargo-macos-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.lock') }}-shard-${{ matrix.shard }}
-          restore-keys: |
-            cargo-macos-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.lock') }}-
-            cargo-macos-
+          key: cargo-macos-shard-${{ matrix.shard }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.lock') }}
+          restore-keys: cargo-macos-shard-${{ matrix.shard }}-
       # The flake shell selects the system Apple SDK and toolchain itself.
       - name: Run macOS regression gates with the system Apple SDK
         run: nix develop .#ci --command make -j1 ci-macos-shard-${{ matrix.shard }}
