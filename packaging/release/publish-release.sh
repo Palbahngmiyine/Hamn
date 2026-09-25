@@ -111,8 +111,6 @@ make -s --no-print-directory -C "$ROOT/guest" image-tool >/dev/null &&
     "$ROOT/guest/build/hamn-image-tool" verify-release-size \
     "$CANDIDATE_DIR/$GUEST_FILE" "$SIZE_REPORT" "$SIZE_BUDGET" "$COMMIT" ||
     fail "guest image size evidence or reviewed release budget is missing or invalid"
-jq -e --arg commit "$COMMIT" '.sourceRevision == $commit' "$SIZE_REPORT" >/dev/null ||
-    fail "guest image size report belongs to a different source revision"
 
 # Only the schema v3 manifest is published; clients up to v0.1.2 read the
 # removed v2 manifest and must reinstall with install.sh.
