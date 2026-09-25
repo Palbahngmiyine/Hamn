@@ -278,23 +278,22 @@ LOCAL_MACOS_LEAVES := $(foreach gate,$(LOCAL_MACOS_GATES),$(or $($(gate)_PARTS),
 CI_MACOS_SHARDS := 1 2 3 4 5
 # Timing-sensitive PTY gates (test-control-native, test-control-tui) run
 # beside at most one heavy updater lane. test-control-rust stays on shard 4,
-# whose Cargo cache carries target/debug, and runs after the lighter gates
-# so its compile does not overlap the TUI gates.
-CI_MACOS_SHARD_1 := test-update-recovery test-profile-state \
-	test-guest-deployment test-port-forwarding test-kubernetes-cli \
-	test-diagnostics test-release-gate test-workflows
+# whose Cargo cache carries target/debug.
+CI_MACOS_SHARD_1 := test-update-recovery test-port-forwarding \
+	test-kubernetes-cli test-diagnostics test-release-gate test-workflows
 CI_MACOS_SHARD_1_USER := test-update-cli
 CI_MACOS_SHARD_2 := test-update-ux-redirected test-update-native test-uninstall \
 	test-release-publish
-CI_MACOS_SHARD_2_USER := test-update-ux-pty test-install-bootstrap
-CI_MACOS_SHARD_3 := test-install-cleanup test-install-script test-update-check \
-	test-control-native test-hosted-validation
+CI_MACOS_SHARD_2_USER := test-update-ux-pty test-install-bootstrap \
+	test-update-check
+CI_MACOS_SHARD_3 := test-install-cleanup test-install-script \
+	test-control-native test-profile-state test-hosted-validation
 CI_MACOS_SHARD_3_USER :=
-CI_MACOS_SHARD_4 := test-update-concurrency test-update-properties \
-	test-core-quality test-portable test-public-export test-release-version \
-	test-release-request test-release-repository-preflight test-control-rust \
-	test-control-tui
-CI_MACOS_SHARD_4_USER := test-install-system-tools
+CI_MACOS_SHARD_4 := test-core-quality test-portable test-public-export \
+	test-release-version test-release-request test-release-repository-preflight \
+	test-control-rust test-control-tui test-guest-deployment
+CI_MACOS_SHARD_4_USER := test-install-system-tools test-update-concurrency \
+	test-update-properties
 CI_MACOS_SHARD_5 := host test-update-script test-release-artifacts
 CI_MACOS_SHARD_5_USER :=
 CI_MACOS_LEAVES := $(foreach shard,$(CI_MACOS_SHARDS),$(CI_MACOS_SHARD_$(shard)) $(CI_MACOS_SHARD_$(shard)_USER))
