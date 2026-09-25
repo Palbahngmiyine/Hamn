@@ -4,6 +4,7 @@
 use std::process::ExitCode;
 
 mod native_flag_inventory;
+mod rust_sdk;
 mod single_binary;
 mod tui;
 mod tui_guarded_delete;
@@ -17,6 +18,7 @@ type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
     ("native-flag-inventory", native_flag_inventory::main),
+    ("rust-sdk", rust_sdk::main),
     ("single-binary", single_binary::main),
     ("tui", tui::main),
     ("tui-guarded-delete", tui_guarded_delete::main),
@@ -28,6 +30,7 @@ const SUITES: &[Suite] = &[
 
 const FIXTURES: &[(&str, Fixture)] = &[
     ("native-regressions", tui_native_regressions::fixture),
+    ("rust-sdk", rust_sdk::fixture),
     ("tui-guarded-delete", tui_guarded_delete::fixture),
     ("tui-workspaces", tui_workspaces::fixture),
 ];

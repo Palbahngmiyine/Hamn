@@ -242,7 +242,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-ssh-timeout
 	python3 tests/host/test_k3s_retirement.py
 	cargo test --locked -p hamn-dev
-	python3 tests/host/test_rust_sdk.py
+	$(HAMN_DEV) test rust-sdk
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test single-binary
 
 test-workflows:
