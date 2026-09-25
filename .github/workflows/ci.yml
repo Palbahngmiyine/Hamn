@@ -62,17 +62,10 @@ jobs:
           [ "$RUNNER_OS" = macOS ]
           [ "$RUNNER_ARCH" = ARM64 ]
           [ "$(uname -m)" = arm64 ]
-      # Single-user Nix installs in seconds; the locked flake still pins every
-      # tool, and the store cache below only avoids downloading it again.
       - name: Install Nix
-        uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
-      - name: Restore Nix store
-        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
+        uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
-          primary-key: nix-macos-${{ hashFiles('flake.nix', 'flake.lock', 'rust-toolchain.toml') }}
-          restore-prefixes-first-match: nix-macos-
-          paths: ~/.cache/nix
-          save: ${{ matrix.shard == 1 }}
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Realize the locked Nix shell
         run: nix develop .#ci --command true
       # Cargo still decides freshness; a cache only avoids recompiling.

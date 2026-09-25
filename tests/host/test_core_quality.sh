@@ -248,6 +248,12 @@ expected_workflows=$(printf '%s\n' \
 while IFS= read -r action; do
     [[ "$action" =~ ^[^@]+@[0-9a-f]{40}$ ]] ||
         fail "workflow action is not pinned to a full commit SHA: $action"
+    # The repository runs only GitHub-owned actions and this allowlist; any
+    # other action fails the whole run before a job starts (startup_failure).
+    case "${action%%@*}" in
+    actions/* | github/* | cachix/install-nix-action | googleapis/release-please-action) ;;
+    *) fail "workflow action is not allowed by the repository Actions policy: $action" ;;
+    esac
 done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^ #]+).*/\1/p' \
     "$ROOT"/.github/workflows/*.yml)
 
