@@ -69,6 +69,13 @@ which the Nix shells provide.
 Run Make gates serially: packaging/update fixtures temporarily build other
 versions into the public `build/hamn` path.
 
+Pull-request CI splits these gates into `make ci-macos-shard-1` through
+`ci-macos-shard-5`, each run serially on a separate runner, and builds with
+`CARGO_PROFILE=ci` (the release profile without LTO). `make check-ci-macos-shards`
+fails unless the shards together run every `test-local-macos` gate exactly once.
+The release workflow still runs `test-local-macos` serially with the release
+profile, the one that builds published artifacts.
+
 ## Guest images and retirement
 
 `guest/image/release-inputs.json` pins the Ubuntu base URL and SHA-256.

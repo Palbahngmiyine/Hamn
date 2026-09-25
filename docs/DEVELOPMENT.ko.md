@@ -67,6 +67,12 @@ VM 없이 증거 계약을 검사합니다. 둘 다 물리 환경 릴리스 증�
 Nix 셸이 제공하는 `actionlint`가 필요합니다. 패키징·업데이트 테스트가 공개 `build/hamn` 경로에
 다른 버전을 일시적으로 빌드하므로 Make 검증은 순서대로 실행합니다.
 
+PR CI는 이 검증을 `make ci-macos-shard-1`부터 `ci-macos-shard-5`까지 나누어 각각
+별도 runner에서 순서대로 실행하고, `CARGO_PROFILE=ci`(LTO를 끈 release 프로필)로
+빌드합니다. `make check-ci-macos-shards`는 샤드 전체가 `test-local-macos`의 모든
+검증을 정확히 한 번씩 실행하지 않으면 실패합니다. 릴리스 워크플로는 게시 산출물을
+만드는 release 프로필로 `test-local-macos`를 계속 순서대로 실행합니다.
+
 ## 게스트 이미지와 전환
 
 `guest/image/release-inputs.json`은 Ubuntu 기반 이미지 URL과 SHA-256을 고정합니다.

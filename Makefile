@@ -55,6 +55,8 @@ START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retr
 	test-release-request \
 	test-kubernetes-cli test-core-quality test-public-export test-release-repository-preflight \
 	test-port-forwarding test-workflows test-local-macos \
+	$(test-control_PARTS) $(test-install_PARTS) $(test-update_PARTS) \
+	check-ci-macos-shards print-ci-macos-shards \
 	release-candidate release-gate release-hosted-validation
 
 FORCE:
@@ -162,10 +164,17 @@ $(BUILD)/tests/test_ssh_deadline: tests/host/test_ssh_deadline.c $(HOST_TEST_OBJ
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) $(LDFLAGS) -o $@
 
-test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(BUILD)/tests/test_proc_deadline $(BUILD)/tests/test_ssh_deadline
+# These share one debug test build: the flag inventory and test_tui.py run
+# `cargo test` binaries themselves, so they stay with `cargo test --locked`.
+test-control-rust: host
+	python3 tests/host/test_native_flag_inventory.py
+	cargo test --locked
+	@test "$$(cargo tree --locked --prefix none --format '{p}' | sed -n '/^crossterm v/p' | cut -d ' ' -f 1,2 | sort -u | wc -l | tr -d ' ')" = 1
+	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
+
+test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(BUILD)/tests/test_proc_deadline $(BUILD)/tests/test_ssh_deadline
 	python3 tests/host/test_control_signed_bootstrap.py
 	python3 tests/host/test_tui_create_plugins.py
-	python3 tests/host/test_native_flag_inventory.py
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_operation.c host/core/operation.c host/core/log.c host/util/fs.c vendor/cjson/cJSON.c -o $(BUILD)/tests/test_operation
 	$(BUILD)/tests/test_operation
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_operation_preflight.c host/core/operation.c host/core/log.c host/util/fs.c vendor/cjson/cJSON.c -o $(BUILD)/tests/test_operation_preflight
@@ -182,15 +191,12 @@ test-control: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(B
 	$(BUILD)/tests/test_proc_deadline
 	SSH_DEADLINE_TEST=$(BUILD)/tests/test_ssh_deadline python3 tests/host/test_ssh_deadline.py
 	python3 tests/host/test_docker_readiness.py
-	cargo test --locked
-	@test "$$(cargo tree --locked --prefix none --format '{p}' | sed -n '/^crossterm v/p' | cut -d ' ' -f 1,2 | sort -u | wc -l | tr -d ' ')" = 1
 	$(PROFILE_READ_TEST)
 	HAMN=$(HOST_BIN) python3 tests/host/test_core_worker.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_docker_api.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_docker_context.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_exec_auth.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_navigation.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_review_improvements.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_session_management.py
@@ -226,28 +232,60 @@ test-workflows:
 	}
 	actionlint -config-file .github/actionlint.yaml .github/workflows/*.yml
 
+# Every local macOS gate, in order. test-local-macos runs them serially in one
+# checkout (the release workflow does this before publishing). Gates listed
+# with <gate>_PARTS are run as those parts, in order.
+LOCAL_MACOS_GATES := test-workflows test-portable test-core-quality test-control \
+	test-port-forwarding host test-profile-state test-guest-deployment \
+	test-diagnostics test-install test-uninstall test-update test-kubernetes-cli \
+	test-release-artifacts test-release-gate test-hosted-validation \
+	test-release-publish test-release-version test-release-request \
+	test-public-export test-release-repository-preflight
+test-control_PARTS := test-control-native test-control-rust
+test-install_PARTS := test-install-script test-install-cleanup \
+	test-install-system-tools test-install-bootstrap
+test-update_PARTS := test-update-properties test-update-native \
+	test-update-concurrency test-update-recovery test-update-check \
+	test-update-cli test-update-ux test-update-script
+LOCAL_MACOS_LEAVES := $(foreach gate,$(LOCAL_MACOS_GATES),$(or $($(gate)_PARTS),$(gate)))
+
+# PR CI runs the same leaves on independent macOS machines, each shard
+# serially in its own checkout (installer tests must not share a machine:
+# generation cleanup scans every process of the user). Balance by measured
+# durations; check-ci-macos-shards proves the shards partition the leaves.
+CI_MACOS_SHARDS := 1 2 3 4 5
+CI_MACOS_SHARD_1 := host test-update-ux test-update-cli test-update-native \
+	test-uninstall test-release-gate test-workflows
+CI_MACOS_SHARD_2 := test-update-script test-update-recovery test-update-check \
+	test-diagnostics test-release-version
+CI_MACOS_SHARD_3 := test-release-artifacts test-release-publish \
+	test-kubernetes-cli test-release-request test-public-export \
+	test-release-repository-preflight
+CI_MACOS_SHARD_4 := test-control-native test-install-script test-install-cleanup \
+	test-portable test-port-forwarding
+CI_MACOS_SHARD_5 := test-control-rust test-hosted-validation \
+	test-update-properties test-update-concurrency test-install-system-tools \
+	test-install-bootstrap test-profile-state test-guest-deployment \
+	test-core-quality
+CI_MACOS_LEAVES := $(foreach shard,$(CI_MACOS_SHARDS),$(CI_MACOS_SHARD_$(shard)))
+
 test-local-macos:
-	$(MAKE) test-workflows
-	$(MAKE) test-portable
-	$(MAKE) test-core-quality
-	$(MAKE) test-control
-	$(MAKE) test-port-forwarding
-	$(MAKE) host
-	$(MAKE) test-profile-state
-	$(MAKE) test-guest-deployment
-	$(MAKE) test-diagnostics
-	$(MAKE) test-install
-	$(MAKE) test-uninstall
-	$(MAKE) test-update
-	$(MAKE) test-kubernetes-cli
-	$(MAKE) test-release-artifacts
-	$(MAKE) test-release-gate
-	$(MAKE) test-hosted-validation
-	$(MAKE) test-release-publish
-	$(MAKE) test-release-version
-	$(MAKE) test-release-request
-	$(MAKE) test-public-export
-	$(MAKE) test-release-repository-preflight
+	$(foreach gate,$(LOCAL_MACOS_GATES),$(MAKE) $(gate) &&) :
+
+test-control test-install test-update:
+	$(foreach part,$($@_PARTS),$(MAKE) $(part) &&) :
+
+ci-macos-shard-%: check-ci-macos-shards
+	@test -n "$(CI_MACOS_SHARD_$*)" || { echo "FAIL: unknown CI macOS shard: $*" >&2; exit 2; }
+	$(foreach gate,$(CI_MACOS_SHARD_$*),$(MAKE) $(gate) &&) :
+
+check-ci-macos-shards:
+	@test "$(sort $(CI_MACOS_LEAVES))" = "$(sort $(LOCAL_MACOS_LEAVES))" && \
+		test "$(words $(CI_MACOS_LEAVES))" = "$(words $(LOCAL_MACOS_LEAVES))" || { \
+		echo "FAIL: CI macOS shards must run every local macOS gate exactly once" >&2; exit 1; }
+
+print-ci-macos-shards:
+	@echo $(CI_MACOS_SHARDS)
 
 test-port-forwarding:
 	bash tests/host/test_port_forwarding.sh
@@ -290,35 +328,57 @@ test-guest-deployment: host
 test-diagnostics: host
 	HAMN=$(HOST_BIN) bash tests/host/test_diagnostics.sh
 
-test-install: host
+test-install-script: host
 	HAMN=$(HOST_BIN) bash tests/host/test_install.sh
+
+test-install-cleanup: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_generation_cleanup.py
+
+test-install-system-tools: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_install_system_tools.py
+
+test-install-bootstrap: host
 	python3 tests/host/test_bootstrap_acquire.py
 
 test-uninstall: host
 	HAMN=$(HOST_BIN) bash tests/host/test_uninstall.sh
 
-test-update: host
+test-update-properties: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_properties.py
+
+test-update-native: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_native.py
+
+test-update-concurrency: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_concurrency.py
+
+test-update-recovery: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_recovery_ownership.py
+
+test-update-check: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_update_check.py
+
+test-update-cli: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_cli.py
+
+test-update-ux: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_update_ux.py
+
+test-update-script: host
 	HAMN=$(HOST_BIN) bash tests/host/test_update.sh
 
-test-release-artifacts: host
+# Candidate tests build their own release versions and never read the
+# checkout's build/hamn, so they do not rebuild it first.
+test-release-artifacts:
 	bash tests/host/test_release_artifacts.sh
 
-test-hosted-validation: host
+test-hosted-validation:
 	bash tests/host/test_hosted_validation.sh
 
-test-release-gate: host
+test-release-gate:
 	bash tests/host/test_release_gate.sh
 
-test-release-publish: host
+test-release-publish:
 	bash tests/host/test_release_publish.sh
 
 test-release-version:

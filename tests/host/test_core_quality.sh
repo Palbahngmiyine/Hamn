@@ -252,12 +252,27 @@ done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^ #]+).*/\1/p' \
     "$ROOT"/.github/workflows/*.yml)
 
 ci_workflow=$ROOT/.github/workflows/ci.yml
+make -C "$ROOT" -s --no-print-directory check-ci-macos-shards ||
+    fail "CI macOS shards do not cover the local macOS gates exactly once"
 ruby -ryaml -e '
     workflow = YAML.load_file(ARGV.fetch(0))
     trigger = workflow.fetch("on") { workflow.fetch(true) }.fetch("pull_request")
     abort "required PR checks must not be filtered by paths" if
         trigger.key?("paths") || trigger.key?("paths-ignore")
-' "$ci_workflow"
+    jobs = workflow.fetch("jobs")
+    shard = jobs.fetch("macos-shard")
+    abort "CI must run every shard listed by make print-ci-macos-shards" unless
+        shard.dig("strategy", "matrix", "shard").map(&:to_s) == ARGV.fetch(1).split &&
+        shard.dig("strategy", "fail-fast") == false
+    abort "only PR CI may select the fast ci Cargo profile" unless
+        shard.fetch("env") == { "CARGO_PROFILE" => "ci" }
+    required = jobs.fetch("macos")
+    abort "the required macOS check must fail unless every shard passes" unless
+        required.fetch("name") == "macOS build and regression gates" &&
+        required["needs"] == "macos-shard" && required["if"] == "always()" &&
+        required.fetch("steps").map { |step| [step["env"], step["run"]] } ==
+            [[{ "SHARDS" => "${{ needs.macos-shard.result }}" }, %q(test "$SHARDS" = success)]]
+' "$ci_workflow" "$(make -C "$ROOT" -s --no-print-directory print-ci-macos-shards)"
 for requirement in \
     '  contents: read' \
     '    runs-on: ubuntu-24.04' \
@@ -266,7 +281,7 @@ for requirement in \
     '        run: nix flake check --print-build-logs' \
     '        run: nix develop .#ci --command make -j1 test-portable' \
     '      - name: Run macOS regression gates with the system Apple SDK' \
-    '        run: nix develop .#ci --command make -j1 test-local-macos'; do
+    '        run: nix develop .#ci --command make -j1 ci-macos-shard-${{ matrix.shard }}'; do
     grep -Fqx "$requirement" "$ci_workflow" ||
         fail "Nix CI workflow is incomplete: $requirement"
 done
@@ -360,6 +375,9 @@ for requirement in \
     grep -Fqx "$requirement" "$release_workflow" ||
         fail "automated release trigger is incomplete: $requirement"
 done
+if grep -Fq 'CARGO_PROFILE' "$release_workflow"; then
+    fail "release candidates must be built and gated with the release Cargo profile"
+fi
 if grep -Fq 'commit.verification.verified' "$release_workflow"; then
     fail "release workflow still requires GitHub Verified commits"
 fi

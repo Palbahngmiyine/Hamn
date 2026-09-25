@@ -36,10 +36,20 @@ jobs:
       - name: Run portable source gates
         run: nix develop .#ci --command make -j1 test-portable
 
-  macos:
-    name: macOS build and regression gates
+  # Every local macOS gate runs exactly once across these shards (see
+  # `make check-ci-macos-shards`), each serially on its own machine. PRs build
+  # the same source with the faster `ci` Cargo profile; the release workflow
+  # still runs `test-local-macos` serially with the release profile.
+  macos-shard:
+    name: macOS shard ${{ matrix.shard }}
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    env:
+      CARGO_PROFILE: ci
     steps:
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -56,6 +66,46 @@ jobs:
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Realize the locked Nix shell
+        run: nix develop .#ci --command true
+      # Cargo still decides freshness; a cache only avoids recompiling.
+      - name: Restore Cargo build cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/ci
+            target/debug
+          key: cargo-macos-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.lock', 'build.rs') }}-shard-${{ matrix.shard }}
+          restore-keys: |
+            cargo-macos-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.lock', 'build.rs') }}-
       # The flake shell selects the system Apple SDK and toolchain itself.
       - name: Run macOS regression gates with the system Apple SDK
-        run: nix develop .#ci --command make -j1 test-local-macos
+        run: nix develop .#ci --command make -j1 ci-macos-shard-${{ matrix.shard }}
+      - name: Save Cargo build cache
+        if: success() && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/ci
+            target/debug
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # The required check: every shard must succeed (cancelled or skipped fails).
+  macos:
+    name: macOS build and regression gates
+    needs: macos-shard
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every macOS shard to pass
+        env:
+          SHARDS: ${{ needs.macos-shard.result }}
+        run: test "$SHARDS" = success

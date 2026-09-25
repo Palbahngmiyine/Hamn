@@ -38,3 +38,11 @@ tar = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+
+# PR CI builds and tests the same source faster (CARGO_PROFILE=ci); release
+# candidates and published artifacts always use the release profile above.
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

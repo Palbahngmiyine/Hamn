@@ -86,6 +86,12 @@ Run Make test gates serially in the same checkout, for example
 `build/hamn` with other versions. Do not run separate gates concurrently unless
 their build outputs and fixtures are verified to be isolated.
 
+PR CI runs the same gates as `ci-macos-shard-N` targets, each serially on its own
+runner; `make check-ci-macos-shards` fails unless the shards together run every
+`test-local-macos` gate exactly once. PR CI builds with `CARGO_PROFILE=ci` (the
+release profile without LTO). Release candidates and `release.yml` always use the
+release profile and run `test-local-macos` serially.
+
 - `make host`: build, ad-hoc codesign, verify, and publish the single Rust + C/Objective-C `build/hamn`. Use `Cargo.lock` and `rust-toolchain.toml`.
 - `make install`: install only `hamn` and its versioned source into `~/.local`.
 - `make test-control`: Rust unit tests plus worker, Docker/Kubernetes API, TUI, SSH deadline, and single-binary regressions.
