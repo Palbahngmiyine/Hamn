@@ -97,18 +97,18 @@ K3s 데이터는 복구되지 않습니다. [설정](CONFIGURATION.ko.md)을 참
 
 격리한 HOME, 테스트 소유 프로필, 명시적으로 선택한 테스트 Kubernetes context를
 사용합니다. 기존 사용자 VM에 파괴적인 테스트를 실행하지 않습니다. 외부 Kubernetes
-검증기는 고유 namespace를 만들고 `finally`에서 제거하며 kubeconfig 바이트 보존을
+검증기는 고유 namespace를 만들고 검사가 실패해도 제거하며 kubeconfig 바이트 보존을
 확인합니다.
 
 ```sh
-python3 packaging/release/external-kubernetes-e2e.py --help
-packaging/release/physical-e2e.sh --help
+make hamn-dev
+target/release/hamn-dev release external-kubernetes-e2e --help
+target/release/hamn-dev release physical-e2e --help
 ```
 
-`make release-gate`는 정확한 후보에서 추출한 검증기를 사용합니다. 실행·정지 상태의
-구형 fixture와 고정한 구형 바이너리를 준비하고 실제 Apple Silicon에서 Docker
-데이터 보존을 증명해야 합니다. 입력과 배포 권한은 [릴리스 설정](RELEASE-SETUP.ko.md)을
-참고하세요.
+`make release-gate`는 checkout에서 `hamn-dev`를 빌드하고, 실제 Apple Silicon에서
+정확한 후보에 보관된 실행 파일로 물리 검증기를 실행합니다. 입력과 배포 권한은
+[릴리스 설정](RELEASE-SETUP.ko.md)을 참고하세요.
 
 ## 소스 경계
 

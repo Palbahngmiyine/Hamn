@@ -43,60 +43,56 @@ label completion. API/authentication failures still fail the check visibly.
 
 Version override semantics: [Release Please documentation](https://github.com/googleapis/release-please#how-do-i-change-the-version-number).
 
+## Release tooling
+
+The release scripts in `packaging/release` keep their shell orchestration and
+delegate JSON, evidence, version and GitHub checks to `hamn-dev release`
+(`tools/hamn-dev`, never shipped). The Make targets build it and pass its
+absolute path as `HAMN_DEV`; the release workflows build it with
+`cargo build --locked -p hamn-dev` using the toolchain pinned in
+`rust-toolchain.toml`. `hamn-dev release` without a subcommand lists the
+subcommands and their arguments.
+
 ## Optional manual physical validation
 
-Physical VM, Docker, Kubernetes and migration E2E checks remain available through
+Physical VM, Docker and Kubernetes E2E checks remain available through
 `make release-gate`. They are not an automatic publication prerequisite. To run
 them manually, use an isolated Apple Silicon machine with macOS development
-tools, Python 3.12+, Docker CLI, kubectl and a disposable Kubernetes context.
-Do not register a repository runner for this optional local check.
+tools, the Rust toolchain pinned in `rust-toolchain.toml`, Docker CLI, kubectl
+and a disposable Kubernetes context. Do not register a repository runner for
+this optional local check.
 
 Provide `$HOME/.config/hamn/physical-validator.env` as an owned regular file
 with mode 0600 and one hard link. Source this file only for the optional local gate;
-only the validator administrator may edit it. Define absolute paths:
+only the validator administrator may edit it. Define:
 
 ```sh
 HAMN_E2E_CONTEXT='dedicated-test-context'
 HAMN_E2E_KUBECONFIG='/absolute/path/test-kubeconfig'
-HAMN_LEGACY_BINARY='/absolute/path/legacy/hamn'
-HAMN_LEGACY_BINARY_SHA256='64-lowercase-hex-digest'
-HAMN_LEGACY_RUNNING_FIXTURE='/absolute/path/fixtures/running'
-HAMN_LEGACY_STOPPED_FIXTURE='/absolute/path/fixtures/stopped'
 ```
 
-Each fixture directory contains a stopped, isolated legacy profile's
-`disk.img`, `config.yaml`, `id_ed25519`, `id_ed25519.pub`, `efi-vars.bin`,
-`machine-id.bin`, `mac-addr`, and `expected.json`. Never commit these files.
-The config must have empty `mounts` and `provision` lists. The harness clones
-fixture disks and never boots the originals. Only the running clone enables
-`mountHome`, sharing the harness's newly created private temporary HOME;
-the real user HOME is never shared. This preserves the old default input:
-v0.0.1 emits invalid null cloud-init mounts when all sharing is disabled.
-The stopped clone keeps HOME sharing disabled. No seed, deployment marker,
-guest source, or original fixture is changed to bypass legacy startup checks.
-`expected.json` records `k3sState` (`running` or `stopped`) and a `docker`
-snapshot captured from that fixture, including container/image/volume/network
-identities and sentinel volume content hashes. See `physical_runtime.py` for
-the snapshot schema. Docker recreates its built-in bridge identity on daemon
-restart: check built-in networks by name and user-created networks by ID.
-Capture real populated fixtures; empty or invented
-snapshots are not evidence. The running fixture enables K3s before shutdown;
-the stopped fixture contains K3s data but has K3s disabled.
+`make release-gate` builds `hamn-dev` from the checkout and runs
+`hamn-dev release physical-e2e`. The harness unpacks the exact candidate host
+archive after checking every member, verifies the archived executable's
+signature, dependencies and version, and runs it in a private temporary HOME
+under `/private/tmp`; no user VM or kubeconfig is used. It creates and starts
+two isolated profiles from the candidate guest image, exercises the structured
+Docker API and the external Docker socket, opens and quits the TUI on a PTY
+(the terminal settings must be restored and the VM must keep running), stops
+and restarts a VM, and runs the external Kubernetes harness. The Kubernetes
+harness creates and removes a unique test namespace and verifies the source
+kubeconfig is unchanged. Every owned profile must be proven stopped before the
+workspace is removed; a failed stop keeps the workspace.
 
-The harness starts the running fixture with the pinned legacy binary before
-launching and quitting the candidate TUI. It verifies that TUI entry leaves
-the VM state, pending migration and last operation unchanged. It independently
-waits for the guest K3s service to be active/enabled and its API ready, then explicitly
-confirms `hamn --headless vm migrate --profile <clone> --yes`.
-It starts the stopped fixture with the candidate
-headless interface. Both must finish retirement, preserve Docker snapshots,
-and leave no live test VM. The Kubernetes harness creates and removes a
-unique test namespace and verifies the source kubeconfig is unchanged.
+Physical evidence is schema 3 (`physical-validation-evidence.json`). The
+legacy K3s retirement checks, fixtures and the `legacy` section of schema 2
+were removed with managed K3s retirement; schema 2 evidence is rejected.
 The release gate defaults to the cluster Pod network. For an API validation
 cluster without working CNI, explicitly set `HAMN_E2E_K8S_HOST_NETWORK=1`.
 The evidence records `podNetwork: "host"`; this validates Kubernetes operations
 and logs but does not establish Pod network connectivity. The standalone
-Kubernetes harness accepts the equivalent `--host-network` option.
+Kubernetes harness, `hamn-dev release external-kubernetes-e2e`, accepts the
+equivalent `--host-network` option.
 
 ## Inputs and release authority
 
@@ -105,14 +101,19 @@ There are no K3s download inputs or compatibility signing keys for new images.
 GitHub artifact attestations bind built artifacts to repository, workflow,
 source commit, and run. Automated release provenance comes from hosted runners.
 The manifest records `validationMode: github-hosted-no-vm`; hosted evidence
-records `physicalE2E: false` and does not claim real VM or migration E2E.
-Publication validates the v2 and v3 manifests with the executable from the
-digest-verified candidate archive, the same parser installed clients use, and
-requires both manifests to name identical artifacts.
+records `physicalE2E: false` and does not claim real VM E2E.
+Publication writes only the schema v3 manifest `hamn-update-manifest-v3.json`
+and validates it with the executable from the digest-verified candidate
+archive, the same parser installed clients use. The schema v2
+`hamn-update-manifest.json` is no longer published: Hamn v0.1.2 and earlier
+read it, get HTTP 404 when they check for updates, and must reinstall with the
+published `install.sh`.
 
 Run the read-only settings check after configuration:
 
 ```sh
+make hamn-dev
+HAMN_DEV="$PWD/target/release/hamn-dev" \
 HAMN_RELEASE_REPOSITORY=Palbahngmiyine/Hamn \
   bash packaging/release/preflight-release-repository.sh
 ```
@@ -205,7 +206,7 @@ Physical validation remains necessary for this image-optimization acceptance,
 even though the automated publication workflow does not run that optional manual gate.
 Acceptance evidence for the optimized image must separately cover Docker API,
 CLI, Compose, Buildx, containerd/runc/CNI, amd64 binfmt, opt-in Rosetta, external
-Kubernetes connectivity, legacy K3s retirement and reboot data preservation on
+Kubernetes connectivity and reboot data preservation on
 the exact artifact. Local tests with synthetic
 size fixtures or sparse disks do not establish image-size savings or VM
 behavior. Do not substitute a fabricated baseline or budget when that Linux
@@ -213,7 +214,8 @@ build or physical validation has not run.
 
 `make release-gate` takes `RELEASE_REF`, `RELEASE_TAG`, `CANDIDATE_DIR`, and an
 empty `OUTPUT_DIR`, plus the validator inputs above. Checkout must be clean
-and match the candidate source. It never rebuilds the RC. If source changes
+and match the candidate source; the harness is built from that checkout. It
+never rebuilds the RC. If source changes
 after validation, assemble and validate a new candidate; do not reuse evidence.
 Missing physical checks prevent a successful manual gate. Changed artifact bytes
 prevent automatic publication, even when hosted tests passed.
@@ -223,11 +225,11 @@ prevent automatic publication, even when hosted tests passed.
 Download the published `install.sh`, verify its GitHub attestation against
 this repository and release workflow with `--deny-self-hosted-runners`, then
 execute it. The installer validates pinned host/guest digests and publishes
-atomically. Installed versions supporting the new manifest can run
-`hamn --headless system update --yes`. The hosted manifest retains the `github-hosted-no-vm` validation mode used by
-the 0.0.1 release.
+atomically. Installed versions that read the v3 manifest can run
+`hamn --headless system update --yes`; v0.1.2 and earlier must reinstall with
+`install.sh`. The hosted manifest retains the `github-hosted-no-vm` validation
+mode used by the 0.0.1 release.
 
-This release breaks CLI/JSON compatibility and automatically removes managed
-K3s cluster data and dedicated local volumes. Docker objects and volumes,
-user mounts, and original kubeconfig are preserved. Binary rollback cannot
-recover K3s data. Include this warning in release notes before publication.
+Managed K3s profiles are no longer migrated: a profile that still has the
+managed-K3s `kubernetes:` key is rejected. Release notes no longer carry a
+K3s data-removal warning.

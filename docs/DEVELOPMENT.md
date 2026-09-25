@@ -101,18 +101,19 @@ back the host binary. See [Configuration](CONFIGURATION.md).
 
 Use an isolated HOME, owned test profiles, and an explicitly selected test
 Kubernetes context. Never run destructive tests against an existing user VM.
-The external Kubernetes harness creates a unique namespace and removes it in
-`finally`; it verifies kubeconfig bytes are unchanged:
+The external Kubernetes harness creates a unique namespace and removes it even
+when a check fails; it verifies kubeconfig bytes are unchanged:
 
 ```sh
-python3 packaging/release/external-kubernetes-e2e.py --help
-packaging/release/physical-e2e.sh --help
+make hamn-dev
+target/release/hamn-dev release external-kubernetes-e2e --help
+target/release/hamn-dev release physical-e2e --help
 ```
 
-`make release-gate` runs the harness extracted from an exact candidate, with
-prepared running/stopped legacy fixtures and a pinned legacy binary. It must
-prove Docker data preservation on actual Apple Silicon. See
-[Release setup](RELEASE-SETUP.md) for runner inputs and promotion authority.
+`make release-gate` builds `hamn-dev` from the checkout and runs the physical
+harness against the executable archived in an exact candidate on actual Apple
+Silicon. See [Release setup](RELEASE-SETUP.md) for runner inputs and promotion
+authority.
 
 ## Source boundaries
 

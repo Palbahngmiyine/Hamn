@@ -19,14 +19,15 @@ pass. See [Korean](RELEASE-REVIEW.ko.md).
   source kubeconfig unchanged; stale object identities reject mutations.
 - [ ] Performance: record startup, CPU/memory during refresh and logs, terminal
   input responsiveness during network delays, and bounded stream behavior.
-- [ ] Migration: real populated running/stopped legacy fixtures; interrupted
-  steps resume; K3s service/data removed; Docker object identities and volume
-  hashes unchanged; multiple profiles isolated; cleanup complete.
+- [ ] Isolation and cleanup: multiple profiles isolated in a disposable HOME;
+  every owned profile proven stopped before its workspace is removed; source
+  kubeconfig unchanged; schema 3 physical evidence bound to the exact RC.
 - [ ] Compatibility: CLI/JSON break documented; external Docker connections
-  preserved; old updater bootstrap path documented; no automatic Colima changes.
+  preserved; only the v3 update manifest published and the reinstall path for
+  v0.1.2 and earlier documented; managed-K3s profiles rejected, not migrated;
+  no automatic Colima changes.
 - [ ] Rollback: previous host install survives interrupted update; Docker data
-  backup/recovery reviewed; release notes explicitly say K3s deletion cannot
-  be reversed by binary rollback.
+  backup/recovery reviewed.
 - [ ] Validation: full `make test-local-macos` passed for candidate source;
   hosted-only validation limits disclosed; any separately claimed physical
   evidence binds exact RC artifacts; no rebuilt bytes substituted after testing.
