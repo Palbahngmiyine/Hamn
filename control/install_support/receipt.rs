@@ -1,13 +1,18 @@
-//! Version-1 receipts hash the installed tree as compact canonical JSON:
-//! depth-first `[path, mode, sha256-or-null]` entries (bin, scripts, packaging;
-//! children sorted), with non-ASCII characters escaped as UTF-16 `\uXXXX`
-//! units, so receipts written by every release compare byte for byte.
+//! Version-2 receipts hash a generation's installed payload as compact
+//! canonical JSON: depth-first `[path, mode, sha256-or-null]` entries for its
+//! `bin` and `share` trees (children sorted), with non-ASCII characters
+//! escaped as UTF-16 `\uXXXX` units, so receipts written by every release
+//! compare byte for byte. Version-1 receipts (the earlier layout's
+//! `scripts`/`packaging` trees) never match.
 //! A failed check is advisory (normal verified install); write failures abort the
 //! transaction. The caller owns the install locks and generation lifetime.
 use super::{Result, download, files, require};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
+
+/// Receipts of the generation payload layout (`bin` and `share`).
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -65,13 +70,8 @@ fn installed_digest(generation: &Path) -> Result<String> {
         "unsafe generation permissions",
     )?;
     let mut entries = Vec::new();
-    visit(&generation.join("bin"), "bin", &mut entries)?;
-    for name in ["scripts", "packaging"] {
-        visit(
-            &generation.join("share/hamn/src").join(name),
-            name,
-            &mut entries,
-        )?;
+    for name in ["bin", "share"] {
+        visit(&generation.join(name), name, &mut entries)?;
     }
     Ok(files::hash(
         canonical_json(&Value::Array(entries))?.as_bytes(),
@@ -90,7 +90,7 @@ pub(super) fn run(
     if mode == "host-check" {
         let r: Receipt = serde_json::from_slice(&download::read_file(&path, 4096, true)?)?;
         require(
-            r.schema_version == 1
+            r.schema_version == SCHEMA_VERSION
                 && r.version == version
                 && r.host == host_hash
                 && r.guest == guest_hash,
@@ -102,7 +102,7 @@ pub(super) fn run(
         )?;
     } else if mode == "write" {
         let r = Receipt {
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
             version: version.into(),
             host: host_hash.into(),
             guest: guest_hash.into(),
@@ -127,14 +127,34 @@ mod tests {
     fn host_check_rejects_changed_or_writable_host_and_unknown_modes() {
         let temp = super::super::test_support::Temp::new();
         let generation = temp.0.join("generation");
-        for directory in ["bin", "share/hamn/src/scripts", "share/hamn/src/packaging"] {
+        for directory in ["bin", "share/hamn"] {
             fs::create_dir_all(generation.join(directory)).unwrap();
         }
+        let pointer = generation.join("share/hamn/update-manifest-url");
+        fs::write(&pointer, b"https://example.test/manifest\n").unwrap();
         let target = generation.join("bin/hamn");
         fs::write(&target, b"host bytes").unwrap();
         let target = target.to_str().unwrap();
         run("write", target, "v1.2.3", "host", "guest").unwrap();
         run("host-check", target, "v1.2.3", "host", "guest").unwrap();
+        // The manifest pointer is part of the installed payload.
+        fs::write(&pointer, b"https://example.test/other\n").unwrap();
+        assert!(run("host-check", target, "v1.2.3", "host", "guest").is_err());
+        fs::write(&pointer, b"https://example.test/manifest\n").unwrap();
+        run("host-check", target, "v1.2.3", "host", "guest").unwrap();
+        // An earlier (version 1) receipt with the same identities is stale.
+        let path = generation.join(".hamn-release.json");
+        let current = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(
+            &path,
+            current.replace("\"schemaVersion\":2", "\"schemaVersion\":1"),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(run("host-check", target, "v1.2.3", "host", "guest").is_err());
+        fs::remove_file(&path).unwrap();
+        run("write", target, "v1.2.3", "host", "guest").unwrap();
         assert!(run("host-check", target, "v1.2.4", "host", "guest").is_err());
         assert!(run("host-check", target, "v1.2.3", "host", "other").is_err());
         // The retired guest-checking `check` mode is not an alias.

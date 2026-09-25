@@ -9,7 +9,7 @@ use crate::runner::{self, case};
 use crate::support::http::{self, Options, Response, Server};
 use crate::support::pty::{self, Pty};
 use crate::support::tmp::TempDir;
-use crate::support::upgrade::{self, Artifact, Group, Output, write_json, write_executable};
+use crate::support::upgrade::{self, Artifact, Group, Output, release_payload, write_json};
 use serde_json::{Value, json};
 use std::fs;
 use std::os::fd::AsRawFd;
@@ -123,23 +123,19 @@ struct Fixture {
     archive: PathBuf,
     guest: PathBuf,
     manifest_path: PathBuf,
-    transport_dir: PathBuf,
     transport: Transport,
 }
 
 impl Fixture {
     fn env(&self, command: &mut Command) {
         let cert = &self.transport.cert;
-        let path = format!("{}:{}", self.transport_dir.display(), std::env::var("PATH").unwrap_or_default());
         command
             .env("CURL_CA_BUNDLE", cert)
             .env("SSL_CERT_FILE", cert)
             .env("NO_PROXY", "127.0.0.1")
             .env("no_proxy", "127.0.0.1")
             .env("HOME", &self.home)
-            .env("PATH", path)
-            // The updater ignores the caller PATH; faults use this seam.
-            .env("HAMN_TEST_UPDATE_TOOL_DIR", &self.transport_dir)
+            .env_remove("HAMN_TEST_UPDATE_FAULTS")
             .env("HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS", "1");
     }
 
@@ -152,6 +148,34 @@ impl Fixture {
 
     fn upgrade(&self, timeout: Duration) -> Output {
         upgrade::run(self.upgrade_command().stdin(Stdio::null()), timeout)
+    }
+
+    /// The headless upgrade with the updater's fault seam naming `faults`.
+    fn upgrade_with_faults(&self, faults: &str, timeout: Duration) -> Output {
+        upgrade::run(self.upgrade_command().env("HAMN_TEST_UPDATE_FAULTS", faults).stdin(Stdio::null()), timeout)
+    }
+
+    /// Runs the active generation's updater directly with `faults` and a
+    /// standard error whose reader is already closed; returns its status.
+    fn update_with_closed_stderr(&self, active: &Path, faults: &str) -> i32 {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let mut ends = [0; 2];
+        // SAFETY: pipe fills two new descriptors, each owned below.
+        assert_eq!(unsafe { libc::pipe(ends.as_mut_ptr()) }, 0);
+        let (reader, writer) = unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) };
+        drop(reader);
+        let mut command = Command::new(active);
+        command
+            .args(["__install-support", "update", "--output-json", "--bindir"])
+            .arg(&self.bindir)
+            .arg("--datadir")
+            .arg(&self.datadir)
+            .arg("--manifest")
+            .arg(&self.manifest_path);
+        self.env(&mut command);
+        command.env("HAMN_TEST_UPDATE_FAULTS", faults).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::from(writer));
+        let child = command.spawn().expect("updater");
+        crate::support::real_cli::communicate(child, Duration::from_secs(30)).returncode
     }
 
     fn active(&self) -> PathBuf {
@@ -219,10 +243,7 @@ fn check(terminal: bool) {
     let version = upgrade::run(Command::new(&hamn).arg("--version"), Duration::from_secs(10)).stdout();
     let version = version.split_whitespace().nth(1).unwrap_or_else(|| panic!("--version: {version:?}")).to_owned();
     let artifact = work.join("release");
-    fs::create_dir_all(artifact.join("bin")).unwrap();
-    fs::copy(&hamn, artifact.join("bin/hamn")).unwrap();
-    upgrade::copy_release_support(&artifact);
-    fs::write(artifact.join("packaging/release/update-manifest-url"), "https://example.test/manifest\n").unwrap();
+    release_payload(&artifact, &hamn, "https://example.test/manifest");
     let fixture = Fixture {
         home: work.join("home"),
         bindir: work.join("bin"),
@@ -230,26 +251,14 @@ fn check(terminal: bool) {
         archive: work.join("host.tar.gz"),
         guest: work.join("guest.img"),
         manifest_path: work.join("manifest.json"),
-        transport_dir: work.join("transport"),
         transport: Transport::start(&work),
         artifact,
         work,
     };
     fs::create_dir(&fixture.home).unwrap();
-    fs::create_dir(&fixture.transport_dir).unwrap();
-    // Resolving support from the checkout's scripts would select the shared
-    // build/hamn even when HAMN names a frozen binary. Own every installer
-    // dependency.
-    let installed = upgrade::run(
-        Command::new("bash")
-            .arg(fixture.artifact.join("scripts/install-host.sh"))
-            .arg(fixture.artifact.join("bin/hamn"))
-            .arg(&fixture.bindir)
-            .arg(&fixture.datadir)
-            .env("HOME", &fixture.home),
-        Duration::from_secs(60),
-    );
-    assert_eq!(installed.returncode, 0, "{}", installed.stderr());
+    // Install the frozen release executable itself, never the shared build.
+    let binary = fixture.artifact.join("bin/hamn");
+    upgrade::install(&binary, &binary, &fixture.bindir, &fixture.datadir, &fixture.home);
     let original = fixture.active();
     upgrade::pack_release(&fixture.artifact, &fixture.archive);
     fs::write(&fixture.guest, "controlled guest fixture\n").unwrap();
@@ -294,15 +303,15 @@ fn check(terminal: bool) {
     fixture.assert_unchanged(&active, &saved, "no-op");
 
     // Version equality is insufficient. A missing or corrupt receipt, changed
-    // updater files or image selection must take the verified install path.
-    for damage in ["missing receipt", "malformed receipt", "source changed", "selection changed"] {
+    // installed files or image selection must take the verified install path.
+    for damage in ["missing receipt", "malformed receipt", "installed files changed", "selection changed"] {
         let generation = fs::canonicalize(fixture.bindir.join(&active)).unwrap();
         let generation = generation.parent().and_then(Path::parent).unwrap();
         let receipt = generation.join(".hamn-release.json");
         match damage {
             "missing receipt" => fs::remove_file(&receipt).unwrap(),
             "malformed receipt" => fs::write(&receipt, "{").unwrap(),
-            "source changed" => fs::write(generation.join("share/hamn/src/packaging/changed.txt"), "changed").unwrap(),
+            "installed files changed" => fs::write(generation.join("share/hamn/changed.txt"), "changed").unwrap(),
             _ => fs::write(&selection, "{}").unwrap(),
         }
         let calls = fixture.transport.requests().len();
@@ -329,7 +338,7 @@ fn check(terminal: bool) {
     fs::copy(&fixture.guest, &cached_guest).unwrap();
 
     // A new archive with the same version must still be installed.
-    fs::write(fixture.artifact.join("packaging/same-version-change.txt"), "new artifact identity").unwrap();
+    fs::write(fixture.artifact.join("share/hamn/same-version-change.txt"), "new artifact identity").unwrap();
     let manifest = fixture.repack(&manifest);
     write_json(&fixture.manifest_path, &manifest);
     let result = upgrade_within(30);
@@ -387,50 +396,39 @@ fn check(terminal: bool) {
     // Reinstalling through bootstrap must preserve the managed binary,
     // including SIGKILL recovery and a later failed installation attempt.
     if !terminal {
-        fs::write(fixture.artifact.join("packaging/same-version-change.txt"), "next candidate").unwrap();
+        fs::write(fixture.artifact.join("share/hamn/same-version-change.txt"), "next candidate").unwrap();
         write_json(&fixture.manifest_path, &fixture.repack(&manifest));
         for termination in [libc::SIGTERM, libc::SIGKILL] {
             interrupted_bootstrap(&fixture, termination, &active, &saved);
         }
     }
 
-    // A logging failure must not bypass rollback after an installer failure.
-    let installer = fixture.artifact.join("scripts/install-host.sh");
-    let installer_source = fs::read_to_string(&installer).unwrap();
-    fs::write(&installer, "#!/bin/bash\necho installer-failed >&2\nexit 77\n").unwrap();
-    write_json(&fixture.manifest_path, &fixture.repack(&manifest));
-    write_executable(
-        &fixture.transport_dir.join("cat"),
-        "#!/bin/bash\ncase \"$1\" in */host-install.log) exit 73;; esac\nexec /bin/cat \"$@\"\n",
-    );
-    let result = upgrade_within(15);
+    // An installer failure after both payloads are staged rolls back before
+    // either public pointer changes, reported once in the JSON error.
+    let reinstall = fixture.repack(&manifest);
+    write_json(&fixture.manifest_path, &reinstall);
+    let result = fixture.upgrade_with_faults("host-install", Duration::from_secs(15));
     assert_ne!(result.returncode, 0);
     let message = error_message(&result);
     assert!(message.contains("host install failed; prior binary and guest image selection were restored"), "{result:?}");
+    assert!(result.stderr().contains("hamn: injected host-install fault"), "{result:?}");
     fixture.assert_unchanged(&active, &saved, "installer failure");
+    // A closed diagnostic stream must not bypass that rollback: every write
+    // to the updater's standard error fails with EPIPE.
+    let status = fixture.update_with_closed_stderr(&active, "host-install");
+    assert_eq!(status, 1);
+    fixture.assert_unchanged(&active, &saved, "installer failure with a closed standard error");
     write_json(&fixture.manifest_path, &manifest);
     let repeated = upgrade_within(30);
     assert!(repeated.returncode == 0 && repeated.stderr().contains("is up to date"), "{repeated:?}");
     fixture.assert_unchanged(&active, &saved, "after installer failure");
 
-    // Receipt publication is part of the transaction. Inject an existing
-    // receipt and a rollback rename failure; a retry must recover the old
-    // generation and its valid receipt before considering a no-op.
+    // Receipt publication is part of the transaction. Fail it and the
+    // rollback link rename; a retry must recover the old generation and its
+    // valid receipt before considering a no-op.
     if !terminal {
-        let move_tool = fixture.transport_dir.join("mv");
-        fs::write(
-            &installer,
-            format!(
-                "{installer_source}\ninstalled=$(readlink \"$BINDIR/hamn\")\n: >\"${{installed%/bin/hamn}}/.hamn-release.json\"\n"
-            ),
-        )
-        .unwrap();
         write_json(&fixture.manifest_path, &fixture.repack(&manifest));
-        write_executable(
-            &move_tool,
-            "#!/bin/bash\nfor arg in \"$@\"; do\ncase \"$arg\" in */.hamn-update-rollback.*/hamn) exit 74;; esac\ndone\nexec /bin/mv \"$@\"\n",
-        );
-        let result = upgrade_within(30);
+        let result = fixture.upgrade_with_faults("receipt-write,rollback-link", Duration::from_secs(30));
         assert_ne!(result.returncode, 0, "{}", result.stderr());
         let message = error_message(&result);
         assert!(message.contains("release receipt failed and recovery could not be applied"), "{message}");
@@ -438,7 +436,6 @@ fn check(terminal: bool) {
         assert_ne!(fixture.active(), active);
         assert_eq!(fs::read(&selection).unwrap(), saved);
         assert!(fixture.journal().is_dir());
-        fs::remove_file(&move_tool).unwrap();
         write_json(&fixture.manifest_path, &manifest);
         fixture.recover_changed_generation(&active, &saved);
         let recovered = upgrade_within(30);
@@ -448,15 +445,8 @@ fn check(terminal: bool) {
 
         // If both completed and recovered journal retirement fail, the
         // remaining recovery instruction preserves the original manifest.
-        fs::write(&installer, &installer_source).unwrap();
         write_json(&fixture.manifest_path, &fixture.repack(&manifest));
-        write_executable(
-            &move_tool,
-            "#!/bin/bash\nfor arg in \"$@\"; do\n\
-             case \"$arg\" in */.hamn-update-completed.*|*/.hamn-update-recovered.*) exit 75;; esac\n\
-             done\nexec /bin/mv \"$@\"\n",
-        );
-        let result = upgrade_within(30);
+        let result = fixture.upgrade_with_faults("retire-journal", Duration::from_secs(30));
         assert_ne!(result.returncode, 0, "{}", result.stderr());
         let message = error_message(&result);
         assert!(
@@ -472,7 +462,6 @@ fn check(terminal: bool) {
         assert_eq!(fixture.active(), active);
         assert_eq!(fs::read(&selection).unwrap(), saved);
         assert!(fixture.journal().is_dir());
-        fs::remove_file(&move_tool).unwrap();
         write_json(&fixture.manifest_path, &manifest);
         let recovered = upgrade_within(30);
         assert!(recovered.returncode == 0 && recovered.stderr().contains("is up to date"), "{recovered:?}");
@@ -527,15 +516,16 @@ fn first_upgrade(fixture: &Fixture, terminal: bool) -> (Vec<u8>, Output) {
 }
 
 /// Interrupts a bootstrap reinstall right after the new host generation was
-/// installed. SIGTERM rolls back in the updater's trap; SIGKILL leaves the
-/// journal, which the next managed command recovers.
+/// installed. SIGTERM rolls back in the updater's signal handling; SIGKILL
+/// leaves the journal, which the next managed command recovers.
 fn interrupted_bootstrap(fixture: &Fixture, termination: i32, active: &Path, saved: &[u8]) {
     let (ready, ready_fd) = upgrade::ready_fifo(&fixture.work, &format!("ready-{termination}"));
     let release = fixture.work.join(format!("release-{termination}"));
     upgrade::mkfifo(&release);
-    let mut command = Command::new("bash");
+    // The release installer runs the release's own executable.
+    let mut command = Command::new(fixture.artifact.join("bin/hamn"));
     command
-        .arg(fixture.artifact.join("scripts/update-host.sh"))
+        .args(["__install-support", "update"])
         .arg("--bootstrap")
         .arg("--bindir")
         .arg(&fixture.bindir)

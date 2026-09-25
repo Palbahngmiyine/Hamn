@@ -63,12 +63,9 @@ pub(super) fn extract(source: &Path, destination: &Path) -> Result<String> {
         "host artifact must have one top-level directory",
     )?;
     let root = roots.into_iter().next().unwrap();
-    for required in [
-        "bin/hamn",
-        "scripts/install-host.sh",
-        "scripts/update-host.sh",
-        "packaging/release/update-manifest-url",
-    ] {
+    // A release archive is one generation payload: the executable and its
+    // manifest pointer. Other members are validated but never installed.
+    for required in ["bin/hamn", super::generation::POINTER] {
         require(
             entries.get(&format!("{root}/{required}")) == Some(&false),
             "host artifact is missing required Hamn files",
@@ -140,12 +137,7 @@ mod tests {
             File::create(path).unwrap(),
             Compression::default(),
         ));
-        for p in [
-            "bin/hamn",
-            "scripts/install-host.sh",
-            "scripts/update-host.sh",
-            "packaging/release/update-manifest-url",
-        ] {
+        for p in ["bin/hamn", "share/hamn/update-manifest-url"] {
             entry(&mut b, &format!("release/{p}"), EntryType::Regular);
         }
         if let Some((path, kind)) = extra {
@@ -209,5 +201,26 @@ mod tests {
             0o755
         );
         assert!(extract(&archive, &dest).is_err());
+    }
+    #[test]
+    fn earlier_layout_archive_without_the_generation_pointer_is_refused() {
+        // Earlier releases kept the pointer under packaging/release/ beside
+        // shell scripts; such an archive is not a generation payload.
+        let t = Temp::new();
+        let archive = t.0.join("host.tar.gz");
+        let mut b = Builder::new(GzEncoder::new(
+            File::create(&archive).unwrap(),
+            Compression::default(),
+        ));
+        for p in ["bin/hamn", "packaging/release/update-manifest-url"] {
+            entry(&mut b, &format!("release/{p}"), EntryType::Regular);
+        }
+        b.into_inner().unwrap().finish().unwrap();
+        let error = extract(&archive, &t.0.join("extract")).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "host artifact is missing required Hamn files"
+        );
+        assert!(!t.0.join("extract").exists());
     }
 }

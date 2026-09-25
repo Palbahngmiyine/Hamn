@@ -110,9 +110,13 @@ fn present(path: &str) -> bool {
 }
 
 /// Removed sources that must not come back as tracked files; an untracked
-/// `desktop/` directory can be the user's and is left alone.
+/// `desktop/` directory can be the user's and is left alone. The host
+/// installer and updater are native (`control/install_support`), so no
+/// shell installer tree or shell install-test fixture returns.
 const UNTRACKED_LEGACY: &[&str] = &[
     "desktop",
+    "scripts",
+    "tests/host/fixtures",
     "host/dockc",
     "host/kube",
     "host/cmd/cmd_nerdctl.c",
@@ -285,7 +289,7 @@ fn architecture_docs_describe_shared_nat_only() {
 fn runtime_persists_no_guest_registry_credentials() {
     assert_absent(
         r"docker[[:space:]]+login|/home/hamn/\.docker",
-        &["host", "guest/scripts", "scripts"],
+        &["host", "guest/scripts", "control/install_support"],
         "runtime still creates or persists guest registry credentials",
     );
 }
@@ -295,7 +299,7 @@ fn runtime_persists_no_guest_registry_credentials() {
 fn mutable_guest_installer_stays_removed() {
     assert_absent(
         r"test_install_runtime|install-runtime\.sh",
-        &["Makefile", "tests", "scripts"],
+        &["Makefile", "tests", "control/install_support"],
         "build or test paths still refer to the removed mutable guest installer",
     );
 }

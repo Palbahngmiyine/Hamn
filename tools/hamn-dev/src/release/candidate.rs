@@ -18,12 +18,12 @@
 //! files behind, which a later validation rejects as an incomplete set.
 //! Each metadata file is canonical JSON (or shell) derived only from its
 //! inputs, so equal inputs give equal bytes.
-use super::checkout::{Checkout, empty_output_directory, environment, git_in, machine, required, variable};
+use super::checkout::{Checkout, empty_output_directory, environment, machine, required, variable};
 use super::files::{Workspace, canonical_json, copy_new, owned_regular, set_mode, sha256_file, write_new};
 use super::process::{self, Spec};
 use super::syntax::{candidate_tag_version, is_digits, is_repository, shell_quote};
 use serde_json::{Value, json};
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
@@ -32,7 +32,6 @@ use std::time::Duration;
 /// A cold release build of the host executable fits well within this.
 const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 const TAR_TIMEOUT: Duration = Duration::from_secs(600);
-const GIT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// `build-candidate`; see the module documentation.
 pub fn build_candidate(args: &[String]) -> Result<(), String> {
@@ -116,12 +115,14 @@ fn build() -> Result<(), String> {
     let plain_version = &version[1..];
     let binary = build_host(&checkout.root, plain_version)?;
     let host_name = format!("hamn-{version}-darwin-arm64");
+    // The archive holds exactly one generation payload: the executable
+    // and its update manifest pointer. The executable installs itself.
     let artifact_root = work.path().join(&host_name);
-    make_directory(&artifact_root)?;
-    make_directory(&artifact_root.join("bin"))?;
+    for directory in ["", "bin", "share", "share/hamn"] {
+        make_directory(&artifact_root.join(directory))?;
+    }
     copy_new(&binary, &artifact_root.join("bin/hamn"), 0o755)?;
-    stage_sources(&checkout.root, work.path(), &artifact_root)?;
-    let url_file = artifact_root.join("packaging/release/update-manifest-url");
+    let url_file = artifact_root.join("share/hamn/update-manifest-url");
     write_new(&url_file, format!("{manifest_url}\n").as_bytes())?;
     set_mode(&url_file, 0o644)?;
 
@@ -215,36 +216,6 @@ fn build_host(root: &Path, version: &str) -> Result<std::path::PathBuf, String> 
 fn make_directory(path: &Path) -> Result<(), String> {
     fs::DirBuilder::new().mode(0o755).create(path).map_err(|error| format!("{}: {error}", path.display()))?;
     set_mode(path, 0o755)
-}
-
-/// Copies the checkout's tracked scripts/ and packaging/ files (committed
-/// or not; untracked files never) into `destination` with tar, so modes
-/// and links are kept.
-fn stage_sources(root: &Path, work: &Path, destination: &Path) -> Result<(), String> {
-    let listed = git_in(root, &["ls-files", "-z", "--", "scripts", "packaging"], &[], GIT_TIMEOUT)?;
-    if !listed.status.success() {
-        return Err(format!("git ls-files failed: {}", listed.stderr_lossy().trim()));
-    }
-    let environment = environment(&[])?;
-    // Stage through a file: a tar reading a pipe stops at the end-of-archive
-    // marker, so a writer still sending the final record's padding can fail
-    // with EPIPE ("tar: Write error", CI run 36145944094).
-    let staged = work.join("sources.tar");
-    let create: [&OsStr; 7] = [
-        "-C".as_ref(),
-        root.as_os_str(),
-        "--null".as_ref(),
-        "-T".as_ref(),
-        "-".as_ref(),
-        "-cf".as_ref(),
-        staged.as_os_str(),
-    ];
-    let spec = Spec { environment: Some(&environment), input: Some(&listed.stdout) };
-    process::run(OsStr::new("tar"), &create, &spec, TAR_TIMEOUT)?;
-    let extract: [OsString; 4] = ["-C".into(), destination.into(), "-xf".into(), staged.clone().into()];
-    let spec = Spec { environment: Some(&environment), ..Spec::default() };
-    process::run(OsStr::new("tar"), &extract, &spec, TAR_TIMEOUT)?;
-    fs::remove_file(&staged).map_err(|error| format!("{}: {error}", staged.display()))
 }
 
 /// Replaces each `__HAMN_*__` placeholder, which must occur exactly once,

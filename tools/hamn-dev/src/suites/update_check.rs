@@ -84,19 +84,11 @@ impl Managed {
         let version = version.split_whitespace().nth(1).unwrap_or_else(|| panic!("--version: {version:?}"));
         let major: u64 = version.trim_start_matches('v').split('.').next().unwrap().parse().unwrap();
         let (bindir, datadir) = (root.join("bin"), root.join("src"));
-        let installed = upgrade::run(
-            Command::new("bash")
-                .arg(upgrade::checkout().join("scripts/install-host.sh"))
-                .arg(&frozen)
-                .arg(&bindir)
-                .arg(&datadir)
-                .env("HOME", &root),
-            Duration::from_secs(30),
-        );
-        assert_eq!(installed.returncode, 0, "{}", installed.stderr());
+        upgrade::install(&frozen, &frozen, &bindir, &datadir, &root);
         let managed = bindir.join("hamn");
-        let generation = fs::canonicalize(&managed).unwrap().parent().and_then(Path::parent).unwrap().to_path_buf();
-        fs::write(generation.join("share/hamn/src/packaging/release/update-manifest-url"), "invalid-offline-url\n").unwrap();
+        // A release generation carries its manifest pointer; point it offline.
+        let generation = upgrade::generation_of(&fs::canonicalize(&managed).unwrap());
+        upgrade::write_pointer(&generation, "invalid-offline-url");
         let tools = root.join("tools");
         fs::create_dir(&tools).unwrap();
         for name in ["docker", "kubectl"] {

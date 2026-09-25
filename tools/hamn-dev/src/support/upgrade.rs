@@ -1,7 +1,8 @@
 //! Release fixtures for the installer and updater suites: digests, schema v3
-//! manifests, `release/` host archives made with the system tar, copies of
-//! the checkout's release support files, and bounded updater processes in an
-//! owned HOME. Nothing here touches the real `~/.hamn` or `~/.local`.
+//! manifests, `release/` host archives (a generation payload: `bin/hamn` and
+//! `share/hamn/update-manifest-url`) made with the system tar, and bounded
+//! updater processes in an owned HOME. Nothing here touches the real
+//! `~/.hamn` or `~/.local`.
 use super::pty;
 use super::real_cli;
 pub use super::real_cli::Output;
@@ -16,10 +17,10 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// The checkout under test (the working directory, as the Makefile runs
-/// suites from the repository root). Panics unless it holds the updater.
+/// suites from the repository root). Panics unless it is a Hamn checkout.
 pub fn checkout() -> PathBuf {
     let root = std::env::current_dir().expect("working directory");
-    assert!(root.join("scripts/update-host.sh").is_file(), "run from the Hamn checkout: {}", root.display());
+    assert!(root.join("packaging/release/install.sh.in").is_file(), "run from the Hamn checkout: {}", root.display());
     root
 }
 
@@ -81,15 +82,20 @@ pub fn write_executable(path: &Path, text: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Copies the checkout's `scripts` and `packaging` into `release` (as a
-/// host archive and an installed generation carry them).
-pub fn copy_release_support(release: &Path) {
-    let root = checkout();
-    fs::create_dir_all(release).unwrap();
-    for name in ["scripts", "packaging"] {
-        let status = Command::new("/bin/cp").arg("-R").arg(root.join(name)).arg(release).status().expect("cp");
-        assert!(status.success(), "copy {name} into {}", release.display());
-    }
+/// Makes `release` a generation payload: `bin/hamn` copied from `binary`
+/// (0755) and the manifest pointer `share/hamn/update-manifest-url` naming
+/// `pointer`, as a release candidate composes its archive.
+pub fn release_payload(release: &Path, binary: &Path, pointer: &str) {
+    fs::create_dir_all(release.join("bin")).unwrap();
+    fs::copy(binary, release.join("bin/hamn")).unwrap_or_else(|error| panic!("{}: {error}", binary.display()));
+    fs::set_permissions(release.join("bin/hamn"), fs::Permissions::from_mode(0o755)).unwrap();
+    write_pointer(release, pointer);
+}
+
+/// Writes (replaces) `share/hamn/update-manifest-url` below `root`.
+pub fn write_pointer(root: &Path, pointer: &str) {
+    fs::create_dir_all(root.join("share/hamn")).unwrap();
+    fs::write(root.join("share/hamn/update-manifest-url"), format!("{pointer}\n")).unwrap();
 }
 
 /// Packs the directory `source` as `release/` into the gzip tar `archive`,
@@ -110,6 +116,26 @@ pub fn pack_release(source: &Path, archive: &Path) {
     assert!(output.status.success(), "tar: {}", String::from_utf8_lossy(&output.stderr));
 }
 
+/// `hamn __install-support install SOURCE BINDIR DATADIR` with `home` as
+/// HOME, as `make install` runs it.
+pub fn install_command(hamn: &Path, source: &Path, bindir: &Path, datadir: &Path, home: &Path) -> Command {
+    let mut command = Command::new(hamn);
+    command.args(["__install-support", "install"]).arg(source).arg(bindir).arg(datadir).env("HOME", home);
+    command
+}
+
+/// Installs `source` with `hamn`, which must succeed.
+pub fn install(hamn: &Path, source: &Path, bindir: &Path, datadir: &Path, home: &Path) -> Output {
+    let result = run(&mut install_command(hamn, source, bindir, datadir, home), Duration::from_secs(60));
+    assert_eq!(result.returncode, 0, "install {}: {}", source.display(), result.stderr());
+    result
+}
+
+/// The generation directory of an active `bin/hamn` target.
+pub fn generation_of(target: &Path) -> PathBuf {
+    target.parent().and_then(Path::parent).expect("generation").to_path_buf()
+}
+
 /// A FIFO named `name` in `root`, opened for a bounded ready wait.
 pub fn ready_fifo(root: &Path, name: &str) -> (PathBuf, OwnedFd) {
     let path = root.join(name);
@@ -121,6 +147,18 @@ pub fn ready_fifo(root: &Path, name: &str) -> (PathBuf, OwnedFd) {
 pub fn await_ready(fd: &OwnedFd, timeout: Duration, what: &str) {
     assert!(!pty::readable(&[fd.as_raw_fd()], timeout).is_empty(), "{what} did not reach its boundary within {timeout:?}");
     assert_eq!(pty::read_some(fd.as_raw_fd()), b"ready\n", "{what}");
+}
+
+/// Succeeds only if no line arrives on the FIFO descriptor `fd` within
+/// `window` (a negative observation needs a bounded window). The test holds
+/// the FIFO open for writing too, so end of file cannot be mistaken for
+/// silence.
+pub fn assert_no_ready(fd: &OwnedFd, window: Duration, what: &str) {
+    if !pty::readable(&[fd.as_raw_fd()], window).is_empty() {
+        let data = pty::read_some(fd.as_raw_fd());
+        assert!(!data.is_empty(), "the FIFO closed while checking for {what}");
+        panic!("received unexpected {what}: {:?}", String::from_utf8_lossy(&data));
+    }
 }
 
 /// Runs `command` to completion within `timeout` with captured output.
@@ -161,6 +199,55 @@ pub fn release(path: &Path, timeout: Duration) {
     }
 }
 
+/// One test barrier (`HAMN_TEST_UPDATE_<POINT>_{READY,RELEASE}_FIFO`): the
+/// FIFOs, the environment naming them, and the ready descriptor.
+pub struct Barrier {
+    pub ready: PathBuf,
+    pub release: PathBuf,
+    ready_fd: OwnedFd,
+    pub environment: [(String, PathBuf); 2],
+}
+
+impl Barrier {
+    /// FIFOs `root/<tag>-ready` and `root/<tag>-release` for `point`.
+    pub fn new(root: &Path, point: &str, tag: &str) -> Self {
+        let (ready, ready_fd) = ready_fifo(root, &format!("{tag}-ready"));
+        let release = root.join(format!("{tag}-release"));
+        mkfifo(&release);
+        let environment = [
+            (format!("HAMN_TEST_UPDATE_{point}_READY_FIFO"), ready.clone()),
+            (format!("HAMN_TEST_UPDATE_{point}_RELEASE_FIFO"), release.clone()),
+        ];
+        Self { ready, release, ready_fd, environment }
+    }
+
+    pub fn apply<'a>(&self, command: &'a mut Command) -> &'a mut Command {
+        for (name, value) in &self.environment {
+            command.env(name, value);
+        }
+        command
+    }
+
+    pub fn await_ready(&self, timeout: Duration, what: &str) {
+        await_ready(&self.ready_fd, timeout, what);
+    }
+
+    pub fn assert_no_ready(&self, window: Duration, what: &str) {
+        assert_no_ready(&self.ready_fd, window, what);
+    }
+
+    pub fn release(&self, timeout: Duration) {
+        release(&self.release, timeout);
+    }
+}
+
+impl Drop for Barrier {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.ready);
+        let _ = fs::remove_file(&self.release);
+    }
+}
+
 /// A child process group leader (Python's `start_new_session=True`). When
 /// dropped with the child still running, the whole group is killed with
 /// SIGKILL and the leader reaped, so no updater or installer survives a test.
@@ -195,7 +282,7 @@ impl Group {
         matches!(self.0.as_mut().expect("child").try_wait(), Ok(None))
     }
 
-    /// Sends `signal` to the leader only (the updater's own traps run).
+    /// Sends `signal` to the leader only (the updater's own handlers run).
     pub fn signal(&self, signal: i32) {
         pty::kill(self.id(), signal);
     }
@@ -235,11 +322,9 @@ pub fn version_wrapper(version: &str, native: &Path) -> String {
 }
 
 /// An owned HOME (`root/home`, install roots `home/bin` and `home/source`)
-/// plus version-wrapped releases of the checkout's updater, all under one
-/// temporary root. Private operations run one frozen copy of the Hamn under
-/// test, so no build output is read after setup. Each release updater gets
-/// one fixture-only observation point, right before it takes the install
-/// root locks: `HAMN_TEST_UPDATE_BEFORE_LOCK_READY_FIFO` receives `ready`.
+/// plus version-wrapped releases, all under one temporary root. Every
+/// release executable runs one frozen copy of the Hamn under test for its
+/// private operations, so no build output is read after setup.
 pub struct Releases {
     pub root: PathBuf,
     pub home: PathBuf,
@@ -251,12 +336,6 @@ pub struct Releases {
     pub selection: PathBuf,
     native: PathBuf,
     _directory: super::tmp::TempDir,
-}
-
-/// The updater the releases carry: `$HAMN_TEST_UPDATER_SOURCE`, or the
-/// checkout's `scripts/update-host.sh`.
-fn updater_source() -> PathBuf {
-    std::env::var_os("HAMN_TEST_UPDATER_SOURCE").map_or_else(|| checkout().join("scripts/update-host.sh"), PathBuf::from)
 }
 
 impl Releases {
@@ -283,42 +362,34 @@ impl Releases {
     }
 
     /// Builds release `version` (`root/release-VERSION`, its host archive, a
-    /// guest image and a v3 manifest) and returns its updater and manifest.
+    /// guest image and a v3 manifest) and returns its executable (which runs
+    /// the updater for `--bootstrap`) and manifest.
     pub fn release(&self, version: &str) -> (PathBuf, PathBuf) {
         let release = self.root.join(format!("release-{version}"));
         fs::create_dir_all(release.join("bin")).unwrap();
         write_executable(&release.join("bin/hamn"), &version_wrapper(version, &self.native));
-        copy_release_support(&release);
-        let updater = release.join("scripts/update-host.sh");
-        let source = fs::read_to_string(updater_source()).unwrap();
-        let boundary = "source \"$script_dir/install-transaction.sh\"";
-        assert_eq!(source.matches(boundary).count(), 1, "missing root-lock fixture boundary");
-        let observation = "if [ -n \"${HAMN_TEST_UPDATE_BEFORE_LOCK_READY_FIFO:-}\" ]; then\n  \
-                           printf \"ready\\n\" >\"$HAMN_TEST_UPDATE_BEFORE_LOCK_READY_FIFO\"\nfi\n";
-        write_executable(&updater, &source.replace(boundary, &format!("{observation}{boundary}")));
-        fs::write(release.join("packaging/release/update-manifest-url"), "https://fixture.test/manifest-v3.json\n").unwrap();
+        write_pointer(&release, "https://fixture.test/manifest-v3.json");
         let archive = self.root.join(format!("{version}.tar.gz"));
         pack_release(&release, &archive);
         let guest = self.root.join(format!("{version}.img"));
         fs::write(&guest, format!("guest-{version}")).unwrap();
         let manifest_path = self.root.join(format!("{version}.json"));
         write_json(&manifest_path, &manifest(&format!("v{version}"), &Artifact::local(&archive), &Artifact::local(&guest)));
-        (updater, manifest_path)
+        (release.join("bin/hamn"), manifest_path)
     }
 
-    /// The updater of the currently installed generation.
-    pub fn installed_updater(&self) -> PathBuf {
-        let target = fs::canonicalize(&self.command).expect("installed command");
-        target.parent().and_then(Path::parent).expect("generation").join("share/hamn/src/scripts/update-host.sh")
+    /// The executable of the currently installed generation.
+    pub fn installed(&self) -> PathBuf {
+        fs::canonicalize(&self.command).expect("installed command")
     }
 
-    /// `bash UPDATER --bindir ... --datadir ... --manifest MANIFEST
-    /// --output-json OPTIONS...` in this HOME, with local artifacts allowed.
-    pub fn updater(&self, script: &Path, manifest: &Path, options: &[&str]) -> Command {
-        let mut command = Command::new("bash");
+    /// `PROGRAM __install-support update --bindir ... --datadir ...
+    /// --manifest MANIFEST --output-json OPTIONS...` in this HOME, with
+    /// local artifacts allowed.
+    pub fn updater(&self, program: &Path, manifest: &Path, options: &[&str]) -> Command {
+        let mut command = Command::new(program);
         command
-            .arg(script)
-            .arg("--bindir")
+            .args(["__install-support", "update", "--bindir"])
             .arg(&self.bindir)
             .arg("--datadir")
             .arg(&self.datadir)
@@ -332,16 +403,25 @@ impl Releases {
         command
     }
 
+    /// The installed generation's updater invoked as a frontend would: its
+    /// own version and generation identity.
+    pub fn frontend(&self, program: &Path, manifest: &Path, version: &str) -> Command {
+        let generation = program.to_str().expect("UTF-8 path").to_owned();
+        let mut command = self.updater(program, manifest, &["--current-version", version, "--generation", &generation]);
+        command.stdin(Stdio::null());
+        command
+    }
+
     /// Runs an updater to success and returns its JSON result.
-    pub fn run_update(&self, script: &Path, manifest: &Path, options: &[&str]) -> Value {
-        let result = run(&mut self.updater(script, manifest, options), Duration::from_secs(30));
+    pub fn run_update(&self, program: &Path, manifest: &Path, options: &[&str]) -> Value {
+        let result = run(&mut self.updater(program, manifest, options), Duration::from_secs(30));
         assert_eq!(result.returncode, 0, "{}", result.stderr());
         serde_json::from_slice(&result.stdout).expect("updater JSON result")
     }
 
     /// Starts an updater in its own process group with `extra` environment.
-    pub fn spawn(&self, script: &Path, manifest: &Path, options: &[&str], extra: &[(&str, &Path)]) -> Group {
-        let mut command = self.updater(script, manifest, options);
+    pub fn spawn(&self, program: &Path, manifest: &Path, options: &[&str], extra: &[(&str, &Path)]) -> Group {
+        let mut command = self.updater(program, manifest, options);
         for (name, value) in extra {
             command.env(name, value);
         }

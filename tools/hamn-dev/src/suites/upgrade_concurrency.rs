@@ -1,8 +1,8 @@
 //! Real updater transactions serialize on the install root locks without
 //! rebuilding the shared executable. Version wrappers delegate every private
-//! operation to a frozen copy of the Hamn under test; the production
-//! installer, updater, receipt and journal run in an owned HOME, and a
-//! fixture-only FIFO observation binds the assertions to lock acquisition.
+//! operation to a frozen copy of the Hamn under test; the native installer,
+//! updater, receipt and journal run in an owned HOME, and the updater's
+//! BEFORE_LOCK test barrier binds the assertions to lock acquisition.
 use crate::runner::{self, case};
 use crate::support::upgrade::{self, Releases, await_ready, mkfifo, ready_fifo, release};
 use std::path::{Path, PathBuf};
@@ -48,8 +48,7 @@ fn queued_pair(fixture: &Releases, first: (&Path, &Path, &[&str]), second: (&Pat
         fixture.spawn(second.0, second.1, second.2, &[("HAMN_TEST_UPDATE_BEFORE_LOCK_READY_FIFO", &second_ready_path)]);
     await_ready(&second_ready, Duration::from_secs(20), "second updater");
     // The second invocation reached the root-lock boundary while the first
-    // still owns the durable transaction lock. This observation is injected
-    // into the release fixture, never into the shipped updater.
+    // still owns the durable transaction lock (an announce-only barrier).
     assert!(second_child.running(), "the second updater did not wait for the lock owner");
     assert!(first_child.running());
     release(&release_first, WAIT);
@@ -72,7 +71,7 @@ fn queued_pair(fixture: &Releases, first: (&Path, &Path, &[&str]), second: (&Pat
 fn installed(fixture: &Releases, version: &str) -> PathBuf {
     let (script, manifest) = fixture.release(version);
     fixture.run_update(&script, &manifest, &["--bootstrap"]);
-    fixture.installed_updater()
+    fixture.installed()
 }
 
 fn queued_frontend_cannot_replace_newer_active_generation() {
@@ -80,7 +79,8 @@ fn queued_frontend_cannot_replace_newer_active_generation() {
     let invoked = installed(&fixture, "1.0.1");
     let (_, newer) = fixture.release("1.0.3");
     let (_, older) = fixture.release("1.0.2");
-    let stale = ["--current-version", "1.0.1"];
+    let generation = invoked.to_str().unwrap().to_owned();
+    let stale = ["--current-version", "1.0.1", "--generation", generation.as_str()];
     let error = queued_pair(&fixture, (&invoked, &newer, &stale), (&invoked, &older, &stale));
     assert!(error.contains("managed generation changed"), "{error}");
 }
@@ -100,7 +100,7 @@ fn active_version_overrides_stale_frontend_version() {
     let active = fixture.active();
     let selection = std::fs::read(&fixture.selection).unwrap();
     let result =
-        upgrade::run(&mut fixture.updater(&invoked, &older, &["--current-version", "1.0.1"]), WAIT);
+        upgrade::run(&mut fixture.frontend(&invoked, &older, "1.0.1"), WAIT);
     assert_ne!(result.returncode, 0, "{}", result.stdout());
     assert!(result.stderr().contains("stable downgrade is not permitted"), "{}", result.stderr());
     assert_eq!(fixture.active(), active);
@@ -115,7 +115,7 @@ fn writable_runtime_root_rejects_update_without_changing_installation() {
     let (active, selected) = (fixture.active(), std::fs::read(&fixture.selection).unwrap());
     std::fs::set_permissions(fixture.home.join(".hamn"), std::fs::Permissions::from_mode(0o777)).unwrap();
     let result =
-        upgrade::run(&mut fixture.updater(&invoked, &newer, &["--current-version", "1.0.1"]), WAIT);
+        upgrade::run(&mut fixture.frontend(&invoked, &newer, "1.0.1"), WAIT);
     assert_ne!(result.returncode, 0, "{}", result.stdout());
     assert!(result.stderr().contains("unsafe Hamn runtime root"), "{}", result.stderr());
     assert_eq!(fixture.active(), active);

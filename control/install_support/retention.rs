@@ -1,7 +1,12 @@
-//! Collection requires inherited locks for both canonical install roots. Keep
-//! active, predecessor, caller, open-file and recovery references. Generations
-//! of unknown ownership remain; marker-last retirement is retryable.
-use super::{Result, files, manifest::hexadecimal, require};
+//! Obsolete-generation collection, under the caller's transaction locks for
+//! both canonical install roots. Keeps the active generation, its recorded
+//! predecessor, the caller's `keep` targets, anything a process has open, and
+//! generations named by a pending recovery root. A generation is collected
+//! only with the exact marker for these roots, of this layout or of the
+//! migrated Hamn 0.1.x layout; generations of unknown ownership remain;
+//! marker-last retirement is retryable. Reports removals and deferrals to the
+//! caller, which decides where they are shown.
+use super::{Result, files, generation, locks, manifest::hexadecimal, require};
 use std::{
     fs,
     io::{ErrorKind, Read},
@@ -185,21 +190,21 @@ fn open_paths(text: &str) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn collect(bin: &Path, data: &Path, previous: &str, source: &str) -> Result<()> {
-    let mut locks = [
-        bin.join(".hamn-transaction.lock"),
-        files::parent(data)?.join(format!(
-            ".{}.hamn-transaction.lock",
-            data.file_name()
-                .and_then(|n| n.to_str())
-                .ok_or("invalid data path")?
-        )),
-    ];
-    locks.sort();
-    for (fd, path) in (6..=7).zip(locks) {
-        files::lock_same(&path, fd)?;
-        files::flock(fd, true)?;
-    }
+/// What one collection did.
+#[derive(Debug, Default)]
+pub(super) struct Collection {
+    /// Names of removed generations.
+    pub(super) removed: Vec<String>,
+    /// Why collection (or one generation's collection) was deferred.
+    pub(super) deferred: Vec<String>,
+}
+
+/// Collects obsolete generations of `transaction`'s roots (see the module
+/// documentation). An error means nothing more could be decided safely.
+pub(super) fn collect(transaction: &locks::Transaction, keep: &[&str]) -> Result<Collection> {
+    let roots = transaction.roots();
+    let (bin, data) = (roots.bindir.as_path(), roots.datadir.as_path());
+    let mut report = Collection::default();
     let root = data.join(".hamn-generations");
     files::owned(data, true, Some(0o755))?;
     files::owned(&root, true, Some(0o755))?;
@@ -212,19 +217,18 @@ pub(super) fn collect(bin: &Path, data: &Path, previous: &str, source: &str) -> 
     )?;
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     if pending(&PathBuf::from(home).join(".hamn/cache"))? {
-        eprintln!("hamn: generation cleanup deferred while recovery metadata exists");
-        return Ok(());
+        report
+            .deferred
+            .push("generation cleanup deferred while recovery metadata exists".into());
+        return Ok(report);
     }
     let active = fs::read_link(bin.join("hamn"))?;
     require(
         generation_target(&active, &root),
         "active link is outside managed generation root",
     )?;
-    let mut keep = vec![
-        active.clone(),
-        PathBuf::from(previous),
-        PathBuf::from(source),
-    ];
+    let mut keep: Vec<PathBuf> = keep.iter().map(PathBuf::from).collect();
+    keep.push(active.clone());
     let predecessor = files::parent(files::parent(&active)?)?.join(".hamn-previous-target");
     match fs::symlink_metadata(&predecessor) {
         Ok(_) => {
@@ -243,8 +247,6 @@ pub(super) fn collect(bin: &Path, data: &Path, previous: &str, source: &str) -> 
         Err(e) => return Err(e.into()),
     }
     let opened = open_files(Duration::from_secs(30))?;
-    let bin_id = files::path_hash(bin.to_str().ok_or("invalid bin path")?);
-    let data_id = files::path_hash(data.to_str().ok_or("invalid data path")?);
     for mut path in children(&root)? {
         let leaf = path
             .file_name()
@@ -256,27 +258,29 @@ pub(super) fn collect(bin: &Path, data: &Path, previous: &str, source: &str) -> 
         if !generation_name(name) {
             continue;
         }
-        let result = (|| -> Result<()> {
+        let result = (|| -> Result<bool> {
             if !tree_owned(&path)?
                 || keep.iter().any(|p| p.starts_with(&path))
                 || opened.iter().any(|p| Path::new(p).starts_with(&path))
             {
-                return Ok(());
+                return Ok(false);
             }
             if retired && children(&path)?.is_empty() {
                 fs::remove_dir(&path)?;
-                return Ok(());
+                return Ok(false);
             }
             let marker = path.join(".hamn-generation");
             if files::owned(&marker, false, Some(0o600)).is_err() {
-                return Ok(());
+                return Ok(false);
             }
-            let expected = format!(
-                "version=1\nbinary_sha256={}\nbindir_id={bin_id}\ndatadir_id={data_id}\n",
-                &name[..64]
-            );
-            if files::text(&marker)? != expected {
-                return Ok(());
+            // Only the exact marker for these roots, of this layout or of
+            // the migrated 0.1.x layout, proves ownership; other layouts and
+            // roots are left alone.
+            let text = files::text(&marker)?;
+            if text != generation::marker_text(&name[..64], roots)?
+                && text != generation::released_marker_text(&name[..64], roots)?
+            {
+                return Ok(false);
             }
             for p in children(&path)? {
                 if p.file_name()
@@ -285,32 +289,35 @@ pub(super) fn collect(bin: &Path, data: &Path, previous: &str, source: &str) -> 
                     .starts_with(".hamn-recovery-root-")
                     && recovery_pending(&p)?
                 {
-                    return Ok(());
+                    return Ok(false);
                 }
             }
             if !retired {
                 let binary = path.join("bin/hamn");
                 files::owned(&binary, false, Some(0o755))?;
                 if files::digest(&binary)? != name[..64] {
-                    return Ok(());
+                    return Ok(false);
                 }
                 let destination = root.join(format!(".retired-{name}"));
                 match fs::symlink_metadata(&destination) {
                     Err(e) if e.kind() == ErrorKind::NotFound => (),
-                    _ => return Ok(()),
+                    _ => return Ok(false),
                 }
                 fs::rename(&path, &destination)?;
                 path = destination;
             }
             erase(&path)?;
-            println!("hamn: removed obsolete generation {name}");
-            Ok(())
+            Ok(true)
         })();
-        if let Err(error) = result {
-            eprintln!("hamn: generation cleanup deferred: {error}");
+        match result {
+            Ok(true) => report.removed.push(name.to_owned()),
+            Ok(false) => {}
+            Err(error) => report
+                .deferred
+                .push(format!("generation cleanup deferred: {error}")),
         }
     }
-    Ok(())
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -347,13 +354,16 @@ mod tests {
         );
     }
     #[test]
-    fn open_paths_keep_absolute_names_and_no_open_script_blocks_collection() {
-        // An updater with scripts/update-host.sh open but no transaction lock
-        // (Hamn 0.1.1 and earlier) is not a reason to defer collection.
-        let text = "p1\nn/a/scripts/update-host.sh\nnpipe\np2\nn/b/.hamn-generations/x/bin/hamn\nf5\n";
+    fn open_paths_keep_only_absolute_names() {
+        // Process (`p`) and descriptor (`f`) fields and non-path names
+        // (pipes, sockets) never select a generation.
+        let text = "p1\nn/a/share/hamn/update-manifest-url\nnpipe\np2\nn/b/.hamn-generations/x/bin/hamn\nf5\n";
         assert_eq!(
             open_paths(text),
-            ["/a/scripts/update-host.sh", "/b/.hamn-generations/x/bin/hamn"]
+            [
+                "/a/share/hamn/update-manifest-url",
+                "/b/.hamn-generations/x/bin/hamn"
+            ]
         );
     }
     #[test]

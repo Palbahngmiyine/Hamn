@@ -296,7 +296,7 @@ artifact_root=$("$work/hamn-support" __install-support extract "$host_archive" "
     fail "host artifact validation or extraction failed"
 
 artifact=$work/extract/$artifact_root
-[ -x "$artifact/bin/hamn" ] && [ -x "$artifact/scripts/update-host.sh" ] ||
+[ -x "$artifact/bin/hamn" ] && [ -f "$artifact/share/hamn/update-manifest-url" ] ||
     fail "verified host artifact is incomplete"
 
 manifest=$work/manifest.json
@@ -304,9 +304,12 @@ manifest=$work/manifest.json
     "$HAMN_COMMIT" "$host_archive" "$HAMN_HOST_SHA256" "$HAMN_GUEST_URL" "$HAMN_GUEST_SHA256" \
     "$HAMN_HOST_SIZE" "$HAMN_GUEST_SIZE"
 
+# The verified release executable installs itself: it re-verifies the host
+# archive against the manifest written above, acquires the guest image, and
+# publishes a journaled generation with rollback on any failure.
 env -i HOME="$HOME" TMPDIR="$work" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
-    /bin/bash "$artifact/scripts/update-host.sh" --bootstrap \
+    "$artifact/bin/hamn" __install-support update --bootstrap \
     --bindir "$HOME/.local/bin" --datadir "$HOME/.local/share/hamn/src" \
     --manifest "file://$manifest"
 

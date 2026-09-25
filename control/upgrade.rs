@@ -244,8 +244,9 @@ fn managed_helper() -> Option<(PathBuf, PathBuf)> {
     {
         return None;
     }
-    let source = generation.join("share/hamn/src");
-    let pointer = source.join("packaging/release/update-manifest-url");
+    // Release generations carry the manifest pointer of their archive;
+    // source builds (`make install`) have none and never check.
+    let pointer = generation.join("share/hamn/update-manifest-url");
     owned_regular(&executable, false, 128 * 1024 * 1024)?;
     owned_regular(&pointer, false, 4096)?;
     Some((executable, pointer))

@@ -74,8 +74,11 @@ static int resolve_invocation(char output[PATH_MAX])
     return lstat(output, &status) == 0 ? 0 : -1;
 }
 
-static int managed_paths(char executable[PATH_MAX], char datadir[PATH_MAX],
-                         char helper[PATH_MAX])
+/* A managed executable is DATADIR/.hamn-generations/<name>/bin/hamn, an
+ * owned single-link executable. The same executable performs the update
+ * (`__install-support update`), which revalidates everything under its
+ * locks; this check only decides whether the command is managed at all. */
+static int managed_paths(char executable[PATH_MAX], char datadir[PATH_MAX])
 {
     if (!proc_self_path(executable, PATH_MAX))
         return -1;
@@ -91,14 +94,8 @@ static int managed_paths(char executable[PATH_MAX], char datadir[PATH_MAX],
         return -1;
     memcpy(datadir, executable, data_length);
     datadir[data_length] = '\0';
-    size_t generation_length = (size_t)(suffix - executable);
-    int written = snprintf(helper, PATH_MAX,
-                           "%.*s/share/hamn/src/scripts/update-host.sh",
-                           (int)generation_length, executable);
-    if (written < 0 || written >= PATH_MAX)
-        return -1;
     struct stat status;
-    return lstat(helper, &status) == 0 && S_ISREG(status.st_mode) &&
+    return lstat(executable, &status) == 0 && S_ISREG(status.st_mode) &&
         status.st_uid == geteuid() && status.st_nlink == 1 &&
         (status.st_mode & 0111) != 0 ? 0 : -1;
 }
@@ -167,8 +164,8 @@ int hamn_control_upgrade(const char *manifest, int check_only, int force,
         (force != 0 && force != 1) || (check_only && force))
         return 2;
     *result = NULL;
-    char executable[PATH_MAX], datadir[PATH_MAX], helper[PATH_MAX];
-    if (managed_paths(executable, datadir, helper) != 0) {
+    char executable[PATH_MAX], datadir[PATH_MAX];
+    if (managed_paths(executable, datadir) != 0) {
         if (check_only)
             return unsupported_check_result(result);
         log_set_error("this hamn is not a managed installation, so it cannot upgrade itself; "
@@ -206,14 +203,18 @@ int hamn_control_upgrade(const char *manifest, int check_only, int force,
         close(result_fd); unlink(result_path); rmdir(result_directory);
         return 1;
     }
-    /* The documented system shell, independent of the caller's PATH. */
+    /* This managed generation's own executable runs the transaction in a
+     * fresh process; --generation names it so the updater can refuse a
+     * stale frontend after another update replaced the active generation. */
     const char *command[20] = {
-        "/bin/bash", helper, "--bindir", binary_dir, "--datadir", datadir,
-        NULL, NULL, NULL,
+        executable, "__install-support", "update", "--bindir", binary_dir,
+        "--datadir", datadir, NULL,
     };
-    size_t count = 6;
+    size_t count = 7;
     command[count++] = "--current-version";
     command[count++] = HAMN_VERSION;
+    command[count++] = "--generation";
+    command[count++] = executable;
     command[count++] = "--output-json";
     command[count++] = "--result-file";
     command[count++] = result_path;

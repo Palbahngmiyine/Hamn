@@ -8,16 +8,19 @@ const HOSTED_EVIDENCE: &str = "tools/hamn-dev/src/release/hosted.rs";
 const PUBLISH: &str = "tools/hamn-dev/src/release/publish.rs";
 const CANDIDATE: &str = "tools/hamn-dev/src/release/candidate.rs";
 const INSTALLER: &str = "packaging/release/install.sh.in";
-const UPDATER: &str = "scripts/update-host.sh";
+const UPDATER: &str = "control/install_support/update.rs";
+const RELEASE_ARTIFACTS: &str = "tools/hamn-dev/src/suites/release_artifacts.rs";
 const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 /// Release driver fixtures shared by the Rust release suites.
 const RELEASE_DRIVER: &str = "tools/hamn-dev/src/support/release_driver.rs";
 
 pub fn release_fixtures_do_not_inherit_workflow_identity() {
-    let release_test = "tests/host/test_release_artifacts.sh";
     assert!(
-        contains(release_test, "unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT"),
-        "release fixture inherits hosted workflow identity: {release_test}"
+        contains(
+            RELEASE_ARTIFACTS,
+            r#"for name in ["GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"] {"#
+        ) && contains(RELEASE_ARTIFACTS, "command.env_remove(name);"),
+        "release fixture inherits hosted workflow identity: {RELEASE_ARTIFACTS}"
     );
     assert!(
         contains(

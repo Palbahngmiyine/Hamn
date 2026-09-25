@@ -4,7 +4,7 @@
 //! installer and updater; the test itself only prepares fixtures outside it.
 use crate::runner::{self, case};
 use crate::support::tmp::TempDir;
-use crate::support::upgrade::{self, Artifact, copy_release_support, digest, file_digest, pack_release, write_executable, write_json};
+use crate::support::upgrade::{self, Artifact, digest, file_digest, pack_release, release_payload, write_json};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
@@ -23,11 +23,11 @@ pub fn main(filters: &[String]) -> ExitCode {
 }
 
 /// The only commands the installer and updater may execute, besides the
-/// release's own `hamn` and scripts.
+/// release's own `hamn`: the stock shells and tools of install.sh and its
+/// zsh acquisition program, and the updater's curl, sw_vers and lsof.
 const TOOLS: &[&str] = &[
-    "bash", "sh", "zsh", "env", "curl", "openssl", "tar", "bsdtar", "chmod", "mkdir", "rmdir", "rm", "mv", "cp", "ln",
-    "sync", "cat", "stat", "mktemp", "id", "dirname", "basename", "find", "rsync", "install", "readlink", "awk", "wc",
-    "tr", "cmp", "grep", "uname", "sw_vers", "lsof", "echo",
+    "bash", "zsh", "env", "curl", "openssl", "tar", "bsdtar", "chmod", "mkdir", "rm", "mv", "cp", "sync", "cat", "stat",
+    "mktemp", "id", "awk", "sw_vers", "lsof",
 ];
 const SYSTEM_DIRECTORIES: [&str; 4] = ["/bin", "/usr/bin", "/sbin", "/usr/sbin"];
 
@@ -58,7 +58,7 @@ fn ascii_json_string(text: &str) -> String {
 
 /// The receipt's installed-tree digest, derived independently of Hamn from
 /// the documented contract: depth-first `[name, mode, sha256-or-null]`
-/// entries for bin, scripts and packaging with sorted children.
+/// entries for the generation's bin and share trees with sorted children.
 fn receipt_tree_digest(generation: &Path) -> String {
     fn visit(path: &Path, name: &str, entries: &mut Vec<String>) {
         let info = fs::symlink_metadata(path).unwrap();
@@ -74,9 +74,8 @@ fn receipt_tree_digest(generation: &Path) -> String {
         }
     }
     let mut entries = Vec::new();
-    visit(&generation.join("bin"), "bin", &mut entries);
-    for name in ["scripts", "packaging"] {
-        visit(&generation.join("share/hamn/src").join(name), name, &mut entries);
+    for name in ["bin", "share"] {
+        visit(&generation.join(name), name, &mut entries);
     }
     digest(format!("[{}]", entries.join(",")).as_bytes())
 }
@@ -94,30 +93,8 @@ fn install_and_upgrade_need_only_system_tools() {
     fs::create_dir(&home).unwrap();
     fs::create_dir(&scratch).unwrap();
 
-    // A source checkout with no completed build must not fall through to an
-    // unrelated bin/hamn, even when that file is executable.
-    let incomplete = work.join("incomplete-source");
-    fs::create_dir_all(incomplete.join("bin")).unwrap();
-    fs::write(incomplete.join("Cargo.toml"), "[package]\n").unwrap();
-    write_executable(&incomplete.join("bin/hamn"), &format!("#!/bin/sh\ntouch '{}/foreign-executed'\n", work.display()));
-    let rejected = upgrade::run(
-        Command::new("/bin/bash")
-            .args(["-c", "ROOT=\"$1\"; source \"$2\"; install_support hash \"$3\"", "resolve"])
-            .arg(&incomplete)
-            .arg(upgrade::checkout().join("scripts/install-support.sh"))
-            .arg(&hamn),
-        Duration::from_secs(10),
-    );
-    assert_ne!(rejected.returncode, 0);
-    assert!(!work.join("foreign-executed").exists());
-
     let release = work.join("release");
-    fs::create_dir_all(release.join("bin")).unwrap();
-    fs::copy(&hamn, release.join("bin/hamn")).unwrap();
-    copy_release_support(&release);
-    fs::write(release.join("packaging/release/update-manifest-url"), "https://example.invalid/manifest\n").unwrap();
-    // A non-ASCII name exercises the receipt's escaping contract.
-    fs::write(release.join("scripts/기록.txt"), "receipt Unicode fixture\n").unwrap();
+    release_payload(&release, &hamn, "https://example.invalid/manifest");
     let archive = work.join("host.tar.gz");
     pack_release(&release, &archive);
     let guest = work.join("guest.img");
@@ -173,11 +150,7 @@ fn install_and_upgrade_need_only_system_tools() {
     for path in &allowed {
         profile_text.push_str(&format!(" (literal {})\n", quote(path)));
     }
-    profile_text.push_str(&format!(" (regex {})\n", quote(&format!("^{}/.*/(bin/hamn|hamn-support)$", literal_regex(work_text)))));
-    profile_text.push_str(&format!(
-        " (regex {}))\n",
-        quote(&format!("^{}/.*/scripts/(install-host|update-host)\\.sh$", literal_regex(work_text)))
-    ));
+    profile_text.push_str(&format!(" (regex {}))\n", quote(&format!("^{}/.*/(bin/hamn|hamn-support)$", literal_regex(work_text)))));
     let profile = work.join("system-only.sb");
     fs::write(&profile, profile_text).unwrap();
     let sandboxed = |program: &Path, args: &[&str], success: bool| {
@@ -225,8 +198,10 @@ fn install_and_upgrade_need_only_system_tools() {
     let before = fs::read(&selection).unwrap();
 
     // Rewrite the receipt with the independently derived tree digest: the
-    // native updater must accept it without reinstalling (a no-op).
+    // native updater must accept it without reinstalling (a no-op). A
+    // non-ASCII name exercises the receipt's escaping contract.
     let generation = active.parent().and_then(Path::parent).unwrap();
+    fs::write(generation.join("share/hamn/기록.txt"), "receipt Unicode fixture\n").unwrap();
     let receipt_path = generation.join(".hamn-release.json");
     let mut receipt: Value = serde_json::from_slice(&fs::read(&receipt_path).unwrap()).unwrap();
     receipt["installedSHA256"] = receipt_tree_digest(generation).into();

@@ -17,6 +17,7 @@ mod generation_cleanup;
 // Linux portable gate needs the source-tree suites alone.
 #[cfg(target_os = "macos")]
 mod guest_image_live;
+mod host_install;
 mod hosted_validation;
 mod install_system_tools;
 mod kubernetes_api;
@@ -29,6 +30,7 @@ mod port_forwarding;
 mod profile_yaml;
 mod public_export;
 mod qcow2;
+mod release_artifacts;
 mod release_candidate;
 mod release_consumer;
 mod release_gate;
@@ -39,6 +41,7 @@ mod release_publish;
 mod release_repository_preflight;
 mod release_request;
 mod release_version;
+mod released_migration;
 mod remote_cancel_boundaries;
 mod repository;
 mod rust_sdk;
@@ -68,7 +71,9 @@ mod tui_ssh_timeout;
 mod tui_tls_target;
 mod tui_workspaces;
 mod udp_proxy;
+mod uninstall;
 mod update_check;
+mod update_transaction;
 mod update_ux;
 mod upgrade_cli;
 mod upgrade_concurrency;
@@ -149,7 +154,10 @@ const SUITES: &[Suite] = &[
     ("guest-image-live", guest_image_live::main),
     ("bootstrap-acquire", bootstrap_acquire::main),
     ("generation-cleanup", generation_cleanup::main),
+    ("host-install", host_install::main),
+    ("released-migration", released_migration::main),
     ("install-system-tools", install_system_tools::main),
+    ("uninstall", uninstall::main),
     ("upgrade-cli", upgrade_cli::main),
     ("upgrade-concurrency", upgrade_concurrency::main),
     ("upgrade-native", upgrade_native::main),
@@ -157,6 +165,8 @@ const SUITES: &[Suite] = &[
     ("upgrade-recovery-ownership", upgrade_recovery_ownership::main),
     ("update-check", update_check::main),
     ("update-ux", update_ux::main),
+    ("update-transaction", update_transaction::main),
+    ("release-artifacts", release_artifacts::main),
     ("measure-upgrade-download", measure_upgrade_download::main),
 ];
 
@@ -197,6 +207,8 @@ const FIXTURES: &[(&str, Fixture)] = &[
     #[cfg(target_os = "macos")]
     ("workspace-management-kubectl", workspace_live::checks::management_kubectl),
     ("generation-wait", generation_cleanup::waiting_executable),
+    ("generation-lock-holder", generation_cleanup::lock_holder),
+    ("released-install-support", crate::support::released::install_support),
     ("bootstrap-curl", bootstrap_acquire::curl_fixture),
     ("update-check-cli", update_check::cli_fixture),
 ];

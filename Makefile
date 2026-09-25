@@ -89,7 +89,7 @@ $(VERSION_STAMP): FORCE
 $(VERSIONED_OBJS): $(VERSION_STAMP)
 
 install: host
-	bash scripts/install-host.sh "$(HOST_BIN)" "$(BINDIR)" "$(DATADIR)"
+	$(HOST_BIN) __install-support install "$(HOST_BIN)" "$(BINDIR)" "$(DATADIR)"
 
 $(BUILD)/libhamn_core.a: $(HOST_OBJS)
 	@mkdir -p $(dir $@)
@@ -440,7 +440,8 @@ test-diagnostics: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test diagnostics
 
 test-install-script: host
-	HAMN=$(HOST_BIN) bash tests/host/test_install.sh
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test host-install
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test released-migration
 
 test-install-cleanup: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test generation-cleanup
@@ -452,7 +453,7 @@ test-install-bootstrap: host
 	$(HAMN_DEV) test bootstrap-acquire
 
 test-uninstall: host
-	HAMN=$(HOST_BIN) bash tests/host/test_uninstall.sh
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test uninstall
 
 test-update-properties: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-properties
@@ -479,7 +480,7 @@ test-update-ux-pty: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test update-ux pty
 
 test-update-script: host
-	HAMN=$(HOST_BIN) bash tests/host/test_update.sh
+	$(HAMN_DEV) test update-transaction
 
 # Candidate tests build their own release versions and never read the
 # checkout's build/hamn, so they do not rebuild it first. The release
@@ -488,7 +489,7 @@ test-update-script: host
 RELEASE_TOOL := HAMN_DEV=$(abspath $(HAMN_DEV))
 
 test-release-artifacts: hamn-dev
-	$(RELEASE_TOOL) bash tests/host/test_release_artifacts.sh
+	$(HAMN_DEV) test release-artifacts
 
 # hosted-validation builds a real candidate (replacing build/hamn, then
 # restoring it); release-candidate checks the builder's inputs.

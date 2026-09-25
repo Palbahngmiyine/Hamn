@@ -46,6 +46,14 @@ macOS 시스템 라이브러리와 기존 Virtualization entitlement를 사용�
 Ad-hoc 서명이며 Developer ID 서명이나 공증은 아닙니다. 코어 실행 파일이나
 전용 동적 라이브러리를 별도로 배포하지 않습니다.
 
+`make install`은 실행 파일 자체의 native 설치기(`build/hamn __install-support install`)로
+`build/hamn`을 `PREFIX`(기본 `~/.local`) 아래의 새 관리형 generation으로 게시합니다.
+`BINDIR`와 `DATADIR`로 명령·데이터 디렉터리를 지정합니다. 소스 파일 없이 실행 파일만
+설치하며, 검증 가능한 Hamn 0.1.x 설치는 이전하고 그 밖의 이전 설치는 아무것도
+바꾸지 않고 거부합니다. [설치 문서](INSTALLATION.ko.md#설치-배치와-이전-설치)를
+참고하세요. 이전 테스트는 v0.1.2 릴리스 commit의 설치기로 Hamn 0.1.2를 설치하므로
+설치기 게이트에는 shallow clone이 아닌 전체 clone이 필요합니다.
+
 내장 Engine API에는 Docker CLI가 필요하지 않습니다. 외부 Docker CLI·Compose·
 buildx·SDK는 프로필 공개 소켓을 사용할 수 있습니다. VM에는 설치·검증된 관리형
 게스트 이미지가 필요하며 서명되지 않은 클라우드 이미지로 대체하지 않습니다.
@@ -108,6 +116,7 @@ target/release/hamn-dev release physical-e2e --help
 ## 소스 경계
 
 - `control/`: 타입화한 요청·결과, 공통 서비스, TUI, 헤드리스 출력.
+- `control/install_support/`: native 설치기와 업데이트기(`__install-support`).
 - `host/core/`: C ABI, 프로필, VM 수명주기, 게스트 배포 트랜잭션.
 - `host/vz/`: Virtualization.framework 전용.
 - `host/fwd/`: 소유권을 관리하는 Docker 소켓·공개 포트 포워딩.
