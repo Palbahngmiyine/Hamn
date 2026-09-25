@@ -10,6 +10,7 @@ mod docker_api;
 mod docker_context;
 mod docker_readiness;
 mod exec_auth;
+mod guest_image_live;
 mod kubernetes_api;
 mod native_flag_inventory;
 mod native_query_lifetime;
@@ -47,6 +48,7 @@ mod tui_ssh_timeout;
 mod tui_tls_target;
 mod tui_workspaces;
 mod udp_proxy;
+mod workspace_live;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
@@ -96,6 +98,10 @@ const SUITES: &[Suite] = &[
     ("tui-docker-images", tui_docker_images::main),
     ("tui-kubectl-output", tui_kubectl_output::main),
     ("tui-tls-target", tui_tls_target::main),
+    ("workspace-live-checks", workspace_live::checks::main),
+    ("workspace-live", workspace_live::main),
+    ("workspace-live-management", workspace_live::management_main),
+    ("guest-image-live", guest_image_live::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
@@ -124,6 +130,9 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("create-plugins-kubectl", tui_create_plugins::kubectl_recorded),
     ("create-plugin", tui_create_plugins::plugin),
     ("create-shadow-plugin", tui_create_plugins::shadow_plugin),
+    ("workspace-live-argv", workspace_live::checks::argv_recorder),
+    ("workspace-live-exec-witness", workspace_live::exec_witness),
+    ("workspace-management-kubectl", workspace_live::checks::management_kubectl),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {
