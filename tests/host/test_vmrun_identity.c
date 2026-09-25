@@ -1,6 +1,7 @@
 /* vm_process_probe() adopts, and vm_stop() signals, a vmrun supervisor only
  * when its control-socket status reports the OS start token of the process
- * recorded in vmrun.pid/vmrun.identity. The supervisor here is a forked child
+ * recorded in vmrun.pid/vmrun.identity, and that identity carries the
+ * executable UUID. The supervisor here is a forked child
  * of this test (so it shares the test executable's UUID) that answers status
  * requests with scripted replies; no VM is involved. */
 #include <assert.h>
@@ -89,10 +90,23 @@ static int reply_text(enum reply reply, char *text, size_t cap)
 }
 
 /* The child: serves `replies` in order (repeating the last) on vmrun.sock
- * until the test closes its end of `alive_fd`. */
+ * until the test closes its end of `alive_fd`. Without replies it serves no
+ * control socket, like vmrun before it creates one. */
 static void serve(const struct profile *p, const enum reply *replies,
                   int reply_count, int alive_fd, int ready_fd)
 {
+    char ready = 'r';
+    if (reply_count == 0) {
+        if (write(ready_fd, &ready, 1) != 1)
+            _exit(92);
+        close(ready_fd);
+        struct pollfd alive = { .fd = alive_fd, .events = POLLIN };
+        while (poll(&alive, 1, -1) < 0) {
+            if (errno != EINTR)
+                _exit(93);
+        }
+        _exit(0);
+    }
     struct sockaddr_un address = { .sun_family = AF_UNIX };
     char path[1024];
     if (!profile_path(p, "vmrun.sock", path, sizeof(path)) ||
@@ -104,7 +118,6 @@ static void serve(const struct profile *p, const enum reply *replies,
         bind(listener, (struct sockaddr *)&address, sizeof(address)) != 0 ||
         listen(listener, 4) != 0)
         _exit(91);
-    char ready = 'r';
     if (write(ready_fd, &ready, 1) != 1)
         _exit(92);
     close(ready_fd);
@@ -137,7 +150,7 @@ static void serve(const struct profile *p, const enum reply *replies,
 static void supervisor_start(const struct profile *p, const enum reply *replies,
                              int reply_count, struct supervisor *supervisor)
 {
-    assert(reply_count >= 1 && reply_count <= MAX_REPLIES);
+    assert(reply_count >= 0 && reply_count <= MAX_REPLIES);
     int alive[2], ready[2], events[2];
     assert(pipe(alive) == 0 && pipe(ready) == 0 && pipe(events) == 0);
     pid_t pid = fork();
@@ -253,6 +266,16 @@ static void write_identity(const struct profile *p,
     write_text(p, "vmrun.pid", text);
 }
 
+/* The pre-release vmrun.identity form: no executable UUID. */
+static void write_identity_without_uuid(const struct profile *p,
+                                        const struct supervisor *supervisor)
+{
+    char text[160];
+    snprintf(text, sizeof(text), "%d %" PRIu64 " %" PRIu64 "\n",
+             supervisor->pid, supervisor->start_sec, supervisor->start_usec);
+    write_text(p, "vmrun.identity", text);
+}
+
 static void profile_create(const char *root, const char *name,
                            struct profile *p)
 {
@@ -345,6 +368,98 @@ static void stop_signals_only_while_status_reports_start_identity(
     assert(!exists(&p, "vmrun.identity") && !exists(&p, "vmrun.pid"));
 }
 
+/* A live supervisor with a verified status, recorded by a vmrun.identity
+ * without its executable UUID, is not adopted: the identity file is neither
+ * trusted nor rewritten, and nothing signals or cleans up the process. */
+static void identity_without_uuid_is_not_adopted_from_a_status(
+    const char *root)
+{
+    struct profile p;
+    profile_create(root, "no-uuid-ctl", &p);
+    const enum reply replies[] = { REPLY_START_IDENTITY };
+    struct supervisor supervisor;
+    supervisor_start(&p, replies, 1, &supervisor);
+    write_identity(&p, &supervisor);
+    write_identity_without_uuid(&p, &supervisor);
+    char before[160], after[160];
+    read_text(&p, "vmrun.identity", before, sizeof(before));
+    int pid = -1;
+    assert(vm_process_probe(&p, &pid) == VM_PROCESS_UNVERIFIED && pid == -1);
+    assert(vm_cleanup_stale(&p) == -1);
+    int was_running = 1;
+    assert(vm_stop(&p, &was_running) == -1 && was_running == 0);
+    read_text(&p, "vmrun.identity", after, sizeof(after));
+    assert(strcmp(before, after) == 0 && exists(&p, "vmrun.pid"));
+    assert(!supervisor_kill(&supervisor));
+}
+
+/* Before vmrun serves its control socket, only a complete identity of the
+ * live process verifies it. The same process recorded without its UUID is
+ * unverified, like a corrupt identity, and is neither stopped nor cleaned. */
+static void identity_without_uuid_is_unverified_before_the_control_socket(
+    const char *root)
+{
+    struct profile p;
+    profile_create(root, "pre-ctl-uuid", &p);
+    struct supervisor supervisor;
+    supervisor_start(&p, NULL, 0, &supervisor);
+    write_identity(&p, &supervisor);
+    int pid = -1;
+    assert(vm_process_probe(&p, &pid) == VM_PROCESS_VERIFIED &&
+           pid == supervisor.pid);
+    assert(!supervisor_kill(&supervisor));
+
+    profile_create(root, "pre-ctl-no-uuid", &p);
+    supervisor_start(&p, NULL, 0, &supervisor);
+    write_identity_without_uuid(&p, &supervisor);
+    char before[160], after[160];
+    read_text(&p, "vmrun.identity", before, sizeof(before));
+    pid = -1;
+    assert(vm_process_probe(&p, &pid) == VM_PROCESS_UNVERIFIED && pid == -1);
+    assert(vm_cleanup_stale(&p) == -1);
+    int was_running = 1;
+    assert(vm_stop(&p, &was_running) == -1 && was_running == 0);
+    read_text(&p, "vmrun.identity", after, sizeof(after));
+    assert(strcmp(before, after) == 0);
+    assert(!supervisor_kill(&supervisor));
+}
+
+/* A complete identity of a process that is gone is stale and cleaned up. An
+ * identity without the UUID, like any unreadable identity, is unverified:
+ * its files stay for inspection. PID 2147483646 exceeds macOS's PID range,
+ * so no process can hold it. */
+static void identity_without_uuid_of_a_gone_process_is_kept(const char *root)
+{
+    static const struct {
+        const char *name;
+        const char *identity;
+        enum vm_process_state state;
+    } cases[] = {
+        { "gone-uuid",
+          "2147483646 1 1 0123456789abcdef0123456789abcdef\n",
+          VM_PROCESS_STALE },
+        { "gone-no-uuid", "2147483646 1 1\n", VM_PROCESS_UNVERIFIED },
+        { "gone-corrupt", "not an identity\n", VM_PROCESS_UNVERIFIED },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct profile p;
+        profile_create(root, cases[i].name, &p);
+        write_text(&p, "vmrun.identity", cases[i].identity);
+        write_text(&p, "vmrun.pid", "2147483646\n");
+        assert(vm_process_probe(&p, NULL) == cases[i].state);
+        if (cases[i].state == VM_PROCESS_STALE) {
+            assert(vm_cleanup_stale(&p) == 0);
+            assert(!exists(&p, "vmrun.identity") && !exists(&p, "vmrun.pid"));
+        } else {
+            char after[160];
+            assert(vm_cleanup_stale(&p) == -1);
+            read_text(&p, "vmrun.identity", after, sizeof(after));
+            assert(strcmp(after, cases[i].identity) == 0);
+            assert(exists(&p, "vmrun.pid"));
+        }
+    }
+}
+
 /* The cases run in a child, so a failed assertion still leaves this process
  * to remove the profiles; supervisors exit when that child's end of their
  * alive pipe closes. */
@@ -358,6 +473,9 @@ int main(void)
         status_with_start_identity_is_verified(root);
         status_without_matching_start_identity_is_unverified(root);
         stop_signals_only_while_status_reports_start_identity(root);
+        identity_without_uuid_is_not_adopted_from_a_status(root);
+        identity_without_uuid_is_unverified_before_the_control_socket(root);
+        identity_without_uuid_of_a_gone_process_is_kept(root);
         _exit(0);
     }
     int status = 0;
@@ -375,6 +493,7 @@ int main(void)
         return 1;
     }
     assert(removed);
-    puts("PASS: vmrun is adopted or signaled only with its reported start identity");
+    puts("PASS: vmrun is adopted or signaled only with its complete recorded "
+         "and reported identity");
     return 0;
 }
