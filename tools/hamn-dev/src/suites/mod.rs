@@ -15,6 +15,7 @@ mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
 mod profile_yaml;
+mod qcow2;
 mod remote_cancel_boundaries;
 mod rust_sdk;
 mod single_binary;
@@ -47,6 +48,7 @@ type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
+    ("qcow2", qcow2::main),
     ("diagnostics", diagnostics::main),
     ("docker-readiness", docker_readiness::main),
     ("observer-requests", observer_requests::main),

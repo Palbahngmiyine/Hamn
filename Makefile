@@ -390,7 +390,7 @@ test-qcow2: host
 	@test -n "$(HAMN_QCOW2_IMAGE)" || { \
 		echo "HAMN_QCOW2_IMAGE must name a signed guest image fixture" >&2; exit 2; \
 	}
-	HAMN=$(HOST_BIN) bash tests/host/test_qcow2.sh $(HAMN_QCOW2_IMAGE)
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test qcow2 $(HAMN_QCOW2_IMAGE)
 
 test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
