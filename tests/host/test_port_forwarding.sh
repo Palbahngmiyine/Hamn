@@ -247,8 +247,9 @@ test ! -e "$STATE"
 assert_process_gone "$UDP_PID"
 
 # A missing state file must not authorize replacing the only identity evidence
-# for a live relay. Legacy/malformed evidence is likewise preserved fail-closed;
-# only a complete token for a process that is definitely gone may be replaced.
+# for a live relay. An unverifiable (PID-only) pidfile is likewise preserved
+# fail-closed; only a complete token for a process that is definitely gone may
+# be replaced.
 "$TEST_BIN" add 127.0.0.1:48119:53/udp
 UDP_PID=$(awk -F '\t' '$3 == 48119 { print $5 }' "$STATE")
 UDP_STATE_RECORD=$(cat "$STATE")
@@ -267,7 +268,7 @@ assert_process_gone "$UDP_PID"
 
 printf '4242\n' >"$PROFILE/udp-127-0-0-1-48121.pid"
 if "$TEST_BIN" add 127.0.0.1:48121:53/udp >/dev/null 2>&1; then
-    echo "FAIL: legacy UDP pidfile was replaced" >&2
+    echo "FAIL: unverified UDP pidfile was replaced" >&2
     exit 1
 fi
 test "$(cat "$PROFILE/udp-127-0-0-1-48121.pid")" = 4242
@@ -315,14 +316,12 @@ UDP_PID=$(awk -F '\t' '$1 == "udp" { print $5 }' "$STATE")
 "$TEST_BIN" remove 127.0.0.1:48106:53/udp
 assert_process_gone "$UDP_PID"
 
-# Legacy TCP records remain cleanable. A mismatched UDP start token proves the
-# recorded relay is gone, so stale tracking clears without signaling the PID.
-printf 'tcp\t127.0.0.1\t48107\t80\t0\n' >"$STATE"
-"$TEST_BIN" cleanup
-grep -q $'^cancel\t127.0.0.1\t48107$' "$EVENTS"
+# A mismatched UDP start token proves the recorded relay is gone, so stale
+# tracking clears without signaling the PID.
 /bin/sleep 30 &
 UNRELATED=$!
-printf 'udp\t127.0.0.1\t48108\t53\t%s\t1\t1\n' "$UNRELATED" >"$STATE"
+printf 'udp\t127.0.0.1\t48108\t53\t%s\t1\t1\tcommitted\t0\t0\t0\n' \
+    "$UNRELATED" >"$STATE"
 printf '%s\n' "$UNRELATED" >"$PROFILE/udp-127-0-0-1-48108.pid"
 "$TEST_BIN" add 127.0.0.1:48116:53/udp
 VERIFIED_PID=$(awk -F '\t' '$3 == 48116 { print $5 }' "$STATE")
@@ -333,31 +332,33 @@ test ! -e "$STATE"
 test ! -e "$PROFILE/udp-127-0-0-1-48108.pid"
 test ! -e "$PROFILE/udp-127-0-0-1-48116.pid"
 
-# A legacy PID-only record cannot distinguish the relay from PID reuse. Every
-# destructive path fails and preserves both state and pidfile for inspection.
-printf 'udp\t127.0.0.1\t48109\t53\t%s\n' "$UNRELATED" >"$STATE"
+# A UDP record without a relay start token (a hand-edited record) cannot
+# distinguish the relay from PID reuse. Every destructive path fails and
+# preserves both state and pidfile for inspection.
+printf 'udp\t127.0.0.1\t48109\t53\t%s\t0\t0\tcommitted\t0\t0\t0\n' \
+    "$UNRELATED" >"$STATE"
 printf '%s\n' "$UNRELATED" >"$PROFILE/udp-127-0-0-1-48109.pid"
-if "$TEST_BIN" cleanup 2>"$WORK/legacy.err"; then
-    echo "FAIL: cleanup forgot a legacy UDP relay" >&2
+if "$TEST_BIN" cleanup 2>"$WORK/unverified.err"; then
+    echo "FAIL: cleanup forgot an unverified UDP relay" >&2
     exit 1
 fi
 kill -0 "$UNRELATED"
-grep -q 'refusing to stop unverified UDP forward process' "$WORK/legacy.err"
+grep -q 'refusing to stop unverified UDP forward process' "$WORK/unverified.err"
 awk -F '\t' -v pid="$UNRELATED" \
     'NF == 11 && $1 == "udp" && $5 == pid && $6 == 0 && $7 == 0 &&
      $8 == "committed" && $9 == 0 && $10 == 0 && $11 == 0' "$STATE" \
     | grep -q .
 test -e "$PROFILE/udp-127-0-0-1-48109.pid"
 if "$TEST_BIN" remove 127.0.0.1:48109:53/udp \
-    2>"$WORK/remove-legacy.err"; then
-    echo "FAIL: remove forgot a legacy UDP relay" >&2
+    2>"$WORK/remove-unverified.err"; then
+    echo "FAIL: remove forgot an unverified UDP relay" >&2
     exit 1
 fi
 kill -0 "$UNRELATED"
 test -e "$STATE"
 test -e "$PROFILE/udp-127-0-0-1-48109.pid"
-if "$TEST_BIN" reconcile '' 2>"$WORK/reconcile-legacy.err"; then
-    echo "FAIL: reconcile forgot a legacy UDP relay" >&2
+if "$TEST_BIN" reconcile '' 2>"$WORK/reconcile-unverified.err"; then
+    echo "FAIL: reconcile forgot an unverified UDP relay" >&2
     exit 1
 fi
 kill -0 "$UNRELATED"
@@ -376,7 +377,7 @@ mkfifo "$READY_FIFO"
 STUBBORN=$("$TEST_BIN" spawn-ignore-sigterm)
 bounded_fifo_read "$READY_FIFO" "the SIGTERM-resistant relay readiness"
 read -r START_SEC START_USEC <<<"$("$TEST_BIN" process-token "$STUBBORN")"
-printf 'udp\t127.0.0.1\t48110\t53\t%s\t%s\t%s\n' \
+printf 'udp\t127.0.0.1\t48110\t53\t%s\t%s\t%s\tcommitted\t0\t0\t0\n' \
     "$STUBBORN" "$START_SEC" "$START_USEC" >"$STATE"
 printf '%s\n' "$STUBBORN" >"$PROFILE/udp-127-0-0-1-48110.pid"
 "$TEST_BIN" cleanup
@@ -554,7 +555,7 @@ done
 # The fixed state capacity rejects both one more add and an oversized file.
 : >"$STATE"
 for offset in {0..127}; do
-    printf 'tcp\t127.0.0.1\t%s\t80\t0\t0\t0\n' \
+    printf 'tcp\t127.0.0.1\t%s\t80\t0\t0\t0\tcommitted\t0\t0\t0\n' \
         "$((49000 + offset))" >>"$STATE"
 done
 if "$TEST_BIN" add 127.0.0.1:49200:80/tcp >/dev/null 2>&1; then
@@ -562,7 +563,7 @@ if "$TEST_BIN" add 127.0.0.1:49200:80/tcp >/dev/null 2>&1; then
     exit 1
 fi
 test "$(state_count)" -eq 128
-printf 'tcp\t127.0.0.1\t49201\t80\t0\t0\t0\n' >>"$STATE"
+printf 'tcp\t127.0.0.1\t49201\t80\t0\t0\t0\tcommitted\t0\t0\t0\n' >>"$STATE"
 if "$TEST_BIN" cleanup >/dev/null 2>&1; then
     echo "FAIL: oversized port forward state was partially accepted" >&2
     exit 1
@@ -578,10 +579,10 @@ if "$TEST_BIN" reconcile '' >/dev/null 2>&1; then exit 1; fi
 if "$TEST_BIN" cleanup >/dev/null 2>&1; then exit 1; fi
 rm "$STATE"
 for invalid_record in \
-    $'tcp\tnot-an-ip\t49202\t80\t0\t0\t0' \
-    $'udp\t127.0.0.1\t49202\t53\t42\t1\t1000000' \
+    $'tcp\tnot-an-ip\t49202\t80\t0\t0\t0\tcommitted\t0\t0\t0' \
+    $'udp\t127.0.0.1\t49202\t53\t42\t1\t1000000\tcommitted\t0\t0\t0' \
     $'tcp\t127.0.0.1\t49202\t80\t0\t0' \
-    $'tcp\t127.0.0.1\t49202\t80\t0\t0\t0\tunknown' \
+    $'tcp\t127.0.0.1\t49202\t80\t0\t0\t0\tunknown\t0\t0\t0' \
     $'tcp\t127.0.0.1\t49202\t80\t0\t0\t0\tpending\textra'; do
     printf '%s\n' "$invalid_record" >"$STATE"
     if "$TEST_BIN" cleanup >/dev/null 2>&1; then
@@ -590,6 +591,55 @@ for invalid_record in \
     fi
 done
 rm "$STATE"
+
+# Pre-release 5-, 7- and 8-field records are corrupt state, alone or after a
+# valid record. Loading fails as a whole: no mutation rewrites the file,
+# touches a listener or signals the recorded relay, even when the record's
+# start token matches the live process.
+/bin/sleep 30 &
+UNRELATED=$!
+read -r START_SEC START_USEC <<<"$("$TEST_BIN" process-token "$UNRELATED")"
+printf '%s\t%s\t%s\n' "$UNRELATED" "$START_SEC" "$START_USEC" \
+    >"$PROFILE/udp-127-0-0-1-49203.pid"
+cp "$PROFILE/udp-127-0-0-1-49203.pid" "$WORK/pidfile-before"
+VALID_RECORD=$'tcp\t127.0.0.1\t49204\t80\t0\t0\t0\tcommitted\t0\t0\t0'
+for legacy_record in \
+    $'tcp\t127.0.0.1\t49203\t80\t0' \
+    "$(printf 'udp\t127.0.0.1\t49203\t53\t%s' "$UNRELATED")" \
+    "$(printf 'udp\t127.0.0.1\t49203\t53\t%s\t%s\t%s' \
+        "$UNRELATED" "$START_SEC" "$START_USEC")" \
+    "$(printf 'udp\t127.0.0.1\t49203\t53\t%s\t%s\t%s\tcommitted' \
+        "$UNRELATED" "$START_SEC" "$START_USEC")"; do
+    for state in "$legacy_record" "$VALID_RECORD"$'\n'"$legacy_record"; do
+        printf '%s\n' "$state" >"$STATE"
+        cp "$STATE" "$WORK/state-before"
+        cp "$EVENTS" "$WORK/events-before"
+        for command in cleanup reconcile remove-tcp remove-udp add commit \
+            sync; do
+            case "$command" in
+            cleanup) set -- cleanup ;;
+            reconcile) set -- reconcile '' ;;
+            remove-tcp) set -- remove 127.0.0.1:49203:80/tcp ;;
+            remove-udp) set -- remove 127.0.0.1:49203:53/udp ;;
+            add) set -- add 127.0.0.1:49205:80/tcp ;;
+            commit) set -- commit 127.0.0.1:49204:80/tcp ;;
+            sync) set -- sync ;;
+            esac
+            if "$TEST_BIN" "$@" >/dev/null 2>&1; then
+                echo "FAIL: $command accepted a pre-release record" >&2
+                exit 1
+            fi
+            cmp -s "$STATE" "$WORK/state-before"
+            cmp -s "$EVENTS" "$WORK/events-before"
+            cmp -s "$PROFILE/udp-127-0-0-1-49203.pid" "$WORK/pidfile-before"
+            kill -0 "$UNRELATED"
+        done
+    done
+done
+rm "$STATE" "$PROFILE/udp-127-0-0-1-49203.pid"
+kill "$UNRELATED"
+wait "$UNRELATED" 2>/dev/null || true
+UNRELATED=
 
 # Every public mutation fails before touching state when the process lock
 # cannot be opened.
