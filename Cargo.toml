@@ -9,6 +9,12 @@ build = "build.rs"
 name = "hamn"
 path = "control/main.rs"
 
+# tools/hamn-dev holds build, test and release tooling. It is never shipped;
+# plain `cargo build` and `cargo test` still act on the product only.
+[workspace]
+members = ["tools/hamn-dev"]
+default-members = ["."]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

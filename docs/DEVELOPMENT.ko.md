@@ -40,8 +40,8 @@ build/hamn --headless capabilities
 ```
 
 Cargo는 `Cargo.lock`으로 의존성을 고정하고 자체 출력 디렉터리에 C/Objective-C
-정적 라이브러리를 만듭니다. `scripts/build-host.py`는 게시를 직렬화하고 임시
-실행 파일을 서명·검증한 뒤 `build/hamn`을 원자적으로 교체합니다. 단일 Mach-O는
+정적 라이브러리를 만듭니다. `hamn-dev build-host`(배포하지 않는 `tools/hamn-dev`
+워크스페이스 crate)는 게시를 직렬화하고 임시 실행 파일을 서명·검증한 뒤 `build/hamn`을 원자적으로 교체합니다. 단일 Mach-O는
 macOS 시스템 라이브러리와 기존 Virtualization entitlement를 사용합니다.
 Ad-hoc 서명이며 Developer ID 서명이나 공증은 아닙니다. 코어 실행 파일이나
 전용 동적 라이브러리를 별도로 배포하지 않습니다.

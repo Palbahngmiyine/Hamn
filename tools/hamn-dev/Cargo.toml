@@ -1,0 +1,17 @@
+[package]
+name = "hamn-dev"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Hamn's build, test and release tooling; never shipped in an artifact."
+
+[[bin]]
+name = "hamn-dev"
+path = "src/main.rs"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+unicode-width = "0.2"

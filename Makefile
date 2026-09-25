@@ -5,6 +5,8 @@ CARGO_PROFILE ?= release
 VERSION    ?= 0.1.2
 # x-release-please-end
 VERSION_STAMP := $(BUILD)/.hamn-version
+# tools/hamn-dev publishes build/hamn and runs the host regression suites.
+HAMN_DEV := $(or $(CARGO_TARGET_DIR),target)/$(if $(filter dev,$(CARGO_PROFILE)),debug,$(CARGO_PROFILE))/hamn-dev
 PREFIX     ?= $(HOME)/.local
 BINDIR     ?= $(PREFIX)/bin
 DATADIR    ?= $(PREFIX)/share/hamn/src
@@ -52,7 +54,7 @@ START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retr
 
 -include $(HOST_DEPS)
 
-.PHONY: FORCE host install clean test-portable test-qcow2 test-control \
+.PHONY: FORCE host hamn-dev install clean test-portable test-qcow2 test-control \
 	test-profile-state test-guest-deployment test-diagnostics test-install \
 	test-uninstall test-update test-release-artifacts test-hosted-validation \
 	test-release-gate test-release-publish \
@@ -91,8 +93,13 @@ $(BUILD)/libhamn_core.a: $(HOST_OBJS)
 	ar rcs $@.tmp $(HOST_OBJS)
 	mv $@.tmp $@
 
-$(HOST_BIN): FORCE host/entitlements.plist
-	MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) python3 scripts/build-host.py $@ $(VERSION) $(CARGO_PROFILE)
+# The same deployment target as the product build, so both builds reuse one
+# set of dependency artifacts.
+hamn-dev:
+	MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) cargo build --locked --profile $(CARGO_PROFILE) -p hamn-dev
+
+$(HOST_BIN): FORCE host/entitlements.plist hamn-dev
+	MACOSX_DEPLOYMENT_TARGET=$(MACOS_MIN) $(HAMN_DEV) build-host $@ $(VERSION) $(CARGO_PROFILE)
 
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
@@ -214,7 +221,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_session_management.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_workspaces.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_outcomes.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_native_regressions.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-native-regressions
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_quoting.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_reload.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_native_query_lifetime.py
@@ -234,9 +241,9 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_guarded_delete.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py
 	python3 tests/host/test_k3s_retirement.py
-	python3 tests/host/test_build_publish.py
+	cargo test --locked -p hamn-dev
 	python3 tests/host/test_rust_sdk.py
-	HAMN=$(HOST_BIN) bash tests/host/test_single_binary.sh
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test single-binary
 
 test-workflows:
 	@command -v actionlint >/dev/null || { \

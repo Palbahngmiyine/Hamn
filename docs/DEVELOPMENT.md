@@ -40,8 +40,8 @@ build/hamn --headless capabilities
 ```
 
 Cargo locks dependencies in `Cargo.lock` and builds C/Objective-C into a static
-archive in its own output directory. `scripts/build-host.py` serializes
-publication, signs and checks a temporary executable, then atomically replaces
+archive in its own output directory. `hamn-dev build-host` (the `tools/hamn-dev`
+workspace crate, never shipped) serializes publication, signs and checks a temporary executable, then atomically replaces
 `build/hamn`. The single Mach-O uses macOS system libraries and the existing
 Virtualization entitlement. This is ad-hoc signing, not Developer ID signing
 or notarization. Do not distribute a separate core executable or dynamic library.
