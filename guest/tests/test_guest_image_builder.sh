@@ -1,5 +1,7 @@
 #!/bin/bash
 set -euo pipefail
+# A failing assertion must name itself; CI otherwise shows only the exit.
+trap 'echo "FAIL: ${BASH_SOURCE[0]}:$LINENO: $BASH_COMMAND" >&2' ERR
 
 GUEST_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PROJECT_ROOT=$(cd "$GUEST_ROOT/.." && pwd)
@@ -172,7 +174,11 @@ HAMN_TEST_GUESTFISH_RESIZE_COMMANDS="$GUESTFISH_RESIZE_COMMANDS" \
     echo "FAIL: empty synthetic image passed actual extraction validation" >&2
     exit 1
 fi
-grep -Fq 'qcow2: file too small' "$WORK/build.err"
+grep -Fq 'qcow2: file too small' "$WORK/build.err" || {
+    echo "FAIL: the synthetic image was not rejected by qcow2 extraction" >&2
+    cat "$WORK/build.err" >&2
+    exit 1
+}
 [ ! -e "$OUTPUT" ]
 [ ! -e "$WORK/baseline.img" ]
 [ ! -e "$WORK/baseline.img.sha256" ]
