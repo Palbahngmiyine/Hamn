@@ -103,59 +103,33 @@ if grep -E '/(guest|shared|vendor)(/|$)' "$WORK/host-members" >/dev/null; then
     echo "FAIL: host artifact contains mutable guest build sources" >&2
     exit 1
 fi
-grep -Fxq 'hamn-v0.0.1-darwin-arm64/packaging/release/physical-e2e.sh' \
-    "$WORK/host-members" ||
-    {
-        echo "FAIL: host artifact is missing its physical E2E harness" >&2
-        exit 1
-    }
 if grep -Fq '/colima-benchmark.sh' "$WORK/host-members"; then
     echo "FAIL: host artifact still contains a removed Colima benchmark harness" >&2
     exit 1
 fi
-EXTRACTED=$WORK/extracted
-mkdir "$EXTRACTED"
-tar -xzf "$HOST_ARTIFACT" -C "$EXTRACTED"
-for harness in physical-e2e.sh; do
-    path=$EXTRACTED/hamn-v0.0.1-darwin-arm64/packaging/release/$harness
-    [ -x "$path" ] || {
-        echo "FAIL: candidate release harness is not executable: $harness" >&2
-        exit 1
-    }
-    "$path" --help >"$WORK/$harness.help"
-    grep -Fq "usage: $harness" "$WORK/$harness.help" || {
-        echo "FAIL: candidate release harness did not run: $harness" >&2
-        exit 1
-    }
-done
+# The physical harness is hamn-dev, built from the validated checkout by
+# `make release-gate`; the shipped archive carries no release harness.
+if grep -E '/packaging/release/(physical-e2e|physical_contract|external-kubernetes-e2e|complete-release-pr|release-pr-ready)' \
+    "$WORK/host-members" >/dev/null; then
+    echo "FAIL: host artifact still ships a removed Python release harness" >&2
+    exit 1
+fi
 HOST_HASH=$(sha256 "$HOST_ARTIFACT")
 GUEST_HASH=$(sha256 "$GUEST_ARTIFACT")
-python3 - "$WORK/candidate/hamn-v0.0.1.spdx.json" "$HOST_HASH" "$GUEST_HASH" <<'PY'
-import json
-import re
-import sys
-
-path, host_hash, guest_hash = sys.argv[1:]
-with open(path, encoding="utf-8") as source:
-    sbom = json.load(source)
-creation = sbom.get("creationInfo")
-if not isinstance(creation, dict) or set(creation) != {
-        "creators", "created", "licenseListVersion"} or \
-        creation["creators"] != ["Tool: hamn-release-candidate"] or \
-        not isinstance(creation["created"], str) or \
-        not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
-                         creation["created"]):
-    raise SystemExit("SBOM creation metadata is invalid")
-packages = sbom.get("packages")
-if not isinstance(packages, list) or len(packages) != 2:
-    raise SystemExit("SBOM packages are invalid")
-checksums = {item["name"]: item["checksums"] for item in packages}
-if checksums.get("hamn-v0.0.1-darwin-arm64.tar.gz") != [
-        {"algorithm": "SHA256", "checksumValue": host_hash}] or \
-        checksums.get("hamn-v0.0.1-ubuntu-24.04-arm64.img") != [
-        {"algorithm": "SHA256", "checksumValue": guest_hash}]:
-    raise SystemExit("SBOM hashes do not bind candidate artifacts")
-PY
+jq -e --arg host "$HOST_HASH" --arg guest "$GUEST_HASH" '
+    ([.packages[]? | {key: .name, value: .checksums}] | from_entries) as $sums |
+    (.creationInfo | type == "object" and
+        keys == ["created", "creators", "licenseListVersion"] and
+        .creators == ["Tool: hamn-release-candidate"] and
+        (.created | type == "string" and
+            test("\\A[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z\\z"))) and
+    (.packages | type == "array" and length == 2) and
+    $sums["hamn-v0.0.1-darwin-arm64.tar.gz"] == [{"algorithm": "SHA256", "checksumValue": $host}] and
+    $sums["hamn-v0.0.1-ubuntu-24.04-arm64.img"] == [{"algorithm": "SHA256", "checksumValue": $guest}]
+' "$WORK/candidate/hamn-v0.0.1.spdx.json" >/dev/null || {
+    echo "FAIL: SBOM creation metadata or hashes do not bind candidate artifacts" >&2
+    exit 1
+}
 printf '%s' \
     '{"schemaVersion":2,"channel":"stable","version":"v0.0.1",' \
     '"commit":"'"$RELEASE_REF"'","validationMode":"github-hosted-no-vm",' \

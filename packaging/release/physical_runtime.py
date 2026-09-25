@@ -1,16 +1,14 @@
-"""Isolated VM/Docker and terminal helpers for the physical release harness."""
-import fcntl
+"""Isolated VM/Docker helpers kept only for the workspace_live Python tests.
+
+The physical release harness is tools/hamn-dev/src/release (runtime.rs holds
+the Rust equivalent of this module). Delete this file when the live tests
+that import it (tests/host/test_workspace_live.py, workspace_live_*.py and
+test_guest_image_live.py) are ported.
+"""
 import json
-import os
 from pathlib import Path
-import pty
-import select
 import shlex
-import signal
-import struct
 import subprocess
-import termios
-import time
 
 
 def run(command, env=None, timeout=660, data=None):
@@ -19,12 +17,6 @@ def run(command, env=None, timeout=660, data=None):
     if result.returncode:
         raise RuntimeError(f'{command[0]} failed ({result.returncode}): {result.stderr[-4096:]} {result.stdout[-4096:]}')
     return result.stdout
-
-
-def terminal_settings(fd):
-    settings = termios.tcgetattr(fd)
-    settings[3] &= ~getattr(termios, 'PENDIN', 0)
-    return settings
 
 
 class Runtime:
@@ -60,86 +52,6 @@ class Runtime:
                     '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'UserKnownHostsFile=/dev/null',
                     '-o', 'StrictHostKeyChecking=no', '-o', 'ConnectTimeout=10',
                     'hamn@' + status['ip'], shlex.join(['sudo', 'bash', '-euc', script])], self.environment)
-
-    def snapshot(self, profile):
-        result = {}
-        for group, key in [('containers', 'Id'), ('images', 'Id'), ('volumes', 'Name'), ('networks', 'Id')]:
-            rows = self.call('docker', group, 'list', profile=profile)
-            if group == 'networks':
-                builtin = {'bridge', 'host', 'none'}
-                result['builtinNetworks'] = sorted(row['Name'] for row in rows if row['Name'] in builtin)
-                if set(result['builtinNetworks']) != builtin:
-                    raise RuntimeError('Docker built-in networks are missing')
-                rows = [row for row in rows if row['Name'] not in builtin]
-            result[group] = sorted(row[key] for row in rows)
-        result['volumeSha256'] = self.engine('run', '--rm', '--pull=never', '--network=none',
-            '--mount', 'type=volume,src=hamn-retirement-data,dst=/data,readonly',
-            'busybox:1.37', 'sha256sum', '/data/sentinel', profile=profile).split()[0]
-        return result
-
-    def terminal(self):
-        master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 100, 0, 0))
-        before = terminal_settings(slave)
-        child = subprocess.Popen([self.binary], stdin=slave, stdout=slave, stderr=slave,
-            env=dict(self.environment, TERM='xterm-256color'), start_new_session=True)
-        output = bytearray()
-        try:
-            deadline = time.monotonic() + 15
-            while b'Hamn' not in output:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0 or not select.select([master], [], [], remaining)[0]:
-                    raise RuntimeError('TUI did not render before the deadline')
-                output.extend(os.read(master, 65536))
-            os.write(master, b'q')
-            deadline = time.monotonic() + 10
-            # Continue consuming redraw/restore bytes while quitting: a full
-            # PTY output queue can otherwise block the application's writer.
-            while child.poll() is None and time.monotonic() < deadline:
-                if select.select([master], [], [], max(0, min(0.1, deadline - time.monotonic())))[0]:
-                    os.read(master, 65536)
-            if child.wait(timeout=1) or terminal_settings(slave) != before:
-                raise RuntimeError('TUI did not restore the terminal')
-        finally:
-            if child.poll() is None:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait(timeout=10)
-            os.close(master)
-            os.close(slave)
-
-    def retire_running(self, profile):
-        """Prove TUI entry is read-only before explicitly confirming retirement."""
-        before = self.call('vm', 'status', profile=profile)
-        fields = ('state', 'migration', 'lastOperation')
-        if not all(key in before for key in fields) or before['state'] != 'running' or before['migration'] != 'pending':
-            raise RuntimeError('running legacy fixture must have pending retirement')
-        self.terminal()
-        after = self.call('vm', 'status', profile=profile)
-        if any(key not in after or after[key] != before[key] for key in fields):
-            raise RuntimeError('TUI entry changed legacy state before confirmation')
-        # A running VM does not establish that this is the running-K3s case.
-        self.ssh("timeout 190 sh -c 'until systemctl is-active --quiet k3s.service && "
-                 "systemctl is-enabled --quiet k3s.service && "
-                 "k3s kubectl --request-timeout=5s get --raw=/readyz >/dev/null; "
-                 "do sleep 1; done'", profile=profile)
-        self.call('vm', 'migrate', profile=profile, yes=True)
-
-    def verify_retired(self, profile):
-        script = '''
-test "$(readlink /etc/systemd/system/k3s.service)" = /dev/null
-test ! -e /usr/local/bin/k3s
-test ! -e /var/lib/rancher/k3s
-test ! -e /etc/rancher/k3s
-test ! -e /var/lib/kubelet
-test ! -e /var/lib/cni/networks/cbr0
-test ! -e /run/flannel
-test ! -e /etc/hamn/k3s-compatibility.json
-test "$(ctr --namespace k8s.io containers list -q | wc -l)" -eq 0
-cat /var/lib/hamn/k3s-retirement-v1.json
-'''
-        journal = json.loads(self.ssh(script, profile=profile))
-        if journal != {'version': 1, 'stage': 'complete'}:
-            raise RuntimeError('retirement journal is incomplete')
 
     def stop(self, profiles):
         errors = []

@@ -49,22 +49,24 @@ host=$candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 host_hash=$(sha256 "$host")
 # Synthetic fixture evidence exercises the gate; it is never production image
 # measurement and is only accepted through the explicit local-test boundary.
-python3 - "$candidate/hamn-v0.0.1-ubuntu-24.04-arm64.img" \
-    "$evidence/guest-image-size-report.json" "$WORK/size-budget.json" "$release_ref" <<'PY_SIZE'
-import hashlib, json, pathlib, sys
-image, report_path, budget_path, revision = sys.argv[1:]
-data = pathlib.Path(image).read_bytes()
-digest = hashlib.sha256(data).hexdigest()
-baseline = len(data) + 64 * 1024**2
-report = {"schemaVersion":1,"reviewOnly":False,"compressedBytes":len(data),"imageSha256":digest,
-    "baselineCompressedBytes":baseline,"baselineSha256":"1"*64,"savedBytes":64*1024**2,
-    "requiredSavingsBytes":64*1024**2,"virtualBytes":8*1024**3,"baseImageSha256":"2"*64,
-    "sourceRevision":revision,"packagesBefore":["fixture"],"packagesAfter":["fixture"],"cleanup":["fixture only"],"runtimeValidation":"not executed"}
-pathlib.Path(report_path).write_text(json.dumps(report))
-budget={"schemaVersion":1,"maximumCompressedBytes":len(data)+1,"referenceImageSha256":digest,
-    "footprintReportSha256":hashlib.sha256(pathlib.Path(report_path).read_bytes()).hexdigest()}
-pathlib.Path(budget_path).write_text(json.dumps(budget))
-PY_SIZE
+image=$candidate/hamn-v0.0.1-ubuntu-24.04-arm64.img
+image_bytes=$(stat -f %z "$image")
+jq -n --argjson bytes "$image_bytes" --arg digest "$(sha256 "$image")" \
+    --arg revision "$release_ref" --arg ones "$(printf '%064d' 0 | tr 0 1)" \
+    --arg twos "$(printf '%064d' 0 | tr 0 2)" '{
+        schemaVersion: 1, reviewOnly: false, compressedBytes: $bytes,
+        imageSha256: $digest, baselineCompressedBytes: ($bytes + 64 * 1048576),
+        baselineSha256: $ones, savedBytes: (64 * 1048576),
+        requiredSavingsBytes: (64 * 1048576), virtualBytes: (8 * 1073741824),
+        baseImageSha256: $twos, sourceRevision: $revision,
+        packagesBefore: ["fixture"], packagesAfter: ["fixture"],
+        cleanup: ["fixture only"], runtimeValidation: "not executed"}' \
+    >"$evidence/guest-image-size-report.json"
+jq -n --argjson bytes "$image_bytes" --arg digest "$(sha256 "$image")" \
+    --arg report "$(sha256 "$evidence/guest-image-size-report.json")" '{
+        schemaVersion: 1, maximumCompressedBytes: ($bytes + 1),
+        referenceImageSha256: $digest, footprintReportSha256: $report}' \
+    >"$WORK/size-budget.json"
 export HAMN_RELEASE_ALLOW_LOCAL=1 HAMN_TEST_RELEASE_SIZE_BUDGET="$WORK/size-budget.json"
 publish=$WORK/publish
 mkdir "$publish"
@@ -78,41 +80,37 @@ HAMN_EXPECTED_WORKFLOW_ATTEMPT="$workflow_attempt" \
 [ "$(sha256 "$host")" = "$host_hash" ]
 [ ! -e "$publish/hamn-update-manifest.json.sig" ]
 [ ! -e "$publish/validation-evidence.json.sig" ]
+# Only the schema v3 manifest is published.
+[ ! -e "$publish/hamn-update-manifest.json" ]
 # Keep publisher URLs and bytes unchanged; native curl uses a bounded local TLS
 # CONNECT fixture with child-only trust, not a PATH replacement.
-python3 "$ROOT/tests/host/publisher_consumer.py" "$publish" "$candidate" "$WORK/consumers"
-python3 - "$publish/hamn-update-manifest.json" "$release_ref" \
-    "$publish/hosted-validation-evidence.json" "$source_tree" \
-    "$publish/hamn-update-manifest-v3.json" "$candidate" <<'PY'
-import json
-import os
-import sys
-
-manifest_path, commit, evidence_path, tree, v3_path, candidate = sys.argv[1:]
-with open(manifest_path, encoding="utf-8") as source:
-    manifest = json.load(source)
-if manifest.get("schemaVersion") != 2 or manifest.get("version") != "v0.0.1" or \
-        set(manifest) != {"schemaVersion", "channel", "version", "commit",
-                         "validationMode", "compatibility", "artifacts"} or \
-        manifest.get("commit") != commit or \
-        manifest.get("validationMode") != "github-hosted-no-vm":
-    raise SystemExit("keyless update manifest identity is invalid")
-if not manifest["artifacts"]["host"]["url"].startswith(
-        "https://github.com/example/hamn/releases/download/v0.0.1/"):
-    raise SystemExit("host URL is not canonical")
-with open(evidence_path, encoding="utf-8") as source:
-    evidence = json.load(source)
-if evidence.get("physicalE2E") is not False or \
-        evidence.get("sourceTree") != tree:
-    raise SystemExit("hosted evidence overstates validation")
-with open(v3_path, encoding="utf-8") as source:
-    v3 = json.load(source)
-assert v3["schemaVersion"] == 3
-for name in ("host", "guestImage"):
-    old, new = manifest["artifacts"][name], v3["artifacts"][name]
-    assert old["sha256"] == new["sha256"] and old["url"] == new["url"]
-    assert new["size"] == os.path.getsize(os.path.join(candidate, new["url"].rsplit("/", 1)[1]))
-PY
+HAMN_SOURCE_ROOT="$ROOT" HAMN_PUBLISHED_DIR="$publish" HAMN_CANDIDATE_DIR="$candidate" \
+HAMN_CONSUMER_WORK="$WORK/consumers" \
+    "$HAMN_DEV" test release-publisher-consumer
+guest=$candidate/hamn-v0.0.1-ubuntu-24.04-arm64.img
+jq -e --arg commit "$release_ref" \
+    --arg base "https://github.com/example/hamn/releases/download/v0.0.1" \
+    --arg host_hash "$host_hash" --argjson host_size "$(stat -f %z "$host")" \
+    --arg guest_hash "$(sha256 "$guest")" --argjson guest_size "$(stat -f %z "$guest")" '
+    (keys == ["artifacts", "channel", "commit", "compatibility", "schemaVersion",
+        "validationMode", "version"]) and
+    .schemaVersion == 3 and .channel == "stable" and .version == "v0.0.1" and
+    .commit == $commit and .validationMode == "github-hosted-no-vm" and
+    .compatibility == {"os": "darwin", "architecture": "arm64", "minimumMacOS": "13.0"} and
+    .artifacts.host == {"url": ($base + "/hamn-v0.0.1-darwin-arm64.tar.gz"),
+        "sha256": $host_hash, "size": $host_size} and
+    .artifacts.guestImage == {"url": ($base + "/hamn-v0.0.1-ubuntu-24.04-arm64.img"),
+        "sha256": $guest_hash, "size": $guest_size, "format": "qcow2",
+        "compression": "zlib", "virtualSize": 8589934592}
+' "$publish/hamn-update-manifest-v3.json" >/dev/null || {
+    echo "FAIL: keyless update manifest does not bind the exact candidate" >&2
+    exit 1
+}
+jq -e --arg tree "$source_tree" '.physicalE2E == false and .sourceTree == $tree' \
+    "$publish/hosted-validation-evidence.json" >/dev/null || {
+    echo "FAIL: hosted evidence overstates validation" >&2
+    exit 1
+}
 
 # Missing reviewed evidence and review-only reports must fail at publication,
 # even when all candidate and hosted-validation identities are otherwise valid.
@@ -124,11 +122,8 @@ for size_failure in missing-budget review-only; do
     if [ "$size_failure" = missing-budget ]; then
         test_budget=$WORK/absent-budget.json
     else
-        python3 - "$evidence/guest-image-size-report.json" <<'PY_REVIEW'
-import json, pathlib, sys
-path=pathlib.Path(sys.argv[1]); value=json.loads(path.read_text())
-value['reviewOnly']=True; path.write_text(json.dumps(value))
-PY_REVIEW
+        jq '.reviewOnly = true' "$WORK/size-report.backup" \
+            >"$evidence/guest-image-size-report.json"
     fi
     if HAMN_TEST_RELEASE_SIZE_BUDGET="$test_budget" \
         HAMN_RELEASE_REPOSITORY="$repository" \
@@ -141,7 +136,7 @@ PY_REVIEW
         exit 1
     fi
     grep -Fq 'guest image size evidence or reviewed release budget is missing or invalid' "$WORK/$size_failure.err"
-    [ ! -e "$rejected/hamn-update-manifest.json" ]
+    [ ! -e "$rejected/hamn-update-manifest-v3.json" ]
 done
 cp "$WORK/size-report.backup" "$evidence/guest-image-size-report.json"
 
@@ -159,18 +154,8 @@ fi
 grep -Fq 'hosted validation workflow provenance mismatch' "$WORK/wrong-run.err"
 
 cp "$evidence/hosted-validation-evidence.json" "$WORK/evidence.backup"
-python3 - "$evidence/hosted-validation-evidence.json" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-with open(path, encoding="utf-8") as source:
-    value = json.load(source)
-value["physicalE2E"] = True
-with open(path, "w", encoding="utf-8", newline="\n") as output:
-    json.dump(value, output, sort_keys=True, separators=(",", ":"))
-    output.write("\n")
-PY
+jq -S -c '.physicalE2E = true' "$WORK/evidence.backup" \
+    >"$evidence/hosted-validation-evidence.json"
 overstated=$WORK/overstated
 mkdir "$overstated"
 if HAMN_RELEASE_REPOSITORY="$repository" \

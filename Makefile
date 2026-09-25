@@ -471,42 +471,47 @@ test-update-script: host
 	HAMN=$(HOST_BIN) bash tests/host/test_update.sh
 
 # Candidate tests build their own release versions and never read the
-# checkout's build/hamn, so they do not rebuild it first.
-test-release-artifacts:
-	bash tests/host/test_release_artifacts.sh
+# checkout's build/hamn, so they do not rebuild it first. Release scripts
+# run their JSON, evidence and GitHub logic through hamn-dev (HAMN_DEV, an
+# absolute path because some tests run copies of the scripts elsewhere).
+RELEASE_TOOL := HAMN_DEV=$(abspath $(HAMN_DEV))
 
-test-hosted-validation:
-	bash tests/host/test_hosted_validation.sh
+test-release-artifacts: hamn-dev
+	$(RELEASE_TOOL) bash tests/host/test_release_artifacts.sh
 
-test-release-gate:
-	bash tests/host/test_release_gate.sh
+test-hosted-validation: hamn-dev
+	$(RELEASE_TOOL) bash tests/host/test_hosted_validation.sh
 
-test-release-publish:
-	bash tests/host/test_release_publish.sh
+test-release-gate: hamn-dev
+	$(RELEASE_TOOL) bash tests/host/test_release_gate.sh
 
-test-release-version:
-	bash tests/host/test_release_version.sh
-	python3 tests/host/test_release_completion.py
-	python3 tests/host/test_release_pr_ready.py
+test-release-publish: hamn-dev
+	$(RELEASE_TOOL) bash tests/host/test_release_publish.sh
+
+test-release-version: hamn-dev
+	$(RELEASE_TOOL) bash tests/host/test_release_version.sh
+	$(HAMN_DEV) test release-github
 	bash tests/host/test_release_network.sh
 
-test-release-request:
-	bash tests/host/test_release_request.sh
+test-release-request: hamn-dev
+	$(RELEASE_TOOL) bash tests/host/test_release_request.sh
 
 test-public-export:
 	bash tests/host/test_public_export.sh
 
-test-release-repository-preflight:
-	bash tests/host/test_release_repository_preflight.sh
+test-release-repository-preflight: hamn-dev
+	$(RELEASE_TOOL) bash tests/host/test_release_repository_preflight.sh
 
-release-candidate:
-	bash packaging/release/build-candidate.sh
+release-candidate: hamn-dev
+	$(RELEASE_TOOL) bash packaging/release/build-candidate.sh
 
-release-hosted-validation:
-	bash packaging/release/hosted-validation.sh
+release-hosted-validation: hamn-dev
+	$(RELEASE_TOOL) bash packaging/release/hosted-validation.sh
 
-release-gate:
-	bash packaging/release/release-gate.sh
+# The physical harness is hamn-dev built here from the checkout that the
+# gate then requires to be clean and to match the candidate's source.
+release-gate: hamn-dev
+	$(RELEASE_TOOL) bash packaging/release/release-gate.sh
 
 test-kubernetes-cli: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
