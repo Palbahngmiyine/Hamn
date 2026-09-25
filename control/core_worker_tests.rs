@@ -65,13 +65,16 @@ print(json.dumps({'Ok': {'completed': True, 'holderPid': child.pid}}), flush=Tru
 async fn cancellation_keeps_streaming_and_waits_for_owned_worker_cleanup_gate() {
     let fixture = Fixture::new("cleanup-gate", r#"
 def cleanup(*_):
+    # SIGTERM follows 'worker-ready' at once and can interrupt that print();
+    # printing to the same buffered stream from here is then reentrant, so
+    # the handler writes and exits without Python's buffers.
     gate = socket.socket(socket.AF_UNIX)
     gate.connect(str(root / 'cleanup.sock'))
-    print('cleanup-started', file=sys.stderr, flush=True)
+    os.write(2, b'cleanup-started\n')
     gate.recv(1)
-    print('cleanup-completed', file=sys.stderr, flush=True)
-    print(json.dumps({'Ok': {'cleanup': 'completed'}}), flush=True)
-    sys.exit(0)
+    os.write(2, b'cleanup-completed\n')
+    os.write(1, json.dumps({'Ok': {'cleanup': 'completed'}}).encode() + b'\n')
+    os._exit(0)
 signal.signal(signal.SIGTERM, cleanup)
 print('worker-ready', file=sys.stderr, flush=True)
 signal.pause()

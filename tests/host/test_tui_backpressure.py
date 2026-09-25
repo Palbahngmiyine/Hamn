@@ -19,12 +19,14 @@ if 'stdin-proof' not in sys.argv:
     print(json.dumps({'ID': 'abc123', 'Names': 'old-target-row', 'State': 'running'}))
     sys.exit(0)
 tty.setraw(0)
+# A signal can interrupt the main flow's print() to the same stdout, where a
+# second print() is reentrant; the handlers write without Python's buffers.
 def interrupted(number, *_):
-    print('CLI_INTERRUPTED', flush=True)
-    sys.exit(128 + number)
+    os.write(1, b'CLI_INTERRUPTED\n')
+    os._exit(128 + number)
 signal.signal(signal.SIGINT, interrupted)
 signal.signal(signal.SIGTERM, interrupted)
-signal.signal(signal.SIGWINCH, lambda *_: print('RESIZED:%dx%d' % os.get_terminal_size(0), flush=True))
+signal.signal(signal.SIGWINCH, lambda *_: os.write(1, ('RESIZED:%dx%d\n' % os.get_terminal_size(0)).encode()))
 print('INPUT_READY', flush=True)
 with (root / 'gate').open() as gate:
     gate.read(1)
