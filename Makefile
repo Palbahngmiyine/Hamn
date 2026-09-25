@@ -440,16 +440,16 @@ test-update-recovery: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-recovery-ownership
 
 test-update-check: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_update_check.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test update-check
 
 test-update-cli: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_cli.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-cli
 
 test-update-ux-redirected: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_update_ux.py redirected
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test update-ux redirected
 
 test-update-ux-pty: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_update_ux.py pty
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test update-ux pty
 
 test-update-script: host
 	HAMN=$(HOST_BIN) bash tests/host/test_update.sh

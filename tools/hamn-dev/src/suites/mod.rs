@@ -41,6 +41,9 @@ mod tui_ssh_timeout;
 mod tui_tls_target;
 mod tui_workspaces;
 mod udp_proxy;
+mod update_check;
+mod update_ux;
+mod upgrade_cli;
 mod upgrade_concurrency;
 mod upgrade_native;
 mod upgrade_properties;
@@ -88,10 +91,13 @@ const SUITES: &[Suite] = &[
     ("tui-docker-images", tui_docker_images::main),
     ("tui-kubectl-output", tui_kubectl_output::main),
     ("tui-tls-target", tui_tls_target::main),
+    ("upgrade-cli", upgrade_cli::main),
     ("upgrade-concurrency", upgrade_concurrency::main),
     ("upgrade-native", upgrade_native::main),
     ("upgrade-properties", upgrade_properties::main),
     ("upgrade-recovery-ownership", upgrade_recovery_ownership::main),
+    ("update-check", update_check::main),
+    ("update-ux", update_ux::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
@@ -120,6 +126,7 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("create-plugins-kubectl", tui_create_plugins::kubectl_recorded),
     ("create-plugin", tui_create_plugins::plugin),
     ("create-shadow-plugin", tui_create_plugins::shadow_plugin),
+    ("update-check-cli", update_check::cli_fixture),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {
