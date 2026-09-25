@@ -4,6 +4,7 @@
 use std::process::ExitCode;
 
 mod single_binary;
+mod tui_cluster_target;
 mod tui_native_regressions;
 mod tui_tls_target;
 
@@ -12,6 +13,7 @@ type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
     ("single-binary", single_binary::main),
+    ("tui-cluster-target", tui_cluster_target::main),
     ("tui-native-regressions", tui_native_regressions::main),
     ("tui-tls-target", tui_tls_target::main),
 ];
