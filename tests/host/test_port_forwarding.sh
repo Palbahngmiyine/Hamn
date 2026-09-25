@@ -52,10 +52,10 @@ export PORT_TEST_EVENTS="$EVENTS"
 
 UDP_EXECUTABLE=${HAMN_UDP_EXECUTABLE:-$TEST_BIN}
 if [ -n "${HAMN_UDP_EXECUTABLE:-}" ]; then
-    python3 "$REPO_ROOT/tests/host/test_udp_proxy.py" "$UDP_EXECUTABLE" \
+    "$HAMN_DEV" test udp-proxy "$UDP_EXECUTABLE" \
         "$WORK/udp-proxy" --production
 else
-    python3 "$REPO_ROOT/tests/host/test_udp_proxy.py" "$UDP_EXECUTABLE" \
+    "$HAMN_DEV" test udp-proxy "$UDP_EXECUTABLE" \
         "$WORK/udp-proxy"
 fi
 

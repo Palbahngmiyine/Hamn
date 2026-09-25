@@ -9,6 +9,7 @@ mod remote_cancel_boundaries;
 mod single_binary;
 mod ssh_deadline;
 mod tui_native_regressions;
+mod udp_proxy;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
@@ -20,6 +21,7 @@ const SUITES: &[Suite] = &[
     ("single-binary", single_binary::main),
     ("ssh-deadline", ssh_deadline::main),
     ("tui-native-regressions", tui_native_regressions::main),
+    ("udp-proxy", udp_proxy::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
