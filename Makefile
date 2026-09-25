@@ -390,7 +390,7 @@ print-ci-macos-shards:
 	@echo $(CI_MACOS_SHARDS)
 
 test-port-forwarding: hamn-dev
-	HAMN_DEV=$(HAMN_DEV) bash tests/host/test_port_forwarding.sh
+	$(HAMN_DEV) test port-forwarding
 
 test-qcow2: host
 	@test -n "$(HAMN_QCOW2_IMAGE)" || { \

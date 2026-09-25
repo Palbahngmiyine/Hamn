@@ -1,6 +1,5 @@
 #include <errno.h>
 #include <fcntl.h>
-#include <libproc.h>
 #include <limits.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -10,7 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
-#include <sys/proc_info.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -269,23 +267,6 @@ static int ignore_sigterm(void)
         pause();
 }
 
-static int print_process_token(const char *text)
-{
-    char *end = NULL;
-    errno = 0;
-    long pid = strtol(text, &end, 10);
-    if (errno || !end || *end || pid <= 1 || pid > INT32_MAX)
-        return 2;
-    struct proc_bsdinfo info;
-    int size = proc_pidinfo((int)pid, PROC_PIDTBSDINFO, 0, &info,
-                            sizeof(info));
-    if (size != (int)sizeof(info) || info.pbi_pid != (uint32_t)pid)
-        return 1;
-    printf("%llu\t%llu\n", (unsigned long long)info.pbi_start_tvsec,
-           (unsigned long long)info.pbi_start_tvusec);
-    return 0;
-}
-
 static int spawn_ignore_sigterm(void)
 {
     const char *directory = getenv("PORT_TEST_DIR");
@@ -519,8 +500,6 @@ int main(int argc, char **argv)
         return ignore_sigterm();
     if (argc == 2 && strcmp(argv[1], "spawn-ignore-sigterm") == 0)
         return spawn_ignore_sigterm();
-    if (argc == 3 && strcmp(argv[1], "process-token") == 0)
-        return print_process_token(argv[2]);
     if (argc == 3 && strcmp(argv[1], "parse") == 0) {
         struct port_spec parsed;
         return load_spec(argv[2], &parsed) == 0 ? 0 : 2;

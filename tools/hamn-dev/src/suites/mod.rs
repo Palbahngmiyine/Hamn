@@ -14,6 +14,7 @@ mod kubernetes_api;
 mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
+mod port_forwarding;
 mod profile_yaml;
 mod remote_cancel_boundaries;
 mod rust_sdk;
@@ -50,6 +51,7 @@ const SUITES: &[Suite] = &[
     ("diagnostics", diagnostics::main),
     ("docker-readiness", docker_readiness::main),
     ("observer-requests", observer_requests::main),
+    ("port-forwarding", port_forwarding::main),
     ("remote-cancel-boundaries", remote_cancel_boundaries::main),
     ("single-binary", single_binary::main),
     ("ssh-deadline", ssh_deadline::main),

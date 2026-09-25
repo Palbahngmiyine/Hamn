@@ -105,9 +105,9 @@ if rg -n '/opt/hamn/src|guest_deployment_sync_sources' \
     fail "host runtime still deploys mutable guest sources"
 fi
 
-if rg -n -- '-I(shared|guest/hamnd)([[:space:]]|$)' \
+if rg -n -- '-I(shared|guest/hamnd)([[:space:]"]|$)' \
     "$ROOT/compile_flags.txt" "$ROOT/Makefile" "$ROOT/guest/Makefile" \
-    "$ROOT/tests/host/test_port_forwarding.sh" >/dev/null; then
+    "$ROOT/tools/hamn-dev/src/suites/port_forwarding.rs" >/dev/null; then
     fail "build configuration still refers to removed source trees"
 fi
 

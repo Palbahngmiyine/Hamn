@@ -9,7 +9,7 @@ use crate::support::bounded_process;
 use crate::support::http::{Options, Reply, Request, Response, Server};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, ExitCode};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,15 +19,20 @@ pub fn main(args: &[String]) -> ExitCode {
         eprintln!("usage: hamn-dev test observer-requests TEST_BINARY WORK_DIRECTORY [FILTER...]");
         return ExitCode::from(2);
     };
-    let (binary, root) = (PathBuf::from(binary), PathBuf::from(root));
-    let cases: Vec<Case> = [1usize, 10, 100]
+    let cases = cases(Path::new(binary), Path::new(root));
+    runner::run("observer-requests", "the snapshot reader sends one bounded request per snapshot", cases, filters)
+}
+
+/// The measurements, each in its own profile directory below `root`; the
+/// port-forwarding suite runs them against its compiled driver.
+pub fn cases(binary: &Path, root: &Path) -> Vec<Case> {
+    [1usize, 10, 100]
         .into_iter()
         .map(|count| {
-            let (binary, root) = (binary.clone(), root.clone());
+            let (binary, root) = (binary.to_path_buf(), root.to_path_buf());
             case(format!("measure/{count}"), move || measure(&binary, &root, count))
         })
-        .collect();
-    runner::run("observer-requests", "the snapshot reader sends one bounded request per snapshot", cases, filters)
+        .collect()
 }
 
 fn measure(binary: &Path, root: &Path, count: usize) {
