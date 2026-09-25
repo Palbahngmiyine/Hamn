@@ -1092,7 +1092,7 @@ mod tests {
         assert!(current_target(&state).is_none());
     }
     #[test]
-    #[ignore = "requires an isolated PTY and gate from tests/host/test_tui.py"]
+    #[ignore = "requires an isolated PTY and gate from `hamn-dev test tui`"]
     fn resize_and_key_readiness_survive_the_same_poll_batch() {
         use std::{
             io::{Read, Write},
@@ -1334,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "executed in a PTY by tests/host/test_tui.py; intentionally panics"]
+    #[ignore = "executed in a PTY by `hamn-dev test tui`; intentionally panics"]
     fn panic_restores_terminal_fixture() {
         let mut terminal = ratatui::init();
         let _restore = Restore;

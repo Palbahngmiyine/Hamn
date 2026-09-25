@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 mod native_flag_inventory;
 mod single_binary;
+mod tui;
 mod tui_native_regressions;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
@@ -13,6 +14,7 @@ type Fixture = fn(&str, &[String]) -> ExitCode;
 const SUITES: &[Suite] = &[
     ("native-flag-inventory", native_flag_inventory::main),
     ("single-binary", single_binary::main),
+    ("tui", tui::main),
     ("tui-native-regressions", tui_native_regressions::main),
 ];
 
