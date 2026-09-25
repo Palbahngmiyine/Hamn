@@ -144,11 +144,11 @@ exec /usr/bin/curl "$@"
         }
     }
 
-    fn artifact(&self, sized: bool) -> Artifact {
+    fn artifact(&self) -> Artifact {
         Artifact {
             url: "https://fixture.test/artifact".into(),
             sha256: format!("{:x}", Sha256::digest(&self.payload)),
-            size: sized.then_some(self.payload.len() as u64),
+            size: self.payload.len() as u64,
         }
     }
 
@@ -179,16 +179,16 @@ fn workspace() -> (Temporary, PathBuf) {
     (root, cache)
 }
 
-fn run(server: &Server, cache: &Path, sized: bool) -> (Result<(PathBuf, Counts)>, String) {
+fn run(server: &Server, cache: &Path) -> (Result<(PathBuf, Counts)>, String) {
     let mut progress = Progress::new(
         Vec::new(),
         "Downloading guest image",
-        sized.then_some(65536),
+        65536,
         false,
     );
     let result = acquire_resuming(
         cache,
-        &server.artifact(sized),
+        &server.artifact(),
         "guestImage",
         &server.curl,
         &mut progress,
@@ -205,7 +205,7 @@ fn interrupted_transfers_resume_automatically_and_count_every_network_byte() {
         &root.path,
         vec![Reply::Truncate(1000), Reply::Truncate(3000)],
     );
-    let (result, output) = run(&server, &cache, true);
+    let (result, output) = run(&server, &cache);
     let (path, counts) = result.unwrap();
     assert_eq!(fs::read(path).unwrap(), server.payload);
     assert_eq!(
@@ -225,7 +225,7 @@ fn interrupted_transfers_resume_automatically_and_count_every_network_byte() {
 fn bytes_from_an_earlier_run_stay_reused_while_this_run_resumes() {
     let (root, cache) = workspace();
     let server = Server::new(&root.path, vec![Reply::Truncate(2000)]);
-    let artifact = server.artifact(true);
+    let artifact = server.artifact();
     let downloads = cache.join("downloads");
     directory(&downloads, 0o700).unwrap();
     let partial = downloads.join(format!(".{}.partial", artifact.sha256));
@@ -240,7 +240,7 @@ fn bytes_from_an_earlier_run_stay_reused_while_this_run_resumes() {
         },
     )
     .unwrap();
-    let (result, _) = run(&server, &cache, true);
+    let (result, _) = run(&server, &cache);
     let (_, counts) = result.unwrap();
     assert_eq!(
         server.ranges(),
@@ -255,7 +255,7 @@ fn bytes_from_an_earlier_run_stay_reused_while_this_run_resumes() {
 fn a_transfer_without_progress_fails_immediately() {
     let (root, cache) = workspace();
     let server = Server::new(&root.path, vec![Reply::Drop]);
-    let (result, output) = run(&server, &cache, true);
+    let (result, output) = run(&server, &cache);
     let error = result.unwrap_err().to_string();
     assert!(error.starts_with("download failed: "), "{error}");
     assert_eq!(server.ranges().len(), 1);
@@ -266,36 +266,22 @@ fn a_transfer_without_progress_fails_immediately() {
 fn resumption_is_bounded_and_keeps_the_partial_for_the_next_run() {
     let (root, cache) = workspace();
     let server = Server::new(&root.path, vec![Reply::Truncate(100); 8]);
-    let (result, output) = run(&server, &cache, true);
+    let (result, output) = run(&server, &cache);
     assert!(result.is_err());
     assert_eq!(server.ranges().len(), 1 + RESUME_ATTEMPTS as usize);
     assert!(output.contains("resuming (3 of 3)"), "{output}");
     let partial = cache.join(format!(
         "downloads/.{}.partial",
-        server.artifact(true).sha256
+        server.artifact().sha256
     ));
     assert_eq!(fs::read(partial).unwrap(), server.payload[..400]);
-}
-
-#[test]
-fn unsized_schema_v2_artifacts_are_not_resumed() {
-    let (root, cache) = workspace();
-    let server = Server::new(&root.path, vec![Reply::Truncate(1000)]);
-    let (result, _) = run(&server, &cache, false);
-    assert!(result.is_err());
-    assert_eq!(server.ranges(), [None]);
-    let partial = cache.join(format!(
-        "downloads/.{}.partial",
-        server.artifact(false).sha256
-    ));
-    assert!(!partial.exists());
 }
 
 #[test]
 fn explicit_transfers_fail_on_stalls_instead_of_a_fixed_total_deadline() {
     let (root, cache) = workspace();
     let server = Server::new(&root.path, Vec::new());
-    run(&server, &cache, true).0.unwrap();
+    run(&server, &cache).0.unwrap();
     let arguments = server.arguments();
     let value = |name: &str| {
         let index = arguments

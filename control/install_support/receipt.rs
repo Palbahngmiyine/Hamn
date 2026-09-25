@@ -19,14 +19,6 @@ struct Receipt {
     installed: String,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct Selection {
-    schema_version: u32,
-    file: String,
-    sha256: String,
-}
-
 fn canonical_json(value: &Value) -> Result<String> {
     let text = serde_json::to_string(value)?;
     let mut ascii = String::new();
@@ -89,11 +81,10 @@ pub(super) fn run(
     version: &str,
     host_hash: &str,
     guest_hash: &str,
-    cache: &str,
 ) -> Result<()> {
     let generation = files::parent(files::parent(Path::new(target))?)?;
     let path = generation.join(".hamn-release.json");
-    if matches!(mode, "check" | "host-check") {
+    if mode == "host-check" {
         let r: Receipt = serde_json::from_slice(&download::read_file(&path, 4096, true)?)?;
         require(
             r.schema_version == 1
@@ -105,30 +96,6 @@ pub(super) fn run(
         require(
             r.installed == installed_digest(generation)?,
             "installed files changed",
-        )?;
-        if mode == "host-check" {
-            return Ok(());
-        }
-        let cache = Path::new(cache);
-        let selection = cache.join("guest-image.json");
-
-        let name = format!("hamn-guest-{guest_hash}.img");
-        let selection: Selection =
-            serde_json::from_slice(&download::read_file(&selection, 4096, false)?)?;
-        require(
-            selection.schema_version == 1
-                && selection.file == name
-                && selection.sha256 == guest_hash,
-            "different image selection",
-        )?;
-        let marker = cache.join(format!("{name}.verified"));
-        require(
-            std::str::from_utf8(&download::read_file(&marker, 128, false)?)?.trim() == guest_hash,
-            "invalid image verification marker",
-        )?;
-        require(
-            download::digest(&cache.join(name))? == guest_hash,
-            "cached image changed",
         )?;
     } else if mode == "write" {
         let r = Receipt {
@@ -154,7 +121,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn host_check_survives_missing_guest_but_rejects_changed_or_writable_host() {
+    fn host_check_rejects_changed_or_writable_host_and_unknown_modes() {
         let temp = super::super::test_support::Temp::new();
         let generation = temp.0.join("generation");
         for directory in ["bin", "share/hamn/src/scripts", "share/hamn/src/packaging"] {
@@ -163,17 +130,17 @@ mod tests {
         let target = generation.join("bin/hamn");
         fs::write(&target, b"host bytes").unwrap();
         let target = target.to_str().unwrap();
-        let cache = temp.0.join("cache");
-        fs::create_dir(&cache).unwrap();
-        let cache = cache.to_str().unwrap();
-        run("write", target, "v1.2.3", "host", "guest", cache).unwrap();
-        run("host-check", target, "v1.2.3", "host", "guest", cache).unwrap();
-        assert!(run("check", target, "v1.2.3", "host", "guest", cache).is_err());
+        run("write", target, "v1.2.3", "host", "guest").unwrap();
+        run("host-check", target, "v1.2.3", "host", "guest").unwrap();
+        assert!(run("host-check", target, "v1.2.4", "host", "guest").is_err());
+        assert!(run("host-check", target, "v1.2.3", "host", "other").is_err());
+        // The retired guest-checking `check` mode is not an alias.
+        assert!(run("check", target, "v1.2.3", "host", "guest").is_err());
         fs::set_permissions(target, fs::Permissions::from_mode(0o666)).unwrap();
-        assert!(run("host-check", target, "v1.2.3", "host", "guest", cache).is_err());
+        assert!(run("host-check", target, "v1.2.3", "host", "guest").is_err());
         fs::set_permissions(target, fs::Permissions::from_mode(0o644)).unwrap();
         fs::write(target, b"changed host bytes").unwrap();
-        assert!(run("host-check", target, "v1.2.3", "host", "guest", cache).is_err());
+        assert!(run("host-check", target, "v1.2.3", "host", "guest").is_err());
     }
 
     #[test]
@@ -182,24 +149,5 @@ mod tests {
             canonical_json(&json!(["한😀\n", 493, null])).unwrap(),
             r#"["\ud55c\ud83d\ude00\n",493,null]"#
         );
-    }
-
-    #[test]
-    fn receipt_selection_rejects_duplicate_and_unknown_fields() {
-        let good = r#"{"schemaVersion":1,"file":"image","sha256":"digest"}"#;
-        assert!(serde_json::from_str::<Selection>(good).is_ok());
-        for bad in [
-            good.replace(
-                "\"schemaVersion\":1",
-                "\"schemaVersion\":1,\"schemaVersion\":1",
-            ),
-            good.replace(
-                "\"file\":\"image\"",
-                "\"file\":\"other\",\"file\":\"image\"",
-            ),
-            good.replace('{', "{\"unknown\":true,"),
-        ] {
-            assert!(serde_json::from_str::<Selection>(&bad).is_err());
-        }
     }
 }

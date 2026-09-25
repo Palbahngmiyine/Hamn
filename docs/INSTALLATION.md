@@ -51,10 +51,12 @@ the subset of downloaded bytes delivered by a valid Range response; it must not
 be added to `downloadedBytes` when calculating total network traffic.
 
 Before changing a generation, the updater validates the manifest, platform,
-artifact size (v3), SHA-256 and extracted host version. HTTPS is required for
+exact artifact size, SHA-256 and extracted host version. HTTPS is required for
 initial URLs and every redirect. Runtime digest checks do not verify release
 pipeline keyless attestations and must not be described as client signature
-verification. Schema v2 compatibility omits sizes and uses full downloads.
+verification. Only schema v3 manifests are read; a manifest of another schema,
+including the retired schema v2, fails with `manifest schema vN is not supported`
+and the advice to reinstall with the official installer.
 
 The existing generation receipt binds the version and host/guest digests to the
 installed binary, scripts and packaging. A healthy matching receipt and selected
@@ -72,12 +74,12 @@ native downloader. Once the host is authenticated, its native updater acquires
 the guest image. No telemetry is sent.
 Explicit transfers allow 15 seconds to connect and fail only when throughput stays
 below 1 KiB/s for 60 seconds (with an absolute six-hour bound), so a slow but
-healthy link can finish a large guest image. When a v3 transfer is interrupted
+healthy link can finish a large guest image. When a transfer is interrupted
 after persisting new bytes, the updater resumes it with Range up to three more
 times; a transfer that makes no progress fails immediately, and integrity
-failures never retry. Otherwise rerun the command to resume the safe v3 partial.
-V2 failures restart the full download. `hamn upgrade` allows the operation 60
-minutes; headless `system update` keeps its `--timeout` (default 600 seconds).
+failures never retry. Otherwise rerun the command to resume the safe partial.
+`hamn upgrade` allows the operation 60 minutes; headless `system upgrade` keeps
+its `--timeout` (default 600 seconds).
 
 Managed installs collect obsolete generations after commit, retaining the active
 and immediately previous generation, open executables/support files, and recovery
@@ -128,13 +130,14 @@ managed installation first. A local install pass is not physical VM validation.
 
 ## Manifest compatibility and release evidence
 
-The publisher retains strict schema v2 `hamn-update-manifest.json` and adds schema
-v3 `hamn-update-manifest-v3.json`, with identical host and guest digests. New
-installations point to v3. V3 adds exact artifact sizes, qcow2/zlib guest format and
-an 8 GiB virtual size. Manifests are limited to 256 KiB, host archives to 128 MiB,
-and guest artifacts to less than 2 GiB. Duplicate and unknown JSON keys are rejected.
-V2 consumers additionally accept the previously published valid `repository`
-metadata extension. Published historical releases are not rewritten.
+The publisher writes schema v3 `hamn-update-manifest-v3.json`, which installations
+point to. V3 names exact artifact sizes, the qcow2/zlib guest format and an 8 GiB
+virtual size. Manifests are limited to 256 KiB, host archives to 128 MiB, and guest
+artifacts to less than 2 GiB. Duplicate, unknown and null JSON keys are rejected,
+including the retired v2 `repository` extension. Hamn 0.1.2 and earlier read only
+schema v2, so they cannot upgrade in place; reinstall them with the official
+installer. Published
+historical releases are not rewritten.
 
 Publication requires actual image size evidence and a reviewed
 `guest/image/release-size-budget.json`. A review-only report or absent reviewed

@@ -805,7 +805,7 @@ if [ -n "$old_target" ] && [ "$managed_marker" = version=1 ]; then
         else
             progress "Hamn ${release_version#v} is up to date."
         fi
-        upgrade_support reuse-counts "$manifest" "$cache" "$counts" both
+        upgrade_support reuse-counts "$manifest" "$counts" both
         finish_result up-to-date
         prune_generations
         exit 0
@@ -817,7 +817,7 @@ previous_version=
 if [ "$force" = 0 ] && [ "$status" = repair-required ] && \
     [ -n "$old_target" ] && release_receipt host-check "$old_target"; then
     host_mutation=0
-    upgrade_support reuse-counts "$manifest" "$cache" "$counts" host
+    upgrade_support reuse-counts "$manifest" "$counts" host
 fi
 if [ -n "$previous_version" ] && [ "$host_mutation" = 0 ]; then
     progress "Repairing the Hamn ${release_version#v} guest image..."

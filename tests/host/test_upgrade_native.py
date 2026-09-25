@@ -72,29 +72,22 @@ class NativeUpgrade(unittest.TestCase):
         result = self.call("manifest", "--manifest", self.path.as_uri(), "--macos", "13.0",
             "--architecture", "arm64", "--output", output, success=success)
         if success:
-            # Local manifests transfer no network bytes. The accepted manifest is
-            # recorded unchanged except for the dropped legacy v2 repository key.
+            # Local manifests transfer no network bytes; the accepted manifest
+            # is recorded unchanged.
             self.assertEqual(result.stdout, "0\n")
-            expected = {key: item for key, item in value.items() if key != "repository"}
-            self.assertEqual(json.loads(output.read_text()), expected)
+            self.assertEqual(json.loads(output.read_text()), value)
         return output
 
-    def test_manifest_v2_v3_and_rejections_follow_the_published_contract(self):
-        for schema in (2, 3):
-            value = manifest()
-            if schema == 2:
-                value["schemaVersion"] = 2
-                value["repository"] = "legacy/hamn"
-                value["artifacts"] = {name: {key: item[key] for key in ("url", "sha256")}
-                    for name, item in value["artifacts"].items()}
-            self.metadata(value)
+    def test_manifest_v3_and_rejections_follow_the_published_contract(self):
+        self.metadata(manifest())
         output = self.root / "parsed.json"
         original = output.read_bytes()
         invalid = []
         for key, val in (("size", True), ("size", 0), ("size", HOST_LIMIT + 1), ("size", None),
                          ("url", "http://example.test/host"), ("sha256", "A" * 64)):
             item = manifest(); item["artifacts"]["host"][key] = val; invalid.append(item)
-        for key, val in (("schemaVersion", True), ("version", "v01.2.3"), ("repository", "legacy/hamn"), ("unexpected", 1)):
+        for key, val in (("schemaVersion", True), ("schemaVersion", 2), ("version", "v01.2.3"),
+                         ("repository", "legacy/hamn"), ("unexpected", 1)):
             item = manifest(); item[key] = val; invalid.append(item)
         invalid += ['{"schemaVersion":3,"schemaVersion":3}', "NaN", "{" + " " * MANIFEST_LIMIT]
         for item in invalid:
@@ -136,7 +129,7 @@ class NativeUpgrade(unittest.TestCase):
                                               "reusedBytes": len(payload.read_bytes()), "source": source}, name)
         actual = json.loads(self.call("result", self.path, "1.0.0", "updated", counts).stdout)
         self.assertEqual(actual, expected_result("1.0.0", value, "updated", recorded))
-        self.call("reuse-counts", self.path, cache, counts, "both")
+        self.call("reuse-counts", self.path, counts, "both")
         self.assertEqual(json.loads((counts / "host.json").read_text())["reusedBytes"], len(payload.read_bytes()))
         (counts / "host.json").write_text(json.dumps({"downloadedBytes":MAX_COUNTER,"resumedBytes":0,"reusedBytes":0,"source":"network"}))
         (counts / "guestImage.json").write_text(json.dumps({"downloadedBytes":1,"resumedBytes":0,"reusedBytes":0,"source":"network"}))

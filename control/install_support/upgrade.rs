@@ -62,7 +62,6 @@ enum Operation {
     },
     ReuseCounts {
         manifest: PathBuf,
-        cache: PathBuf,
         counts: PathBuf,
         name: String,
     },
@@ -244,16 +243,17 @@ fn detach() -> Result<bool> {
     }
     Ok(true)
 }
+/// The selected guest image record (`guest-image.json`).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Selection {
+    schema_version: u32,
+    file: String,
+    sha256: String,
+}
 fn guest_healthy(cache: &Path, artifact: &manifest::Artifact) -> bool {
     (|| -> Result<bool> {
         let name = format!("hamn-guest-{}.img", artifact.sha256);
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct Selection {
-            schema_version: u32,
-            file: String,
-            sha256: String,
-        }
         let selection: Selection = serde_json::from_slice(&download::read_file(
             &cache.join("guest-image.json"),
             4096,
@@ -277,16 +277,15 @@ fn guest_healthy(cache: &Path, artifact: &manifest::Artifact) -> bool {
     .unwrap_or(false)
 }
 fn receipt_run(mode: &str, target: &str, manifest: &Manifest, cache: &Path) -> Result<()> {
-    // The legacy receipt binds digests but has no artifact byte-size field.
-    // Manifest-aware checks must validate the same exact v3 size contract as
-    // check-only status before authorizing a no-op or reporting reused bytes.
+    // The receipt binds digests, not byte sizes. `check` also validates the
+    // selected guest image against the manifest's exact size, as check-only
+    // status does, before it may authorize a no-op or report reused bytes.
     receipt::run(
         if mode == "check" { "host-check" } else { mode },
         target,
         &manifest.version,
         &manifest.artifacts.host.sha256,
         &manifest.artifacts.guest_image.sha256,
-        cache.to_str().ok_or("cache path is not UTF-8")?,
     )?;
     if mode == "check" {
         require(
@@ -498,7 +497,6 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         }
         Operation::ReuseCounts {
             manifest: path,
-            cache,
             counts,
             name,
         } => {
@@ -509,27 +507,14 @@ pub(super) fn run(args: &[String]) -> Result<()> {
                 "guestImage" => &["guestImage"],
                 _ => return Err("unknown release artifact".into()),
             };
+            // The caller verified these artifacts (receipt and guest checks)
+            // against the manifest, whose sizes are exact.
             for name in names {
                 let artifact = value.artifact(name)?;
-                let path = if *name == "guestImage" {
-                    cache.join(format!("hamn-guest-{}.img", artifact.sha256))
-                } else {
-                    cache
-                        .join("downloads")
-                        .join(format!("{}.artifact", artifact.sha256))
-                };
-                let amount = match artifact.size {
-                    Some(size) => size,
-                    None => match fs::symlink_metadata(&path) {
-                        Ok(_) => download::safe_file(&path, false, None)?.len(),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-                        Err(error) => return Err(error.into()),
-                    },
-                };
                 download::atomic_json(
                     &counts.join(format!("{name}.json")),
                     &Counts {
-                        reused_bytes: amount,
+                        reused_bytes: artifact.size,
                         source: "installed".into(),
                         ..Counts::default()
                     },
@@ -546,7 +531,7 @@ mod tests {
     use crate::install_support::test_support::Temp;
     fn value() -> Manifest {
         manifest::parse(
-            &manifest::tests::fixture(3).to_string().into_bytes(),
+            &manifest::tests::fixture().to_string().into_bytes(),
             "13",
             "arm64",
         )
@@ -815,6 +800,24 @@ mod tests {
             json!({"schemaVersion":1,"checkedAt":1000,"ok":false,"latestVersion":null})
         );
         automatic_at(&args, 1001, || panic!("valid failed record must back off")).unwrap();
+    }
+    #[test]
+    fn guest_selection_rejects_duplicate_and_unknown_fields() {
+        let good = r#"{"schemaVersion":1,"file":"image","sha256":"digest"}"#;
+        assert!(serde_json::from_str::<Selection>(good).is_ok());
+        for bad in [
+            good.replace(
+                "\"schemaVersion\":1",
+                "\"schemaVersion\":1,\"schemaVersion\":1",
+            ),
+            good.replace(
+                "\"file\":\"image\"",
+                "\"file\":\"other\",\"file\":\"image\"",
+            ),
+            good.replace('{', "{\"unknown\":true,"),
+        ] {
+            assert!(serde_json::from_str::<Selection>(&bad).is_err());
+        }
     }
     #[test]
     fn checked_accounting_and_version_status_keep_repair_distinct() {

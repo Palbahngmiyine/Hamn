@@ -69,12 +69,15 @@ build_release() {
     host_hash=$(sha256 "$archive")
     guest_hash=$(sha256 "$guest")
     printf '%s' \
-        '{"schemaVersion":2,"channel":"stable","version":"v'"$version"'",' \
+        '{"schemaVersion":3,"channel":"stable","version":"v'"$version"'",' \
         '"commit":"0123456789abcdef0123456789abcdef01234567",' \
         '"validationMode":"github-hosted-no-vm",' \
         '"compatibility":{"os":"darwin","architecture":"arm64","minimumMacOS":"13.0"},' \
-        '"artifacts":{"host":{"url":"file://'"$archive"'","sha256":"'"$host_hash"'"},' \
-        '"guestImage":{"url":"file://'"$guest"'","sha256":"'"$guest_hash"'"}}}' \
+        '"artifacts":{"host":{"url":"file://'"$archive"'","sha256":"'"$host_hash"'",' \
+        '"size":'"$(stat -f %z "$archive")"'},' \
+        '"guestImage":{"url":"file://'"$guest"'","sha256":"'"$guest_hash"'",' \
+        '"size":'"$(stat -f %z "$guest")"',"format":"qcow2","compression":"zlib",' \
+        '"virtualSize":8589934592}}}' \
         >"$manifest"
     printf '%s\n' "$manifest"
 }
@@ -136,6 +139,17 @@ if run_update "$WORK/bad-manifest.json" \
     exit 1
 fi
 assert_active_state "$new_target" "$selection_2" 'manifest rejection'
+
+# A retired schema v2 manifest is refused by its schema, with the reinstall
+# advice, before any download or state change.
+sed 's/"schemaVersion":3/"schemaVersion":2/' "$MANIFEST_2" >"$WORK/v2-manifest.json"
+if run_update "$WORK/v2-manifest.json" >"$WORK/v2.out" 2>"$WORK/v2.err"; then
+    echo "FAIL: a schema v2 manifest was accepted" >&2
+    exit 1
+fi
+grep -Fq 'manifest schema v2 is not supported; this Hamn reads only schema v3' "$WORK/v2.out"
+grep -Fq 'Reinstall with the official installer' "$WORK/v2.out"
+assert_active_state "$new_target" "$selection_2" 'schema v2 rejection'
 
 # An installer failure occurs after both payloads are staged but before either
 # public pointer may change.

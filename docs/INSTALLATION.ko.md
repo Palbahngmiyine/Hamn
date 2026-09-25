@@ -47,11 +47,13 @@ were not restarted.` 같은 결과 한 줄을 표시합니다. `--check`는 다�
 Range 응답으로 받은 downloaded byte의 부분집합이므로 총 네트워크 전송량을
 계산할 때 `downloadedBytes`에 다시 더하지 않습니다.
 
-generation을 변경하기 전에 manifest, 플랫폼, v3 아티팩트 크기, SHA-256과
+generation을 변경하기 전에 manifest, 플랫폼, 정확한 아티팩트 크기, SHA-256과
 압축을 푼 호스트 버전을 검증합니다. 최초 URL과 모든 redirect는 HTTPS여야 합니다.
 실행 시 digest 검증은 릴리스 파이프라인의 keyless attestation 검증과 다릅니다.
-클라이언트가 서명을 검증한다고 표현하지 않습니다. 크기가 없는 v2 호환 경로는
-전체 다운로드를 사용합니다.
+클라이언트가 서명을 검증한다고 표현하지 않습니다. schema v3 manifest만 읽습니다.
+지원을 끝낸 schema v2를 포함한 다른 schema의 manifest는
+`manifest schema vN is not supported` 오류와 공식 설치기로 다시 설치하라는 안내로
+실패합니다.
 
 설치 기록은 버전과 호스트·게스트 digest를 바이너리·스크립트·패키징 내용에 연결합니다.
 기록과 이미지가 모두 정상인 동일 릴리스는 payload 요청 없이 끝납니다. 호스트가
@@ -69,11 +71,11 @@ Hamn의 native downloader와 digest 잠금 및 검증된 artifact cache를 공�
 외부 telemetry를 전송하지 않습니다.
 명시적 전송은 연결에 15초를 허용하고, 처리량이 60초 동안 1 KiB/s 미만일 때만
 실패합니다(절대 상한 6시간). 따라서 느리지만 정상인 연결도 큰 게스트 이미지를 끝까지
-받을 수 있습니다. v3 전송이 새 바이트를 저장한 뒤 중단되면 Range로 최대 세 번 더
+받을 수 있습니다. 전송이 새 바이트를 저장한 뒤 중단되면 Range로 최대 세 번 더
 이어받습니다. 진전이 없는 전송은 바로 실패하고 무결성 실패는 재시도하지 않습니다.
-그 밖에는 명령을 다시 실행하면 안전한 v3 partial을 이어받으며 v2는 전체 다운로드를
-다시 시작합니다. `hamn upgrade`는 작업 전체에 60분을 허용하고 headless
-`system update`는 기존 `--timeout`(기본 600초)을 유지합니다.
+그 밖에는 명령을 다시 실행하면 안전한 partial을 이어받습니다. `hamn upgrade`는
+작업 전체에 60분을 허용하고 headless `system upgrade`는 기존 `--timeout`(기본
+600초)을 유지합니다.
 
 관리 설치는 반영 후 불필요한 설치본을 정리하며, 활성 설치본과 직전 설치본,
 열린 실행 파일·지원 파일, 복구 참조를 보존합니다. 설치와 업데이트는 두 대상
@@ -121,13 +123,13 @@ HOME에서 나중에 설치한 generation은 보존합니다. 게스트만 복�
 
 ## Manifest 호환성과 릴리스 근거
 
-publisher는 기존 schema v2 `hamn-update-manifest.json`을 유지하면서 동일한
-호스트·게스트 digest를 가진 v3 `hamn-update-manifest-v3.json`도 생성합니다.
-새 설치는 v3를 가리킵니다. v3는 정확한 아티팩트 크기, qcow2/zlib와 8 GiB
-virtual size를 포함합니다. manifest는 256 KiB, 호스트 아카이브는 128 MiB 이하,
-게스트 아티팩트는 2 GiB 미만으로 제한합니다. 중복·미지의 JSON key는 거부합니다.
-v2 consumer는 이전에 발행된 올바른 `repository` 확장도 허용합니다.
-이미 공개된 과거 릴리스는 수정하지 않습니다.
+publisher는 설치본이 가리키는 schema v3 `hamn-update-manifest-v3.json`을
+생성합니다. v3는 정확한 아티팩트 크기, qcow2/zlib 게스트 형식과 8 GiB virtual
+size를 포함합니다. manifest는 256 KiB, 호스트 아카이브는 128 MiB 이하, 게스트
+아티팩트는 2 GiB 미만으로 제한합니다. 지원을 끝낸 v2 `repository` 확장을 포함해
+중복·미지·null JSON key는 거부합니다. Hamn 0.1.2 이하는 schema v2만 읽으므로
+제자리에서 업그레이드할 수 없고 공식 설치기로 다시 설치해야 합니다. 이미 공개된
+과거 릴리스는 수정하지 않습니다.
 
 발행에는 실제 이미지 크기 근거와 검토된 `guest/image/release-size-budget.json`이
 필요합니다. review-only report나 검토된 budget 부재는 발행을 차단합니다.

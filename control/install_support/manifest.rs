@@ -1,9 +1,14 @@
-//! Strict bounded v2/v3 metadata. Typed decoding rejects duplicate/unknown keys.
-//! The legacy installer keeps its five-line interface; upgrades validate URLs.
+//! Strict bounded schema v3 release metadata. Typed decoding rejects
+//! duplicate, unknown and null keys; every artifact names its exact byte size.
+//! Other schema versions (including the retired v2) are refused by version
+//! before field decoding, so the error names the unsupported schema.
 use super::{Result, download, files, require};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::json;
 use std::path::Path;
+
+/// The only release manifest schema this client reads.
+const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -15,12 +20,6 @@ pub(super) struct Manifest {
     validation_mode: String,
     compatibility: Compatibility,
     pub artifacts: Artifacts,
-    #[serde(
-        default,
-        deserialize_with = "some",
-        skip_serializing_if = "Option::is_none"
-    )]
-    repository: Option<String>,
 }
 fn some<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
     d: D,
@@ -46,12 +45,8 @@ pub(super) struct Artifacts {
 pub(super) struct Artifact {
     pub url: String,
     pub sha256: String,
-    #[serde(
-        default,
-        deserialize_with = "some",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub size: Option<u64>,
+    /// Exact byte size, 1..=the artifact kind's limit.
+    pub size: u64,
     #[serde(
         default,
         deserialize_with = "some",
@@ -137,15 +132,30 @@ fn system_version(value: &str) -> Result<[u64; 3]> {
     }
     Ok(result)
 }
+/// Only the schema version, read before strict field decoding so that a
+/// manifest of another schema is refused by its version, not by a field.
+#[derive(Deserialize)]
+struct Schema {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+}
 fn decode(data: &[u8], urls: bool) -> Result<Manifest> {
     require(
         data.len() as u64 <= download::MANIFEST_LIMIT,
         "manifest exceeds 256 KiB",
     )?;
+    let schema: Schema = serde_json::from_slice(data)?;
+    if schema.schema_version != SCHEMA_VERSION {
+        return Err(format!(
+            "manifest schema v{} is not supported; this Hamn reads only schema v{SCHEMA_VERSION}",
+            schema.schema_version
+        )
+        .into());
+    }
     let mut value: Manifest = serde_json::from_slice(data)?;
     require(
-        matches!(value.schema_version, 2 | 3) && value.channel == "stable",
-        "manifest is not a stable schema v2 or v3 release",
+        value.schema_version == SCHEMA_VERSION && value.channel == "stable",
+        "manifest is not a stable schema v3 release",
     )?;
     stable_version(&value.version)?;
     value.version = format!(
@@ -160,19 +170,6 @@ fn decode(data: &[u8], urls: bool) -> Result<Manifest> {
         ),
         "invalid release validation mode",
     )?;
-    if let Some(repository) = value.repository.take() {
-        let parts: Vec<_> = repository.split('/').collect();
-        require(
-            value.schema_version == 2
-                && parts.len() == 2
-                && parts.iter().all(|p| {
-                    !p.is_empty()
-                        && p.bytes()
-                            .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
-                }),
-            "invalid release repository",
-        )?;
-    }
     require(
         value.compatibility.os == "darwin" && value.compatibility.architecture == "arm64",
         "manifest is not compatible with Apple Silicon macOS",
@@ -197,17 +194,11 @@ fn decode(data: &[u8], urls: bool) -> Result<Manifest> {
             hexadecimal(&artifact.sha256, 64),
             "invalid artifact SHA-256",
         )?;
-        if value.schema_version == 3 {
-            require(
-                artifact
-                    .size
-                    .is_some_and(|size| (1..=limit).contains(&size)),
-                "artifact size outside permitted range",
-            )?;
-        } else {
-            require(artifact.size.is_none(), "unexpected v2 artifact size")?;
-        }
-        if value.schema_version == 3 && name == "guestImage" {
+        require(
+            (1..=limit).contains(&artifact.size),
+            "artifact size outside permitted range",
+        )?;
+        if name == "guestImage" {
             require(
                 artifact.format.as_deref() == Some("qcow2")
                     && artifact.compression.as_deref() == Some("zlib")
@@ -246,29 +237,6 @@ pub(super) fn load(path: &Path) -> Result<Manifest> {
         true,
     )
 }
-pub(super) fn fields(path: &str, os: &str, architecture: &str) -> Result<()> {
-    let value = decode(
-        &download::read_file(Path::new(path), download::MANIFEST_LIMIT, false)?,
-        false,
-    )?;
-    compatible(&value, os, architecture)?;
-    value.print_fields();
-    Ok(())
-}
-pub(super) fn bootstrap(
-    path: &str,
-    version: &str,
-    commit: &str,
-    host: &str,
-    host_hash: &str,
-    guest: &str,
-    guest_hash: &str,
-) -> Result<()> {
-    let value = json!({"schemaVersion":2,"channel":"stable","version":version,"commit":commit,
-        "validationMode":"github-hosted-no-vm", "compatibility":{"os":"darwin","architecture":"arm64","minimumMacOS":"13.0"},
-        "artifacts":{"host":{"url":format!("file://{host}"),"sha256":host_hash}, "guestImage":{"url":guest,"sha256":guest_hash}}});
-    files::publish(Path::new(path), format!("{value}\n").as_bytes())
-}
 pub(super) fn bootstrap_v3(
     path: &str,
     version: &str,
@@ -294,33 +262,19 @@ pub(super) fn bootstrap_v3(
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    pub(crate) fn fixture(schema: u32) -> serde_json::Value {
-        let mut value = json!({"schemaVersion":schema,"channel":"stable","version":"v1.2.3","commit":"a".repeat(40),"validationMode":"physical-apple-silicon","compatibility":{"os":"darwin","architecture":"arm64","minimumMacOS":"13.0"},"artifacts":{"host":{"url":"https://example.test/host","sha256":"b".repeat(64)},"guestImage":{"url":"https://example.test/guest","sha256":"c".repeat(64)}}});
-        if schema == 3 {
-            value["artifacts"]["host"]["size"] = 1.into();
-            let guest = value["artifacts"]["guestImage"].as_object_mut().unwrap();
-            guest.extend([
-                ("size".into(), 1.into()),
-                ("format".into(), "qcow2".into()),
-                ("compression".into(), "zlib".into()),
-                ("virtualSize".into(), (8_u64 * 1024 * 1024 * 1024).into()),
-            ]);
-        }
-        value
+    /// A valid stable schema v3 release with 1-byte host and guest artifacts.
+    pub(crate) fn fixture() -> serde_json::Value {
+        json!({"schemaVersion":3,"channel":"stable","version":"v1.2.3","commit":"a".repeat(40),
+            "validationMode":"physical-apple-silicon",
+            "compatibility":{"os":"darwin","architecture":"arm64","minimumMacOS":"13.0"},
+            "artifacts":{"host":{"url":"https://example.test/host","sha256":"b".repeat(64),"size":1},
+                "guestImage":{"url":"https://example.test/guest","sha256":"c".repeat(64),"size":1,
+                    "format":"qcow2","compression":"zlib","virtualSize":8_u64*1024*1024*1024}}})
     }
     #[test]
     fn schemas_reject_duplicates_nulls_extra_keys_and_overflow() {
-        for schema in [2, 3] {
-            assert!(
-                parse(
-                    &serde_json::to_vec(&fixture(schema)).unwrap(),
-                    "13",
-                    "arm64e"
-                )
-                .is_ok()
-            );
-        }
-        let source = fixture(3).to_string();
+        assert!(parse(&serde_json::to_vec(&fixture()).unwrap(), "13", "arm64e").is_ok());
+        let source = fixture().to_string();
         for bad in [
             source.replacen(
                 "\"schemaVersion\":3",
@@ -336,21 +290,65 @@ pub(super) mod tests {
             source.replacen("\"size\":1", "\"size\":true", 1),
             source.replacen("\"size\":1", "\"size\":18446744073709551616", 1),
             source.replacen('{', "{\"repository\":null,", 1),
+            // The retired v2 `repository` extension is an unknown key in v3.
+            source.replacen('{', "{\"repository\":\"owner/hamn\",", 1),
         ] {
             assert!(parse(bad.as_bytes(), "13", "arm64").is_err(), "{bad}");
         }
-        let mut old = fixture(2);
-        old["repository"] = "legacy/hamn".into();
-        assert!(
-            serde_json::to_value(parse(&serde_json::to_vec(&old).unwrap(), "13", "arm64").unwrap())
-                .unwrap()
-                .get("repository")
-                .is_none()
-        );
-        old["schemaVersion"] = 3.into();
-        assert!(parse(&serde_json::to_vec(&old).unwrap(), "13", "arm64").is_err());
         assert!(parse(source.as_bytes(), "12.9", "arm64").is_err());
         assert!(parse(source.as_bytes(), "13", "x86_64").is_err());
+    }
+    #[test]
+    fn retired_schema_v2_and_other_versions_are_refused_by_version() {
+        // Schema v2 (no sizes, optional `repository`) is no longer read. The
+        // refusal names the schema instead of a missing size field.
+        let mut v2 = fixture();
+        v2["schemaVersion"] = 2.into();
+        v2["repository"] = "owner/hamn".into();
+        for name in ["host", "guestImage"] {
+            let artifact = v2["artifacts"][name].as_object_mut().unwrap();
+            artifact.retain(|key, _| key == "url" || key == "sha256");
+        }
+        let with_schema = |schema: u32| {
+            let mut value = fixture();
+            value["schemaVersion"] = schema.into();
+            value
+        };
+        for (schema, value) in [
+            (2, v2),
+            (2, with_schema(2)),
+            (0, with_schema(0)),
+            (1, with_schema(1)),
+            (4, with_schema(4)),
+        ] {
+            let error = parse(&serde_json::to_vec(&value).unwrap(), "13", "arm64")
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                format!("manifest schema v{schema} is not supported; this Hamn reads only schema v3"),
+                "{value}"
+            );
+        }
+        // A v3 manifest without an artifact size is rejected, never defaulted.
+        for name in ["host", "guestImage"] {
+            let mut missing = fixture();
+            let artifact = missing["artifacts"][name].as_object_mut().unwrap();
+            artifact.remove("size");
+            let error = parse(&serde_json::to_vec(&missing).unwrap(), "13", "arm64")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("missing field `size`"), "{name}: {error}");
+        }
+        for bad in [
+            &b"{}"[..],
+            b"[]",
+            b"{\"schemaVersion\":true}",
+            b"{\"schemaVersion\":null}",
+            b"{\"schemaVersion\":3,\"schemaVersion\":2}",
+        ] {
+            assert!(parse(bad, "13", "arm64").is_err());
+        }
     }
     #[test]
     fn stable_versions_are_canonical_numeric_and_bounded() {
@@ -425,10 +423,10 @@ pub(super) mod tests {
 
     #[test]
     fn v3_round_trips_and_field_violations_are_rejected() {
-        let v3 = fixture(3);
+        let v3 = fixture();
         let parsed = parse(&serde_json::to_vec(&v3).unwrap(), "13", "arm64").unwrap();
         assert_eq!(serde_json::to_value(&parsed).unwrap(), v3);
-        let mut boundary = fixture(3);
+        let mut boundary = fixture();
         boundary["artifacts"]["host"]["size"] = download::HOST_LIMIT.into();
         boundary["artifacts"]["guestImage"]["size"] = download::GUEST_LIMIT.into();
         assert!(parse(&serde_json::to_vec(&boundary).unwrap(), "13", "arm64").is_ok());
@@ -444,7 +442,7 @@ pub(super) mod tests {
             ("commit", json!("A".repeat(40))),
             ("validationMode", json!("unverified")),
         ] {
-            let mut item = fixture(3);
+            let mut item = fixture();
             item[key] = value.clone();
             cases.push((format!("{key}={value}"), item));
         }
@@ -459,13 +457,10 @@ pub(super) mod tests {
             ("guestImage", "format", json!("raw")),
             ("guestImage", "virtualSize", json!(1)),
         ] {
-            let mut item = fixture(3);
+            let mut item = fixture();
             item["artifacts"][name][key] = value.clone();
             cases.push((format!("{name}.{key}={value}"), item));
         }
-        let mut repository = fixture(2);
-        repository["repository"] = "bad/extra/name".into();
-        cases.push(("v2 repository=bad/extra/name".into(), repository));
         for (label, item) in cases {
             assert!(
                 parse(&serde_json::to_vec(&item).unwrap(), "13.0", "arm64").is_err(),
@@ -474,7 +469,7 @@ pub(super) mod tests {
         }
 
         assert!(parse(b"NaN", "13", "arm64").is_err());
-        let mut exact = serde_json::to_vec(&fixture(3)).unwrap();
+        let mut exact = serde_json::to_vec(&fixture()).unwrap();
         exact.resize(download::MANIFEST_LIMIT as usize, b' ');
         assert!(parse(&exact, "13", "arm64").is_ok());
         exact.push(b' ');
@@ -482,9 +477,9 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn generated_v2_and_v3_manifests_name_identical_artifacts() {
-        // Dual publication, seed 20260922: 16 publisher-shaped releases. V3
-        // only adds sizes and image metadata; both must select the same bytes.
+    fn generated_manifests_round_trip_their_artifact_identities() {
+        // Seed 20260922: 16 publisher-shaped releases. Parsing keeps each
+        // artifact's URL, digest and size exactly (the bytes to acquire).
         let mut next = generator(20260922);
         let mut hex = |length: usize| -> String {
             (0..length)
@@ -492,41 +487,66 @@ pub(super) mod tests {
                 .collect()
         };
         for case in 0..16 {
-            let mut v3 = fixture(3);
+            let mut value = fixture();
             let version = format!(
                 "v{}.{}.{}",
                 u32::from_str_radix(&hex(8), 16).unwrap(),
                 u32::from_str_radix(&hex(8), 16).unwrap(),
                 u32::from_str_radix(&hex(8), 16).unwrap()
             );
-            v3["version"] = version.clone().into();
-            v3["commit"] = hex(40).into();
+            value["version"] = version.clone().into();
+            value["commit"] = hex(40).into();
+            let mut expected = Vec::new();
             for name in ["host", "guestImage"] {
-                let artifact = &mut v3["artifacts"][name];
-                artifact["url"] = format!("https://fixture.test/{version}/{name}-{case}").into();
-                artifact["sha256"] = hex(64).into();
-                artifact["size"] = (1 + u64::from_str_radix(&hex(4), 16).unwrap()).into();
+                let artifact = &mut value["artifacts"][name];
+                let url = format!("https://fixture.test/{version}/{name}-{case}");
+                let (sha256, size) = (hex(64), 1 + u64::from_str_radix(&hex(4), 16).unwrap());
+                artifact["url"] = url.clone().into();
+                artifact["sha256"] = sha256.clone().into();
+                artifact["size"] = size.into();
+                expected.push((url, sha256, size));
             }
-            let mut v2 = v3.clone();
-            v2["schemaVersion"] = 2.into();
-            for name in ["host", "guestImage"] {
-                let artifact = v2["artifacts"][name].as_object_mut().unwrap();
-                artifact.retain(|key, _| key == "url" || key == "sha256");
-            }
-            let old = parse(&serde_json::to_vec(&v2).unwrap(), "13.0", "arm64").unwrap();
-            let new = parse(&serde_json::to_vec(&v3).unwrap(), "13.0", "arm64").unwrap();
-            assert_eq!(
-                (&old.version, &new.version),
-                (&version, &version),
-                "case {case}"
-            );
-            for (before, after) in [
-                (&old.artifacts.host, &new.artifacts.host),
-                (&old.artifacts.guest_image, &new.artifacts.guest_image),
-            ] {
-                assert_eq!((&before.url, &before.sha256), (&after.url, &after.sha256));
-                assert!(before.size.is_none() && after.size.is_some(), "case {case}");
-            }
+            let parsed = parse(&serde_json::to_vec(&value).unwrap(), "13.0", "arm64").unwrap();
+            assert_eq!(parsed.version, version, "case {case}");
+            let actual: Vec<_> = [&parsed.artifacts.host, &parsed.artifacts.guest_image]
+                .into_iter()
+                .map(|artifact| (artifact.url.clone(), artifact.sha256.clone(), artifact.size))
+                .collect();
+            assert_eq!(actual, expected, "case {case}");
         }
+    }
+
+    #[test]
+    fn bootstrap_writes_a_strict_v3_manifest_that_load_reads_back() {
+        let temp = super::super::test_support::Temp::new();
+        let path = temp.0.join("manifest.json");
+        let (host, guest) = ("b".repeat(64), "c".repeat(64));
+        let write = |path: &Path, host_size: u64| {
+            bootstrap_v3(
+                path.to_str().unwrap(),
+                "v1.2.3",
+                &"a".repeat(40),
+                "/private/host.tar.gz",
+                &host,
+                "https://example.test/guest",
+                &guest,
+                host_size,
+                9,
+            )
+        };
+        write(&path, 7).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["schemaVersion"], 3);
+        assert_eq!(
+            written["artifacts"]["host"],
+            json!({"url": "file:///private/host.tar.gz", "sha256": host, "size": 7})
+        );
+        assert_eq!(written["artifacts"]["guestImage"]["size"], 9);
+        // A size outside the artifact limit is refused before publication.
+        let refused = temp.0.join("refused.json");
+        assert!(write(&refused, 0).is_err());
+        assert!(write(&refused, download::HOST_LIMIT + 1).is_err());
+        assert!(!refused.exists());
     }
 }
