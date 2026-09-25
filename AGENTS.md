@@ -55,12 +55,12 @@
 - `guest/json/`: strict JSON for guest-side C tools and the in-guest `guest-json`
   helper that configuration scripts use instead of an interpreter.
 - `guest/systemd/`: the `hamnd.service` unit.
-- `packaging/release/`: the release installer template and stable promotion. It must
-  not rebuild an already validated RC.
+- `packaging/release/`: the release installer template.
 - `tools/hamn-dev/`: never-shipped build, test, and release tooling: host publication,
   regression suites (`hamn-dev test`), and the release drivers (`hamn-dev release`)
-  for version resolution, candidate assembly, hosted and physical validation, and
-  repository preflight.
+  for version resolution, candidate assembly, hosted and physical validation, stable
+  promotion, and repository preflight. Promotion must not rebuild an already
+  validated RC.
 - `tests/host/`, `guest/tests/`, and inline Rust tests: host, guest, and control-plane regressions. `tools/hamn-dev` suites cover release evidence, release drivers, and runtime validation.
 - `docs/`: English source documentation and corresponding Korean Markdown translations.
 - `vendor/`: vendored C dependencies. Avoid replacing these casually.

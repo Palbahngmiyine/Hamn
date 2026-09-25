@@ -343,7 +343,7 @@ jobs:
           mkdir "$RUNNER_TEMP/hamn-publish"
           HAMN_EXPECTED_WORKFLOW_RUN="$GITHUB_RUN_ID" \
           HAMN_EXPECTED_WORKFLOW_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
-          bash packaging/release/publish-release.sh \
+          "$HAMN_DEV" release publish \
             "$STABLE_TAG" "$CANDIDATE_TAG" "$GITHUB_SHA" \
             "$RUNNER_TEMP/hamn-release-input" "$RUNNER_TEMP/hamn-publish"
       - name: Attest immutable update manifest

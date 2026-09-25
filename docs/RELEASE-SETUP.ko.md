@@ -45,12 +45,15 @@ Manifest의 버전이 아직 게시되지 않았거나 draft 상태라면 Releas
 릴리스 driver는 `hamn-dev release`(`tools/hamn-dev`, 배포하지 않음)의 하위
 명령입니다. `make release-candidate`·`make release-hosted-validation`·
 `make release-gate`는 각각 `build-candidate`·`hosted-validation`·`gate`를
-실행하고, 릴리스 workflow는 `resolve-release`와 `recover-release`를 실행합니다.
-`preflight-repository`와 `export-public-source`도 같은 하위 명령입니다. 각 하위
-명령은 Make target과 workflow가 전달하는 환경 변수로 입력을 받고 현재 작업
-디렉터리의 checkout에서 실행합니다. `packaging/release/publish-release.sh`는 셸
-조율을 유지하고 검사는 `HAMN_DEV`로 전달된 `hamn-dev release`에 맡깁니다. Make
-target이 `hamn-dev`를 빌드하고, 릴리스 workflow는 `rust-toolchain.toml`에 고정한
+실행하고, 릴리스 workflow는 `resolve-release`·`recover-release`·`publish`를
+실행합니다. `preflight-repository`와 `export-public-source`도 같은 하위
+명령입니다. 각 하위 명령은 Make target과 workflow가 전달하는 환경 변수로 입력을
+받고(`publish`는 stable 태그·후보 태그·릴리스 commit·입력 디렉터리·출력
+디렉터리도 인자로 받습니다) 현재 작업 디렉터리의 checkout에서 실행합니다.
+`publish`는 hosted 검증을 거친 후보 바이트를 다시 빌드하지 않고 그대로
+승격합니다. 후보 파일, hosted 증거, 게스트 이미지 크기 증거를 확인한 뒤 v3 update
+manifest를 쓰며, 후보에 포함된 `hamn`이 그 manifest를 받아들여야만 승격을
+계속합니다. Make target이 `hamn-dev`를 빌드하고, 릴리스 workflow는 `rust-toolchain.toml`에 고정한
 toolchain으로 `cargo build --locked -p hamn-dev`를 실행해 빌드합니다. 하위 명령
 없이 `hamn-dev release`를 실행하면 하위 명령과 인자 목록을 출력합니다.
 

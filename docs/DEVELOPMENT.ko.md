@@ -112,7 +112,8 @@ target/release/hamn-dev release physical-e2e --help
 - `host/vz/`: Virtualization.framework 전용.
 - `host/fwd/`: 소유권을 관리하는 Docker 소켓·공개 포트 포워딩.
 - `guest/agent/`, `guest/scripts/`: 게스트 관리와 이미지 소유 helper.
-- `packaging/release/`: 정확한 후보 생성·검증·배포.
+- `packaging/release/`: 릴리스 설치 스크립트 템플릿.
+- `tools/hamn-dev/`(`hamn-dev release`): 정확한 후보 생성·검증·배포.
 
 내부 worker는 터미널·비동기 런타임 초기화 전에 분기합니다. C 전역 상태와
 fork/exit 동작은 worker에 격리합니다. TUI 종료가 별도 소유 VM supervisor를

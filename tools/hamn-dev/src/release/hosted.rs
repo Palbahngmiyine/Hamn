@@ -6,7 +6,7 @@
 //! workflow run and attempt, for the same candidate bytes, with exactly
 //! those capability claims.
 use super::checkout::{Checkout, empty_output_directory, existing_directory, is_positive_decimal, required, variable};
-use super::files::{canonical_json, read_json, set_mode, sha256_file, write, write_new};
+use super::files::{canonical_json, read_json, set_mode, sha256_file, write_new};
 use super::syntax::{candidate_tag_version, is_artifact_name, is_hex};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
@@ -73,7 +73,7 @@ fn validate_hosted() -> Result<(), String> {
 /// `shasum -a 256 -c SHA256SUMS` in `directory`: at least one
 /// `SHA256  NAME` (or binary-mode `SHA256 *NAME`) line, each naming a plain
 /// file in `directory` with that digest. Anything else is a mismatch.
-fn checksums_match(directory: &Path) -> bool {
+pub fn checksums_match(directory: &Path) -> bool {
     let Ok(listed) = fs::read_to_string(directory.join("SHA256SUMS")) else {
         return false;
     };
@@ -179,21 +179,11 @@ pub struct Promotion<'a> {
     pub artifacts: [&'a str; 4],
 }
 
-/// `verify-hosted CANDIDATE_DIR EVIDENCE STABLE_TAG RC_TAG COMMIT TREE RUN
-/// ATTEMPT HOST GUEST SBOM INSTALLER`
-pub fn verify_hosted_command(args: &[String]) -> Result<(), String> {
-    let [directory, evidence, stable_tag, candidate_tag, commit, tree, run, attempt, host, guest, sbom, installer] =
-        args
-    else {
-        return Err("usage: hamn-dev release verify-hosted CANDIDATE_DIR EVIDENCE STABLE_TAG RC_TAG COMMIT TREE RUN \
-                    ATTEMPT HOST GUEST SBOM INSTALLER"
-            .into());
-    };
-    let promotion =
-        Promotion { stable_tag, candidate_tag, commit, tree, run, attempt, artifacts: [host, guest, sbom, installer] };
-    verify_hosted(Path::new(directory), Path::new(evidence), &promotion)
-}
-
+/// Accepts hosted evidence at `evidence_path` only when `directory` holds
+/// exactly the promotion's artifacts, candidate.json and SHA256SUMS, and
+/// the candidate and the evidence both name the promotion's tags, source
+/// and workflow run and bind those exact bytes with no more capability
+/// claims than a hosted run makes.
 pub fn verify_hosted(directory: &Path, evidence_path: &Path, promotion: &Promotion) -> Result<(), String> {
     let mut expected: BTreeSet<&str> = promotion.artifacts.into_iter().collect();
     expected.extend(["candidate.json", "SHA256SUMS"]);
@@ -279,18 +269,21 @@ pub fn verify_hosted(directory: &Path, evidence_path: &Path, promotion: &Promoti
     Ok(())
 }
 
-/// `write-manifest OUTPUT STABLE_TAG COMMIT BASE_URL CANDIDATE_DIR HOST
-/// GUEST`: the schema 3 stable update manifest, binding each artifact's
-/// HTTPS URL, SHA-256 and size and the guest image's format. (The schema 2
-/// manifest for v0.0.1-v0.1.2 clients is no longer published; those clients
-/// reinstall with install.sh.)
-pub fn write_manifest(args: &[String]) -> Result<(), String> {
-    let [output, stable_tag, commit, base_url, directory, host, guest] = args else {
-        return Err(
-            "usage: hamn-dev release write-manifest OUTPUT STABLE_TAG COMMIT BASE_URL CANDIDATE_DIR HOST GUEST".into(),
-        );
-    };
-    let directory = Path::new(directory);
+/// Writes the schema 3 stable update manifest to the new file `output` (an
+/// existing path is never replaced), binding the host archive `host` and
+/// guest image `guest` in `directory` by their `BASE_URL/NAME` URL, SHA-256
+/// and size, and the guest image's format. (The schema 2 manifest for
+/// v0.0.1-v0.1.2 clients is no longer published; those clients reinstall
+/// with install.sh.)
+pub fn write_manifest(
+    output: &Path,
+    stable_tag: &str,
+    commit: &str,
+    base_url: &str,
+    directory: &Path,
+    host: &str,
+    guest: &str,
+) -> Result<(), String> {
     let artifact = |name: &str| -> Result<Value, String> {
         let path = directory.join(name);
         let size = fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?.len();
@@ -309,7 +302,7 @@ pub fn write_manifest(args: &[String]) -> Result<(), String> {
         "compatibility": {"os": "darwin", "architecture": "arm64", "minimumMacOS": "13.0"},
         "artifacts": {"host": artifact(host)?, "guestImage": guest_image},
     });
-    write(Path::new(output), canonical_json(&value).as_bytes())
+    write_new(output, canonical_json(&value).as_bytes())
 }
 
 /// `verify-draft-release RELEASE_JSON TAG COMMIT`: the draft created from
@@ -517,5 +510,36 @@ mod tests {
         assert!(verify(&release(&with_v2, true)).is_err(), "the removed v2 manifest must not be published");
         assert!(verify(&changed(&release(&assets, true), &json!({"targetCommitish": TREE}))).is_err());
         assert!(verify(&changed(&release(&assets, true), &json!({"isPrerelease": true}))).is_err());
+    }
+
+    #[test]
+    fn manifest_binds_urls_digests_and_sizes_and_is_never_replaced() {
+        let directory = TempDir::new("hamn-release-manifest-");
+        let root = directory.path();
+        fs::write(root.join("host.tar.gz"), "host bytes").unwrap();
+        fs::write(root.join("guest.img"), "guest").unwrap();
+        let output = root.join("manifest.json");
+        let base = "https://example.invalid/download/v0.0.1";
+        write_manifest(&output, "v0.0.1", COMMIT, base, root, "host.tar.gz", "guest.img").unwrap();
+        // `shasum -a 256` of the literal bytes, independent of sha256_file.
+        let host_sha256 = "43bcde663fb99877d335d8d1c06c25386bb8528a324218f1a9e8424f50d3cb03";
+        let guest_sha256 = "84983c60f7daadc1cb8698621f802c0d9f9a3c3c295c810748fb048115c186ec";
+        let expected = json!({
+            "schemaVersion": 3, "channel": "stable", "version": "v0.0.1", "commit": COMMIT,
+            "validationMode": "github-hosted-no-vm",
+            "compatibility": {"os": "darwin", "architecture": "arm64", "minimumMacOS": "13.0"},
+            "artifacts": {
+                "host": {"url": format!("{base}/host.tar.gz"), "sha256": host_sha256, "size": 10},
+                "guestImage": {"url": format!("{base}/guest.img"), "sha256": guest_sha256, "size": 5,
+                    "format": "qcow2", "compression": "zlib", "virtualSize": 8_589_934_592u64},
+            },
+        });
+        assert_eq!(fs::read_to_string(&output).unwrap(), canonical_json(&expected));
+        let error = write_manifest(&output, "v0.0.2", COMMIT, base, root, "host.tar.gz", "guest.img").unwrap_err();
+        assert!(error.contains("exists"), "{error}");
+        assert_eq!(fs::read_to_string(&output).unwrap(), canonical_json(&expected));
+        let missing = root.join("other.json");
+        assert!(write_manifest(&missing, "v0.0.1", COMMIT, base, root, "absent", "guest.img").is_err());
+        assert!(!missing.exists(), "a manifest was written for a missing artifact");
     }
 }

@@ -35,6 +35,7 @@ mod release_gate;
 mod release_github;
 mod release_network;
 mod release_physical;
+mod release_publish;
 mod release_repository_preflight;
 mod release_request;
 mod release_version;
@@ -92,6 +93,7 @@ const SUITES: &[Suite] = &[
     ("release-github", release_github::main),
     ("release-physical", release_physical::main),
     ("release-publisher-consumer", release_consumer::main),
+    ("release-publish", release_publish::main),
     ("single-binary", single_binary::main),
     ("ssh-deadline", ssh_deadline::main),
     ("control-signed-bootstrap", control_signed_bootstrap::main),

@@ -48,12 +48,16 @@ Version override semantics: [Release Please documentation](https://github.com/go
 The release drivers are `hamn-dev release` subcommands (`tools/hamn-dev`,
 never shipped): `build-candidate`, `hosted-validation` and `gate` behind
 `make release-candidate`, `make release-hosted-validation` and
-`make release-gate`; `resolve-release` and `recover-release` in the release
-workflow; `preflight-repository`; and `export-public-source`. They read their
-inputs from the environment variables that the Make targets and workflows
-pass, and they run in the checkout of the working directory.
-`packaging/release/publish-release.sh` keeps its shell orchestration and
-delegates its checks to `hamn-dev release` through `HAMN_DEV`. The Make
+`make release-gate`; `resolve-release`, `recover-release` and `publish` in the
+release workflow; `preflight-repository`; and `export-public-source`. They
+read their inputs from the environment variables that the Make targets and
+workflows pass (`publish` also takes the stable and candidate tags, the release
+commit and its input and output directories as arguments), and they run in the
+checkout of the working directory. `publish` promotes the exact hosted
+candidate bytes without rebuilding them: it verifies the candidate files, the
+hosted evidence, and the guest image size evidence, then writes the v3 update
+manifest and completes the promotion only if the candidate's own `hamn` accepts
+that manifest. The Make
 targets build `hamn-dev`; the release workflows build it with
 `cargo build --locked -p hamn-dev` using the toolchain pinned in
 `rust-toolchain.toml`. `hamn-dev release` without a subcommand lists the

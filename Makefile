@@ -500,8 +500,10 @@ test-release-gate: hamn-dev
 	$(HAMN_DEV) test release-physical
 	$(HAMN_DEV) test release-gate
 
+# release-publish promotes a real candidate (built as in test-hosted-validation)
+# and synthetic ones; it builds guest/build/hamn-image-tool.
 test-release-publish: hamn-dev
-	$(RELEASE_TOOL) bash tests/host/test_release_publish.sh
+	$(HAMN_DEV) test release-publish
 
 test-release-version: hamn-dev
 	$(HAMN_DEV) test release-version
