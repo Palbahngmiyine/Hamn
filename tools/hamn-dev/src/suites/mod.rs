@@ -8,6 +8,7 @@ mod single_binary;
 mod tui;
 mod tui_native_regressions;
 mod tui_navigation;
+mod tui_workspaces;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
@@ -18,10 +19,12 @@ const SUITES: &[Suite] = &[
     ("tui", tui::main),
     ("tui-native-regressions", tui_native_regressions::main),
     ("tui-navigation", tui_navigation::main),
+    ("tui-workspaces", tui_workspaces::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
     ("native-regressions", tui_native_regressions::fixture),
+    ("tui-workspaces", tui_workspaces::fixture),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

@@ -219,7 +219,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-navigation
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_review_improvements.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_session_management.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_workspaces.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-workspaces
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_outcomes.py
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-native-regressions
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_quoting.py
