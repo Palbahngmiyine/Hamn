@@ -1,8 +1,10 @@
 //! Shared test support: PTYs, the screen recorder, temporary directories and
 //! the TUI harness.
+pub mod exec;
 pub mod http;
 pub mod pty;
 pub mod screen;
+pub mod termios;
 pub mod tmp;
 pub mod tui;
 
