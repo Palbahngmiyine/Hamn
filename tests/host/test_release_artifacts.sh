@@ -92,21 +92,24 @@ HAMN_RELEASE_ALLOW_DIRTY=1 \
 
 HOST_ARTIFACT=$WORK/candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 GUEST_ARTIFACT=$WORK/candidate/hamn-v0.0.1-ubuntu-24.04-arm64.img
-if tar -tzf "$HOST_ARTIFACT" | grep -Fq "$(basename "$CACHED_INPUT")"; then
+# List once into a file: with pipefail, grep -q exiting early could kill tar
+# with SIGPIPE and turn a found forbidden member into a passing check.
+tar -tzf "$HOST_ARTIFACT" >"$WORK/host-members"
+if grep -Fq "$(basename "$CACHED_INPUT")" "$WORK/host-members"; then
     echo "FAIL: host artifact contains untracked local files" >&2
     exit 1
 fi
-if tar -tzf "$HOST_ARTIFACT" | grep -E '/(guest|shared|vendor)(/|$)' >/dev/null; then
+if grep -E '/(guest|shared|vendor)(/|$)' "$WORK/host-members" >/dev/null; then
     echo "FAIL: host artifact contains mutable guest build sources" >&2
     exit 1
 fi
-tar -tzf "$HOST_ARTIFACT" |
-    grep -Fxq 'hamn-v0.0.1-darwin-arm64/packaging/release/physical-e2e.sh' ||
+grep -Fxq 'hamn-v0.0.1-darwin-arm64/packaging/release/physical-e2e.sh' \
+    "$WORK/host-members" ||
     {
         echo "FAIL: host artifact is missing its physical E2E harness" >&2
         exit 1
     }
-if tar -tzf "$HOST_ARTIFACT" | grep -Fq '/colima-benchmark.sh'; then
+if grep -Fq '/colima-benchmark.sh' "$WORK/host-members"; then
     echo "FAIL: host artifact still contains a removed Colima benchmark harness" >&2
     exit 1
 fi

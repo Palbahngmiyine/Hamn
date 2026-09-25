@@ -50,7 +50,10 @@ if git -C "$ROOT" ls-tree -r --name-only "$COMMIT" -- desktop | grep -q .; then
 fi
 
 mkdir -m 0755 "$OUTPUT"
-git -C "$ROOT" archive --format=tar "$COMMIT" | tar -x -C "$OUTPUT" ||
+# tar stops reading at the end-of-archive marker; draining the rest keeps
+# git archive from dying of SIGPIPE while it writes the final padding.
+git -C "$ROOT" archive --format=tar "$COMMIT" |
+    { tar -x -C "$OUTPUT" && cat >/dev/null; } ||
     fail "cannot extract tracked source tree"
 
 git -C "$OUTPUT" init -q --initial-branch main

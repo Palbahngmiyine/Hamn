@@ -46,8 +46,11 @@ fi
 # untracked shared/ file must not become an immutable image input.
 REPO=$WORK/repo
 mkdir -p "$REPO"
-git -C "$PROJECT_ROOT" archive --format=tar HEAD -- guest vendor host/image |
-    tar -C "$REPO" -xf -
+# Through a file: a reading tar stops at the end-of-archive marker, and a
+# writer still sending padding then dies of SIGPIPE (CI run 36148429857).
+git -C "$PROJECT_ROOT" archive --format=tar -o "$WORK/sources.tar" HEAD -- \
+    guest vendor host/image
+tar -C "$REPO" -xf "$WORK/sources.tar"
 cp "$GUEST_ROOT"/image/*.sh "$GUEST_ROOT"/image/*.py "$GUEST_ROOT"/image/*.c \
     "$GUEST_ROOT"/image/*.json "$REPO/guest/image/"
 cp "$PROJECT_ROOT"/host/image/qcow2.{c,h} "$REPO/host/image/"
