@@ -25,14 +25,19 @@ sha256_file() {
     /usr/bin/openssl dgst -sha256 -r "$1" | awk '{print $1}'
 }
 
+mebibytes() {
+    awk -v bytes="$1" 'BEGIN { printf "%.1f MiB", bytes / 1048576 }'
+}
+
 
 if [ "$#" -gt 0 ]; then
     if [ "$#" = 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
         echo "Install Hamn ${HAMN_VERSION#v} for Apple Silicon macOS."
-        echo "Usage: bash install.sh"
-        echo "Downloads and verifies the host archive and guest image, then installs to ~/.local/bin."
-        echo "Existing VMs are not restarted; existing profile disks keep their guest root."
-        echo "For updates: hamn upgrade (or hamn --headless system update --yes)"
+        echo "Usage: curl -fsSL https://github.com/Palbahngmiyine/Hamn/releases/latest/download/install.sh | /bin/bash"
+        echo "   or: bash install.sh"
+        echo "Downloads Hamn and its Linux guest image, verifies both, and installs"
+        echo "the hamn command to ~/.local/bin. Running VMs are not restarted."
+        echo "Update later with: hamn upgrade"
         exit 0
     fi
     fail "unknown arguments; use bash install.sh --help"
@@ -55,7 +60,7 @@ home_mode=$(stat -f '%Lp' "$HOME")
 # Reject foreign commands before creating cache state or downloading anything.
 # The verified updater performs the complete generation ownership check again.
 if [ -e "$HOME/.local/bin/hamn" ] && [ ! -L "$HOME/.local/bin/hamn" ]; then
-    fail "existing hamn is not a managed generation; migrate it with make install before using the release installer"
+    fail "existing hamn is not a managed generation: ~/.local/bin/hamn is a standalone executable. If you built it from source, run make install from the current source first; otherwise move it aside and run this installer again"
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/hamn-install.XXXXXX") ||
@@ -65,7 +70,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "hamn install: Preparing Hamn ${HAMN_VERSION#v}" >&2
+echo "Installing Hamn ${HAMN_VERSION#v} for Apple Silicon macOS..." >&2
 # The cold bootstrap cannot use the authenticated helper until its host archive
 # arrives. macOS ships zsh/system: its fcntl lock interoperates with native flock
 # on Darwin. One process owns both this lock and all partial writes; killing it
@@ -76,7 +81,7 @@ setopt ERR_EXIT NO_UNSET PIPE_FAIL
 umask 077
 zmodload zsh/system
 zmodload zsh/stat
-home_dir=$1 url=$2 key=$3 expected=$4 scratch=$5 allow_local=$6
+home_dir=$1 url=$2 key=$3 expected=$4 scratch=$5 allow_local=$6 label=${7:-}
 curl_pid=
 TRAPEXIT() {
     if [[ -n "$curl_pid" ]]; then
@@ -160,6 +165,7 @@ if exists "$partial" && exists "$metadata" && (( $(size_of "$metadata") <= 2048 
     fi
 fi
 if (( offset == 0 )); then /bin/rm -f "$partial" "$metadata"; fi
+[[ -z "$label" ]] || print -ru2 -- "$label"
 save_metadata() {
     local temporary
     temporary=$(/usr/bin/mktemp "$store_dir/.bootstrap.XXXXXX")
@@ -262,12 +268,11 @@ done
 fail "host server rejected resumed transfer"
 HAMN_BOOTSTRAP_ACQUIRE
 chmod 0600 "$work/acquire-host.zsh"
-echo "hamn install: Downloading host archive..." >&2
 host_archive=$(env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
     /bin/zsh -f "$work/acquire-host.zsh" "$HOME" "$HAMN_HOST_URL" "$HAMN_HOST_SHA256" \
-    "$HAMN_HOST_SIZE" "$work" "${HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS:-0}") ||
-    fail "host download failed; check your connection and rerun this installer"
-echo "hamn install: Verifying host archive SHA-256..." >&2
+    "$HAMN_HOST_SIZE" "$work" "${HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS:-0}" \
+    "Downloading Hamn ${HAMN_VERSION#v} ($(mebibytes "$HAMN_HOST_SIZE"))...") ||
+    fail "Hamn download failed; check your connection and run the installer again to resume"
 [ "$(sha256_file "$host_archive")" = "$HAMN_HOST_SHA256" ] ||
     fail "host artifact SHA-256 mismatch"
 
@@ -311,14 +316,23 @@ resolved_command=$(PATH="$caller_path" command -v hamn || :)
 if [ -n "$resolved_command" ] && "$work/hamn-support" __install-support same-file \
     "$resolved_command" "$HOME/.local/bin/hamn" 2>/dev/null
 then
-    echo "hamn install: Ready. Run hamn to open the terminal interface." >&2
-else
-    if [ -n "$resolved_command" ]; then
-        printf 'hamn install: PATH currently selects another hamn: %s\n' "$resolved_command" >&2
-    else
-        echo "hamn install: hamn is not on your current PATH." >&2
-    fi
-    printf 'hamn install: Installed command: %s\n' "$HOME/.local/bin/hamn" >&2
-    echo "hamn install: Add this to your shell configuration, then open a new terminal:" >&2
-    echo '  export PATH="$HOME/.local/bin:$PATH"' >&2
+    echo "Run hamn to get started. Update later with hamn upgrade." >&2
+    exit 0
 fi
+# Advise for the caller's login shell; nothing is written on their behalf.
+path_line='export PATH="$HOME/.local/bin:$PATH"'
+login_shell=${SHELL:-}
+case "${login_shell##*/}" in
+zsh) setup="echo '$path_line' >> ~/.zshrc && source ~/.zshrc" ;;
+bash) setup="echo '$path_line' >> ~/.bash_profile && source ~/.bash_profile" ;;
+fish) setup="fish_add_path ~/.local/bin" ;;
+*) setup="$path_line   # add to your shell configuration" ;;
+esac
+if [ -n "$resolved_command" ]; then
+    printf 'Another hamn comes first on your PATH: %s\n' "$resolved_command" >&2
+    echo "Put ~/.local/bin before it (or remove it), then open a new terminal:" >&2
+else
+    echo "~/.local/bin is not on your PATH yet. Add it with:" >&2
+fi
+printf '  %s\n' "$setup" >&2
+echo "Then run hamn to get started." >&2

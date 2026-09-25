@@ -33,7 +33,13 @@ hamn --version
 바이너리에서 거부합니다. 관리형 명령 심볼릭 링크로 실행해야 합니다.
 `--manifest URL`로 HTTPS manifest를 지정할 수 있으며 로컬 경로는 테스트 전용입니다.
 
-일반 출력에는 버전과 전송량을 표시합니다. `--output json`은 `schemaVersion`,
+사람용 출력은 짧습니다. 진행 안내는 stderr에 표시합니다. `Checking for updates...`,
+`Updating Hamn A → B...` 제목, 캐시에 없는 아티팩트마다 다운로드 한 줄(최종 stderr가
+터미널이면 백분율·크기·속도를 제자리에서 갱신하고, 아니면 시작 줄 하나만 출력),
+`Installing...`, 그리고 `Hamn A is up to date.`나 `Updated Hamn A → B. Existing VMs
+were not restarted.` 같은 결과 한 줄을 표시합니다. `--check`는 다음 명령을 알려 주는
+문장 하나를 출력합니다. 실패하면 `hamn upgrade: <원인>` 한 줄만 출력하며 headless는
+같은 원인을 JSON `error.message`로 한 번만 알립니다. `--output json`은 `schemaVersion`,
 `currentVersion`, `latestVersion`, `status`, `downloadedBytes`, `resumedBytes`,
 `reusedBytes`, 아티팩트별 `artifacts`, `completed`, `profileDisksChanged=false`를
 포함하는 JSON 객체 하나를 출력합니다. headless는 기존 JSON envelope의 data에
@@ -61,9 +67,13 @@ Range를 거부하거나 무시하면 전체 다운로드를 한 번 재시도�
 Hamn의 native downloader와 digest 잠금 및 검증된 artifact cache를 공유합니다.
 호스트를 검증한 다음에는 해당 native updater가 게스트 이미지를 획득합니다.
 외부 telemetry를 전송하지 않습니다.
-수동 전송은 요청마다 연결 15초, 전체 600초로 제한합니다. 네트워크 실패를 기존처럼
-자동으로 3회 재시도하지 않습니다. 명령을 다시 실행하면 안전한 v3 partial을
-이어받으며 v2는 전체 다운로드를 다시 시작합니다.
+명시적 전송은 연결에 15초를 허용하고, 처리량이 60초 동안 1 KiB/s 미만일 때만
+실패합니다(절대 상한 6시간). 따라서 느리지만 정상인 연결도 큰 게스트 이미지를 끝까지
+받을 수 있습니다. v3 전송이 새 바이트를 저장한 뒤 중단되면 Range로 최대 세 번 더
+이어받습니다. 진전이 없는 전송은 바로 실패하고 무결성 실패는 재시도하지 않습니다.
+그 밖에는 명령을 다시 실행하면 안전한 v3 partial을 이어받으며 v2는 전체 다운로드를
+다시 시작합니다. `hamn upgrade`는 작업 전체에 60분을 허용하고 headless
+`system update`는 기존 `--timeout`(기본 600초)을 유지합니다.
 
 관리 설치는 반영 후 불필요한 설치본을 정리하며, 활성 설치본과 직전 설치본,
 열린 실행 파일·지원 파일, 복구 참조를 보존합니다. 설치와 업데이트는 두 대상
@@ -102,8 +112,10 @@ HOME에서 나중에 설치한 generation은 보존합니다. 게스트만 복�
 상태나 이미 정리한 legacy K3s 데이터를 복구할 수 없습니다. 첫 설치 실패에는
 이전 바이너리가 없어 명령이 남을 수 있고 이미지 선택을 복구합니다.
 
-최초 설치기는 고정된 시스템 도구 PATH를 사용하고 호출자의 PATH는 설정 안내에만
-사용합니다. 앞에서 선택되는 다른 `hamn`을 알리며 PATH 변경 후 새 터미널을
+최초 설치기와 업데이트기는 고정된 시스템 도구 PATH(`/usr/bin:/bin:/usr/sbin:/sbin`,
+`/bin/bash`로 실행)를 사용하므로 호출자 PATH 앞쪽의 GNU 도구가 동작을 바꾸지
+못합니다. 최초 설치기는 호출자의 PATH를 설정 안내에만 사용하며, 호출자의 zsh·bash·fish에
+맞춰 추가할 한 줄을 알려 줍니다. 앞에서 선택되는 다른 `hamn`을 알리며 PATH 변경 후 새 터미널을
 열도록 안내합니다. 이전 형식의 일반 바이너리는 관리형 설치로 이전해야 합니다.
 로컬 설치 통과는 물리 VM 검증이 아닙니다.
 
@@ -123,13 +135,14 @@ Hosted validation으로 물리 VM 동작을 검증했다고 주장하지 않습�
 
 ## 레퍼런스 분석
 
-Microsoft·GitHub·Rust 재단 생태계의 공식 프로젝트로 대상을 제한했습니다.
+Microsoft·GitHub·Rust 재단 생태계와 Anthropic Claude Code의 공식 프로젝트로 대상을 제한했습니다.
 상호작용 설계 참고이며 사용성을 측정해 순위를 매긴 결과는 아닙니다.
 
 | 공식 프로젝트 | 확인한 패턴 | Hamn 적용 |
 | --- | --- | --- |
 | [GitHub CLI](https://cli.github.com/manual/gh_extension_upgrade) | 작업별 사용법·옵션·dry-run 설명, [stderr 업데이트 알림](https://cli.github.com/manual/gh_help_environment) | 작업별 도움말, 필수 `--yes` 설명, JSON과 진행 안내 분리 |
 | [Microsoft .NET 설치기](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-install-script) | [소스](https://github.com/dotnet/install-scripts/blob/47940ac9fc30a2f2dd19167165d0bb0774625f67/src/dotnet-install.sh)의 다운로드·압축 해제·설치 버전·PATH 안내, dry-run의 재실행 명령 | 단계 안내, 재시도 방법, 필요한 경우의 PATH 안내 |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code/setup) | 작은 `install.sh`가 checksum을 검증한 바이너리 하나를 받아 설치를 마무리하게 하고, `claude update\|upgrade` 한 명령으로 확인과 설치를 수행(2.1.282 `--help`와 공개 `install.sh`를 확인) | 명령 하나로 설치하고 `hamn upgrade\|update`는 제목 한 줄, 아티팩트별 진행률, 결과 한 줄을 표시 |
 | [rustup](https://rust-lang.github.io/rustup/installation/) | [버전 요약 구현](https://github.com/rust-lang/rustup/blob/454ff04cdefebc8f38f47f64b3904866f9e0660f/src/cli/common.rs)의 설치·업데이트·변경 없음·실패 구분 | 설치 전후 버전 표시, 검증된 변경 없음 결과, 반영 완료 후 성공 요약 |
 
 PTY 터미널에서 GitHub CLI 2.100.0의 `extension upgrade --help`와

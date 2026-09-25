@@ -33,6 +33,13 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def error_message(result):
+    """The single failure reason in the headless JSON envelope."""
+    value = json.loads(result.stdout)
+    assert value['ok'] is False, result.stdout
+    return value['error']['message']
+
+
 
 @contextlib.contextmanager
 def controlled_https(root):
@@ -110,6 +117,8 @@ def check(terminal):
         transport.mkdir()
         env = {**os.environ, **tls_env, 'HOME': str(home),
                'PATH': str(transport) + ':' + os.environ['PATH'],
+               # The updater ignores the caller PATH; faults use this seam.
+               'HAMN_TEST_UPDATE_TOOL_DIR': str(transport),
                'HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS': '1'}
         listener = socket.socket(socket.AF_UNIX)
         listener.bind(str(work / 'ready.sock'))
@@ -128,7 +137,7 @@ def check(terminal):
                 with selectors.DefaultSelector() as poll:
                     poll.register(reader, selectors.EVENT_READ)
                     deadline = time.monotonic() + 15
-                    while b'Downloading host archive' not in received:
+                    while b'Downloading Hamn ' not in received:
                         assert poll.select(max(0, deadline - time.monotonic())), 'progress was buffered until completion'
                         chunk = os.read(reader, 4096)
                         assert chunk, 'stderr ended before download progress'
@@ -151,8 +160,11 @@ def check(terminal):
             else:
                 received += stderr
             assert json.loads(stdout)['data']['completed'] is True, stdout
-            assert b'Updated Hamn:' in received and version.encode() in received
+            assert b'Reinstalled Hamn ' + version.encode() + b'.' in received, received
             assert b'Existing VMs were not restarted' in received
+            # One heading and one result line; no internal jargon or repeats.
+            for jargon in (b'hamn update:', b'verified cache', b'atomically', b'update completed'):
+                assert jargon not in received, received
             assert b'.hamn-generations/' not in received and b'file://' not in received
             args = (work / 'transport-requests').read_text()
             assert len(args.splitlines()) == 2 and all(' TLSv1.' in row for row in args.splitlines()), args
@@ -174,7 +186,7 @@ def check(terminal):
                 assert recovered.returncode != 0, recovered.stdout
                 assert not json.loads(recovered.stdout)['ok'], recovered.stdout
                 assert b'recovered the previous binary and guest image selection' in recovered.stderr, recovered.stderr
-                assert b'managed generation changed while waiting or recovering' in recovered.stderr, recovered.stderr
+                assert 'managed generation changed while waiting or recovering' in error_message(recovered), recovered.stdout
                 assert os.readlink(bindir / 'hamn') == active
                 assert selection.read_bytes() == saved
                 assert not (home / '.hamn/cache/.hamn-update-transaction').exists()
@@ -186,7 +198,8 @@ def check(terminal):
             repeated = update()
             assert repeated.returncode == 0, repeated.stderr
             assert json.loads(repeated.stdout)['data']['completed'] is True
-            assert b'Unchanged Hamn' in repeated.stderr and b'Updated Hamn:' not in repeated.stderr
+            # A no-op is exactly two human lines.
+            assert repeated.stderr == b'Checking for updates...\nHamn ' + version.encode() + b' is up to date.\n', repeated.stderr
             assert (work / 'transport-requests').read_bytes() == before_calls
             assert os.readlink(bindir / 'hamn') == active
             assert selection.read_bytes() == saved and selection.stat().st_mtime_ns == before_mtime
@@ -208,7 +221,7 @@ def check(terminal):
                 calls = len((work / 'transport-requests').read_text().splitlines())
                 result = update()
                 assert result.returncode == 0, (damage, result.returncode, result.stdout, result.stderr)
-                assert b'Unchanged Hamn' not in result.stderr, damage
+                assert b'is up to date' not in result.stderr, damage
                 # Both payloads are cached. Only damaged host integrity requires
                 # a generation reinstall; guest selection repair preserves it.
                 assert len((work / 'transport-requests').read_text().splitlines()) == calls, damage
@@ -221,7 +234,8 @@ def check(terminal):
             cached_guest.write_bytes(b'corrupted')
             result = update()
             assert result.returncode == 0 and json.loads(result.stdout)['data']['status'] == 'repaired', result.stderr
-            assert b'Unchanged Hamn' not in result.stderr
+            assert b'is up to date' not in result.stderr
+            assert b'Repaired the Hamn ' + version.encode() + b' guest image.' in result.stderr, result.stderr
             assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
             cached_guest.write_bytes(guest.read_bytes())
 
@@ -232,7 +246,7 @@ def check(terminal):
             manifest['artifacts']['host']['sha256'] = digest(archive)
             manifest_path.write_text(json.dumps(manifest))
             result = update()
-            assert result.returncode == 0 and b'Updated Hamn:' in result.stderr, result.stderr
+            assert result.returncode == 0 and b'Reinstalled Hamn ' in result.stderr, result.stderr
             assert os.readlink(bindir / 'hamn') != active
             active = os.readlink(bindir / 'hamn')
             # Strict metadata rejection, including malformed known extensions.
@@ -241,11 +255,13 @@ def check(terminal):
                 manifest_path.write_text(json.dumps(bad))
                 result = subprocess.run([bindir / 'hamn', '--headless', 'system', 'update', '--yes',
                                          '--manifest', manifest_path], env=env, capture_output=True, timeout=15)
-                assert result.returncode != 0 and not json.loads(result.stdout)['ok']
-                assert b'No new release was installed' in result.stderr
-                assert b'retry the same command with all original options (including --manifest, if supplied)' in result.stderr
+                assert result.returncode != 0
+                message = error_message(result)
+                assert 'is not usable by this Hamn' in message, message
+                assert 'https://github.com/Palbahngmiyine/Hamn#install' in message, message
+                # The reason is reported once (JSON), not repeated on stderr.
+                assert message.encode() not in result.stderr and b'update failed' not in result.stderr, result.stderr
                 assert b'retry with hamn --headless system update --yes' not in result.stderr
-                assert b'https://github.com/Palbahngmiyine/Hamn#install' in result.stderr
                 assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
                 assert not (home / '.hamn/cache/.hamn-update-transaction').exists()
             for failure in ('version', 'checksum'):
@@ -257,10 +273,12 @@ def check(terminal):
                 manifest_path.write_text(json.dumps(bad))
                 result = subprocess.run([bindir / 'hamn', '--headless', 'system', 'update', '--yes',
                                          '--manifest', manifest_path], env=env, capture_output=True, timeout=15)
-                assert result.returncode != 0 and not json.loads(result.stdout)['ok']
-                expected = b'version does not match' if failure == 'version' else b'guest image acquisition failed'
-                assert expected in result.stderr, result.stderr
-                assert b'Updated Hamn:' not in result.stderr
+                assert result.returncode != 0
+                message = error_message(result)
+                expected = ('host binary version does not match' if failure == 'version'
+                            else 'could not obtain the guest image: artifact size or SHA-256 mismatch')
+                assert expected in message, message
+                assert b'Updated Hamn' not in result.stderr and b'Reinstalled Hamn' not in result.stderr
                 assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
             # Reinstalling through bootstrap must preserve the managed binary,
             # including SIGKILL recovery and a later failed installation attempt.
@@ -321,13 +339,13 @@ def check(terminal):
             cat.chmod(0o755)
             result = subprocess.run([bindir / 'hamn', '--headless', 'system', 'update', '--yes',
                                      '--manifest', manifest_path], env=env, capture_output=True, timeout=15)
-            assert result.returncode != 0 and not json.loads(result.stdout)['ok']
-            assert b'host install failed; prior binary and guest image selection were restored' in result.stderr, (result.stdout, result.stderr)
+            assert result.returncode != 0
+            assert 'host install failed; prior binary and guest image selection were restored' in error_message(result), (result.stdout, result.stderr)
             assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
             assert not (home / '.hamn/cache/.hamn-update-transaction').exists()
             manifest_path.write_text(json.dumps(manifest))
             repeated = update()
-            assert repeated.returncode == 0 and b'Unchanged Hamn' in repeated.stderr, repeated.stderr
+            assert repeated.returncode == 0 and b'is up to date' in repeated.stderr, repeated.stderr
             assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
             # Receipt publication is part of the transaction. Inject an existing
             # receipt and a rollback rename failure; retry must recover the old
@@ -348,8 +366,8 @@ def check(terminal):
                 move.chmod(0o755)
                 result = update()
                 assert result.returncode != 0, result.stderr
-                assert b'release receipt failed and recovery could not be applied' in result.stderr
-                assert b'were restored' not in result.stderr
+                assert 'release receipt failed and recovery could not be applied' in error_message(result), result.stdout
+                assert 'were restored' not in error_message(result) and b'were restored' not in result.stderr
                 assert os.readlink(bindir / 'hamn') != active
                 assert selection.read_bytes() == saved
                 assert (home / '.hamn/cache/.hamn-update-transaction').is_dir()
@@ -358,7 +376,7 @@ def check(terminal):
                 recover_changed_generation()
                 recovered = update()
                 assert recovered.returncode == 0, recovered.stderr
-                assert b'Unchanged Hamn' in recovered.stderr
+                assert b'is up to date' in recovered.stderr
                 assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
                 assert not (home / '.hamn/cache/.hamn-update-transaction').exists()
                 # If both completed/recovered journal retirement fail, preserve
@@ -375,14 +393,14 @@ def check(terminal):
                 move.chmod(0o755)
                 result = update()
                 assert result.returncode != 0, result.stderr
-                assert b'could not clear its recovery journal; retry the same command with all original options (including --manifest)' in result.stderr
-                assert b'run hamn --headless system update --yes again' not in result.stderr
+                assert 'could not clear its recovery journal; retry the same command with all original options (including --manifest)' in error_message(result), result.stdout
+                assert b'run hamn --headless system update --yes again' not in result.stdout + result.stderr
                 assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
                 assert (home / '.hamn/cache/.hamn-update-transaction').is_dir()
                 move.unlink()
                 manifest_path.write_text(json.dumps(manifest))
                 recovered = update()
-                assert recovered.returncode == 0 and b'Unchanged Hamn' in recovered.stderr, recovered.stderr
+                assert recovered.returncode == 0 and b'is up to date' in recovered.stderr, recovered.stderr
                 assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
                 assert not (home / '.hamn/cache/.hamn-update-transaction').exists()
             print(f'PASS: {"PTY" if terminal else "redirected"} progress before completion, JSON, version summary, schema rejection, no-op identity and state preservation')

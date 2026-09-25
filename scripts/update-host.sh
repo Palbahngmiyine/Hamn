@@ -2,16 +2,37 @@
 # Install one HTTPS/digest-verified compatible release without rebuilding it.
 set -euo pipefail
 export LC_ALL=C
+# Stock macOS tools only: a caller PATH with GNU coreutils would change stat -f.
+# Regression tests inject tool faults through an explicit directory instead.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+[ -z "${HAMN_TEST_UPDATE_TOOL_DIR:-}" ] || PATH=$HAMN_TEST_UPDATE_TOOL_DIR:$PATH
+export PATH
 
+# Failure reporting. With --result-file the frontend prints this single reason
+# once (and puts it in the headless JSON error); the installer and direct runs
+# print it here. Detailed diagnostics may precede it on stderr.
+fail_prefix="hamn upgrade"
+result_ready=0
 fail() {
-    echo "hamn update: $*" >&2
+    if [ "$result_ready" = 1 ] && printf '%s\n' "$*" >"$result_file" 2>/dev/null; then
+        exit 1
+    fi
+    echo "$fail_prefix: $*" >&2
     exit 1
 }
 
-# Human progress goes to stderr; stdout belongs to the headless JSON protocol.
-# HAMN_UPDATE_PROGRESS is set by the frontend because the worker uses a pipe.
+# Human progress goes to stderr as plain sentences; stdout belongs to the
+# headless JSON protocol. The native downloader draws its own progress lines.
 progress() {
-    echo "hamn update: $*" >&2
+    echo "$*" >&2
+}
+
+# The last diagnostic line of a native helper, without its internal prefix.
+helper_reason() {
+    local line
+    line=$(tail -n 1 "$1" 2>/dev/null) || line=
+    line=${line#hamn: }
+    printf '%s' "${line:-unknown error}"
 }
 
 usage() {
@@ -100,6 +121,11 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 [ "$check_only" = 0 ] || [ "$force" = 0 ] || usage
+[ "$bootstrap" = 0 ] || fail_prefix="hamn install"
+if [ -n "$result_file" ]; then
+    safe_private_regular "$result_file" || fail "unsafe upgrade result file"
+    result_ready=1
+fi
 if [ "$check_only" = 1 ]; then
     [ -n "$current_version" ] || usage
     if [ -z "$manifest_ref" ]; then
@@ -108,13 +134,17 @@ if [ "$check_only" = 1 ]; then
     fi
     # This branch precedes directory creation, locks, journal recovery and all
     # installation inspection. A check cannot repair an interrupted mutation.
-    if [ -n "$result_file" ]; then
-        safe_private_regular "$result_file" || fail "unsafe upgrade result file"
-        exec >"$result_file"
+    check=("$INSTALL_SUPPORT" __install-support upgrade check --manifest "$manifest_ref"
+        --current-version "$current_version" --macos "$(sw_vers -productVersion)"
+        --architecture "$(uname -m)" --target "$(readlink "$bindir/hamn")")
+    [ "$result_ready" = 1 ] || exec "${check[@]}"
+    # The JSON result goes to the result file; a failure reason is kept.
+    if ! reason=$("${check[@]}" 2>&1 >"$result_file"); then
+        reason=${reason##*$'\n'}
+        reason=${reason#hamn: }
+        fail "could not check for updates: ${reason:-unknown error}"
     fi
-    exec "$INSTALL_SUPPORT" __install-support upgrade check --manifest "$manifest_ref" \
-        --current-version "$current_version" --macos "$(sw_vers -productVersion)" \
-        --architecture "$(uname -m)" --target "$(readlink "$bindir/hamn")"
+    exit 0
 fi
 [ -z "$current_version" ] || upgrade_support version "$current_version" 2>/dev/null || \
     fail "upgrade requires a stable managed release; reinstall with the official installer"
@@ -124,8 +154,9 @@ BINDIR=$bindir DATADIR=$datadir
 source "$script_dir/install-transaction.sh"
 bindir=$BINDIR datadir=$DATADIR
 prune_generations() {
+    # Removed generations are routine; only a deferral (stderr) is reported.
     install_support prune "$bindir" "$datadir" \
-        "$old_target" "$source_root" ||
+        "$old_target" "$source_root" >/dev/null ||
         echo "hamn update: obsolete generation cleanup deferred" >&2
 }
 
@@ -708,13 +739,18 @@ trap cleanup EXIT
 manifest=$work/manifest.json
 counts=$work/counts
 mkdir -m 0700 "$counts"
-progress "Checking release metadata..."
+# The installer supplies a verified local manifest; only updates contact it.
+[ "$bootstrap_entry" = 1 ] || progress "Checking for updates..."
 if ! manifest_bytes=$(upgrade_support manifest --manifest "$manifest_ref" \
     --current-version "$current_version" --macos "$(sw_vers -productVersion)" \
-    --architecture "$(uname -m)" --output "$manifest"); then
-    progress "No new release was installed. See the official installer recovery instructions:"
-    progress "https://github.com/Palbahngmiyine/Hamn#install"
-    exit 1
+    --architecture "$(uname -m)" --output "$manifest" 2>"$work/manifest.err"); then
+    reason=$(helper_reason "$work/manifest.err")
+    case "$reason" in
+    "download failed: "*)
+        fail "could not check for updates: ${reason#download failed: }. Check your connection and try again." ;;
+    *)
+        fail "the latest release information is not usable by this Hamn ($reason). Reinstall with the official installer: https://github.com/Palbahngmiyine/Hamn#install" ;;
+    esac
 fi
 printf '{"downloadedBytes":%s,"resumedBytes":0,"reusedBytes":0,"source":"manifest"}\n' \
     "$manifest_bytes" >"$counts/manifest.json"
@@ -728,7 +764,11 @@ upgrade_support fields "$manifest" >"$work/manifest-fields"
     IFS= read -r guest_hash
 } <"$work/manifest-fields"
 status=$(upgrade_support status "$manifest" "$current_version" "$cache" "$old_target") || fail "unsupported installed version"
-[ "$status" != ahead ] || fail "stable downgrade is not permitted"
+if [ "$status" = ahead ]; then
+    [ "$bootstrap_entry" = 0 ] ||
+        fail "stable downgrade is not permitted: Hamn $current_version is already installed, which is newer than this installer (${release_version#v}); run hamn upgrade to stay current"
+    fail "stable downgrade is not permitted: installed Hamn $current_version is newer than the latest release (${release_version#v})"
+fi
 finish_result() {
     if [ "$output_json" = 1 ]; then
         if [ -n "$result_file" ]; then
@@ -753,11 +793,14 @@ release_receipt() {
 }
 
 if [ -n "$old_target" ] && [ "$managed_marker" = version=1 ]; then
-    progress "Checking installed release and cached image..."
     if [ "$force" = 0 ] && [ "$status" = up-to-date ] && release_receipt check "$old_target" &&
         [ "$(readlink "$hamn_link")" = "$old_target" ] && path_absent "$update_journal"; then
-        progress "Unchanged Hamn ${release_version#v}: installed files and guest image match this release."
-        progress "No further artifact downloads or installation were needed."
+        # Installed files and guest image match this release: no downloads.
+        if [ "$bootstrap_entry" = 1 ]; then
+            progress "Hamn ${release_version#v} is already installed."
+        else
+            progress "Hamn ${release_version#v} is up to date."
+        fi
         upgrade_support reuse-counts "$manifest" "$cache" "$counts" both
         finish_result up-to-date
         prune_generations
@@ -772,19 +815,38 @@ if [ "$force" = 0 ] && [ "$status" = repair-required ] && \
     host_mutation=0
     upgrade_support reuse-counts "$manifest" "$cache" "$counts" host
 fi
-progress "Release: ${previous_version:-not installed} -> ${release_version#v}"
-progress "Existing VMs are not restarted; existing profile disks keep their guest root."
-if [ "$host_mutation" = 1 ]; then
-    progress "Downloading host archive (verified cache is reused)..."
-    host_archive=$(upgrade_support acquire "$manifest" host "$cache" "$counts/host.json") || fail "host acquisition failed; check your connection and retry"
+if [ -n "$previous_version" ] && [ "$host_mutation" = 0 ]; then
+    progress "Repairing the Hamn ${release_version#v} guest image..."
+elif [ -n "$previous_version" ] && [ "$previous_version" = "${release_version#v}" ]; then
+    progress "Reinstalling Hamn ${release_version#v}..."
+elif [ -n "$previous_version" ]; then
+    progress "Updating Hamn $previous_version → ${release_version#v}..."
 fi
-progress "Downloading guest image (verified cache is reused)..."
-guest_download=$(upgrade_support acquire "$manifest" guestImage "$cache" "$counts/guestImage.json") || fail "guest image acquisition failed; check your connection and retry"
-progress "Verifying archive and image SHA-256..."
+# The native helper prints download progress itself (nothing for a verified
+# cache hit) and the transfer reason on failure; stdout is only the path.
+acquisition_failed() {
+    local what=$1 reason=
+    [ ! -f "$counts/$2.reason" ] || reason=$(head -c 1024 "$counts/$2.reason")
+    case "$reason" in
+    "download failed: "*)
+        if [ "$bootstrap_entry" = 1 ]; then
+            fail "could not download $what: ${reason#download failed: }. Check your connection and run the installer again to resume."
+        fi
+        fail "could not download $what: ${reason#download failed: }. Check your connection and run hamn upgrade again to resume."
+        ;;
+    *) fail "could not obtain $what: ${reason:-unknown error}" ;;
+    esac
+}
+if [ "$host_mutation" = 1 ]; then
+    host_archive=$(upgrade_support acquire "$manifest" host "$cache" "$counts/host.json") ||
+        acquisition_failed "Hamn ${release_version#v}" host
+fi
+guest_download=$(upgrade_support acquire "$manifest" guestImage "$cache" "$counts/guestImage.json") ||
+    acquisition_failed "the guest image" guestImage
+progress "Installing..."
 [ "$(sha256_file "$guest_download")" = "$guest_hash" ] || fail "guest image SHA-256 mismatch"
 if [ "$host_mutation" = 1 ]; then
 [ "$(sha256_file "$host_archive")" = "$host_hash" ] || fail "host artifact SHA-256 mismatch"
-progress "Extracting verified host archive..."
 artifact_root=$(install_support extract "$host_archive" "$work/extract") ||
     fail "host artifact validation or extraction failed"
 
@@ -796,7 +858,6 @@ artifact=$work/extract/$artifact_root
     fail "host binary version does not match the release manifest"
 fi
 
-progress "Staging verified guest image..."
 guest_name=hamn-guest-$guest_hash.img
 guest_target=$cache/$guest_name
 guest_marker=$guest_target.verified
@@ -828,7 +889,6 @@ printf '{"schemaVersion":1,"file":"%s","sha256":"%s"}\n' \
     "$guest_name" "$guest_hash" >"$new_selection"
 chmod 0600 "$new_selection"
 
-progress "Installing release atomically..."
 prepare_update_journal "$new_selection" ||
     fail "cannot record a durable update rollback transaction"
 trap 'interrupted_update HUP' HUP
@@ -900,12 +960,15 @@ fi
 
 prune_generations
 
-if [ -n "$previous_version" ]; then
-    progress "Updated Hamn: $previous_version -> ${release_version#v}"
+if [ -z "$previous_version" ]; then
+    progress "Installed Hamn ${release_version#v}."
+elif [ "$host_mutation" = 0 ]; then
+    progress "Repaired the Hamn ${release_version#v} guest image. Existing VMs were not restarted."
+elif [ "$previous_version" = "${release_version#v}" ]; then
+    progress "Reinstalled Hamn ${release_version#v}. Existing VMs were not restarted."
 else
-    progress "Installed Hamn ${release_version#v}"
+    progress "Updated Hamn $previous_version → ${release_version#v}. Existing VMs were not restarted."
 fi
-progress "Guest image verified and selected for new profile disks. Existing VMs were not restarted."
 
 # The notice is advisory and never authorizes installation. Drop it only after
 # a successful transaction; an unsafe entry is left for explicit repair.

@@ -22,7 +22,10 @@ pub fn run_cli(args: &[OsString]) -> i32 {
         words: vec!["system".into(), "update".into()],
         headless: true,
         yes: true, // Explicit `hamn upgrade` is the human mutation request.
-        timeout: 600,
+        // The largest permitted operation deadline: a guest image on a slow
+        // link must not be cut off after ten minutes. Transfers themselves
+        // fail on stalls, and an interrupted download resumes on the next run.
+        timeout: 3600,
         tail: 200,
         ..Request::default()
     };
@@ -64,7 +67,7 @@ pub fn run_cli(args: &[OsString]) -> i32 {
     match parsed {
         Ok(true) => {
             println!(
-                "Usage: hamn upgrade [--check] [--force] [--manifest URL] [--output json]\n\nhamn update is an alias. --check reads only release metadata.\n--force reinstalls the same release; stable downgrades are rejected.\nOnly managed installations may be changed. Existing profile disks are preserved."
+                "Usage: hamn upgrade [--check] [--force] [--manifest URL] [--output json]\n\nInstall the latest stable Hamn release. hamn update is an alias.\n\nOptions:\n  --check        Only report whether an update is available\n  --force        Reinstall the current release (never downgrades)\n  --manifest URL Use another release manifest\n  --output json  Print one JSON result on stdout\n\nRunning VMs are not restarted and existing VM disks are not changed.\nAn interrupted upgrade is recovered and resumed by running it again."
             );
             return 0;
         }
@@ -96,16 +99,11 @@ pub fn run_cli(args: &[OsString]) -> i32 {
         Ok(value) => {
             if json {
                 println!("{value}");
-            } else {
-                println!(
-                    "Hamn {} → {}: {}. Downloaded {} bytes; reused {} bytes. Existing profile disks unchanged.",
-                    value["currentVersion"].as_str().unwrap_or("unknown"),
-                    value["latestVersion"].as_str().unwrap_or("unknown"),
-                    value["status"].as_str().unwrap_or("completed"),
-                    value["downloadedBytes"],
-                    value["reusedBytes"]
-                );
+            } else if request.check {
+                println!("{}", check_summary(&value));
             }
+            // An installation's final status line was already written to
+            // stderr by the updater, together with its progress.
             0
         }
         Err(Failure { code, message }) => {
@@ -119,6 +117,28 @@ pub fn run_cli(args: &[OsString]) -> i32 {
             }
             1
         }
+    }
+}
+
+/// One human sentence, with the next command, for an `upgrade --check` result.
+fn check_summary(value: &serde_json::Value) -> String {
+    let current = value["currentVersion"].as_str().unwrap_or("unknown");
+    let latest = value["latestVersion"].as_str().unwrap_or("unknown");
+    match value["status"].as_str().unwrap_or_default() {
+        "up-to-date" => format!("Hamn {current} is up to date."),
+        "update-available" => format!(
+            "Hamn {latest} is available (installed: {current}). Run hamn upgrade to install it."
+        ),
+        "repair-required" => format!(
+            "Hamn {current} is current, but its installed files or guest image need repair. Run hamn upgrade to repair them."
+        ),
+        "ahead" => format!(
+            "Hamn {current} is newer than the latest stable release ({latest}); there is nothing to install."
+        ),
+        "unsupported-install" => format!(
+            "This hamn ({current}) was not installed by the Hamn installer, so it cannot upgrade itself. Install Hamn with: curl -fsSL https://github.com/Palbahngmiyine/Hamn/releases/latest/download/install.sh | /bin/bash"
+        ),
+        other => format!("Hamn {current}: {other}."),
     }
 }
 
@@ -411,6 +431,42 @@ mod tests {
             "__install-support\nupgrade\nschedule\n--manifest\nhttps://fixture.invalid/manifest\n--current-version\n1.2.3\n"
         );
     }
+    #[test]
+    fn check_summaries_name_the_versions_and_the_next_command() {
+        let summary = |status: &str, current: &str, latest: serde_json::Value| {
+            super::check_summary(&serde_json::json!({
+                "status": status, "currentVersion": current, "latestVersion": latest
+            }))
+        };
+        assert_eq!(
+            summary("up-to-date", "1.2.3", "v1.2.3".into()),
+            "Hamn 1.2.3 is up to date."
+        );
+        assert_eq!(
+            summary("update-available", "1.2.3", "1.3.0".into()),
+            "Hamn 1.3.0 is available (installed: 1.2.3). Run hamn upgrade to install it."
+        );
+        assert!(
+            summary("repair-required", "1.2.3", "1.2.3".into())
+                .ends_with("Run hamn upgrade to repair them.")
+        );
+        assert!(
+            summary("ahead", "2.0.0", "1.9.0".into())
+                .contains("newer than the latest stable release (1.9.0)")
+        );
+        let unsupported = summary("unsupported-install", "0.0.0-dev", serde_json::Value::Null);
+        assert!(
+            unsupported
+                .starts_with("This hamn (0.0.0-dev) was not installed by the Hamn installer")
+        );
+        assert!(unsupported.ends_with("install.sh | /bin/bash"));
+        // Future statuses are still reported rather than hidden.
+        assert_eq!(
+            summary("renamed", "1.2.3", "1.2.3".into()),
+            "Hamn 1.2.3: renamed."
+        );
+    }
+
     #[test]
     fn stable_versions_reject_metadata_and_overflow() {
         assert_eq!(stable("v4294967295.2.3"), Some([u32::MAX, 2, 3]));

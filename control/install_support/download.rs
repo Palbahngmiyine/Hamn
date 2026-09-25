@@ -4,7 +4,11 @@
 //! per-digest advisory locks cover lookup, transfer and atomic publication.
 //! Network interruption retains a v3 partial; integrity failures discard it.
 //! No generation, profile, VM or guest-selection mutations belong here.
-use super::{Result, require};
+use super::{
+    Result,
+    progress::{self, Progress},
+    require,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -184,6 +188,13 @@ fn remove_optional(path: &Path) -> Result<()> {
 
 pub(super) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    atomic_bytes(path, &bytes)
+}
+
+/// Private one-line text record (for example a failure reason handoff).
+pub(super) fn atomic_text(path: &Path, text: &str) -> Result<()> {
+    let mut bytes = text.replace('\n', " ").into_bytes();
     bytes.push(b'\n');
     atomic_bytes(path, &bytes)
 }
@@ -434,7 +445,57 @@ struct Transfer {
     written: u64,
 }
 
+/// Explicit transfers fail when stalled below 1 KiB/s for 60 seconds, not
+/// after a fixed total that a slow but healthy link cannot meet. The absolute
+/// six-hour bound still terminates a pathological trickle.
+const STALL_BYTES_PER_SECOND: &str = "1024";
+const STALL_SECONDS: &str = "60";
+const EXPLICIT_MAX_SECONDS: &str = "21600";
+
+/// Describe a curl exit status for people; the transfer policy is unchanged.
+fn curl_failure(code: Option<i32>) -> String {
+    let reason = match code {
+        Some(6) => "could not resolve the release server",
+        Some(7) => "could not connect to the release server",
+        Some(22) => "the release server returned an HTTP error",
+        Some(28) => "the connection stalled or timed out",
+        Some(35 | 60) => "a secure (TLS) connection could not be established",
+        Some(18 | 52 | 56) => "the connection was interrupted",
+        _ => "the transfer failed",
+    };
+    match code {
+        Some(code) => format!("download failed: {reason} (curl exit {code})"),
+        None => format!("download failed: {reason}"),
+    }
+}
+
 fn transfer(
+    url: &str,
+    destination: &Path,
+    limit: u64,
+    offset: u64,
+    saved_validator: Option<&str>,
+    automatic: bool,
+    on_headers: impl FnMut(&Headers) -> Result<()>,
+    curl: &Path,
+) -> std::result::Result<Transfer, TransferFailure> {
+    transfer_observed(
+        url,
+        destination,
+        limit,
+        offset,
+        saved_validator,
+        automatic,
+        on_headers,
+        curl,
+        &mut |_| {},
+    )
+}
+
+/// `observe` receives the running count of payload bytes written by this
+/// response (excluding `offset`). It must not fail the transfer.
+#[allow(clippy::too_many_arguments)]
+fn transfer_observed(
     url: &str,
     destination: &Path,
     limit: u64,
@@ -443,6 +504,7 @@ fn transfer(
     automatic: bool,
     mut on_headers: impl FnMut(&Headers) -> Result<()>,
     curl: &Path,
+    observe: &mut dyn FnMut(u64),
 ) -> std::result::Result<Transfer, TransferFailure> {
     use TransferFailure::{Invalid, RangeRejected};
     validate_url(url).map_err(Invalid)?;
@@ -495,11 +557,19 @@ fn transfer(
             "--connect-timeout",
             if automatic { "2" } else { "15" },
             "--max-time",
-            if automatic { "5" } else { "600" },
+            if automatic { "5" } else { EXPLICIT_MAX_SECONDS },
             "--dump-header",
         ])
         .arg(&header.path)
         .args(["-o", "-"]);
+    if !automatic {
+        command.args([
+            "--speed-limit",
+            STALL_BYTES_PER_SECOND,
+            "--speed-time",
+            STALL_SECONDS,
+        ]);
+    }
     if offset != 0 {
         command.args(["--range", &format!("{offset}-")]);
         if let Some(value) = saved_validator {
@@ -555,6 +625,7 @@ fn transfer(
                 return Err(Invalid("artifact exceeds expected size".into()));
             }
             target.write_all(&buffer[..count])?;
+            observe(received);
         }
     }
     target.sync_all()?;
@@ -567,7 +638,7 @@ fn transfer(
     }
     if !status.success() {
         return Err(TransferFailure::Interrupted(
-            "release transfer failed".into(),
+            curl_failure(status.code()).into(),
         ));
     }
     Ok(Transfer {
@@ -654,15 +725,163 @@ fn save_partial_metadata(path: &Path, value: &PartialMetadata) -> Result<()> {
     atomic_bytes(path, bytes.as_bytes())
 }
 
-pub(super) fn acquire(cache: &Path, artifact: &Artifact, name: &str) -> Result<(PathBuf, Counts)> {
-    acquire_with_curl(cache, artifact, name, Path::new("/usr/bin/curl"))
+/// Resumptions after the first attempt when a sized (v3) transfer is
+/// interrupted after persisting new bytes. A transfer that makes no progress
+/// fails immediately; integrity failures discard the partial and never retry.
+const RESUME_ATTEMPTS: u32 = 3;
+
+/// Explicit install/upgrade acquisition. Progress goes to stderr (see
+/// `progress`); the result and counters are the same as one uninterrupted
+/// transfer, except that bytes from interrupted attempts count as downloaded.
+pub(super) fn acquire(
+    cache: &Path,
+    artifact: &Artifact,
+    name: &str,
+    label: &str,
+) -> Result<(PathBuf, Counts)> {
+    let mut progress = Progress::new(
+        io::stderr(),
+        label,
+        artifact.size,
+        progress::live_terminal(),
+    );
+    acquire_resuming(
+        cache,
+        artifact,
+        name,
+        Path::new("/usr/bin/curl"),
+        &mut progress,
+        RESUME_ATTEMPTS,
+        std::time::Duration::from_secs(1),
+    )
 }
 
+/// Network accounting for one attempt, filled in even when it fails.
+#[derive(Default)]
+struct AttemptStats {
+    /// Payload bytes received, including a discarded rejected-Range body.
+    downloaded: u64,
+    /// Subset of `downloaded` written after an accepted Range request.
+    resumed: u64,
+    /// Bytes written to the partial by this attempt and still retained there.
+    retained: u64,
+}
+
+fn acquire_resuming<W: Write>(
+    cache: &Path,
+    artifact: &Artifact,
+    name: &str,
+    curl: &Path,
+    progress: &mut Progress<W>,
+    attempts: u32,
+    pause: std::time::Duration,
+) -> Result<(PathBuf, Counts)> {
+    let (mut downloaded, mut resumed, mut retained) = (0u64, 0u64, 0u64);
+    let mut attempt = 0;
+    loop {
+        let mut stats = AttemptStats::default();
+        match acquire_observed(
+            cache,
+            artifact,
+            name,
+            curl,
+            Some(&mut *progress),
+            &mut stats,
+        ) {
+            Ok((path, mut counts)) => {
+                counts.downloaded_bytes = counts
+                    .downloaded_bytes
+                    .checked_add(downloaded)
+                    .ok_or("transfer counter overflow")?;
+                counts.resumed_bytes = counts
+                    .resumed_bytes
+                    .checked_add(resumed)
+                    .ok_or("transfer counter overflow")?;
+                // The final attempt counted earlier attempts' bytes as reused.
+                counts.reused_bytes = counts.reused_bytes.saturating_sub(retained);
+                return Ok((path, counts));
+            }
+            Err(error) => {
+                downloaded = downloaded
+                    .checked_add(stats.downloaded)
+                    .ok_or("transfer counter overflow")?;
+                resumed = resumed
+                    .checked_add(stats.resumed)
+                    .ok_or("transfer counter overflow")?;
+                if artifact.size.is_none() || stats.retained == 0 || attempt >= attempts {
+                    return Err(error);
+                }
+                retained = retained
+                    .checked_add(stats.retained)
+                    .ok_or("transfer counter overflow")?;
+                attempt += 1;
+                progress.note(&format!("{error}; resuming ({attempt} of {attempts})..."));
+                std::thread::sleep(pause);
+            }
+        }
+    }
+}
+
+/// One attempt without progress: the transport contract exercised by tests.
+#[cfg(test)]
 fn acquire_with_curl(
     cache: &Path,
     artifact: &Artifact,
     name: &str,
     curl: &Path,
+) -> Result<(PathBuf, Counts)> {
+    acquire_observed(
+        cache,
+        artifact,
+        name,
+        curl,
+        None::<&mut Progress<io::Sink>>,
+        &mut AttemptStats::default(),
+    )
+}
+
+/// Run one explicit transfer, recording bytes written so far in `written`
+/// (also on failure) and forwarding them to the optional progress display.
+#[allow(clippy::too_many_arguments)]
+fn observed_transfer<W: Write>(
+    url: &str,
+    destination: &Path,
+    limit: u64,
+    offset: u64,
+    saved_validator: Option<&str>,
+    on_headers: impl FnMut(&Headers) -> Result<()>,
+    curl: &Path,
+    progress: &mut Option<&mut Progress<W>>,
+    written: &mut u64,
+) -> std::result::Result<Transfer, TransferFailure> {
+    *written = 0;
+    transfer_observed(
+        url,
+        destination,
+        limit,
+        offset,
+        saved_validator,
+        false,
+        on_headers,
+        curl,
+        &mut |received| {
+            *written = received;
+            if let Some(progress) = progress.as_deref_mut() {
+                progress.update(offset.saturating_add(received));
+            }
+        },
+    )
+}
+
+/// One acquisition attempt: cache lookup, at most one Range retry, verified
+/// publication. `progress` is told only about network transfers.
+fn acquire_observed<W: Write>(
+    cache: &Path,
+    artifact: &Artifact,
+    name: &str,
+    curl: &Path,
+    mut progress: Option<&mut Progress<W>>,
+    stats: &mut AttemptStats,
 ) -> Result<(PathBuf, Counts)> {
     let limit = match name {
         "host" => HOST_LIMIT,
@@ -768,30 +987,51 @@ fn acquire_with_curl(
     };
     let expected = artifact.size.unwrap_or(limit);
     let mut discarded = 0;
-    let mut transferred = transfer(
+    // Local test artifacts are copied, not transferred; they get no progress.
+    let network = local_source(&artifact.url).is_none();
+    if network && let Some(progress) = progress.as_deref_mut() {
+        progress.start(offset);
+    }
+    let mut written = 0;
+    let mut transferred = observed_transfer(
         &artifact.url,
         &partial,
         expected,
         offset,
         saved_validator.as_deref(),
-        false,
         on_headers,
         curl,
+        &mut progress,
+        &mut written,
     );
     if let Err(TransferFailure::RangeRejected(received)) = transferred {
         discarded = received;
         remove_optional(&partial)?;
         offset = 0;
-        transferred = transfer(
+        if let Some(progress) = progress.as_deref_mut() {
+            progress.restart(0);
+        }
+        transferred = observed_transfer(
             &artifact.url,
             &partial,
             expected,
             0,
             None,
-            false,
             on_headers,
             curl,
+            &mut progress,
+            &mut written,
         );
+    }
+    stats.downloaded = discarded
+        .checked_add(written)
+        .ok_or("transfer counter overflow")?;
+    if offset != 0 {
+        stats.resumed = written;
+    }
+    let done = offset.saturating_add(written);
+    if network && let Some(progress) = progress.as_deref_mut() {
+        progress.finish(done, transferred.is_ok());
     }
     let transferred = match transferred {
         Ok(value) => value,
@@ -803,6 +1043,8 @@ fn acquire_with_curl(
         Err(TransferFailure::Interrupted(error)) => {
             if artifact.size.is_none() {
                 remove_optional(&partial)?;
+            } else {
+                stats.retained = written;
             }
             return Err(error);
         }
@@ -846,3 +1088,7 @@ fn acquire_with_curl(
 #[cfg(test)]
 #[path = "download_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "download_resume_tests.rs"]
+mod resume_tests;

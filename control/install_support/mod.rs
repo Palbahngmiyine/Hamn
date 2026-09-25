@@ -7,12 +7,24 @@ mod archive;
 mod download;
 mod files;
 mod manifest;
+mod progress;
 mod receipt;
 mod retention;
 mod upgrade;
 
 use std::path::Path;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// An error whose reason was already handed to the caller (for example the
+/// updater's `<name>.reason` file); `run` exits non-zero without printing it.
+#[derive(Debug)]
+struct ReportedError(String);
+impl std::fmt::Display for ReportedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ReportedError {}
 
 fn require(condition: bool, message: &str) -> Result<()> {
     if condition {
@@ -38,8 +50,8 @@ pub fn run() -> i32 {
     match result {
         Ok(()) => 0,
         Err(error) => {
-            if !quiet {
-                eprintln!("hamn install support: {error}");
+            if !quiet && !error.is::<ReportedError>() {
+                eprintln!("hamn: {error}");
             }
             1
         }

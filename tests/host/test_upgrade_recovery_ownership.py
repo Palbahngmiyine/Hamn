@@ -217,7 +217,7 @@ class RecoveryOwnership(unittest.TestCase):
                         'case "$arg" in */.hamn-update-rollback.*/hamn) exit 74;; esac\n'
                         'done\nexec /bin/mv "$@"\n')
         move.chmod(0o755)
-        f.env["PATH"] = str(transport) + ":" + os.environ["PATH"]
+        f.env["HAMN_TEST_UPDATE_TOOL_DIR"] = str(transport)
         failed = self.recover()
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("could not be safely recovered", failed.stderr)

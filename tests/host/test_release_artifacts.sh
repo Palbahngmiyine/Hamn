@@ -162,7 +162,7 @@ printf '%s' \
 HOME_DIR=$WORK/home
 mkdir -p "$HOME_DIR"
 HOME="$HOME_DIR" bash "$WORK/candidate/install.sh" --help >"$WORK/help.out"
-grep -Fq 'For updates: hamn upgrade (or hamn --headless system update --yes)' "$WORK/help.out"
+grep -Fxq 'Update later with: hamn upgrade' "$WORK/help.out"
 [ ! -e "$HOME_DIR/.local" ] && [ ! -e "$HOME_DIR/.hamn" ]
 if HOME="$HOME_DIR" bash "$WORK/candidate/install.sh" --unknown >"$WORK/unknown.out" 2>"$WORK/unknown.err"; then
     echo "FAIL: bootstrap accepted an unknown option" >&2
@@ -176,11 +176,16 @@ if HOME="$HOME_DIR" bash "$WORK/candidate/install.sh" >"$WORK/local.out" \
 fi
 grep -Fq 'local artifacts are disabled' "$WORK/local.err"
 
-HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
+HOME="$HOME_DIR" SHELL=/bin/zsh HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     bash "$WORK/candidate/install.sh" >"$WORK/install.out" 2>"$WORK/install.err"
 [ ! -s "$WORK/install.out" ]
-grep -Fq 'Installed Hamn 0.0.1' "$WORK/install.err"
-grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$WORK/install.err"
+grep -Fxq 'Installed Hamn 0.0.1.' "$WORK/install.err"
+# PATH advice names the caller's shell file and is ready to paste.
+grep -Fxq "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc && source ~/.zshrc" "$WORK/install.err"
+if grep -Eq 'hamn (update|install):|verified cache|atomically' "$WORK/install.err"; then
+    echo "FAIL: installer output repeats internal step prefixes or jargon" >&2
+    exit 1
+fi
 "$HOME_DIR/.local/bin/hamn" --version | grep -Fxq 'hamn 0.0.1'
 grep -Fq "\"sha256\":\"$GUEST_HASH\"" \
     "$HOME_DIR/.hamn/cache/guest-image.json"
@@ -196,16 +201,17 @@ if grep -Fq 'export PATH=' "$WORK/reinstall.err"; then
     echo "FAIL: bootstrap suggested PATH setup when the command directory was present" >&2
     exit 1
 fi
-grep -Fq 'Unchanged Hamn 0.0.1' "$WORK/reinstall.err"
+grep -Fxq 'Hamn 0.0.1 is already installed.' "$WORK/reinstall.err"
+grep -Fxq 'Run hamn to get started. Update later with hamn upgrade.' "$WORK/reinstall.err"
 installed_target=$(readlink "$HOME_DIR/.local/bin/hamn")
 mkdir "$WORK/shadow"
 printf '#!/bin/sh\necho old-hamn\n' >"$WORK/shadow/hamn"
 chmod 0755 "$WORK/shadow/hamn"
-HOME="$HOME_DIR" PATH="$WORK/shadow:$HOME_DIR/.local/bin:$PATH" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
+HOME="$HOME_DIR" SHELL=/bin/bash PATH="$WORK/shadow:$HOME_DIR/.local/bin:$PATH" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     bash "$WORK/candidate/install.sh" >"$WORK/shadow.out" 2>"$WORK/shadow.err"
-grep -Fq "PATH currently selects another hamn: $WORK/shadow/hamn" "$WORK/shadow.err"
-grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$WORK/shadow.err"
-if grep -Fq 'Ready. Run hamn' "$WORK/shadow.err"; then
+grep -Fxq "Another hamn comes first on your PATH: $WORK/shadow/hamn" "$WORK/shadow.err"
+grep -Fq "export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bash_profile" "$WORK/shadow.err"
+if grep -Fq 'Run hamn to get started. Update later' "$WORK/shadow.err"; then
     echo "FAIL: bootstrap reported a shadowed command ready" >&2
     exit 1
 fi
@@ -215,7 +221,7 @@ rm "$WORK/shadow/hamn"
 ln -s "$HOME_DIR/.local/bin/hamn" "$WORK/shadow/hamn"
 HOME="$HOME_DIR" PATH="$WORK/shadow:$PATH" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     bash "$WORK/candidate/install.sh" >"$WORK/alias.out" 2>"$WORK/alias.err"
-grep -Fq 'Ready. Run hamn' "$WORK/alias.err"
+grep -Fxq 'Run hamn to get started. Update later with hamn upgrade.' "$WORK/alias.err"
 if grep -Fq 'export PATH=' "$WORK/alias.err"; then
     echo "FAIL: bootstrap rejected a PATH symlink to the installed command" >&2
     exit 1
@@ -237,7 +243,7 @@ if HOME="$WORK/legacy-home" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     echo "FAIL: bootstrap replaced a regular executable without rollback evidence" >&2
     exit 1
 fi
-grep -Fq 'migrate it with make install' "$WORK/legacy.err"
+grep -Fq 'run make install from the current source first' "$WORK/legacy.err"
 [ "$(sha256 "$WORK/legacy-home/.local/bin/hamn")" = "$legacy_hash" ]
 [ ! -L "$WORK/legacy-home/.local/bin/hamn" ]
 [ ! -e "$WORK/legacy-home/.hamn" ]
@@ -245,7 +251,7 @@ printf 'tampered\n' >>"$HOST_ARTIFACT"
 # A verified digest cache is independent of later origin damage.
 HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     bash "$WORK/candidate/install.sh" >"$WORK/cached.out" 2>"$WORK/cached.err"
-grep -Fq 'Unchanged Hamn 0.0.1' "$WORK/cached.err"
+grep -Fxq 'Hamn 0.0.1 is already installed.' "$WORK/cached.err"
 [ "$(readlink "$HOME_DIR/.local/bin/hamn")" = "$installed_target" ]
 # Without those verified bytes, reject the corrupted origin before cutover.
 rm "$HOME_DIR/.hamn/cache/downloads/$HOST_HASH.artifact"

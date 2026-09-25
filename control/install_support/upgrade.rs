@@ -3,7 +3,7 @@
 //! private, atomic and single-flight. Automatic transfer has a five-second
 //! download-layer deadline; scheduling occurs only in the fresh helper process.
 use super::{
-    Result,
+    ReportedError, Result,
     download::{self, Counts},
     manifest::{self, Manifest},
     receipt, require,
@@ -438,11 +438,37 @@ pub(super) fn run(args: &[String]) -> Result<()> {
             cache,
             counts,
         } => {
-            let value = manifest::load(&path)?;
-            let (path, amount) =
-                download::acquire(&cache, &value.artifact(&name)?.acquisition(), &name)?;
-            download::atomic_json(&counts, &amount)?;
-            println!("{}", path.display());
+            let acquired = (|| -> Result<PathBuf> {
+                let value = manifest::load(&path)?;
+                let label = match name.as_str() {
+                    "host" => format!(
+                        "Downloading Hamn {}",
+                        value.version.strip_prefix('v').unwrap_or(&value.version)
+                    ),
+                    _ => "Downloading guest image".to_owned(),
+                };
+                let (path, amount) = download::acquire(
+                    &cache,
+                    &value.artifact(&name)?.acquisition(),
+                    &name,
+                    &label,
+                )?;
+                download::atomic_json(&counts, &amount)?;
+                Ok(path)
+            })();
+            match acquired {
+                Ok(path) => println!("{}", path.display()),
+                Err(error) => {
+                    // The updater reports this reason once, beside the counts
+                    // (`<name>.reason`; results read only `*.json`). Print it
+                    // here only when that handoff itself fails.
+                    let reason = counts.with_extension("reason");
+                    if download::atomic_text(&reason, &error.to_string()).is_err() {
+                        eprintln!("hamn: {error}");
+                    }
+                    return Err(ReportedError(error.to_string()).into());
+                }
+            }
         }
         Operation::Result {
             manifest: path,

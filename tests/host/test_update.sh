@@ -108,7 +108,7 @@ MANAGED_DATADIR=$(cd "$DATADIR" && pwd -P)
 
 MANIFEST_2=$(build_release 0.0.2 'immutable guest image v0.0.2' normal)
 run_update "$MANIFEST_2" >"$WORK/update.out" 2>"$WORK/update.err"
-grep -Fq "Updated Hamn: 0.0.1 -> 0.0.2" "$WORK/update.err"
+grep -Fxq "Updated Hamn 0.0.1 → 0.0.2. Existing VMs were not restarted." "$WORK/update.err"
 grep -Fq '"completed":true' "$WORK/update.out"
 new_target=$(readlink "$BINDIR/hamn")
 [ "$new_target" != "$old_target" ] || {
@@ -126,7 +126,8 @@ if HOME="$HOME_DIR" "$new_target" --headless system update --yes --manifest "$MA
     echo "FAIL: direct generation binary was accepted for update" >&2
     exit 1
 fi
-grep -Fq 'managed hamn command symlink' "$WORK/direct.err"
+# Headless reports the reason once, in its JSON error.
+grep -Fq 'managed hamn command symlink' "$WORK/direct.out"
 cp "$MANIFEST_2" "$WORK/bad-manifest.json"
 printf '{' >"$WORK/bad-manifest.json"
 if run_update "$WORK/bad-manifest.json" \

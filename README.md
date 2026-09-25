@@ -23,13 +23,21 @@ curl -fsSL --proto '=https' --tlsv1.2 \
   | /bin/bash
 ```
 
-```sh
-hamn
+It downloads Hamn and its Linux guest image, verifies both, and installs the
+`hamn` command in `~/.local/bin`. Example output:
+
+```text
+Installing Hamn 0.1.2 for Apple Silicon macOS...
+Downloading Hamn 0.1.2 (4.4 MiB)...
+Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
+Installing...
+Installed Hamn 0.1.2.
+Run hamn to get started. Update later with hamn upgrade.
 ```
 
-The release installer needs only macOS system tools and the downloaded Hamn
-executable. Python, Homebrew, Rust, and Xcode Command Line Tools are not required
-for installation or updates.
+If `~/.local/bin` is not on your PATH, the installer prints the one line to add
+for your shell. It needs only macOS system tools; Python, Homebrew, Rust, and
+Xcode Command Line Tools are not required for installation or updates.
 
 For source builds, see [Development](docs/DEVELOPMENT.md).
 Signed release installation is described in [release setup](docs/RELEASE-SETUP.md).
@@ -100,15 +108,29 @@ set. Hamn does not provide an MCP server.
 ## Upgrade
 
 ```sh
-hamn upgrade --check
-hamn upgrade
-hamn upgrade --force --output json
+hamn upgrade           # install the latest release (alias: hamn update)
+hamn upgrade --check   # only report whether an update is available
 ```
 
-`hamn update` is an alias; `hamn --headless system update --yes` remains supported.
-Only a managed installation can be changed. The updater rejects stable downgrades,
-reuses verified artifacts, repairs a missing same-version guest image separately,
-and preserves existing profile disks. `--force` permits a same-version host reinstall.
-After a successful interactive TUI exit, a cached update notice may appear; release
-checks run in the background and never install an update. Set `HAMN_NO_UPDATE_CHECK=1`
-to disable them. See [installation](docs/INSTALLATION.md) for integrity and recovery.
+```text
+$ hamn upgrade
+Checking for updates...
+Updating Hamn 0.1.1 → 0.1.2...
+Downloading Hamn 0.1.2  100%  4.4 MiB / 4.4 MiB
+Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
+Installing...
+Updated Hamn 0.1.1 → 0.1.2. Existing VMs were not restarted.
+
+$ hamn upgrade
+Checking for updates...
+Hamn 0.1.2 is up to date.
+```
+
+Running VMs are not restarted and existing VM disks are not changed; the new guest
+image is used for VMs created afterwards. An interrupted download resumes
+automatically, or on the next `hamn upgrade`. Failures print one line with the
+reason and what to do next. Automation can use `hamn upgrade --output json` or
+`hamn --headless system update --yes`. After a successful TUI session Hamn may
+mention a newer release; it never installs one by itself. Set
+`HAMN_NO_UPDATE_CHECK=1` to disable that check. See
+[installation](docs/INSTALLATION.md) for integrity, recovery and `--force`.

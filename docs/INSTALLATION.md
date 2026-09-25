@@ -35,7 +35,14 @@ stable downgrades, development versions, source builds, external package-manager
 installations and direct generation binaries; invoke the managed command symlink.
 `--manifest URL` selects another HTTPS manifest. Local paths remain test-only.
 
-Human output reports versions and transfer bytes. `--output json` writes one
+Human output is short. Progress goes to stderr: `Checking for updates...`, an
+`Updating Hamn A → B...` heading, one download line per artifact that is not
+already cached (redrawn in place with percent, size and rate when the final
+stderr is a terminal; a single start line otherwise), `Installing...`, and one
+result line such as `Hamn A is up to date.` or `Updated Hamn A → B. Existing VMs
+were not restarted.`. `--check` prints one sentence naming the next command.
+A failure prints one `hamn upgrade: <reason>` line; headless reports the same
+reason once, in its JSON `error.message`. `--output json` writes one
 result object with `schemaVersion`, `currentVersion`, `latestVersion`, `status`,
 `downloadedBytes`, `resumedBytes`, `reusedBytes`, per-artifact `artifacts`,
 `completed`, and `profileDisksChanged=false`. Headless retains its existing JSON
@@ -63,9 +70,14 @@ Size or digest mismatch is never published. The standalone installer's stock-she
 host bootstrap shares the digest lock and verified artifact cache with Hamn's
 native downloader. Once the host is authenticated, its native updater acquires
 the guest image. No telemetry is sent.
-Manual transfers allow 15 seconds to connect and 600 seconds total per request.
-Network failures are no longer retried three times automatically; rerun the command
-to resume a safe v3 partial. V2 failures restart the full download.
+Explicit transfers allow 15 seconds to connect and fail only when throughput stays
+below 1 KiB/s for 60 seconds (with an absolute six-hour bound), so a slow but
+healthy link can finish a large guest image. When a v3 transfer is interrupted
+after persisting new bytes, the updater resumes it with Range up to three more
+times; a transfer that makes no progress fails immediately, and integrity
+failures never retry. Otherwise rerun the command to resume the safe v3 partial.
+V2 failures restart the full download. `hamn upgrade` allows the operation 60
+minutes; headless `system update` keeps its `--timeout` (default 600 seconds).
 
 Managed installs collect obsolete generations after commit, retaining the active
 and immediately previous generation, open executables/support files, and recovery
@@ -107,8 +119,10 @@ do not restart VMs or replace existing profile disks. Binary rollback cannot
 restore guest state or retired legacy K3s data. First-install failure has no prior
 binary to restore; a published command may remain while image selection is restored.
 
-Bootstrap uses a fixed system-tool PATH and preserves the caller's PATH only for
-setup advice. It identifies an earlier conflicting `hamn`, and recommends opening
+Bootstrap and the updater use a fixed system-tool PATH (`/usr/bin:/bin:/usr/sbin:/sbin`,
+run by `/bin/bash`), so GNU tools earlier in a caller's PATH cannot change their
+behavior. Bootstrap preserves the caller's PATH only for setup advice, which names
+the line to add for the caller's zsh, bash or fish. It identifies an earlier conflicting `hamn`, and recommends opening
 a new terminal after PATH changes. Legacy regular binaries must be migrated to a
 managed installation first. A local install pass is not physical VM validation.
 
@@ -128,13 +142,14 @@ budget blocks publication. Hosted validation does not claim physical VM behavior
 
 ## Reference analysis
 
-References were limited to Microsoft, GitHub, and the Rust Foundation ecosystem.
-These are interaction choices, not measured usability rankings.
+References were limited to Microsoft, GitHub, the Rust Foundation ecosystem, and
+Anthropic's Claude Code. These are interaction choices, not measured usability rankings.
 
 | Official project | Observed pattern | Hamn adaptation |
 | --- | --- | --- |
 | [GitHub CLI](https://cli.github.com/manual/gh_extension_upgrade) | Operation-specific usage, flags, and dry-run explanation; [update notices use stderr](https://cli.github.com/manual/gh_help_environment). | Update-specific help, explicit `--yes`, progress separate from JSON. |
 | [Microsoft .NET installer](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-install-script) | [Source](https://github.com/dotnet/install-scripts/blob/47940ac9fc30a2f2dd19167165d0bb0774625f67/src/dotnet-install.sh) reports download, extraction, installed version, PATH advice, and a repeatable dry-run invocation. | Stage messages, actionable retry guidance, conditional PATH advice. |
+| [Claude Code](https://docs.claude.com/en/docs/claude-code/setup) | A small `install.sh` downloads one checksum-verified binary and lets it finish installation; `claude update\|upgrade` checks and installs in one command (observed: 2.1.282 `--help`, and the published `install.sh`). | One pasted command installs; `hamn upgrade\|update` prints one heading, per-artifact progress and one result line. |
 | [rustup](https://rust-lang.github.io/rustup/installation/) | [Version summary implementation](https://github.com/rust-lang/rustup/blob/454ff04cdefebc8f38f47f64b3904866f9e0660f/src/cli/common.rs) distinguishes installed, updated, unchanged, and failed results. | Installed-to-selected version display, verified unchanged result, and a success summary only after commit. |
 
 Terminal observations used a PTY: GitHub CLI 2.100.0 `extension upgrade --help`

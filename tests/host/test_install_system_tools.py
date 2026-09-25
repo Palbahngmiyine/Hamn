@@ -130,7 +130,7 @@ with tempfile.TemporaryDirectory(prefix='hamn-system-install-') as tmp:
         'artifacts': {'host': {'url': archive.as_uri(), 'sha256': digest(archive)},
                       'guestImage': {'url': guest.as_uri(), 'sha256': digest(guest)}}}))
     p = run(home / '.local/bin/hamn', '--headless', 'system', 'update', '--yes', '--manifest', manifest)
-    assert b'Unchanged Hamn' in p.stderr
+    assert p.stderr.endswith(b' is up to date.\n'), p.stderr
     assert (home / '.local/bin/hamn').resolve() == active and selection.read_bytes() == before
     bad = manifest.read_text().replace('"schemaVersion": 2', '"schemaVersion": 2, "schemaVersion": 2')
     manifest.write_text(bad)

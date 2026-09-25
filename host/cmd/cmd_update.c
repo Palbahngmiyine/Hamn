@@ -172,6 +172,30 @@ static int unsupported_check_result(char **result)
     return *result ? 0 : 1;
 }
 
+/* The updater writes one human failure reason (a single line) into the
+ * private result file when it fails. Accept only bounded printable text. */
+static int failure_reason(int fd, char *reason, size_t capacity)
+{
+    struct stat status;
+    if (fstat(fd, &status) != 0 || status.st_size <= 0 ||
+        (size_t)status.st_size >= capacity)
+        return -1;
+    ssize_t length = pread(fd, reason, (size_t)status.st_size, 0);
+    if (length != status.st_size)
+        return -1;
+    while (length > 0 && reason[length - 1] == '\n')
+        length--;
+    if (length == 0)
+        return -1;
+    for (ssize_t index = 0; index < length; index++) {
+        unsigned char byte = (unsigned char)reason[index];
+        if (byte < 0x20 || byte == 0x7f)
+            return -1;
+    }
+    reason[length] = '\0';
+    return 0;
+}
+
 int hamn_control_upgrade(const char *manifest, int check_only, int force,
                          char **result)
 {
@@ -183,7 +207,9 @@ int hamn_control_upgrade(const char *manifest, int check_only, int force,
     if (managed_paths(executable, datadir, helper) != 0) {
         if (check_only)
             return unsupported_check_result(result);
-        logerr("upgrade requires a managed Hamn installation; reinstall with the official installer");
+        log_set_error("this hamn is not a managed installation, so it cannot upgrade itself; "
+                      "install Hamn with the official installer: "
+                      "https://github.com/Palbahngmiyine/Hamn#install");
         return 1;
     }
     char invocation[PATH_MAX], resolved[PATH_MAX], binary_dir[PATH_MAX];
@@ -195,7 +221,7 @@ int hamn_control_upgrade(const char *manifest, int check_only, int force,
         path_parent(invocation, binary_dir) != 0) {
         if (check_only)
             return unsupported_check_result(result);
-        logerr("update requires the managed hamn command symlink, not a direct generation binary");
+        log_set_error("update requires the managed hamn command symlink, not a direct generation binary; run hamn upgrade");
         return 1;
     }
 
@@ -216,8 +242,9 @@ int hamn_control_upgrade(const char *manifest, int check_only, int force,
         close(result_fd); unlink(result_path); rmdir(result_directory);
         return 1;
     }
+    /* The documented system shell, independent of the caller's PATH. */
     const char *command[20] = {
-        "bash", helper, "--bindir", binary_dir, "--datadir", datadir,
+        "/bin/bash", helper, "--bindir", binary_dir, "--datadir", datadir,
         NULL, NULL, NULL,
     };
     size_t count = 6;
@@ -250,11 +277,19 @@ int hamn_control_upgrade(const char *manifest, int check_only, int force,
         if (length != final_identity.st_size)
             length = -1;
     }
+    char reason[1024];
+    int reported = rc != 0 && failure_reason(result_fd, reason, sizeof(reason)) == 0;
     close(result_fd);
     unlink(result_path);
     rmdir(result_directory);
+    if (reported) {
+        log_set_error("%s", reason);
+        return 1;
+    }
     if (rc != 0 || length < 0) {
-        logerr("update failed; inspect the diagnostics above and retry the same command with all original options (including --manifest, if supplied); an incomplete transaction is recovered on retry");
+        log_set_error("upgrade did not complete; run the same command again to retry "
+                      "(an interrupted upgrade is recovered automatically%s)",
+                      manifest ? ", keep the same --manifest" : "");
         return 1;
     }
     output[length] = '\0';
@@ -263,7 +298,5 @@ int hamn_control_upgrade(const char *manifest, int check_only, int force,
         logerr("cannot allocate upgrade result");
         return 1;
     }
-    if (!check_only)
-        logmsg("update completed; the selected guest image is used for new profile disks; existing profile disks keep their current guest root");
     return 0;
 }

@@ -23,12 +23,21 @@ curl -fsSL --proto '=https' --tlsv1.2 \
   | /bin/bash
 ```
 
-```sh
-hamn
+설치기는 Hamn과 Linux 게스트 이미지를 내려받아 둘 다 검증한 뒤 `hamn` 명령을
+`~/.local/bin`에 설치합니다. 출력 예시는 다음과 같습니다.
+
+```text
+Installing Hamn 0.1.2 for Apple Silicon macOS...
+Downloading Hamn 0.1.2 (4.4 MiB)...
+Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
+Installing...
+Installed Hamn 0.1.2.
+Run hamn to get started. Update later with hamn upgrade.
 ```
 
-릴리스 설치와 업데이트는 macOS 기본 도구와 내려받은 Hamn 실행 파일만 사용합니다.
-Python, Homebrew, Rust, Xcode Command Line Tools를 따로 설치할 필요가 없습니다.
+`~/.local/bin`이 PATH에 없으면 사용 중인 shell에 추가할 한 줄을 알려 줍니다.
+macOS 기본 도구만 사용하므로 Python, Homebrew, Rust, Xcode Command Line Tools를
+따로 설치할 필요가 없습니다.
 
 소스 빌드는 [개발 문서](docs/DEVELOPMENT.ko.md)를 참고하세요.
 서명된 릴리스 설치는 [릴리스 설정](docs/RELEASE-SETUP.ko.md)을 참고하세요.
@@ -95,15 +104,29 @@ containerd content 저장소, 사용자 마운트, 원본 kubeconfig는 보존�
 ## 업그레이드
 
 ```sh
-hamn upgrade --check
-hamn upgrade
-hamn upgrade --force --output json
+hamn upgrade           # 최신 릴리스 설치 (별칭: hamn update)
+hamn upgrade --check   # 새 버전이 있는지만 확인
 ```
 
-`hamn update`는 별칭이며 `hamn --headless system update --yes`도 유지합니다.
-관리 설치만 변경하고 stable 다운그레이드는 거부합니다. 검증된 파일은 재사용하며
-동일 버전의 게스트 이미지만 없으면 따로 복구하고 기존 프로필 디스크는 보존합니다.
-`--force`는 동일 버전 호스트 재설치를 허용합니다. 대화형 TUI가 성공적으로 끝나면
-캐시된 새 버전 안내를 표시할 수 있습니다. 백그라운드 확인은 자동 설치를 수행하지
-않으며 `HAMN_NO_UPDATE_CHECK=1`로 끌 수 있습니다.
-무결성과 복구 계약은 [설치](docs/INSTALLATION.ko.md)를 참고하세요.
+```text
+$ hamn upgrade
+Checking for updates...
+Updating Hamn 0.1.1 → 0.1.2...
+Downloading Hamn 0.1.2  100%  4.4 MiB / 4.4 MiB
+Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
+Installing...
+Updated Hamn 0.1.1 → 0.1.2. Existing VMs were not restarted.
+
+$ hamn upgrade
+Checking for updates...
+Hamn 0.1.2 is up to date.
+```
+
+실행 중인 VM은 재시작하지 않고 기존 VM 디스크도 바꾸지 않습니다. 새 게스트
+이미지는 이후에 만드는 VM에 사용합니다. 중단된 다운로드는 자동으로 이어받거나
+다음 `hamn upgrade`에서 이어받습니다. 실패하면 원인과 다음 조치를 한 줄로
+표시합니다. 자동화에는 `hamn upgrade --output json`이나
+`hamn --headless system update --yes`를 사용합니다. TUI를 정상 종료한 뒤 새
+릴리스를 안내할 수 있지만 스스로 설치하지는 않습니다. 이 확인은
+`HAMN_NO_UPDATE_CHECK=1`로 끌 수 있습니다. 무결성, 복구, `--force`는
+[설치](docs/INSTALLATION.ko.md)를 참고하세요.
