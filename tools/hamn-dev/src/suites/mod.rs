@@ -13,6 +13,7 @@ mod exec_auth;
 mod generation_cleanup;
 mod install_system_tools;
 mod kubernetes_api;
+mod measure_upgrade_download;
 mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
@@ -104,6 +105,7 @@ const SUITES: &[Suite] = &[
     ("upgrade-recovery-ownership", upgrade_recovery_ownership::main),
     ("update-check", update_check::main),
     ("update-ux", update_ux::main),
+    ("measure-upgrade-download", measure_upgrade_download::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
