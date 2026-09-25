@@ -255,7 +255,12 @@ pub(crate) fn cancellation(live: &Live) {
         |(gate, child)| {
             gate.release();
             signal_child(child, libc::SIGTERM);
-            let _ = crate::support::exec::wait_timeout(child, Duration::from_secs(15));
+            if crate::support::exec::wait_timeout(child, Duration::from_secs(15)).is_none() {
+                // Our own unreaped child; reaped before the failure is reported.
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the headless start survived SIGTERM for 15 s");
+            }
         },
     );
     live.write_json("cancellation-results.json", &Value::from(results));

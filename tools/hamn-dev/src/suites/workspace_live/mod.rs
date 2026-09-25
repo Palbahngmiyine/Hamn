@@ -233,16 +233,8 @@ pub(crate) fn prepare(
         }
         None => {
             let cache = cache.ok_or("a new integration root needs the signed guest image cache")?;
-            let root = mkdtemp(Path::new("/tmp"), "hamn-workspace-live-")?;
-            let home = root.join("home");
-            let target = home.join(".hamn/cache");
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(&target)
-                .map_err(|error| format!("{}: {error}", target.display()))?;
             // Copy only the selected, locally verified signed image; start
-            // verifies it again.
+            // verifies it again. The cache is checked before a root exists.
             let manifest = read_json(&cache.join("guest-image.json"))?;
             let expected = manifest["sha256"].as_str().unwrap_or_default();
             if !is_lower_hex(expected, 64) {
@@ -255,6 +247,14 @@ pub(crate) fn prepare(
             if manifest["file"] != name.as_str() || image_sha256 != expected || !marker.is_file() {
                 return Err("the cache does not hold the verified image its manifest selects".into());
             }
+            let root = mkdtemp(Path::new("/tmp"), "hamn-workspace-live-")?;
+            let home = root.join("home");
+            let target = home.join(".hamn/cache");
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&target)
+                .map_err(|error| format!("{}: {error}", target.display()))?;
             for source in [&image, &marker, &cache.join("guest-image.json")] {
                 let copy = target.join(source.file_name().expect("file name"));
                 process::run(

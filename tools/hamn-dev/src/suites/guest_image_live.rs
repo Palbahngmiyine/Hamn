@@ -54,9 +54,13 @@ pub fn main(args: &[String]) -> ExitCode {
         }
     };
     let missing: Vec<&str> = REQUIRED.iter().copied().filter(|name| flags.value(name).is_none()).collect();
+    if !missing.is_empty() {
+        eprintln!("guest-image-live: missing --{}\n{USAGE}", missing.join(", --"));
+        return ExitCode::from(2);
+    }
     let only = flags.value("only");
-    if !missing.is_empty() || only.is_some_and(|only| !["baseline", "optimized", "case-0", "case-1"].contains(&only)) {
-        eprintln!("guest-image-live: missing --{} or invalid --only\n{USAGE}", missing.join(", --"));
+    if let Some(only) = only.filter(|only| !["baseline", "optimized", "case-0", "case-1"].contains(only)) {
+        eprintln!("guest-image-live: invalid --only {only:?}\n{USAGE}");
         return ExitCode::from(2);
     }
     let path = |name: &str| PathBuf::from(flags.value(name).expect("required"));
