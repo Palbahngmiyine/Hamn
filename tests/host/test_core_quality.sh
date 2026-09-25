@@ -192,17 +192,32 @@ jq -e '
     (.nodes.nixpkgs.locked.rev | test("^[0-9a-f]{40}$")) and
     (.nodes.nixpkgs.locked.narHash | startswith("sha256-"))
 ' "$ROOT/flake.lock" >/dev/null || fail "flake.lock does not pin nixpkgs"
+# The Rust toolchain comes from the pinned overlay, evaluated with the same nixpkgs.
+jq -e '
+    .nodes.root.inputs["rust-overlay"] == "rust-overlay" and
+    .nodes["rust-overlay"].inputs.nixpkgs == ["nixpkgs"] and
+    .nodes["rust-overlay"].locked.owner == "oxalica" and
+    .nodes["rust-overlay"].locked.repo == "rust-overlay" and
+    (.nodes["rust-overlay"].locked.rev | test("^[0-9a-f]{40}$")) and
+    (.nodes["rust-overlay"].locked.narHash | startswith("sha256-"))
+' "$ROOT/flake.lock" >/dev/null || fail "flake.lock does not pin the Rust toolchain overlay"
 for requirement in \
     '"aarch64-darwin"' \
     '"x86_64-darwin"' \
     '"aarch64-linux"' \
     '"x86_64-linux"' \
     'devShells = forAllSystems' \
-    'release = pkgs.mkShellNoCC' \
-    '              kubectl' \
+    '            pkgs.mkShellNoCC {' \
+    '          ci = shellWith [ ];' \
+    '          live = shellWith (with pkgs; [' \
+    '          release = shellWith (with pkgs; [' \
+    '            kind' \
+    '            kubectl' \
+    '        docker-client # includes the Compose and buildx CLI plugins' \
     'checks = forAllSystems' \
     '      actionlintVersion = "1.7.12";' \
-    '          ci = pkgs.mkShellNoCC {' \
+    'inputs.nixpkgs.follows = "nixpkgs";' \
+    '(rust-overlay.lib.mkRustBin { } pkgs).fromRustupToolchainFile ./rust-toolchain.toml;' \
     'actionlint -config-file'; do
     grep -Fq "$requirement" "$ROOT/flake.nix" ||
         fail "Nix flake is missing required integration: $requirement"
@@ -251,26 +266,63 @@ for requirement in \
     '        run: nix flake check --print-build-logs' \
     '        run: nix develop .#ci --command make -j1 test-portable' \
     '      - name: Run macOS regression gates with the system Apple SDK' \
-    '          source scripts/ci/use-system-macos-sdk.sh' \
-    '          make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos'; do
+    '        run: nix develop .#ci --command make -j1 test-local-macos'; do
     grep -Fqx "$requirement" "$ci_workflow" ||
         fail "Nix CI workflow is incomplete: $requirement"
 done
 
+# The Darwin shells, not per-workflow scripts, own the Apple SDK boundary.
 for requirement in \
-    'if [ -n "${HAMN_SYSTEM_SDKROOT:-}" ]; then' \
+    '/usr/bin/xcrun --sdk macosx --show-sdk-path) || HAMN_SYSTEM_SDKROOT=' \
     '/nix/store/*)' \
     'FAIL: Hamn must not compile against the Nix Apple SDK' \
-    'export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH"' \
-    '[ "$(command -v clang)" = /usr/bin/clang ]' \
-    '[ "$(command -v codesign)" = /usr/bin/codesign ]'; do
-    grep -Fq "$requirement" "$ROOT/scripts/ci/use-system-macos-sdk.sh" ||
+    'export SDKROOT=$HAMN_SYSTEM_SDKROOT HAMN_SYSTEM_SDKROOT' \
+    'export PATH=$hamn_nix/usr/bin:/bin:/usr/sbin:/sbin$hamn_rest' \
+    'gnuUserland = pkgs.lib.subtractLists packages pkgs.stdenvNoCC.initialPath;' \
+    '(tool: { name = "bin/${tool}"; path = "/usr/bin/${tool}"; })' \
+    '[ "ar" "c++" "cc" "clang" "clang++" "codesign" "ld" "otool" "ranlib" "xcrun" ]);' \
+    'shellHook = lib.optionalString stdenv.isDarwin (darwinShellHook pkgs packages);'; do
+    grep -Fq "$requirement" "$ROOT/flake.nix" ||
         fail "system macOS SDK boundary is incomplete: $requirement"
 done
-for workflow in "$ci_workflow"; do
-    grep -Fq 'HAMN_SYSTEM_SDKROOT="$system_sdk" \' "$workflow" ||
-        fail "macOS Nix workflow does not pass the pre-resolved system SDK: $workflow"
-done
+if grep -Eq 'source scripts/ci/|SDKROOT="\$HAMN_SYSTEM_SDKROOT"|system_sdk=' \
+    "$ROOT"/.github/workflows/*.yml; then
+    fail "workflows must use the flake shell SDK selection instead of their own"
+fi
+
+# Inside the flake shell, observe the resolved toolchain rather than source text.
+if [ "$(uname -s)" = Darwin ] && [ -n "${IN_NIX_SHELL:-}" ]; then
+    for tool in ar cc clang codesign otool xcrun; do
+        resolved=$(command -v "$tool") || fail "Apple $tool is unavailable in the Nix shell"
+        [ "$(/usr/bin/readlink "$resolved" || printf '%s' "$resolved")" = "/usr/bin/$tool" ] ||
+            fail "$tool must resolve to Apple's /usr/bin/$tool, not $resolved"
+    done
+    for tool in bash cargo git jq make python3 rg ruby rustc; do
+        case "$(command -v "$tool")" in
+        /nix/store/*) ;;
+        *) fail "$tool must come from the pinned Nix shell, not $(command -v "$tool")" ;;
+        esac
+    done
+    for tool in awk find grep sed stat tar xargs; do
+        case "$(command -v "$tool")" in
+        /usr/bin/*|/bin/*) ;;
+        *) fail "$tool must be the macOS userland tool, not $(command -v "$tool")" ;;
+        esac
+    done
+    [ -n "${SDKROOT:-}" ] && [ "$SDKROOT" = "${HAMN_SYSTEM_SDKROOT:-}" ] &&
+        [ -d "$SDKROOT" ] && [ "${SDKROOT#/nix/store/}" = "$SDKROOT" ] ||
+        fail "Nix shell must select the system macOS SDK: ${SDKROOT:-unset}"
+    toolchain_channel=$(sed -nE 's/^channel = "([0-9.]+)"$/\1/p' "$ROOT/rust-toolchain.toml")
+    [ -n "$toolchain_channel" ] || fail "rust-toolchain.toml does not pin a stable channel"
+    case "$(rustc --version)" in
+    "rustc $toolchain_channel "*) ;;
+    *) fail "Nix Rust toolchain does not match rust-toolchain.toml: $(rustc --version)" ;;
+    esac
+elif [ -n "${GITHUB_ACTIONS:-}" ] && [ "$(uname -s)" = Darwin ]; then
+    fail "macOS CI gates must run inside the flake shell (nix develop .#ci)"
+else
+    echo "NOTE: Nix shell toolchain observation skipped outside nix develop on Darwin" >&2
+fi
 
 release_please_workflow=$ROOT/.github/workflows/release-please.yml
 for requirement in \
@@ -298,8 +350,6 @@ checkout_count=$(grep -hFc 'uses: actions/checkout@' "$ROOT"/.github/workflows/*
     -eq "$checkout_count" ] || fail "every checkout must disable credential persistence"
 
 release_workflow=$ROOT/.github/workflows/release.yml
-grep -Fq 'HAMN_SYSTEM_SDKROOT="$system_sdk" \' "$release_workflow" ||
-    fail "release workflow does not pass the pre-resolved system SDK"
 for requirement in \
     '    branches: [main]' \
     "      - '.release-please-manifest.json'" \
@@ -372,9 +422,9 @@ for requirement in \
     '      attestations: write' \
     '      contents: read' \
     '      id-token: write' \
-    '          make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos' \
-    '          make SDKROOT="$HAMN_SYSTEM_SDKROOT" release-candidate \' \
-    '          make release-hosted-validation \' \
+    '          nix develop .#ci --command make -j1 test-local-macos' \
+    '          nix develop .#ci --command make release-candidate \' \
+    '          nix develop .#ci --command make release-hosted-validation \' \
     '      - name: Attest exact candidate artifact provenance' \
     '      - name: Attest hosted validation evidence'; do
     printf '%s\n' "$candidate_job" | grep -Fqx "$requirement" ||

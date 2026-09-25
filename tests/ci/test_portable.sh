@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-SETUP="$ROOT/scripts/ci/setup-test-dependencies.sh"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -11,37 +10,15 @@ fail() {
     exit 1
 }
 
-linux_plan=$(HAMN_CI_OS=Linux HAMN_CI_DRY_RUN=1 bash "$SETUP")
-case "$linux_plan" in
-"os=Linux packages="*) ;;
-*) fail "unexpected Linux dependency plan: $linux_plan" ;;
-esac
-linux_packages=${linux_plan#os=Linux packages=}
-for package in build-essential coreutils curl git jq openssh-client python3 ripgrep ruby; do
-    case " $linux_packages " in
-    *" $package "*) ;;
-    *) fail "Linux dependency plan omits $package: $linux_plan" ;;
-    esac
+# Test tools come only from flake.nix shells; package-manager setup must not return.
+for removed in scripts/ci/setup-test-dependencies.sh \
+    scripts/ci/use-system-macos-sdk.sh; do
+    [ ! -e "$ROOT/$removed" ] || fail "non-Nix test environment setup remains: $removed"
 done
-
-macos_plan=$(HAMN_CI_OS=macOS HAMN_CI_DRY_RUN=1 bash "$SETUP")
-[ "$macos_plan" = 'os=macOS formulae=jq actionlint ripgrep docker' ] ||
-    fail "unexpected macOS dependency plan: $macos_plan"
-if grep -Eq '(^|[^[:alnum:]_])(swift|xcrun)([^[:alnum:]_]|$)' "$SETUP" >/dev/null; then
-    fail "CLI-only CI setup still requires a removed Desktop build tool"
+if grep -Eq '(^|[^[:alnum:]_])(brew|apt-get|rustup|swift|xcodebuild)([^[:alnum:]_]|$)' \
+    "$ROOT/flake.nix" >/dev/null; then
+    fail "Nix test shells depend on a package manager, rustup, or a removed Desktop build tool"
 fi
-
-if HAMN_CI_OS=Plan9 HAMN_CI_DRY_RUN=1 bash "$SETUP" \
-    >"$WORK/unsupported.out" 2>"$WORK/unsupported.err"; then
-    fail "dependency setup accepted an unsupported operating system"
-fi
-grep -Fq 'unsupported CI operating system: Plan9' "$WORK/unsupported.err"
-
-if HAMN_CI_OS=Linux HAMN_CI_DRY_RUN=invalid bash "$SETUP" \
-    >"$WORK/dry-run.out" 2>"$WORK/dry-run.err"; then
-    fail "dependency setup accepted an invalid dry-run value"
-fi
-grep -Fq 'HAMN_CI_DRY_RUN must be 0 or 1' "$WORK/dry-run.err"
 
 while IFS= read -r script; do
     [ -f "$ROOT/$script" ] || continue
