@@ -3,6 +3,7 @@
 //! contain a filter (all cases without filters).
 use std::process::ExitCode;
 
+mod core_worker;
 mod single_binary;
 mod tui_native_regressions;
 
@@ -10,11 +11,13 @@ type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
+    ("core-worker", core_worker::main),
     ("single-binary", single_binary::main),
     ("tui-native-regressions", tui_native_regressions::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
+    ("core-worker-external-cli", core_worker::external_cli_fixture),
     ("native-regressions", tui_native_regressions::fixture),
 ];
 

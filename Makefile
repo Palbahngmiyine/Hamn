@@ -208,7 +208,7 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	SSH_DEADLINE_TEST=$(BUILD)/tests/test_ssh_deadline python3 tests/host/test_ssh_deadline.py
 	python3 tests/host/test_docker_readiness.py
 	$(PROFILE_READ_TEST)
-	HAMN=$(HOST_BIN) python3 tests/host/test_core_worker.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test core-worker
 	HAMN=$(HOST_BIN) python3 tests/host/test_docker_api.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_docker_context.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
