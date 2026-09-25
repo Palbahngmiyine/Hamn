@@ -88,11 +88,10 @@ pending recovery journal, failed process scan, or uncertain ownership defers
 collection; retrying installation/update retries cleanup. Interrupted retirement
 is also retried. Unmarked directories, incomplete staging copies, external package
 manager files, profiles and guest images are outside collection. Do not manually
-launch inactive generation paths during collection. Older updater scripts do not
-participate in the new transaction locks; finish those before installing this fix.
-Generations predating this retention policy are preserved: their recovery roots
-in other HOME directories cannot be enumerated. Existing accumulated generations
-require separate review; automatic collection bounds new unnecessary generations.
+launch inactive generation paths during collection. Updaters from Hamn 0.1.1 and
+earlier do not take the transaction locks and are not detected; do not run one
+while installing or upgrading. Generations from Hamn 0.1.1 and earlier are
+collected like any other owned generation once they are unreferenced.
 
 
 A successful interactive TUI exit may display cached update information and

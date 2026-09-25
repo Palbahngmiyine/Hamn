@@ -1,6 +1,6 @@
 //! Collection requires inherited locks for both canonical install roots. Keep
-//! active, predecessor, caller, open-file and recovery references. Unknown
-//! ownership/legacy generations remain; marker-last retirement is retryable.
+//! active, predecessor, caller, open-file and recovery references. Generations
+//! of unknown ownership remain; marker-last retirement is retryable.
 use super::{Result, files, manifest::hexadecimal, require};
 use std::{
     fs,
@@ -170,32 +170,19 @@ fn scan(command: &mut Command, timeout: Duration) -> Result<Vec<u8>> {
     Ok(std::mem::take(&mut output[0]))
 }
 
+/// Absolute paths that any process of this user has open (lsof `n` fields).
 fn open_files(timeout: Duration) -> Result<Vec<String>> {
     let stdout = scan(
         Command::new("/usr/sbin/lsof").args(["-nP", "-F", "n"]),
         timeout,
     )?;
-    let mut files = Vec::new();
-    let mut process_files = Vec::new();
-    let text = String::from_utf8(stdout)?;
-    for line in text.lines().chain(std::iter::once("p")) {
-        if line.starts_with('p') {
-            require(
-                !process_files
-                    .iter()
-                    .any(|p: &String| p.ends_with("/scripts/update-host.sh"))
-                    || process_files
-                        .iter()
-                        .any(|p| p.ends_with(".hamn-transaction.lock")),
-                "legacy updater is still running",
-            )?;
-            process_files.clear();
-        } else if let Some(path) = line.strip_prefix('n').filter(|p| p.starts_with('/')) {
-            files.push(path.to_owned());
-            process_files.push(path.to_owned());
-        }
-    }
-    Ok(files)
+    Ok(open_paths(&String::from_utf8(stdout)?))
+}
+fn open_paths(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix('n').filter(|p| p.starts_with('/')))
+        .map(str::to_owned)
+        .collect()
 }
 
 pub(super) fn collect(bin: &Path, data: &Path, previous: &str, source: &str) -> Result<()> {
@@ -302,12 +289,6 @@ pub(super) fn collect(bin: &Path, data: &Path, previous: &str, source: &str) -> 
                 }
             }
             if !retired {
-                let retention = path.join(".hamn-retention");
-                if files::owned(&retention, false, Some(0o600)).is_err()
-                    || files::text(&retention)? != "version=1\n"
-                {
-                    return Ok(());
-                }
                 let binary = path.join("bin/hamn");
                 files::owned(&binary, false, Some(0o755))?;
                 if files::digest(&binary)? != name[..64] {
@@ -363,6 +344,16 @@ mod tests {
             )
             .unwrap(),
             b"result\n"
+        );
+    }
+    #[test]
+    fn open_paths_keep_absolute_names_and_no_open_script_blocks_collection() {
+        // An updater with scripts/update-host.sh open but no transaction lock
+        // (Hamn 0.1.1 and earlier) is not a reason to defer collection.
+        let text = "p1\nn/a/scripts/update-host.sh\nnpipe\np2\nn/b/.hamn-generations/x/bin/hamn\nf5\n";
+        assert_eq!(
+            open_paths(text),
+            ["/a/scripts/update-host.sh", "/b/.hamn-generations/x/bin/hamn"]
         );
     }
     #[test]

@@ -135,14 +135,14 @@ with tempfile.TemporaryDirectory(prefix='hamn-generation-test-') as work:
     install()
     assert not running.exists(), 'exited executable was never collected'
 
-    # Pre-policy generations may have unregistered recovery roots in another
-    # HOME. Their old ownership marker alone is not deletion authorization.
+    # An owned, unreferenced generation is collected without the retired
+    # pre-0.1.2 `.hamn-retention` opt-in marker (never written any more).
     current = Path(os.readlink(bindir / 'hamn')).parent.parent
-    legacy = current.with_name(current.name[:64] + '-LEGACY')
-    shutil.copytree(current, legacy)
-    (legacy / '.hamn-retention').unlink()
+    assert not (current / '.hamn-retention').exists()
+    unmarked = current.with_name(current.name[:64] + '-UNMARK')
+    shutil.copytree(current, unmarked)
     collect()
-    assert legacy.exists()
+    assert not unmarked.exists()
 
     saved_previous = (current / '.hamn-previous-target').read_bytes()
     (current / '.hamn-previous-target').write_text('')

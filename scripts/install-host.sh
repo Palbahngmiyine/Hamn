@@ -452,10 +452,6 @@ rsync -a --delete --exclude build \
     "$ROOT/scripts" "$ROOT/packaging" \
     "$generation_stage/share/hamn/src/"
 chmod 0755 "$generation_stage"
-# Older generations cannot enumerate recovery roots from other HOME values.
-# Only generations created with the retention contract opt into collection.
-printf 'version=1\n' >"$generation_stage/.hamn-retention"
-chmod 0600 "$generation_stage/.hamn-retention"
 if [ -n "$hamn_original_target" ]; then
     printf '%s\n' "$hamn_original_target" >"$generation_stage/.hamn-previous-target"
     chmod 0600 "$generation_stage/.hamn-previous-target"

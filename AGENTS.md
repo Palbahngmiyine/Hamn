@@ -86,13 +86,11 @@ Run Make test gates serially in the same checkout, for example
 their build outputs and fixtures are verified to be isolated.
 
 PR CI runs the same gates as `ci-macos-shard-N` targets on five runners (GitHub's
-macOS concurrency limit). Within a shard, `CI_MACOS_SIDE_GATES` run beside the
-serial main lane; list a gate there only if it never runs the updater, never opens
-`scripts/update-host.sh`, and never rebuilds `build/hamn`. `CI_MACOS_ALONE_GATES`
-rebuild `build/hamn` as other versions and run after both lanes. In CI a second
-macOS user also runs `CI_MACOS_SHARD_<n>_USER` updater gates beside the main lane:
-generation cleanup's process scan sees only its own user's processes. Gates listed
-in `CI_MACOS_USER_GATES` must only read the checkout.
+macOS concurrency limit). Within a shard, `CI_MACOS_SIDE_GATES` and a second lane
+of `CI_MACOS_SHARD_<n>_UPDATER` gates (listed in `CI_MACOS_UPDATER_GATES`) run
+beside the serial main lane, as the same user; list a gate there only if it never
+rebuilds `build/hamn` and owns its HOME and install roots. `CI_MACOS_ALONE_GATES`
+rebuild `build/hamn` as other versions and run after the other lanes.
 `make check-ci-macos-shards` fails unless the shards together run every
 `test-local-macos` gate exactly once. PR CI builds with `CARGO_PROFILE=ci` (the
 release profile without LTO). Release candidates and `release.yml` always use the

@@ -71,11 +71,10 @@ Run Make gates serially: packaging/update fixtures temporarily build other
 versions into the public `build/hamn` path.
 
 Pull-request CI splits these gates into `make ci-macos-shard-1` through
-`ci-macos-shard-5` on separate runners. Within a shard, gates that never run the
-updater or rebuild `build/hamn` (`CI_MACOS_SIDE_GATES`) run beside the others,
-and gates that build other versions (`CI_MACOS_ALONE_GATES`) run last. In CI a
-second macOS user runs one more updater lane (`CI_MACOS_SHARD_<n>_USER`) beside
-the main lane; locally that lane runs after the main lane. PR CI builds with
+`ci-macos-shard-5` on separate runners. Within a shard, gates that never rebuild
+`build/hamn` run beside the main lane, in a side lane (`CI_MACOS_SIDE_GATES`) and an
+updater lane (`CI_MACOS_SHARD_<n>_UPDATER`), and gates that build other versions
+(`CI_MACOS_ALONE_GATES`) run last. PR CI builds with
 `CARGO_PROFILE=ci` (the release profile without LTO). `make check-ci-macos-shards`
 fails unless the shards together run every `test-local-macos` gate exactly once.
 The release workflow still runs `test-local-macos` serially with the release
