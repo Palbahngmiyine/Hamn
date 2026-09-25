@@ -191,7 +191,7 @@ test-control-rust: host
 
 test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(BUILD)/tests/test_proc_deadline $(BUILD)/tests/test_ssh_deadline
 	$(HAMN_DEV) test control-signed-bootstrap
-	python3 tests/host/test_tui_create_plugins.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-create-plugins
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_operation.c host/core/operation.c host/core/log.c host/util/fs.c vendor/cjson/cJSON.c -o $(BUILD)/tests/test_operation
 	$(BUILD)/tests/test_operation
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_operation_preflight.c host/core/operation.c host/core/log.c host/util/fs.c vendor/cjson/cJSON.c -o $(BUILD)/tests/test_operation_preflight
@@ -229,15 +229,15 @@ test-control-tui: host
 	python3 tests/host/test_workspace_live_prepare.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_workspace_management.py
 	python3 tests/host/test_workspace_live_external_contexts.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_all.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_images.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_docker_config.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_kubectl_output.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_cluster_target.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-all
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-images
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-config
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-kubectl-output
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-cluster-target
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-picker-restore
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-environment-actions
 	python3 tests/host/test_workspace_kubernetes_assertions.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_tls_target.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-tls-target
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-backpressure
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-guarded-delete
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-ssh-timeout

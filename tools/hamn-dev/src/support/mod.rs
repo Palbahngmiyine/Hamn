@@ -3,10 +3,15 @@
 pub mod api_fixtures;
 pub mod bounded_process;
 pub mod c_extract;
+pub mod docker_engine;
 pub mod exec;
 pub mod harness_peers;
 pub mod http;
+pub mod kube_api;
 pub mod pty;
+pub mod py_http;
+pub mod py_text;
+pub mod real_cli;
 pub mod screen;
 pub mod termios;
 pub mod tmp;
