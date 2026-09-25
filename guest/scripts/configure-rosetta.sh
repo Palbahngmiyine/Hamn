@@ -53,15 +53,6 @@ rosetta_binfmt() {
     "$UPDATE_BINFMT" --admindir "$ROSETTA_BINFMT_DIR" "$@"
 }
 
-remove_legacy_rosetta() {
-    # Releases before the dedicated database could leave a failed install in
-    # the default database. Remove that entry before enabling qemu again.
-    if handler_exists "$ROSETTA_HANDLER"; then
-        "$UPDATE_BINFMT" --remove "$ROSETTA_HANDLER" "$MOUNT_POINT/rosetta" ||
-            fail "cannot remove legacy Rosetta binfmt handler"
-    fi
-}
-
 remove_rosetta_handler() {
     if rosetta_binfmt --display "$ROSETTA_HANDLER" >/dev/null 2>&1; then
         rosetta_binfmt --remove "$ROSETTA_HANDLER" "$MOUNT_POINT/rosetta" ||
@@ -104,7 +95,6 @@ enable_rosetta() {
     handler_exists "$QEMU_HANDLER" ||
         fail "qemu x86_64 binfmt handler is unavailable: $QEMU_HANDLER"
 
-    remove_legacy_rosetta
     # Reconfiguration can start with qemu disabled. Establish the fallback
     # before replacing the old Rosetta registration or attempting a new one.
     ensure_qemu_handler
@@ -133,7 +123,6 @@ enable_rosetta() {
 disable_rosetta() {
     # Make qemu available before removing Rosetta so an interruption never
     # leaves the guest without an x86_64 ELF handler.
-    remove_legacy_rosetta
     ensure_qemu_handler
     remove_rosetta_handler
     echo "hamn: qemu x86_64 translation is enabled"
