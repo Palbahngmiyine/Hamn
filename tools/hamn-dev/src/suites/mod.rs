@@ -4,6 +4,7 @@
 use std::process::ExitCode;
 
 mod control_signed_bootstrap;
+mod core_quality;
 mod core_worker;
 mod diagnostics;
 mod docker_api;
@@ -76,6 +77,7 @@ const SUITES: &[Suite] = &[
     ("single-binary", single_binary::main),
     ("ssh-deadline", ssh_deadline::main),
     ("control-signed-bootstrap", control_signed_bootstrap::main),
+    ("core-quality", core_quality::main),
     ("core-worker", core_worker::main),
     ("docker-api", docker_api::main),
     ("docker-context", docker_context::main),

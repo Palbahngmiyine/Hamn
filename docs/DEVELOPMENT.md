@@ -11,9 +11,9 @@ The GNU11 guest agent is part of the immutable Ubuntu image.
 
 Install Apple's command-line developer tools and [Nix](https://nixos.org/download/)
 with flakes enabled once. The locked `flake.nix` provides everything else: the
-Rust release in `rust-toolchain.toml` with rustfmt and clippy, Python, Ruby, jq,
-ripgrep, actionlint, Git, GNU Make, OpenSSH, and Docker CLI with its Compose and
-buildx plugins. No Homebrew, apt, or Rust installer step is needed.
+Rust release in `rust-toolchain.toml` with rustfmt and clippy, Python, jq,
+actionlint, Git, GNU Make, OpenSSH, and Docker CLI with its Compose and buildx
+plugins. No Homebrew, apt, or Rust installer step is needed.
 
 ```sh
 nix develop                                          # interactive development shell

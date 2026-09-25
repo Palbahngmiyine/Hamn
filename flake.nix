@@ -118,8 +118,6 @@
         jq
         openssh
         python3
-        ripgrep
-        ruby
         (rustToolchainFor pkgs)
       ];
     in
