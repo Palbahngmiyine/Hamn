@@ -205,7 +205,7 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_cancellation.c host/util/proc.c -o $(BUILD)/tests/test_proc_cancellation
 	$(BUILD)/tests/test_proc_cancellation
 	$(BUILD)/tests/test_proc_deadline
-	SSH_DEADLINE_TEST=$(BUILD)/tests/test_ssh_deadline python3 tests/host/test_ssh_deadline.py
+	SSH_DEADLINE_TEST=$(BUILD)/tests/test_ssh_deadline $(HAMN_DEV) test ssh-deadline
 	$(HAMN_DEV) test docker-readiness
 	$(PROFILE_READ_TEST)
 	HAMN=$(HOST_BIN) python3 tests/host/test_core_worker.py

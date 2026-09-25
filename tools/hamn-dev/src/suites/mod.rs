@@ -6,6 +6,7 @@ use std::process::ExitCode;
 mod docker_readiness;
 mod remote_cancel_boundaries;
 mod single_binary;
+mod ssh_deadline;
 mod tui_native_regressions;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
@@ -15,11 +16,13 @@ const SUITES: &[Suite] = &[
     ("docker-readiness", docker_readiness::main),
     ("remote-cancel-boundaries", remote_cancel_boundaries::main),
     ("single-binary", single_binary::main),
+    ("ssh-deadline", ssh_deadline::main),
     ("tui-native-regressions", tui_native_regressions::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
     ("native-regressions", tui_native_regressions::fixture),
+    (ssh_deadline::UNRESPONSIVE_SSH, ssh_deadline::unresponsive_ssh),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {
