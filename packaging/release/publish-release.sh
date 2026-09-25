@@ -107,8 +107,9 @@ if [ -n "${HAMN_TEST_RELEASE_SIZE_BUDGET:-}" ]; then
         fail "test size budget is forbidden in release workflows"
     SIZE_BUDGET=$HAMN_TEST_RELEASE_SIZE_BUDGET
 fi
-python3 "$ROOT/guest/image/verify-release-size.py" \
-    "$CANDIDATE_DIR/$GUEST_FILE" "$SIZE_REPORT" "$SIZE_BUDGET" ||
+make -s --no-print-directory -C "$ROOT/guest" image-tool >/dev/null &&
+    "$ROOT/guest/build/hamn-image-tool" verify-release-size \
+    "$CANDIDATE_DIR/$GUEST_FILE" "$SIZE_REPORT" "$SIZE_BUDGET" "$COMMIT" ||
     fail "guest image size evidence or reviewed release budget is missing or invalid"
 jq -e --arg commit "$COMMIT" '.sourceRevision == $commit' "$SIZE_REPORT" >/dev/null ||
     fail "guest image size report belongs to a different source revision"

@@ -29,14 +29,17 @@ cleanup() {
     local rc=$?
     trap - EXIT
     set +e
-    # Clear only this test's unique entries, including partial old-script
-    # installs in the default database, then restore the package qemu handler.
+    # Clear only this test's unique entries, then restore the package qemu
+    # handler. The script owns only its database; an entry for this handler
+    # in the default database is a regression, removed here and reported.
     if [ -d "$DATABASE" ]; then
         "$REAL_UPDATE" --admindir "$DATABASE" --remove "$HANDLER" \
             /mnt/hamn-rosetta/rosetta || rc=1
     fi
     if [ -f "/var/lib/binfmts/$HANDLER" ]; then
-        "$REAL_UPDATE" --remove "$HANDLER" /mnt/hamn-rosetta/rosetta || rc=1
+        echo "FAIL: Rosetta configuration wrote the default binfmt database" >&2
+        "$REAL_UPDATE" --remove "$HANDLER" /mnt/hamn-rosetta/rosetta
+        rc=1
     fi
     "$REAL_UPDATE" --enable qemu-x86_64 || rc=1
     test ! -e "/proc/sys/fs/binfmt_misc/$HANDLER" || rc=1
@@ -53,6 +56,7 @@ amd64_runs() {
 qemu_restored() {
     test ! -e "/proc/sys/fs/binfmt_misc/$HANDLER"
     test ! -e "$DATABASE/$HANDLER"
+    test ! -e "/var/lib/binfmts/$HANDLER"
     grep -Fxq enabled /proc/sys/fs/binfmt_misc/qemu-x86_64
     amd64_runs
 }

@@ -5,12 +5,15 @@ export LC_ALL=C
 
 # Protect the runtime dependency closure before purging build dependencies.
 # gcc/make were installed only for hamnd; nothing compiles at normal VM startup.
-apt-mark manual python3 curl docker.io containerd runc \
+# Hamn's guest tools are C and shell and need no interpreter; packages that
+# the base image's own cloud-init depends on stay installed through apt.
+apt-mark manual curl docker.io containerd runc \
     containernetworking-plugins qemu-user-static binfmt-support dnsmasq nftables
 apt-get -y purge gcc make
 apt-get -y autoremove --purge
-for command in python3 curl docker dockerd containerd ctr runc \
-    qemu-x86_64-static dnsmasq nft /usr/local/bin/hamnd; do
+for command in curl docker dockerd containerd ctr runc \
+    qemu-x86_64-static dnsmasq nft /usr/local/bin/hamnd \
+    /usr/local/libexec/hamn/guest-json; do
     command -v "$command" >/dev/null
 done
 for plugin in bridge host-local loopback portmap firewall tuning; do

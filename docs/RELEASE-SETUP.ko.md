@@ -158,9 +158,9 @@ budget이 바뀌면 최종 commit에서 배포 산출물을 다시 빌드하고 
 구조 검사를 강제하지만 `reviewOnly: true` report로는 게시할 수 없습니다.
 실제 footprint와 런타임 증거를 검토한 후 승인한 proposal을 budget으로 commit하고
 일반 후보를 빌드합니다. budget 상향에는 새 footprint 검토가 필요하며, budget이
-없으면 실패합니다. 게시 단계는
-`guest/image/verify-release-size.py IMAGE SIZE_REPORT REVIEWED_BUDGET`으로
-정확한 이미지와 report를 다시 검증합니다.
+없으면 실패합니다. 게시 단계는 `make -C guest image-tool`로 빌드한 C 도구
+`guest/build/hamn-image-tool verify-release-size IMAGE SIZE_REPORT REVIEWED_BUDGET COMMIT`으로
+정확한 이미지와 report, report의 소스 revision을 다시 검증합니다.
 
 실제 before/after 런타임 검증에는 같은 빌드에서
 `HAMN_GUEST_BASELINE_OUTPUT=/owned/output/hamn-baseline.img`도 지정합니다.
@@ -172,7 +172,8 @@ budget이 바뀌면 최종 commit에서 배포 산출물을 다시 빌드하고 
 Linux arm64 builder에서 재현 가능한 정리 변형 두 개를 생성하려면 다음을 실행합니다.
 
 ```sh
-python3 guest/tests/image_build_variations.py \
+make -C guest image-tool
+guest/build/hamn-image-tool variations --source-root . \
   --baseline /owned/output/hamn-baseline.img \
   --size-report /owned/output/hamn-guest.img.size-report.json \
   --output-directory /owned/output/variations --seed 20260921

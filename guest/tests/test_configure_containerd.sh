@@ -155,7 +155,6 @@ export HAMN_CTR="$FULL_BIN/ctr"
 export HAMN_MODPROBE="$FULL_BIN/modprobe"
 export HAMN_SYSCTL="$FULL_BIN/sysctl"
 export HAMN_CONTAINERD_MARKER="$FULL_ETC/containerd.marker"
-export HAMN_LEGACY_CONTAINERD_MARKER="$FULL_ETC/containerd-kubernetes-v1"
 export HAMN_CONTAINERD_CONFIG="$FULL_ETC/config.toml"
 export HAMN_MODULES_CONFIG="$FULL_ETC/modules.conf"
 export HAMN_SYSCTL_CONFIG="$FULL_ETC/sysctl.conf"
@@ -163,24 +162,33 @@ export HAMN_CNI_SOURCE_DIR="$FULL_CNI_SOURCE"
 export HAMN_CNI_BIN_DIR="$FULL_CNI_DEST"
 
 : >"$FULL_SYSTEMCTL_LOG"
-printf 'obsolete\n' >"$HAMN_LEGACY_CONTAINERD_MARKER"
 bash "$ROOT/scripts/configure-containerd.sh"
 grep -Fxq 'enable containerd' "$FULL_SYSTEMCTL_LOG"
 grep -Fxq 'start containerd' "$FULL_SYSTEMCTL_LOG"
 ! grep -q '^restart containerd$' "$FULL_SYSTEMCTL_LOG"
 [ -f "$HAMN_CONTAINERD_MARKER" ]
-[ ! -e "$HAMN_LEGACY_CONTAINERD_MARKER" ]
 
-# Unsafe legacy evidence fails before touching the current marker or services.
-mkdir "$HAMN_LEGACY_CONTAINERD_MARKER"
+# The pre-release v1 marker migration is gone: its retired override neither
+# blocks configuration (formerly a directory did) nor deletes what it names.
+LEGACY_DIRECTORY="$FULL_ETC/containerd-kubernetes-v1"
+LEGACY_FILE="$FULL_ETC/containerd-kubernetes-v1.file"
+mkdir "$LEGACY_DIRECTORY"
+printf 'kept\n' >"$LEGACY_FILE"
 : >"$FULL_SYSTEMCTL_LOG"
-if bash "$ROOT/scripts/configure-containerd.sh"; then
-    echo "FAIL: configure-containerd accepted a legacy marker directory" >&2
+HAMN_LEGACY_CONTAINERD_MARKER="$LEGACY_DIRECTORY" \
+    bash "$ROOT/scripts/configure-containerd.sh"
+HAMN_LEGACY_CONTAINERD_MARKER="$LEGACY_FILE" \
+    bash "$ROOT/scripts/configure-containerd.sh"
+[ -d "$LEGACY_DIRECTORY" ]
+[ "$(cat "$LEGACY_FILE")" = kept ]
+[ -f "$HAMN_CONTAINERD_MARKER" ]
+! grep -Eq '^(enable|start|restart) containerd$' "$FULL_SYSTEMCTL_LOG"
+rmdir "$LEGACY_DIRECTORY"
+rm "$LEGACY_FILE"
+if grep -Eq 'containerd-kubernetes-v1|LEGACY' "$ROOT/scripts/configure-containerd.sh"; then
+    echo "FAIL: configure-containerd retains the v1 marker migration" >&2
     exit 1
 fi
-[ -f "$HAMN_CONTAINERD_MARKER" ]
-[ ! -s "$FULL_SYSTEMCTL_LOG" ]
-rmdir "$HAMN_LEGACY_CONTAINERD_MARKER"
 
 # An identical active configuration performs no service mutation.
 : >"$FULL_SYSTEMCTL_LOG"

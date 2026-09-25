@@ -184,11 +184,23 @@ for failure in early partial disabled; do
     assert_rosetta_removed
 done
 
-# A failed old release may have persisted Rosetta in qemu's database without
-# installing a kernel entry. Migration removes only that local entry.
+# The pre-release migration out of qemu's default database is gone: Rosetta
+# changes only its own database and never touches another default entry.
 printf '%s\t%s\t%s\n' hamn-rosetta disabled "$MOUNT_POINT/rosetta" >>"$STATE"
-run_rosetta disable >"$WORK/legacy.out"
+: >"$LOG"
+run_rosetta disable >"$WORK/legacy-disable.out"
+run_rosetta enable >"$WORK/legacy-enable.out"
+assert_entry qemu-x86_64 disabled /usr/bin/qemu-x86_64-static
+assert_entry hamn-rosetta enabled "$MOUNT_POINT/rosetta"
+grep -Fxq "hamn-rosetta"$'\t'"disabled"$'\t'"$MOUNT_POINT/rosetta" "$STATE"
+if grep -Eq '^--[a-z-]+ hamn-rosetta( |$)' "$LOG"; then
+    echo 'FAIL: Rosetta configuration edited the default binfmt database' >&2
+    exit 1
+fi
+run_rosetta disable >"$WORK/legacy-restore.out"
 assert_entry qemu-x86_64 enabled /usr/bin/qemu-x86_64-static
+awk -F '\t' '$1 != "hamn-rosetta" { print }' "$STATE" >"$STATE.clean"
+mv "$STATE.clean" "$STATE"
 assert_rosetta_removed
 
 rm -rf "$ROSETTA_DATABASE"

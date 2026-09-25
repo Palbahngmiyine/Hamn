@@ -133,10 +133,9 @@ schema rejects `network`, and `configure` has no `--network` or
 `--network-interface` option. Hamn does not provide a LAN-reachable guest
 address in 0.0.1.
 
-Guest Docker networks resolve `host.docker.internal`. `host.hamn.internal` is a
-0.0.1 compatibility alias; successful guest Docker configuration warns that it
-will be removed in the next release. Hamn does not touch host
-`/var/run/docker.sock`.
+Guest Docker networks resolve `host.docker.internal`. The 0.0.1
+`host.hamn.internal` alias has been removed; use `host.docker.internal`.
+Hamn does not touch host `/var/run/docker.sock`.
 
 ## Kubernetes
 

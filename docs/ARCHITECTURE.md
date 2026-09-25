@@ -127,9 +127,8 @@ ports use SSH ControlMaster forwards; published UDP ports use a bounded host
 relay. Forward creation and removal are transactionally reconciled. Network
 attachment is not configurable per profile: there is no `network` YAML key or
 network-selection CLI option.
-`host.docker.internal` is served to guest Docker networks; `host.hamn.internal`
-is a 0.0.1 compatibility alias and guest Docker configuration warns before its
-next-release removal.
+`host.docker.internal` is served to guest Docker networks. The 0.0.1
+`host.hamn.internal` alias has been removed.
 
 ## Compatibility boundaries
 

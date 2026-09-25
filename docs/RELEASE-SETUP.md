@@ -173,8 +173,10 @@ savings and all structural checks, but its `reviewOnly: true` report cannot be
 published. After reviewing the actual footprint and runtime evidence, commit
 the approved proposal as the budget and build a normal candidate. Budget
 increases require a new footprint review; missing budgets fail closed.
-Publication independently verifies the exact image/report with
-`guest/image/verify-release-size.py IMAGE SIZE_REPORT REVIEWED_BUDGET`.
+Publication independently verifies the exact image/report and the report's
+source revision with
+`guest/build/hamn-image-tool verify-release-size IMAGE SIZE_REPORT REVIEWED_BUDGET COMMIT`,
+a C tool built by `make -C guest image-tool`.
 
 For actual before/after runtime validation, also set
 `HAMN_GUEST_BASELINE_OUTPUT=/owned/output/hamn-baseline.img` during that build.
@@ -187,7 +189,8 @@ artifacts are rejected. The baseline is review evidence, not a release asset.
 To generate two reproducible cleanup variations on the Linux arm64 builder:
 
 ```sh
-python3 guest/tests/image_build_variations.py \
+make -C guest image-tool
+guest/build/hamn-image-tool variations --source-root . \
   --baseline /owned/output/hamn-baseline.img \
   --size-report /owned/output/hamn-guest.img.size-report.json \
   --output-directory /owned/output/variations --seed 20260921

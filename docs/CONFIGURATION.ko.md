@@ -127,9 +127,8 @@ YAML schema는 `network`를 거부하고 `configure`에는 `--network` 또는
 `--network-interface` option이 없습니다. Hamn은 0.0.1에서 LAN-reachable guest
 address를 제공하지 않습니다.
 
-Guest Docker network는 host.docker.internal을 resolve합니다.
-host.hamn.internal은 0.0.1 compatibility alias입니다. Guest Docker configuration이
-성공하면 다음 release에서 제거된다는 warning을 출력합니다. Hamn은 host
+Guest Docker network는 host.docker.internal을 resolve합니다. 0.0.1의
+host.hamn.internal alias는 제거되었으므로 host.docker.internal을 사용합니다. Hamn은 host
 /var/run/docker.sock을 건드리지 않습니다.
 
 ## Kubernetes
