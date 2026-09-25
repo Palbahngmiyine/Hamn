@@ -574,13 +574,15 @@ mod tests {
         fs::write(profile.join("disk.img"), b"preserved").unwrap();
         for (ok, ttl) in [(true, 86400), (false, 21600)] {
             for age in [ttl - 1, ttl] {
+                // The prior record names an older release than the fetched
+                // manifest (v1.2.3), so a refresh is distinguishable from reuse.
                 download::atomic_json(
                     &cache.join("update-check-v1.json"),
                     &CheckRecord {
                         schema_version: 1,
                         checked_at: now - age,
                         ok,
-                        latest_version: Some("1.2.3".into()),
+                        latest_version: Some("1.1.0".into()),
                     },
                 )
                 .unwrap();
@@ -591,6 +593,20 @@ mod tests {
                 })
                 .unwrap();
                 assert_eq!(calls, usize::from(age == ttl));
+                let record = read_check(&cache, now).unwrap();
+                let expected = if age == ttl {
+                    (true, now, "1.2.3")
+                } else {
+                    (ok, now - age, "1.1.0")
+                };
+                assert_eq!(
+                    (
+                        record.ok,
+                        record.checked_at,
+                        record.latest_version.as_deref().unwrap()
+                    ),
+                    expected
+                );
             }
         }
         download::atomic_json(
@@ -607,7 +623,142 @@ mod tests {
         let record = read_check(&cache, now).unwrap();
         assert!(!record.ok);
         assert_eq!(record.latest_version.as_deref(), Some("1.2.3"));
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(cache.join("update-check-v1.json"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         assert_eq!(fs::read(profile.join("disk.img")).unwrap(), b"preserved");
+    }
+    #[test]
+    fn automatic_refresh_is_bounded_by_the_automatic_transfer_deadline() {
+        // Contract: automatic checks allow 2 s to connect (including TLS) and
+        // 5 s in total. A listener that never accepts stalls the handshake, so
+        // only the automatic deadline can end this refresh promptly.
+        let t = Temp::new();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut args = args(t.0.clone());
+        args.manifest = format!(
+            "https://127.0.0.1:{}/manifest",
+            listener.local_addr().unwrap().port()
+        );
+        let started = std::time::Instant::now();
+        automatic(args).unwrap();
+        let elapsed = started.elapsed();
+        drop(listener);
+        assert!(
+            elapsed < std::time::Duration::from_secs(8),
+            "automatic refresh exceeded its deadline: {elapsed:?}"
+        );
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let record = read_check(&t.0.join(".hamn/cache"), now).unwrap();
+        assert!(!record.ok && record.latest_version.is_none());
+    }
+    #[test]
+    fn development_version_check_is_unsupported_without_network_or_state() {
+        let t = Temp::new();
+        let home = t.0.join("home");
+        fs::create_dir(&home).unwrap();
+        let check = |current: &str| {
+            run(&[
+                "check",
+                "--current-version",
+                current,
+                "--manifest",
+                "not-a-network-url",
+                "--macos",
+                "13.0",
+                "--architecture",
+                "arm64",
+                "--home",
+                home.to_str().unwrap(),
+            ]
+            .map(String::from))
+        };
+        check("0.1.1-dev").unwrap();
+        // A stable version must reach manifest validation; this URL is invalid.
+        assert!(check("0.1.1").is_err());
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+        let empty = json!({"downloadedBytes":0,"resumedBytes":0,"reusedBytes":0,"source":"none"});
+        assert_eq!(
+            unsupported("0.1.1-dev"),
+            json!({"schemaVersion":1,"currentVersion":"0.1.1-dev","latestVersion":null,
+                "status":"unsupported-install","downloadedBytes":0,"resumedBytes":0,"reusedBytes":0,
+                "artifacts":{"manifest":empty,"host":empty,"guestImage":empty},
+                "profileDisksChanged":false,"completed":true})
+        );
+    }
+    #[test]
+    fn generated_accounting_sums_every_source_and_rejects_only_real_overflow() {
+        // Property 12 (transfer accounting conservation), seed 20260925:
+        // 12 small totals, then totals u64::MAX-2 ..= u64::MAX+2 split across
+        // three sources. Totals are summed in u128 independently of result().
+        let value = value();
+        let mut seed = 20260925u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed
+        };
+        for case in 0..24_u64 {
+            let parts: [u64; 3] = if case < 12 {
+                let total = next() % (1 << 20);
+                let mut cuts = [0, next() % (total + 1), next() % (total + 1), total];
+                cuts.sort_unstable();
+                [cuts[1] - cuts[0], cuts[2] - cuts[1], cuts[3] - cuts[2]]
+            } else {
+                let total = u128::from(u64::MAX) + u128::from(case % 5) - 2;
+                let first = 2 + next() % (u64::MAX / 4);
+                let second = next() % (u64::MAX / 4);
+                let third = total - u128::from(first) - u128::from(second);
+                [first, second, u64::try_from(third).unwrap()]
+            };
+            let mut counts = BTreeMap::new();
+            for (name, downloaded) in ["manifest", "host", "guestImage"].into_iter().zip(parts) {
+                counts.insert(
+                    name.to_owned(),
+                    Counts {
+                        downloaded_bytes: downloaded,
+                        resumed_bytes: next() % downloaded.saturating_add(1).max(1),
+                        reused_bytes: next() % 65537,
+                        source: "generated".into(),
+                    },
+                );
+            }
+            let sum = |field: fn(&Counts) -> u64| -> u128 {
+                counts.values().map(|item| u128::from(field(item))).sum()
+            };
+            let expected = [
+                sum(|item| item.downloaded_bytes),
+                sum(|item| item.resumed_bytes),
+                sum(|item| item.reused_bytes),
+            ];
+            let actual = result("1.2.2", &value, "updated", counts.clone());
+            if expected[0] > u128::from(u64::MAX) {
+                assert!(actual.is_err(), "case {case} accepted overflow");
+                continue;
+            }
+            let actual = actual.unwrap();
+            for (field, total) in ["downloadedBytes", "resumedBytes", "reusedBytes"]
+                .into_iter()
+                .zip(expected)
+            {
+                assert_eq!(
+                    u128::from(actual[field].as_u64().unwrap()),
+                    total,
+                    "case {case}"
+                );
+            }
+            assert_eq!(actual["artifacts"], serde_json::to_value(&counts).unwrap());
+        }
     }
     #[test]
     fn automatic_rejects_future_duplicate_unsafe_records_and_busy_lock() {

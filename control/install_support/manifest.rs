@@ -360,13 +360,18 @@ pub(super) mod tests {
             "",
             "1",
             "1.2",
+            "1.2.3.4",
             "01.2.3",
             "1.02.3",
+            "1.2.03",
             "1.2.3-rc.1",
             "1.2.3+build",
             "4294967296.0.0",
             " 1.2.3",
             "1.2.3\n",
+            "V1.2.3",
+            "vv1.2.3",
+            "1..3",
         ] {
             assert!(stable_version(bad).is_err(), "{bad}");
         }
@@ -382,6 +387,146 @@ pub(super) mod tests {
             "999999999999999999999999999",
         ] {
             assert!(system_version(bad).is_err());
+        }
+    }
+
+    /// Deterministic LCG shared by the generated cases below (no RNG crate).
+    fn generator(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state
+        }
+    }
+
+    #[test]
+    fn generated_stable_versions_order_numerically_with_optional_prefix() {
+        // Property 1 (stable semantic version ordering), seed 20260921:
+        // 200 pairs. Odd cases draw small components so equal leading parts
+        // force comparison of later components; even cases span all of u32.
+        let mut next = generator(20260921);
+        let text = |v: [u32; 3]| format!("{}.{}.{}", v[0], v[1], v[2]);
+        for case in 0..200 {
+            let mut component = || {
+                let value = (next() >> 32) as u32;
+                if case % 2 == 1 { value % 3 } else { value }
+            };
+            let left = [component(), component(), component()];
+            let right = [component(), component(), component()];
+            let parsed_left = stable_version(&format!("v{}", text(left))).unwrap();
+            let parsed_right = stable_version(&text(right)).unwrap();
+            assert_eq!((parsed_left, parsed_right), (left, right), "case {case}");
+            assert_eq!(parsed_left < parsed_right, left < right, "case {case}");
+            assert_eq!(parsed_left == parsed_right, left == right, "case {case}");
+        }
+    }
+
+    #[test]
+    fn v3_round_trips_and_field_violations_are_rejected() {
+        let v3 = fixture(3);
+        let parsed = parse(&serde_json::to_vec(&v3).unwrap(), "13", "arm64").unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), v3);
+        let mut boundary = fixture(3);
+        boundary["artifacts"]["host"]["size"] = download::HOST_LIMIT.into();
+        boundary["artifacts"]["guestImage"]["size"] = download::GUEST_LIMIT.into();
+        assert!(parse(&serde_json::to_vec(&boundary).unwrap(), "13", "arm64").is_ok());
+
+        let mut cases = Vec::new();
+        for (key, value) in [
+            ("schemaVersion", json!(true)),
+            ("schemaVersion", json!(4)),
+            ("channel", json!("beta")),
+            ("unexpected", json!(1)),
+            ("version", json!("v01.2.3")),
+            ("version", json!(true)),
+            ("commit", json!("A".repeat(40))),
+            ("validationMode", json!("unverified")),
+        ] {
+            let mut item = fixture(3);
+            item[key] = value.clone();
+            cases.push((format!("{key}={value}"), item));
+        }
+        for (name, key, value) in [
+            ("host", "size", json!(0)),
+            ("host", "size", json!(download::HOST_LIMIT + 1)),
+            ("guestImage", "size", json!(download::GUEST_LIMIT + 1)),
+            ("host", "url", json!("http://example.test/host")),
+            ("host", "url", json!("https://user@example.test/host")),
+            ("host", "sha256", json!("A".repeat(64))),
+            ("host", "sha256", json!("b".repeat(63))),
+            ("guestImage", "format", json!("raw")),
+            ("guestImage", "virtualSize", json!(1)),
+        ] {
+            let mut item = fixture(3);
+            item["artifacts"][name][key] = value.clone();
+            cases.push((format!("{name}.{key}={value}"), item));
+        }
+        let mut repository = fixture(2);
+        repository["repository"] = "bad/extra/name".into();
+        cases.push(("v2 repository=bad/extra/name".into(), repository));
+        for (label, item) in cases {
+            assert!(
+                parse(&serde_json::to_vec(&item).unwrap(), "13.0", "arm64").is_err(),
+                "{label}"
+            );
+        }
+
+        assert!(parse(b"NaN", "13", "arm64").is_err());
+        let mut exact = serde_json::to_vec(&fixture(3)).unwrap();
+        exact.resize(download::MANIFEST_LIMIT as usize, b' ');
+        assert!(parse(&exact, "13", "arm64").is_ok());
+        exact.push(b' ');
+        assert!(parse(&exact, "13", "arm64").is_err());
+    }
+
+    #[test]
+    fn generated_v2_and_v3_manifests_name_identical_artifacts() {
+        // Dual publication, seed 20260922: 16 publisher-shaped releases. V3
+        // only adds sizes and image metadata; both must select the same bytes.
+        let mut next = generator(20260922);
+        let mut hex = |length: usize| -> String {
+            (0..length)
+                .map(|_| char::from_digit((next() >> 60) as u32, 16).unwrap())
+                .collect()
+        };
+        for case in 0..16 {
+            let mut v3 = fixture(3);
+            let version = format!(
+                "v{}.{}.{}",
+                u32::from_str_radix(&hex(8), 16).unwrap(),
+                u32::from_str_radix(&hex(8), 16).unwrap(),
+                u32::from_str_radix(&hex(8), 16).unwrap()
+            );
+            v3["version"] = version.clone().into();
+            v3["commit"] = hex(40).into();
+            for name in ["host", "guestImage"] {
+                let artifact = &mut v3["artifacts"][name];
+                artifact["url"] = format!("https://fixture.test/{version}/{name}-{case}").into();
+                artifact["sha256"] = hex(64).into();
+                artifact["size"] = (1 + u64::from_str_radix(&hex(4), 16).unwrap()).into();
+            }
+            let mut v2 = v3.clone();
+            v2["schemaVersion"] = 2.into();
+            for name in ["host", "guestImage"] {
+                let artifact = v2["artifacts"][name].as_object_mut().unwrap();
+                artifact.retain(|key, _| key == "url" || key == "sha256");
+            }
+            let old = parse(&serde_json::to_vec(&v2).unwrap(), "13.0", "arm64").unwrap();
+            let new = parse(&serde_json::to_vec(&v3).unwrap(), "13.0", "arm64").unwrap();
+            assert_eq!(
+                (&old.version, &new.version),
+                (&version, &version),
+                "case {case}"
+            );
+            for (before, after) in [
+                (&old.artifacts.host, &new.artifacts.host),
+                (&old.artifacts.guest_image, &new.artifacts.guest_image),
+            ] {
+                assert_eq!((&before.url, &before.sha256), (&after.url, &after.sha256));
+                assert!(before.size.is_none() && after.size.is_some(), "case {case}");
+            }
         }
     }
 }

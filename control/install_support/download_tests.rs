@@ -148,6 +148,8 @@ enum Mode {
 
 struct Fixture {
     state: Arc<Mutex<(Mode, Vec<(Option<String>, Option<String>, usize)>)>>,
+    /// One-shot fault: create this directory before answering the next request.
+    before_response: Arc<Mutex<Option<PathBuf>>>,
     stop: Arc<AtomicBool>,
     address: std::net::SocketAddr,
     thread: Option<thread::JoinHandle<()>>,
@@ -164,8 +166,10 @@ impl Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let state = Arc::new(Mutex::new((Mode::Normal, Vec::new())));
+        let before_response = Arc::new(Mutex::new(None::<PathBuf>));
         let stop = Arc::new(AtomicBool::new(false));
         let (shared, ended, data) = (state.clone(), stop.clone(), payload.clone());
+        let fault = before_response.clone();
         let thread = thread::spawn(move || {
             for stream in listener.incoming() {
                 if ended.load(Ordering::SeqCst) {
@@ -238,6 +242,9 @@ impl Fixture {
                 } else {
                     String::new()
                 };
+                if let Some(path) = fault.lock().unwrap().take() {
+                    fs::create_dir(path).unwrap();
+                }
                 let response = format!(
                     "HTTP/1.1 {status} fixture\r\nContent-Length: {advertised}\r\nETag: \"native-v1\"\r\n{content_range}Connection: close\r\n\r\n"
                 );
@@ -269,6 +276,7 @@ os.execv('/usr/bin/curl',['curl']+args)
         fs::set_permissions(&curl, fs::Permissions::from_mode(0o700)).unwrap();
         Self {
             state,
+            before_response,
             stop,
             address,
             thread: Some(thread),
@@ -327,13 +335,45 @@ fn cold_warm_and_corrupt_cache_have_independent_network_counts() {
     assert_eq!(fs::read(&path).unwrap(), fixture.payload);
     assert_eq!(counts.downloaded_bytes, fixture.payload.len() as u64);
     assert_eq!(fixture.requests().len(), 1);
+    assert_eq!(fixture.requests()[0].2, fixture.payload.len());
     let (_, counts) = acquire_with_curl(&cache, &artifact, "guestImage", &fixture.curl).unwrap();
     assert_eq!(counts.downloaded_bytes, 0);
     assert_eq!(counts.reused_bytes, fixture.payload.len() as u64);
     assert_eq!(fixture.requests().len(), 1);
-    fs::write(path, b"corrupt").unwrap();
-    acquire_with_curl(&cache, &artifact, "guestImage", &fixture.curl).unwrap();
+    fs::write(&path, b"corrupt").unwrap();
+    let (repaired, counts) =
+        acquire_with_curl(&cache, &artifact, "guestImage", &fixture.curl).unwrap();
+    assert_eq!(repaired, path);
+    assert_eq!(fs::read(&repaired).unwrap(), fixture.payload);
+    assert_eq!(counts.downloaded_bytes, fixture.payload.len() as u64);
     assert_eq!(fixture.requests().len(), 2);
+    assert_eq!(fixture.requests()[1].2, fixture.payload.len());
+}
+
+#[test]
+fn verified_partial_survives_publication_failure_without_another_download() {
+    let root = Workspace::new();
+    let cache = cache_root(root.path()).unwrap();
+    let fixture = Fixture::new(root.path());
+    let artifact = fixture.artifact();
+    let final_path = cache.join(format!("downloads/{}.artifact", artifact.sha256));
+    let partial_path = cache.join(format!("downloads/.{}.partial", artifact.sha256));
+    // The directory appears after the pre-transfer cache lookup, so only the
+    // final rename can fail. Verified complete bytes must remain available.
+    *fixture.before_response.lock().unwrap() = Some(final_path.clone());
+    assert!(acquire_with_curl(&cache, &artifact, "guestImage", &fixture.curl).is_err());
+    assert_eq!(fs::read(&partial_path).unwrap(), fixture.payload);
+    fs::remove_dir(&final_path).unwrap();
+    let (path, counts) = acquire_with_curl(&cache, &artifact, "guestImage", &fixture.curl).unwrap();
+    assert_eq!(path, final_path);
+    assert_eq!(fs::read(&path).unwrap(), fixture.payload);
+    assert_eq!(counts.source, "partial-cache");
+    assert_eq!(counts.downloaded_bytes, 0);
+    assert_eq!(counts.reused_bytes, fixture.payload.len() as u64);
+    assert!(!partial_path.exists());
+    let requests = fixture.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].2, fixture.payload.len());
 }
 
 #[test]
@@ -361,11 +401,17 @@ fn interrupted_transfer_resumes_only_missing_bytes_with_validator() {
     fixture.mode(Mode::Interrupt);
     assert!(acquire_with_curl(&cache, &artifact, "host", &fixture.curl).is_err());
     fixture.mode(Mode::Normal);
-    let (_, counts) = acquire_with_curl(&cache, &artifact, "host", &fixture.curl).unwrap();
+    let (path, counts) = acquire_with_curl(&cache, &artifact, "host", &fixture.curl).unwrap();
+    assert_eq!(fs::read(path).unwrap(), fixture.payload);
     let requests = fixture.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[1].0.as_deref(), Some("bytes=1000-"));
     assert_eq!(requests[1].1.as_deref(), Some("\"native-v1\""));
+    // The server delivered each payload byte exactly once across both requests.
+    assert_eq!(
+        requests.iter().map(|request| request.2).sum::<usize>(),
+        fixture.payload.len()
+    );
     assert_eq!(counts.downloaded_bytes, fixture.payload.len() as u64 - 1000);
     assert_eq!(counts.resumed_bytes, counts.downloaded_bytes);
     assert_eq!(counts.reused_bytes, 1000);
@@ -536,8 +582,9 @@ fn common_partial_metadata_rejects_ambiguous_or_unbounded_lines() {
 #[test]
 fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
     // Feature: automatic-upgrade-and-image-optimization, Properties 4, 6, 12.
-    // Seed 20260921; 100 bounded real acquisitions with independent HTTP counts
-    // and system OpenSSL digest checks. This is not an all-input proof.
+    // Seed 20260921; 108 bounded real acquisitions over nine cache states,
+    // alternating host/guest limits, with independent HTTP byte counts and
+    // system OpenSSL digest checks. This is not an all-input proof.
     let mut seed = 20260921u64;
     let mut next = || {
         seed = seed
@@ -545,7 +592,7 @@ fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
             .wrapping_add(1442695040888963407);
         seed
     };
-    for case in 0..100 {
+    for case in 0..108 {
         let root = Workspace::new();
         let cache = cache_root(root.path()).unwrap();
         let size = match case {
@@ -558,44 +605,50 @@ fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
         };
         let payload: Vec<u8> = (0..size).map(|_| (next() >> 32) as u8).collect();
         let fixture = Fixture::with_payload(root.path(), payload);
-        let artifact = fixture.artifact();
+        let mut artifact = fixture.artifact();
+        let name = if case % 2 == 0 { "host" } else { "guestImage" };
+        let downloads = cache.join("downloads");
+        let final_path = downloads.join(format!("{}.artifact", artifact.sha256));
+        let partial_path = downloads.join(format!(".{}.partial", artifact.sha256));
+        let metadata_path = downloads.join(format!(".{}.validator", artifact.sha256));
         let prefix = if size == 1 {
             0
         } else {
             1 + next() as usize % (size - 1)
         };
+        // Expected results derive from the cache state, not the implementation.
+        let mut expected_downloaded = size;
         let mut expected_reused = 0;
+        let mut resumed_range = None;
         let mut prior_network = 0;
-        match case % 5 {
+        match case % 9 {
             1 => {
                 partial(&cache, &artifact, &fixture.payload[..prefix]);
+                expected_downloaded = size - prefix;
                 expected_reused = prefix;
+                resumed_range = Some(prefix);
             }
             2 => {
                 let outside = root.path().join("preserved");
                 fs::write(&outside, b"owned sentinel").unwrap();
-                let partial_path = partial(&cache, &artifact, &fixture.payload[..prefix]);
+                partial(&cache, &artifact, &fixture.payload[..prefix]);
                 fs::remove_file(&partial_path).unwrap();
                 symlink(&outside, &partial_path).unwrap();
-                assert!(acquire_with_curl(&cache, &artifact, "host", &fixture.curl).is_err());
+                assert!(acquire_with_curl(&cache, &artifact, name, &fixture.curl).is_err());
                 assert!(
                     fixture.requests().is_empty(),
                     "unsafe partial requested network: {case}"
                 );
                 assert_eq!(fs::read(outside).unwrap(), b"owned sentinel");
-                fs::remove_file(partial_path).unwrap();
+                fs::remove_file(&partial_path).unwrap();
             }
             3 => {
                 let mut corrupt = fixture.payload[..prefix].to_vec();
                 corrupt[0] ^= 1;
-                let partial_path = partial(&cache, &artifact, &corrupt);
-                assert!(acquire_with_curl(&cache, &artifact, "host", &fixture.curl).is_err());
-                assert!(!partial_path.exists());
-                assert!(
-                    !cache
-                        .join(format!("downloads/{}.artifact", artifact.sha256))
-                        .exists()
-                );
+                partial(&cache, &artifact, &corrupt);
+                assert!(acquire_with_curl(&cache, &artifact, name, &fixture.curl).is_err());
+                assert!(!partial_path.exists() && !metadata_path.exists());
+                assert!(!final_path.exists());
                 let requests = fixture.requests();
                 assert_eq!(
                     requests[0].0.as_deref(),
@@ -607,19 +660,53 @@ fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
             4 => {
                 let mut oversized = artifact.clone();
                 oversized.size = Some(u64::MAX - next() % 1024);
-                assert!(acquire_with_curl(&cache, &oversized, "host", &fixture.curl).is_err());
+                assert!(acquire_with_curl(&cache, &oversized, name, &fixture.curl).is_err());
                 assert!(
                     fixture.requests().is_empty(),
                     "overflowing size requested network: {case}"
                 );
             }
+            5 => {
+                // A complete verified partial is promoted without network.
+                partial(&cache, &artifact, &fixture.payload);
+                expected_downloaded = 0;
+                expected_reused = size;
+            }
+            6 => {
+                let mut damaged = fixture.payload.clone();
+                *damaged.last_mut().unwrap() ^= 0xff;
+                directory(&downloads, 0o700).unwrap();
+                fs::write(&final_path, damaged).unwrap();
+                fs::set_permissions(&final_path, fs::Permissions::from_mode(0o600)).unwrap();
+            }
+            7 => {
+                // An ignored Range is discarded and retried once from zero.
+                partial(&cache, &artifact, &fixture.payload[..prefix]);
+                fixture.mode(Mode::Ignore);
+                expected_downloaded = 2 * size;
+            }
+            8 => {
+                // A v2 manifest has no size, so a partial cannot be resumed.
+                partial(&cache, &artifact, &fixture.payload[..prefix]);
+                artifact.size = None;
+            }
             _ => {}
         }
-        let (path, counts) = acquire_with_curl(&cache, &artifact, "host", &fixture.curl).unwrap();
+        let (path, counts) = acquire_with_curl(&cache, &artifact, name, &fixture.curl).unwrap();
+        assert_eq!(path, final_path, "seed 20260921 case {case}");
         assert_eq!(
             fs::read(&path).unwrap(),
             fixture.payload,
             "seed 20260921 case {case}"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&path).unwrap().mode() & 0o7777,
+            0o600,
+            "case {case}"
+        );
+        assert!(
+            !partial_path.exists() && !metadata_path.exists(),
+            "case {case}"
         );
         let digest = Command::new("/usr/bin/openssl")
             .args(["dgst", "-sha256", "-r"])
@@ -634,32 +721,47 @@ fn generated_native_acquisition_preserves_content_ranges_and_accounting() {
                 .next(),
             Some(artifact.sha256.as_str())
         );
-        assert_eq!(counts.downloaded_bytes, (size - expected_reused) as u64);
-        assert_eq!(counts.reused_bytes, expected_reused as u64);
+        assert_eq!(
+            (counts.downloaded_bytes, counts.reused_bytes),
+            (expected_downloaded as u64, expected_reused as u64),
+            "case {case}"
+        );
         assert_eq!(
             counts.resumed_bytes,
-            if expected_reused > 0 {
+            if resumed_range.is_some() {
                 counts.downloaded_bytes
             } else {
                 0
-            }
+            },
+            "case {case}"
         );
-        assert_eq!(counts.downloaded_bytes + counts.reused_bytes, size as u64);
         let requests = fixture.requests();
         assert_eq!(
             requests.iter().map(|request| request.2).sum::<usize>(),
-            prior_network + size - expected_reused
+            prior_network + expected_downloaded,
+            "case {case}"
         );
-        if expected_reused > 0 {
-            assert_eq!(
-                requests.last().unwrap().0.as_deref(),
-                Some(format!("bytes={prefix}-").as_str())
-            );
-            assert_eq!(requests.last().unwrap().1.as_deref(), Some("\"native-v1\""));
+        match (case % 9, resumed_range) {
+            (_, Some(prefix)) => {
+                assert_eq!(
+                    requests.last().unwrap().0.as_deref(),
+                    Some(format!("bytes={prefix}-").as_str())
+                );
+                assert_eq!(requests.last().unwrap().1.as_deref(), Some("\"native-v1\""));
+            }
+            (5, None) => assert!(requests.is_empty(), "case {case}"),
+            (7, None) => {
+                let ranges: Vec<_> = requests.iter().map(|request| request.0.clone()).collect();
+                assert_eq!(ranges, [Some(format!("bytes={prefix}-")), None]);
+            }
+            (8, None) => assert_eq!(requests.last().unwrap().0, None),
+            _ => {}
         }
-        let (_, warm) = acquire_with_curl(&cache, &artifact, "host", &fixture.curl).unwrap();
-        assert_eq!(warm.downloaded_bytes, 0);
-        assert_eq!(warm.reused_bytes, size as u64);
+        let (_, warm) = acquire_with_curl(&cache, &artifact, name, &fixture.curl).unwrap();
+        assert_eq!(
+            (warm.downloaded_bytes, warm.resumed_bytes, warm.reused_bytes),
+            (0, 0, size as u64)
+        );
         assert_eq!(
             fixture.requests().len(),
             requests.len(),
@@ -825,52 +927,74 @@ fn acquire_process() {
     let curl = PathBuf::from(std::env::var_os("HAMN_TEST_NATIVE_CURL").unwrap());
     let artifact: Artifact =
         serde_json::from_str(&std::env::var("HAMN_TEST_NATIVE_ARTIFACT").unwrap()).unwrap();
-    let (_, counts) = acquire_with_curl(&cache, &artifact, "host", &curl).unwrap();
+    let (path, counts) = acquire_with_curl(&cache, &artifact, "host", &curl).unwrap();
     atomic_json(
         &PathBuf::from(std::env::var_os("HAMN_TEST_NATIVE_COUNTS").unwrap()),
-        &counts,
+        &serde_json::json!({ "path": path, "counts": counts }),
     )
     .unwrap();
 }
 
 #[test]
 fn simultaneous_processes_download_one_payload() {
-    let root = Workspace::new();
-    let cache = cache_root(root.path()).unwrap();
-    let fixture = Fixture::new(root.path());
-    let artifact = fixture.artifact();
-    let mut children = Vec::new();
-    for index in 0..3 {
-        let output = root.path().join(format!("counts-{index}.json"));
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--ignored",
-                "--exact",
-                &format!(
-                    "{}::acquire_process",
-                    module_path!().split_once("::").unwrap().1
-                ),
-            ])
-            .env("HAMN_TEST_NATIVE_CACHE", &cache)
-            .env("HAMN_TEST_NATIVE_CURL", &fixture.curl)
-            .env(
-                "HAMN_TEST_NATIVE_ARTIFACT",
-                serde_json::to_string(&artifact).unwrap(),
-            )
-            .env("HAMN_TEST_NATIVE_COUNTS", &output)
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .unwrap();
-        children.push((ChildGuard(child), output));
+    // Property 5 (download single-flight), seed 20260923: 2, 3 and 4 real
+    // processes contend for one digest; the server must serve it once.
+    let mut seed = 20260923u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        seed
+    };
+    for width in 2..=4 {
+        let root = Workspace::new();
+        let cache = cache_root(root.path()).unwrap();
+        let size = 4096 + (next() % 28673) as usize;
+        let payload = (0..size).map(|_| (next() >> 32) as u8).collect();
+        let fixture = Fixture::with_payload(root.path(), payload);
+        let artifact = fixture.artifact();
+        let mut children = Vec::new();
+        for index in 0..width {
+            let output = root.path().join(format!("counts-{index}.json"));
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--ignored",
+                    "--exact",
+                    &format!(
+                        "{}::acquire_process",
+                        module_path!().split_once("::").unwrap().1
+                    ),
+                ])
+                .env("HAMN_TEST_NATIVE_CACHE", &cache)
+                .env("HAMN_TEST_NATIVE_CURL", &fixture.curl)
+                .env(
+                    "HAMN_TEST_NATIVE_ARTIFACT",
+                    serde_json::to_string(&artifact).unwrap(),
+                )
+                .env("HAMN_TEST_NATIVE_COUNTS", &output)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap();
+            children.push((ChildGuard(child), output));
+        }
+        let (mut downloaded, mut reused, mut paths) = (0, 0, Vec::new());
+        for (mut child, output) in children {
+            assert!(child.0.wait().unwrap().success(), "width {width}");
+            let record: serde_json::Value =
+                serde_json::from_slice(&read_file(&output, 4096, true).unwrap()).unwrap();
+            let counts: Counts = serde_json::from_value(record["counts"].clone()).unwrap();
+            downloaded += counts.downloaded_bytes;
+            reused += counts.reused_bytes;
+            paths.push(PathBuf::from(record["path"].as_str().unwrap()));
+        }
+        let published = cache.join(format!("downloads/{}.artifact", artifact.sha256));
+        assert!(paths.iter().all(|path| *path == published), "width {width}");
+        assert_eq!(fs::read(&published).unwrap(), fixture.payload);
+        let requests = fixture.requests();
+        assert_eq!(requests.len(), 1, "width {width}");
+        assert_eq!(requests[0].2, size);
+        assert_eq!(downloaded, size as u64);
+        assert_eq!(reused, (width as u64 - 1) * size as u64);
     }
-    let mut downloaded = 0;
-    for (mut child, output) in children {
-        assert!(child.0.wait().unwrap().success());
-        let counts: Counts =
-            serde_json::from_slice(&read_file(&output, 4096, true).unwrap()).unwrap();
-        downloaded += counts.downloaded_bytes;
-    }
-    assert_eq!(fixture.requests().len(), 1);
-    assert_eq!(downloaded, fixture.payload.len() as u64);
 }
