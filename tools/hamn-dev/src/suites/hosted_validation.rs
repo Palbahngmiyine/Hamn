@@ -10,14 +10,15 @@ use crate::release::files::sha256_file;
 use crate::runner::{self, case};
 use crate::support::exec::output_within;
 use crate::support::release_driver::{
-    Outcome, Repo, candidate_directory, git, hamn_dev, is_empty_directory, outcome, pairs, text, with,
+    Outcome, Repo, RestoreHost, candidate_directory, git, hamn_dev, is_empty_directory, outcome, pairs,
+    release_command, text, with,
 };
 use crate::support::tmp::TempDir;
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::time::Duration;
 
 pub fn main(filters: &[String]) -> ExitCode {
@@ -46,47 +47,6 @@ fn hosted_checks() -> Value {
         "vmLifecycle": false, "dockerE2E": false, "colimaCoexistence": false})
 }
 
-/// Rebuilds build/hamn at the version found before a candidate build
-/// replaced it.
-struct RestoreHost(Option<String>);
-
-impl RestoreHost {
-    fn capture() -> Self {
-        let mut command = Command::new("build/hamn");
-        command.arg("--version");
-        let version = command
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|text| text.split_whitespace().nth(1).map(str::to_owned));
-        Self(version)
-    }
-}
-
-impl Drop for RestoreHost {
-    fn drop(&mut self) {
-        if let Some(version) = &self.0 {
-            let mut command = Command::new("make");
-            command.args(["host", &format!("VERSION={version}")]);
-            let output = output_within(&mut command, Duration::from_secs(3600));
-            if !output.status.success() {
-                eprintln!("hosted-validation: cannot restore build/hamn {version}: {output:?}");
-            }
-        }
-    }
-}
-
-/// Our environment without a hosted workflow's identity, plus `extra`.
-fn release_environment(extra: &[(&str, &str)]) -> Command {
-    let mut command = Command::new(std::env::current_exe().unwrap());
-    for name in ["GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"] {
-        command.env_remove(name);
-    }
-    command.envs(extra.iter().copied());
-    command
-}
-
 fn built_candidate_binds_exact_bytes() {
     let _restore = RestoreHost::capture();
     let work = TempDir::new("hamn-hosted-validation-");
@@ -95,7 +55,7 @@ fn built_candidate_binds_exact_bytes() {
     let candidate = text(&work.path().join("candidate"));
     let release_ref = git(Path::new("."), &["rev-parse", "HEAD"]);
     let tree = git(Path::new("."), &["rev-parse", "HEAD^{tree}"]);
-    let mut build = release_environment(&[
+    let mut build = release_command(&[
         ("GITHUB_REPOSITORY", "example/hamn"),
         ("RELEASE_REF", &release_ref),
         ("RELEASE_TAG", RC),
@@ -108,7 +68,7 @@ fn built_candidate_binds_exact_bytes() {
 
     let evidence = work.path().join("evidence");
     let validate = |output: &Path| {
-        let mut command = release_environment(&[
+        let mut command = release_command(&[
             ("RELEASE_REF", &release_ref),
             ("RELEASE_TAG", RC),
             ("CANDIDATE_DIR", &candidate),

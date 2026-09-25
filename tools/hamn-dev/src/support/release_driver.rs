@@ -136,6 +136,54 @@ pub fn hamn_dev(args: &[&str], directory: &Path, environment: &[(&str, &str)]) -
     hamn_dev_within(args, directory, environment, Duration::from_secs(120))
 }
 
+/// A hosted workflow's identity. Release fixtures never inherit it, so a
+/// local run cannot pass for a workflow's.
+pub const WORKFLOW_IDENTITY: [&str; 4] = ["GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"];
+
+/// `hamn-dev` with our environment minus [`WORKFLOW_IDENTITY`], plus
+/// `extra`, in our working directory: a release driver run against this
+/// checkout, as the release workflow runs it.
+pub fn release_command(extra: &[(&str, &str)]) -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    for name in WORKFLOW_IDENTITY {
+        command.env_remove(name);
+    }
+    command.envs(extra.iter().copied());
+    command
+}
+
+/// Rebuilds build/hamn, when dropped, at the version it reported when
+/// captured, before a candidate build replaced it. Run from the
+/// repository root.
+pub struct RestoreHost(Option<String>);
+
+impl RestoreHost {
+    pub fn capture() -> Self {
+        let mut command = Command::new("build/hamn");
+        command.arg("--version");
+        let version = command
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|text| text.split_whitespace().nth(1).map(str::to_owned));
+        Self(version)
+    }
+}
+
+impl Drop for RestoreHost {
+    fn drop(&mut self) {
+        if let Some(version) = &self.0 {
+            let mut command = Command::new("make");
+            command.args(["host", &format!("VERSION={version}")]);
+            let output = output_within(&mut command, Duration::from_secs(3600));
+            if !output.status.success() {
+                eprintln!("cannot restore build/hamn {version}: {output:?}");
+            }
+        }
+    }
+}
+
 pub fn outcome(output: std::process::Output) -> Outcome {
     Outcome {
         code: output.status.code(),
@@ -172,17 +220,31 @@ pub fn is_empty_directory(path: &Path) -> bool {
 /// source whose metadata satisfies both the physical and the hosted
 /// candidate contracts; returns `candidate.json`'s value.
 pub fn candidate_directory(directory: &Path, tag: &str, commit: &str, tree: &str) -> Value {
-    let version = tag.split("-rc.").next().unwrap();
     fs::create_dir_all(directory).unwrap();
-    let names = [
+    for name in candidate_artifacts(tag) {
+        fs::write(directory.join(&name), format!("fixture {name}\n")).unwrap();
+    }
+    bind_candidate(directory, tag, commit, tree)
+}
+
+/// The host archive, guest image, SBOM and installer names of candidate
+/// `tag` (`vX.Y.Z-rc.N`).
+pub fn candidate_artifacts(tag: &str) -> [String; 4] {
+    let version = tag.split("-rc.").next().unwrap();
+    [
         format!("hamn-{version}-darwin-arm64.tar.gz"),
         format!("hamn-{version}-ubuntu-24.04-arm64.img"),
         format!("hamn-{version}.spdx.json"),
         "install.sh".to_owned(),
-    ];
-    for name in &names {
-        fs::write(directory.join(name), format!("fixture {name}\n")).unwrap();
-    }
+    ]
+}
+
+/// Writes `candidate.json` and `SHA256SUMS` binding the four
+/// [`candidate_artifacts`] already in `directory` to `tag` at the given
+/// source; returns `candidate.json`'s value.
+pub fn bind_candidate(directory: &Path, tag: &str, commit: &str, tree: &str) -> Value {
+    let version = tag.split("-rc.").next().unwrap();
+    let names = candidate_artifacts(tag);
     let artifacts: Vec<Value> =
         names.iter().map(|name| json!({"name": name, "sha256": sha256_file(&directory.join(name)).unwrap()})).collect();
     let candidate = json!({"schemaVersion": 1, "kind": "hamn-release-candidate", "tag": tag, "version": version,

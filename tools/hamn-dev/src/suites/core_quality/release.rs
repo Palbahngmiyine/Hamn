@@ -5,17 +5,35 @@
 use super::search::{assert_absent, contains};
 
 const HOSTED_EVIDENCE: &str = "tools/hamn-dev/src/release/hosted.rs";
-const PUBLISH: &str = "packaging/release/publish-release.sh";
+const PUBLISH: &str = "tools/hamn-dev/src/release/publish.rs";
 const CANDIDATE: &str = "tools/hamn-dev/src/release/candidate.rs";
 const INSTALLER: &str = "packaging/release/install.sh.in";
 const UPDATER: &str = "scripts/update-host.sh";
 const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
+/// Release driver fixtures shared by the Rust release suites.
+const RELEASE_DRIVER: &str = "tools/hamn-dev/src/support/release_driver.rs";
 
 pub fn release_fixtures_do_not_inherit_workflow_identity() {
-    for release_test in ["tests/host/test_release_artifacts.sh", "tests/host/test_release_publish.sh"] {
+    let release_test = "tests/host/test_release_artifacts.sh";
+    assert!(
+        contains(release_test, "unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT"),
+        "release fixture inherits hosted workflow identity: {release_test}"
+    );
+    assert!(
+        contains(
+            RELEASE_DRIVER,
+            r#"pub const WORKFLOW_IDENTITY: [&str; 4] = ["GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"];"#
+        ) && contains(RELEASE_DRIVER, "    for name in WORKFLOW_IDENTITY {\n        command.env_remove(name);"),
+        "release driver fixtures do not drop the hosted workflow identity"
+    );
+    // Rust release suites start this executable only through
+    // release_command (identity dropped) or hamn_dev (empty environment).
+    for release_suite in
+        ["tools/hamn-dev/src/suites/hosted_validation.rs", "tools/hamn-dev/src/suites/release_publish.rs"]
+    {
         assert!(
-            contains(release_test, "unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT"),
-            "release fixture inherits hosted workflow identity: {release_test}"
+            contains(release_suite, "release_command(") && !contains(release_suite, "current_exe()"),
+            "release fixture inherits hosted workflow identity: {release_suite}"
         );
     }
 }
@@ -56,12 +74,12 @@ pub fn hosted_evidence_does_not_overstate_validation() {
 
 pub fn keyless_promotion_binds_candidates_and_manifest() {
     assert!(
-        contains(PUBLISH, r#"BASE_URL="https://github.com/${RELEASE_REPOSITORY}/releases/download/${STABLE_TAG}""#),
+        contains(PUBLISH, r#"format!("https://github.com/{repository}/releases/download/{stable_tag}")"#),
         "keyless promotion does not derive the canonical GitHub Release base"
     );
     assert!(
         contains(HOSTED_EVIDENCE, "candidate artifact directory contains unexpected entries")
-            && contains(PUBLISH, r#""$HAMN_DEV" release verify-hosted"#),
+            && contains(PUBLISH, "verify_hosted(&candidate_dir, &evidence, &promotion)?;"),
         "keyless promotion does not reject unbound candidate files"
     );
     assert!(

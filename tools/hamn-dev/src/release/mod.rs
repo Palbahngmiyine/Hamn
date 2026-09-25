@@ -1,12 +1,12 @@
 //! `hamn-dev release SUBCOMMAND ...`: release candidate assembly, evidence
-//! contracts, promotion checks, Release Please coordination, repository
+//! contracts, keyless promotion, Release Please coordination, repository
 //! preflight and the physical validation gate and harness. The Makefile's
-//! release targets, packaging/release/publish-release.sh and the release
-//! workflows call these subcommands; none of them is shipped.
+//! release targets and the release workflows call these subcommands; none
+//! of them is shipped.
 //!
-//! Drivers named `(env)` below take their inputs from environment variables
-//! (documented on each) and run in the checkout of the working directory;
-//! see [`checkout`].
+//! Drivers marked `(env)` below take their inputs (or those beyond their
+//! arguments) from environment variables, documented on each, and run in
+//! the checkout of the working directory; see [`checkout`].
 pub mod archive;
 pub mod candidate;
 pub mod checkout;
@@ -19,6 +19,7 @@ pub mod kubernetes;
 pub mod physical;
 pub mod preflight;
 pub mod process;
+pub mod publish;
 pub mod runtime;
 pub mod syntax;
 pub mod version;
@@ -32,12 +33,7 @@ const COMMANDS: &[(&str, &str, Command)] = &[
     ("hosted-validation", "(env)", hosted::hosted_validation),
     ("gate", "(env)", physical::gate),
     ("validate-candidate", "DIR TAG COMMIT TREE", validate_candidate),
-    (
-        "verify-hosted",
-        "CANDIDATE_DIR EVIDENCE STABLE_TAG RC_TAG COMMIT TREE RUN ATTEMPT HOST GUEST SBOM INSTALLER",
-        hosted::verify_hosted_command,
-    ),
-    ("write-manifest", "OUTPUT STABLE_TAG COMMIT BASE_URL CANDIDATE_DIR HOST GUEST", hosted::write_manifest),
+    ("publish", "STABLE_TAG RC_TAG COMMIT INPUT_DIR OUTPUT_DIR (env)", publish::publish),
     ("verify-draft-release", "RELEASE_JSON TAG COMMIT", hosted::verify_draft_release),
     ("physical-e2e", "[--help]", physical::main),
     ("validate-physical-evidence", "CANDIDATE_JSON SHA256SUMS EVIDENCE RUN ATTEMPT", validate_physical_evidence),
