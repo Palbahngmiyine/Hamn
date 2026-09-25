@@ -41,14 +41,35 @@
           sha256 = "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8";
         };
       };
+      # nixpkgs' Darwin stdenvNoCC keeps its Apple SDK as a default build
+      # input, and that SDK's closure holds cctools, LLVM and clang (about
+      # 1 GiB). Hamn builds only with Apple's tools and the system SDK, so
+      # everything these shells build locally uses a stdenvNoCC without it.
+      buildersFor = pkgs:
+        if pkgs.stdenv.isDarwin then
+          let
+            stdenvNoCC = pkgs.stdenvNoCC.override { extraBuildInputs = [ ]; };
+            trivial = pkgs.callPackage (pkgs.path + "/pkgs/build-support/trivial-builders") {
+              inherit stdenvNoCC;
+            };
+          in
+          {
+            inherit stdenvNoCC;
+            inherit (trivial) linkFarm symlinkJoin;
+            fetchurl = pkgs.fetchurl.override { inherit stdenvNoCC; };
+            mkShellNoCC = pkgs.mkShellNoCC.override { stdenv = stdenvNoCC; };
+          }
+        else
+          { inherit (pkgs) stdenvNoCC linkFarm symlinkJoin fetchurl mkShellNoCC; };
       actionlintFor = pkgs:
         let
           archive = actionlintArchives.${pkgs.system};
+          builders = buildersFor pkgs;
         in
-        pkgs.stdenvNoCC.mkDerivation {
+        builders.stdenvNoCC.mkDerivation {
           pname = "actionlint";
           version = actionlintVersion;
-          src = pkgs.fetchurl {
+          src = builders.fetchurl {
             url = "https://github.com/rhysd/actionlint/releases/download/v${actionlintVersion}/actionlint_${actionlintVersion}_${archive.platform}.tar.gz";
             sha256 = archive.sha256;
           };
@@ -63,13 +84,18 @@
       # The channel, profile and components declared in rust-toolchain.toml.
       # On Darwin, Rust links through Apple's /usr/bin/cc with the system SDK,
       # so the toolchain neither propagates nixpkgs' clang wrapper nor records
-      # a Nix Apple SDK for rust-lld. Both are unused there, and they were
-      # about 1 GiB of the shell (LLVM, clang, cctools and apple-sdk).
+      # a Nix Apple SDK for rust-lld, and its downloads and builds use the
+      # SDK-free builders.
       rustToolchainFor = pkgs:
         let
           inherit (pkgs.stdenv) isDarwin;
+          builders = buildersFor pkgs;
           rustPkgs = pkgs // pkgs.lib.optionalAttrs isDarwin {
-            callPackage = pkgs.newScope { apple-sdk = null; };
+            callPackage = pkgs.newScope {
+              apple-sdk = null;
+              inherit (builders) stdenvNoCC symlinkJoin;
+            };
+            inherit (builders) fetchurl;
           };
           toolchain = (rust-overlay.lib.mkRustBin { } rustPkgs).fromRustupToolchainFile ./rust-toolchain.toml;
         in
@@ -82,7 +108,7 @@
           toolchain;
       # Hamn links against the macOS SDK and is signed with Apple's codesign.
       # These names resolve to Apple's /usr/bin tools, never a Nix compiler.
-      appleToolchainFor = pkgs: pkgs.linkFarm "hamn-apple-toolchain" (map
+      appleToolchainFor = pkgs: (buildersFor pkgs).linkFarm "hamn-apple-toolchain" (map
         (tool: { name = "bin/${tool}"; path = "/usr/bin/${tool}"; })
         [ "ar" "c++" "cc" "clang" "clang++" "codesign" "ld" "otool" "ranlib" "xcrun" ]);
       # Darwin shells: the pinned Nix tools come first, then the macOS (BSD)
@@ -118,8 +144,8 @@
         openssh
         python3
         ripgrep
-        ruby
         (rustToolchainFor pkgs)
+        yq-go
       ];
     in
     {
@@ -127,6 +153,7 @@
         let
           pkgs = pkgsFor system;
           inherit (pkgs) lib stdenv;
+          builders = buildersFor pkgs;
           shellWith = extraPackages:
             let
               packages = lib.optionals stdenv.isDarwin [ (appleToolchainFor pkgs) ]
@@ -134,7 +161,7 @@
                 ++ lib.optionals stdenv.isLinux [ pkgs.coreutils pkgs.gcc ]
                 ++ extraPackages;
             in
-            pkgs.mkShellNoCC {
+            builders.mkShellNoCC {
               inherit packages;
               HAMN_VERSION = hamnVersion;
               shellHook = lib.optionalString stdenv.isDarwin (darwinShellHook pkgs packages);

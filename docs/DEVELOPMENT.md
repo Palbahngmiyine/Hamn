@@ -11,7 +11,7 @@ The GNU11 guest agent is part of the immutable Ubuntu image.
 
 Install Apple's command-line developer tools and [Nix](https://nixos.org/download/)
 with flakes enabled once. The locked `flake.nix` provides everything else: the
-Rust release in `rust-toolchain.toml` with rustfmt and clippy, Python, Ruby, jq,
+Rust release in `rust-toolchain.toml` with rustfmt and clippy, Python, jq, yq,
 ripgrep, actionlint, Git, GNU Make, OpenSSH, and Docker CLI with its Compose and
 buildx plugins. No Homebrew, apt, or Rust installer step is needed.
 
@@ -23,9 +23,9 @@ nix develop .#live                                   # also kubectl and kind
 
 On macOS the shells use Apple's `/usr/bin` compiler, linker, and `codesign`,
 export the system SDK as `SDKROOT` (never a Nix SDK), contain no Nix C compiler
-or Apple SDK (the Rust toolchain does not propagate them), and place the macOS
-userland (`stat`, `sed`, `find`, `tar`) ahead of stdenv's GNU tools because
-Hamn's scripts target it. Pinned Nix tools stay first on `PATH`. CI runs the
+or Apple SDK (everything they build locally uses a stdenv without them), and
+place the macOS userland (`stat`, `sed`, `find`, `tar`) ahead of stdenv's GNU
+tools because Hamn's scripts target it. Pinned Nix tools stay first on `PATH`. CI runs the
 same shells, and `make test-core-quality` checks this resolution inside them.
 
 ## Build
