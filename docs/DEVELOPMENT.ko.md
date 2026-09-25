@@ -22,10 +22,10 @@ nix develop .#live                                   # kubectl과 kind 추가
 ```
 
 macOS 셸은 Apple `/usr/bin`의 컴파일러·링커·`codesign`을 사용하고 시스템 SDK를
-`SDKROOT`로 지정합니다(Nix SDK는 사용하지 않음). Rust 툴체인이 Nix C 컴파일러와
-Apple SDK를 전파하지 않으므로 셸에는 둘 다 없습니다. Hamn 스크립트가 macOS 사용자
-영역을 기준으로 하므로 `stat`, `sed`, `find`, `tar` 같은 macOS 도구를 stdenv의 GNU
-도구보다 앞에 둡니다. 고정한 Nix 도구는 `PATH` 맨 앞에 유지합니다. CI도 같은 셸을
+`SDKROOT`로 지정합니다(Nix SDK는 사용하지 않음). Rust 툴체인이 nixpkgs의 clang
+래퍼를 전파하지 않으므로 `PATH`에 Nix C 컴파일러가 없습니다. Hamn 스크립트가 macOS
+사용자 영역을 기준으로 하므로 `stat`, `sed`, `find`, `tar` 같은 macOS 도구를
+stdenv의 GNU 도구보다 앞에 둡니다. 고정한 Nix 도구는 `PATH` 맨 앞에 유지합니다. CI도 같은 셸을
 사용하며 `make test-core-quality`가 셸 안에서 이 해석 결과를 확인합니다.
 
 ## 빌드

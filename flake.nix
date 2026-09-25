@@ -62,9 +62,10 @@
         };
       # The channel, profile and components declared in rust-toolchain.toml.
       # On Darwin, Rust links through Apple's /usr/bin/cc with the system SDK,
-      # so the toolchain neither propagates nixpkgs' clang wrapper nor records
-      # a Nix Apple SDK for rust-lld. Both are unused there, and they were
-      # about 1 GiB of the shell (LLVM, clang, cctools and apple-sdk).
+      # so the toolchain neither propagates nixpkgs' clang wrapper (whose
+      # setup hook exported NIX_CC and CC) nor records a Nix Apple SDK for
+      # rust-lld. The shell's stdenvNoCC still brings nixpkgs' Apple SDK and
+      # its cctools/LLVM closure; darwinShellHook keeps them out of builds.
       rustToolchainFor = pkgs:
         let
           inherit (pkgs.stdenv) isDarwin;
