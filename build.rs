@@ -24,6 +24,10 @@ fn main() {
     });
     let native = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("core");
     let mut make = Command::new("make");
+    // Cargo's job budget; the C core has ~55 independent translation units.
+    if let Ok(jobs) = env::var("NUM_JOBS") {
+        make.arg(format!("-j{jobs}"));
+    }
     make.current_dir(&root).args([
             format!("{}/libhamn_core.a", native.display()),
             format!("BUILD={}", native.display()),
