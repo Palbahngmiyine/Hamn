@@ -112,10 +112,11 @@ fn present(path: &str) -> bool {
 /// Removed sources that must not come back as tracked files; an untracked
 /// `desktop/` directory can be the user's and is left alone. The host
 /// installer and updater are native (`control/install_support`), so no
-/// shell installer tree returns.
+/// shell installer tree or shell install-test fixture returns.
 const UNTRACKED_LEGACY: &[&str] = &[
     "desktop",
     "scripts",
+    "tests/host/fixtures",
     "host/dockc",
     "host/kube",
     "host/cmd/cmd_nerdctl.c",

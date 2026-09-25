@@ -9,15 +9,22 @@ const PUBLISH: &str = "packaging/release/publish-release.sh";
 const CANDIDATE: &str = "tools/hamn-dev/src/release/candidate.rs";
 const INSTALLER: &str = "packaging/release/install.sh.in";
 const UPDATER: &str = "control/install_support/update.rs";
+const RELEASE_ARTIFACTS: &str = "tools/hamn-dev/src/suites/release_artifacts.rs";
 const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 
 pub fn release_fixtures_do_not_inherit_workflow_identity() {
-    for release_test in ["tests/host/test_release_artifacts.sh", "tests/host/test_release_publish.sh"] {
-        assert!(
-            contains(release_test, "unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT"),
-            "release fixture inherits hosted workflow identity: {release_test}"
-        );
-    }
+    assert!(
+        contains(
+            RELEASE_ARTIFACTS,
+            r#"for name in ["GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"] {"#
+        ) && contains(RELEASE_ARTIFACTS, "command.env_remove(name);"),
+        "release fixture inherits hosted workflow identity: {RELEASE_ARTIFACTS}"
+    );
+    let publish_test = "tests/host/test_release_publish.sh";
+    assert!(
+        contains(publish_test, "unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT"),
+        "release fixture inherits hosted workflow identity: {publish_test}"
+    );
 }
 
 pub fn physical_release_contract_has_no_legacy_retirement() {
