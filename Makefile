@@ -287,14 +287,14 @@ CI_MACOS_SHARDS := 1 2 3 4 5
 # whose Cargo cache carries target/debug.
 CI_MACOS_SHARD_1 := test-update-recovery-current test-port-forwarding \
 	test-kubernetes-cli test-diagnostics test-release-gate test-workflows \
-	test-guest-deployment test-release-artifacts test-hosted-validation
+	test-guest-deployment test-hosted-validation
 CI_MACOS_SHARD_1_USER := test-update-cli
 CI_MACOS_SHARD_2 := test-update-ux-redirected test-update-native test-uninstall \
 	test-update-check
 CI_MACOS_SHARD_2_USER := test-update-ux-pty test-install-bootstrap \
 	test-update-recovery-legacy
 CI_MACOS_SHARD_3 := test-install-cleanup test-install-script \
-	test-control-native test-profile-state
+	test-control-native test-profile-state test-release-artifacts
 CI_MACOS_SHARD_3_USER :=
 CI_MACOS_SHARD_4 := test-core-quality test-portable test-public-export \
 	test-release-version test-release-request test-release-repository-preflight \
