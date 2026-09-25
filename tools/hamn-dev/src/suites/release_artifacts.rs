@@ -12,6 +12,7 @@ use crate::release::files::sha256_file;
 use crate::runner::{self, case};
 use crate::support::exec::output_within;
 use crate::support::release_driver::{Outcome, git, outcome, private_bin, search_path};
+use crate::support::released;
 use crate::support::tmp::TempDir;
 use crate::support::upgrade::{self, Output};
 use serde_json::{Value, json};
@@ -40,6 +41,7 @@ pub fn main(filters: &[String]) -> ExitCode {
                 "local_candidate_bootstraps_exact_bytes_and_refuses_unsafe_installs",
                 local_candidate_bootstraps_exact_bytes_and_refuses_unsafe_installs,
             ),
+            case("candidate_installer_migrates_a_released_install", candidate_installer_migrates_a_released_install),
         ],
         filters,
     )
@@ -454,6 +456,76 @@ fn local_candidate_bootstraps_exact_bytes_and_refuses_unsafe_installs() {
     assert!(stderr.contains("exceeds size limit") || stderr.contains("artifact size or SHA-256 mismatch"), "{stderr}");
     assert_eq!(fs::read_link(&command).unwrap(), target);
     assert!(fs::symlink_metadata(&cached_artifact).is_err());
+}
+
+/// A Hamn 0.1.2 user runs install.sh once: the published installer of a
+/// newer candidate migrates the genuine 0.1.2 install at the default paths
+/// (made by the 0.1.2 installer, see `support::released`) in place, keeping
+/// the 0.1.2 generation as the predecessor.
+fn candidate_installer_migrates_a_released_install() {
+    let work = TempDir::new("hamn-release-artifacts-");
+    let root = fs::canonicalize(work.path()).unwrap();
+    let guest = guest_fixture(&root);
+    let candidate = root.join("candidate");
+    let manifest_url = format!("file://{}", root.join("manifest.json").display());
+    build_candidate(
+        &guest,
+        &candidate,
+        &[
+            ("RELEASE_TAG", OsStr::new("v0.2.0-rc.1")),
+            ("HAMN_RELEASE_MANIFEST_URL", OsStr::new(&manifest_url)),
+            ("HAMN_RELEASE_ALLOW_LOCAL", OsStr::new("1")),
+        ],
+    )
+    .succeeded();
+    let home = root.join("home");
+    let tmp = root.join("tmp");
+    fs::create_dir(&home).unwrap();
+    fs::create_dir(&tmp).unwrap();
+    let (bindir, datadir) = (home.join(".local/bin"), home.join(".local/share/hamn/src"));
+    let payload = released::payload(&root);
+    let (old_target, _) = released::install(&payload, &bindir, &datadir, &home);
+    let old_generation = upgrade::generation_of(&old_target);
+    let old_binary = fs::read(&old_target).unwrap();
+
+    let path =
+        search_path(&[&bindir, Path::new("/usr/bin"), Path::new("/bin"), Path::new("/usr/sbin"), Path::new("/sbin")]);
+    let migrated = bootstrap(
+        &candidate.join("install.sh"),
+        &home,
+        &tmp,
+        &path,
+        &[],
+        &[("SHELL", "/bin/zsh"), ("HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS", "1")],
+    );
+    assert_eq!(migrated.returncode, 0, "{}", migrated.stderr());
+    let stderr = migrated.stderr();
+    for line in [
+        "Installing Hamn 0.2.0 for Apple Silicon macOS...",
+        "Updating Hamn 0.1.2 → 0.2.0...",
+        "Updated Hamn 0.1.2 → 0.2.0. Existing VMs were not restarted.",
+        "Run hamn to get started. Update later with hamn upgrade.",
+    ] {
+        assert!(stderr.lines().any(|text| text == line), "missing {line:?}: {stderr}");
+    }
+    let command = bindir.join("hamn");
+    let target = fs::read_link(&command).unwrap();
+    let generation = upgrade::generation_of(&target);
+    assert_ne!(generation, old_generation);
+    let member = "hamn-v0.2.0-darwin-arm64";
+    assert_eq!(
+        fs::read(&target).unwrap(),
+        archive_bytes(&candidate.join(format!("{member}.tar.gz")), &format!("{member}/bin/hamn"))
+    );
+    assert!(fs::read_to_string(generation.join(".hamn-generation")).unwrap().starts_with("version=2\n"));
+    assert_eq!(
+        fs::read_to_string(generation.join(".hamn-previous-target")).unwrap(),
+        format!("{}\n", old_target.display())
+    );
+    assert_eq!(fs::read(&old_target).unwrap(), old_binary, "the 0.1.2 predecessor changed");
+    assert!(old_generation.join("share/hamn/src/scripts").is_dir());
+    let version = upgrade::run(Command::new(&command).arg("--version").env("HOME", &home), INSTALL);
+    assert_eq!(version.stdout(), "hamn 0.2.0\n");
 }
 
 /// The bytes of archive member `member`.

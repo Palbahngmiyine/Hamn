@@ -13,6 +13,7 @@ pub mod py_http;
 pub mod py_text;
 pub mod real_cli;
 pub mod release_driver;
+pub mod released;
 pub mod screen;
 pub mod termios;
 pub mod tmp;

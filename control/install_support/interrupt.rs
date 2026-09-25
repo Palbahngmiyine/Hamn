@@ -13,7 +13,9 @@
 //! `HAMN_TEST_UPDATE_<NAME>_READY_FIFO` receives `ready\n` and then a line
 //! is awaited from `HAMN_TEST_UPDATE_<NAME>_RELEASE_FIFO`; either may be
 //! omitted. `HAMN_TEST_UPDATE_FAULTS` names comma-separated steps that then
-//! fail as if their filesystem operation had failed. A seam can only pause
+//! fail as if their filesystem operation had failed: `host-install`,
+//! `receipt-write`, `rollback-link`, `retire-journal`, and every barrier
+//! `NAME` (a listed barrier fails instead of pausing). A seam can only pause
 //! or fail a step; it never skips a check, a journal write or a rollback.
 use super::Result;
 use std::{
@@ -147,6 +149,7 @@ fn fifo(variable: &str) -> Result<Option<std::path::PathBuf>> {
 /// The test barrier `name` (see the module documentation). Interruption by
 /// a recorded signal returns `Interrupted`.
 pub(super) fn barrier(name: &str) -> Result<()> {
+    fault(name)?;
     let ready = fifo(&format!("HAMN_TEST_UPDATE_{name}_READY_FIFO"))?;
     let release = fifo(&format!("HAMN_TEST_UPDATE_{name}_RELEASE_FIFO"))?;
     if let Some(ready) = ready {
@@ -172,7 +175,9 @@ pub(super) fn barrier(name: &str) -> Result<()> {
             1 if byte[0] == b'\n' => return Ok(()),
             1 => continue,
             0 => {
-                return Err(format!("test barrier {name} was closed without a release line").into());
+                return Err(
+                    format!("test barrier {name} was closed without a release line").into(),
+                );
             }
             _ => {
                 let error = std::io::Error::last_os_error();

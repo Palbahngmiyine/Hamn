@@ -36,6 +36,7 @@ mod release_physical;
 mod release_repository_preflight;
 mod release_request;
 mod release_version;
+mod released_migration;
 mod remote_cancel_boundaries;
 mod repository;
 mod rust_sdk;
@@ -140,6 +141,7 @@ const SUITES: &[Suite] = &[
     ("bootstrap-acquire", bootstrap_acquire::main),
     ("generation-cleanup", generation_cleanup::main),
     ("host-install", host_install::main),
+    ("released-migration", released_migration::main),
     ("install-system-tools", install_system_tools::main),
     ("uninstall", uninstall::main),
     ("upgrade-cli", upgrade_cli::main),
@@ -188,6 +190,7 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("workspace-management-kubectl", workspace_live::checks::management_kubectl),
     ("generation-wait", generation_cleanup::waiting_executable),
     ("generation-lock-holder", generation_cleanup::lock_holder),
+    ("released-install-support", crate::support::released::install_support),
     ("bootstrap-curl", bootstrap_acquire::curl_fixture),
     ("update-check-cli", update_check::cli_fixture),
 ];

@@ -441,6 +441,7 @@ test-diagnostics: host
 
 test-install-script: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test host-install
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test released-migration
 
 test-install-cleanup: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test generation-cleanup

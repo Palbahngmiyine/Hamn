@@ -52,9 +52,12 @@ jobs:
     env:
       CARGO_PROFILE: ci
     steps:
+      # Full history: the installer migration tests install Hamn 0.1.2 with
+      # the 0.1.2 installer read from its release commit.
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Assert Apple Silicon runner
         shell: bash

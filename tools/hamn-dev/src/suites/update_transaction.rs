@@ -331,8 +331,10 @@ fn updates_recover_failure_interruption_and_legacy_journals() {
             };
             assert!(
                 result.stdout().contains(&expected),
-                "v{version} journal refusal is not explained: {}",
-                result.stdout()
+                "v{version} journal refusal is not explained: {} (status {}, stderr: {})",
+                result.stdout(),
+                result.returncode,
+                result.stderr()
             );
             assert_eq!(digests(&journal), before, "refusing a v{version} journal changed it");
             assert_eq!(fixture.active(), target_3, "refusing a v{version} journal changed the installation");
