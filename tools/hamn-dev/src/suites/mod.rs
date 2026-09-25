@@ -7,6 +7,7 @@ mod native_flag_inventory;
 mod single_binary;
 mod tui;
 mod tui_native_regressions;
+mod tui_navigation;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
@@ -16,6 +17,7 @@ const SUITES: &[Suite] = &[
     ("single-binary", single_binary::main),
     ("tui", tui::main),
     ("tui-native-regressions", tui_native_regressions::main),
+    ("tui-navigation", tui_navigation::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[

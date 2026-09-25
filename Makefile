@@ -216,7 +216,7 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 
 # The TUI, workspace and packaging regressions of test-control, after test-control-native.
 test-control-tui: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_navigation.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-navigation
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_review_improvements.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_session_management.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_workspaces.py
