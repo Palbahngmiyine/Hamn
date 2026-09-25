@@ -43,9 +43,9 @@ jobs:
           PREVIOUS_REF: ${{ github.event.before }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = push ]; then
-            bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"
+            "$HAMN_DEV" release resolve-release "$PREVIOUS_REF"
           else
-            bash packaging/release/resolve-release-request.sh
+            "$HAMN_DEV" release recover-release
           fi
 
   guest-image:

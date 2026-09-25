@@ -1,20 +1,24 @@
 //! The release version recorded in the Release Please manifest and its
 //! copies in version.txt, the Makefile and flake.nix.
 //!
-//! - `resolve-version`: turns a manifest increase between two commits into
-//!   one release run (GitHub step outputs).
-//! - `current-version`: the checked-out manifest version, for recovering an
-//!   unpublished release.
-//! - `check-version-state`: the repository's release configuration and
+//! - `resolve-release PREVIOUS_REF` (push to main): turns a manifest
+//!   increase between the previous and the checked-out commit into one
+//!   release run.
+//! - `recover-release` (workflow_dispatch on main): re-requests the
+//!   checked-out manifest version while its stable tag does not exist.
+//! - `check-version-state ROOT`: the repository's release configuration and
 //!   version copies agree.
-use super::process::{self, Spec};
-use super::syntax::Version;
+//!
+//! Both release drivers run in the checkout (see [`super::checkout`]) and
+//! append `should_release` and, when a release is due, `version`,
+//! `stable_tag`, `candidate_tag` and `commit` lines to `$GITHUB_OUTPUT`;
+//! nothing is appended when they fail.
+use super::checkout::{Checkout, github_output, is_positive_decimal, variable};
+use super::syntax::{Version, is_hex};
 use serde_json::Value;
-use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::time::Duration;
 
 /// Values of `VERSION ?= value` lines (Python:
 /// `^VERSION[ \t]+\?=[ \t]+([^ \t#\r\n]+)[ \t]*$`, multiline).
@@ -93,23 +97,76 @@ fn append_outputs(output: &Path, lines: &[String]) -> Result<(), String> {
         .map_err(|error| format!("{}: {error}", output.display()))
 }
 
-fn git_show(root: &Path, reference: &str, path: &str) -> Result<String, String> {
-    process::run(
-        OsStr::new("git"),
-        &[OsStr::new("-C"), root.as_os_str(), OsStr::new("show"), OsStr::new(&format!("{reference}:{path}"))],
-        &Spec::default(),
-        Duration::from_secs(60),
-    )
+/// The lines a release run hands to the next jobs.
+fn release_outputs(version: &str, run: &str, commit: &str) -> [String; 5] {
+    [
+        "should_release=true".into(),
+        format!("version={version}"),
+        format!("stable_tag=v{version}"),
+        format!("candidate_tag=v{version}-rc.{run}"),
+        format!("commit={commit}"),
+    ]
 }
 
-/// `resolve-version ROOT PREVIOUS_REF COMMIT RUN_ID OUTPUT`
-pub fn resolve_version(args: &[String]) -> Result<(), String> {
-    let [root, previous, commit, run, output] = args else {
-        return Err("usage: hamn-dev release resolve-version ROOT PREVIOUS_REF COMMIT RUN_ID OUTPUT".into());
+/// The commit whose absence means "no previous manifest".
+const NO_COMMIT: &str = "0000000000000000000000000000000000000000";
+
+/// `resolve-release PREVIOUS_REF`, with `GITHUB_OUTPUT`, `GITHUB_RUN_ID`
+/// and `GITHUB_SHA`. Without a manifest at the previous commit (the
+/// Release Please bootstrap, or GitHub's all-zero ref) it records
+/// `should_release=false`; otherwise the checked-out manifest version must
+/// be greater and match version.txt, the Makefile and flake.nix.
+pub fn resolve_release(args: &[String]) -> Result<(), String> {
+    let [previous] = args else {
+        return Err("usage: hamn-dev release resolve-release PREVIOUS_REF".into());
     };
-    let root = Path::new(root);
+    resolve_push(previous).map_err(|error| format!("automated release: {error}"))
+}
+
+fn resolve_push(previous: &str) -> Result<(), String> {
+    if !is_hex(previous, 40) {
+        return Err("previous release ref must be a full commit SHA".into());
+    }
+    let output = github_output()?;
+    let checkout = Checkout::current()?;
+    // Any failure to find the previous manifest is the bootstrap state.
+    let previous_manifest = format!("{previous}:.release-please-manifest.json");
+    if previous == NO_COMMIT || !checkout.git(&["cat-file", "-e", &previous_manifest])?.status.success() {
+        append_outputs(&output, &["should_release=false".into()])?;
+        println!("Release Please bootstrap detected; no release is due");
+        return Ok(());
+    }
+    let commit = variable("GITHUB_SHA")?;
+    if !is_hex(&commit, 40) {
+        return Err("GITHUB_SHA must be a full commit SHA".into());
+    }
+    let run = variable("GITHUB_RUN_ID")?;
+    if !is_positive_decimal(&run) {
+        return Err("GITHUB_RUN_ID must be a positive decimal integer".into());
+    }
+    if commit != checkout.head()? {
+        return Err("GITHUB_SHA does not match the checked-out commit".into());
+    }
+    let version = increased_version(&checkout, previous, &commit)?;
+    append_outputs(&output, &release_outputs(&version, &run, &commit))?;
+    println!("automated release version resolved from Release Please manifest");
+    Ok(())
+}
+
+/// The manifest version at `commit`, which must exceed the one at
+/// `previous` and match `commit`'s version copies.
+fn increased_version(checkout: &Checkout, previous: &str, commit: &str) -> Result<String, String> {
+    // The file's exact bytes: version.txt must end in exactly one newline.
+    let show = |reference: &str, path: &str| -> Result<String, String> {
+        let object = format!("{reference}:{path}");
+        let output = checkout.git(&["show", &object])?;
+        if !output.status.success() {
+            return Err(format!("git show {object} failed: {}", output.stderr_lossy().trim()));
+        }
+        output.stdout_text()
+    };
     let manifest = |reference: &str| -> Result<(String, Version), String> {
-        let value = git_show(root, reference, ".release-please-manifest.json")
+        let value = show(reference, ".release-please-manifest.json")
             .and_then(|text| serde_json::from_str::<Value>(&text).map_err(|error| error.to_string()))
             .map_err(|error| format!("release manifest is invalid: {error}"))?;
         let text = root_entry(&value)?.as_str().ok_or("release version is not a string")?;
@@ -121,34 +178,66 @@ pub fn resolve_version(args: &[String]) -> Result<(), String> {
     if new <= old {
         return Err("release version did not increase".into());
     }
-    if git_show(root, commit, "version.txt")? != format!("{text}\n") {
+    if show(commit, "version.txt")? != format!("{text}\n") {
         return Err("version.txt does not match the release manifest".into());
     }
-    if makefile_versions(&git_show(root, commit, "Makefile")?).first() != Some(&text.as_str()) {
+    if makefile_versions(&show(commit, "Makefile")?).first() != Some(&text.as_str()) {
         return Err("Makefile does not match the release manifest".into());
     }
-    if flake_versions(&git_show(root, commit, "flake.nix")?) != [text.as_str()] {
+    if flake_versions(&show(commit, "flake.nix")?) != [text.as_str()] {
         return Err("flake.nix does not match the release manifest".into());
     }
-    append_outputs(
-        Path::new(output),
-        &[
-            "should_release=true".into(),
-            format!("version={text}"),
-            format!("stable_tag=v{text}"),
-            format!("candidate_tag=v{text}-rc.{run}"),
-            format!("commit={commit}"),
-        ],
-    )
+    Ok(text)
 }
 
-/// `current-version ROOT`: prints the checked-out release version after
-/// checking that every version copy agrees.
-pub fn current_version(args: &[String]) -> Result<(), String> {
-    let [root] = args else {
-        return Err("usage: hamn-dev release current-version ROOT".into());
-    };
-    let root = Path::new(root);
+/// `recover-release`, with `GITHUB_EVENT_NAME=workflow_dispatch`,
+/// `GITHUB_REF=refs/heads/main`, `GITHUB_SHA` (the checked-out commit),
+/// `GITHUB_OUTPUT` and `GITHUB_RUN_ID`: requests the checked-out manifest
+/// version again when its stable tag does not exist yet.
+pub fn recover_release(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: hamn-dev release recover-release".into());
+    }
+    recover().map_err(|error| format!("release request: {error}"))
+}
+
+fn recover() -> Result<(), String> {
+    if variable("GITHUB_EVENT_NAME")? != "workflow_dispatch" {
+        return Err("only workflow_dispatch may recover an unpublished release".into());
+    }
+    if variable("GITHUB_REF")? != "refs/heads/main" {
+        return Err("release recovery must run from main".into());
+    }
+    let commit = variable("GITHUB_SHA")?;
+    if !is_hex(&commit, 40) {
+        return Err("GITHUB_SHA must be a full commit SHA".into());
+    }
+    let checkout = Checkout::current()?;
+    if commit != checkout.head()? {
+        return Err("GITHUB_SHA does not match the checked-out commit".into());
+    }
+    let output = github_output()?;
+    let run = variable("GITHUB_RUN_ID")?;
+    if !is_positive_decimal(&run) {
+        return Err("GITHUB_RUN_ID must be a positive decimal".into());
+    }
+    let version = current_version(&checkout.root)
+        .map_err(|error| format!("cannot resolve the current release version: {error}"))?;
+    let stable_tag = format!("v{version}");
+    let tag = checkout.git(&["rev-parse", "--verify", "--quiet", &format!("refs/tags/{stable_tag}")])?;
+    match tag.code() {
+        Some(0) => return Err(format!("stable tag already exists: {stable_tag}")),
+        Some(1) => {}
+        _ => return Err(format!("cannot look up tag {stable_tag}: {}", tag.stderr_lossy().trim())),
+    }
+    append_outputs(&output, &release_outputs(&version, &run, &commit))?;
+    println!("recovered unpublished release {stable_tag} from protected main");
+    Ok(())
+}
+
+/// The checked-out release version, after checking that every version copy
+/// agrees.
+fn current_version(root: &Path) -> Result<String, String> {
     let read = |name: &str| fs::read_to_string(root.join(name)).map_err(|error| format!("{name}: {error}"));
     let manifest: Value =
         serde_json::from_str(&read(".release-please-manifest.json")?).map_err(|error| error.to_string())?;
@@ -164,8 +253,7 @@ pub fn current_version(args: &[String]) -> Result<(), String> {
     if flake_versions(&read("flake.nix")?) != [version] {
         return Err("flake.nix does not match the release manifest".into());
     }
-    println!("{version}");
-    Ok(())
+    Ok(version.to_owned())
 }
 
 /// `check-version-state ROOT`: Release Please policy (initial version 0.0.1,

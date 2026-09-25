@@ -19,6 +19,8 @@ mod qcow2;
 mod release_consumer;
 mod release_github;
 mod release_physical;
+mod release_request;
+mod release_version;
 mod remote_cancel_boundaries;
 mod repository;
 mod rust_sdk;
@@ -96,6 +98,8 @@ const SUITES: &[Suite] = &[
     ("tui-docker-images", tui_docker_images::main),
     ("tui-kubectl-output", tui_kubectl_output::main),
     ("tui-tls-target", tui_tls_target::main),
+    ("release-version", release_version::main),
+    ("release-request", release_request::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[

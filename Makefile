@@ -513,12 +513,12 @@ test-release-publish: hamn-dev
 	$(RELEASE_TOOL) bash tests/host/test_release_publish.sh
 
 test-release-version: hamn-dev
-	$(RELEASE_TOOL) bash tests/host/test_release_version.sh
+	$(HAMN_DEV) test release-version
 	$(HAMN_DEV) test release-github
 	bash tests/host/test_release_network.sh
 
 test-release-request: hamn-dev
-	$(RELEASE_TOOL) bash tests/host/test_release_request.sh
+	$(HAMN_DEV) test release-request
 
 test-public-export:
 	bash tests/host/test_public_export.sh

@@ -404,8 +404,8 @@ for requirement in \
     '  workflow_dispatch:' \
     '  contents: read' \
     '    name: Resolve release version' \
-    '            bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"' \
-    '            bash packaging/release/resolve-release-request.sh'; do
+    '            "$HAMN_DEV" release resolve-release "$PREVIOUS_REF"' \
+    '            "$HAMN_DEV" release recover-release'; do
     grep -Fqx "$requirement" "$release_workflow" ||
         fail "automated release trigger is incomplete: $requirement"
 done

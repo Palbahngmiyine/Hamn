@@ -2,8 +2,13 @@
 //! contracts, promotion checks, Release Please coordination and the
 //! physical validation harness. The shell drivers in packaging/release and
 //! the release workflows call these subcommands; none of them is shipped.
+//!
+//! Drivers named `(env)` below take their inputs from environment variables
+//! (documented on each) and run in the checkout of the working directory;
+//! see [`checkout`].
 pub mod archive;
 pub mod candidate;
+pub mod checkout;
 pub mod contract;
 pub mod files;
 pub mod github;
@@ -48,8 +53,8 @@ const COMMANDS: &[(&str, &str, Command)] = &[
         "--hamn HAMN --context CONTEXT [--kubeconfig PATH] --output PATH [--host-network]",
         kubernetes::main,
     ),
-    ("resolve-version", "ROOT PREVIOUS_REF COMMIT RUN_ID OUTPUT", version::resolve_version),
-    ("current-version", "ROOT", version::current_version),
+    ("resolve-release", "PREVIOUS_REF (env)", version::resolve_release),
+    ("recover-release", "(env)", version::recover_release),
     ("check-version-state", "ROOT", version::check_version_state),
     ("preflight-rulesets", "RULESETS_JSON OUTPUT", preflight::rulesets),
     ("preflight-repository", "REPOSITORY RESPONSES_DIR", preflight::repository),
