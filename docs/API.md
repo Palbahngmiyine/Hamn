@@ -50,16 +50,11 @@ retry start once; this handoff does not claim VM readiness or clear an earlier
 Navigation does not cancel managed work; confirmed quit requests cancellation
 and waits for cleanup. Unknown outcomes require inspection before retry.
 
-`vm stop` may succeed after its preliminary retirement failed. In that case,
-`data.migrationError` retains the earlier `{code,message}` while the stop response
-remains successful. Inspect this field separately from the stop result and the
-latest operation record, which may now describe the completed stop.
-
 ## Operations
 
 | Family | Operations |
 | --- | --- |
-| VM | `vm list`, `status`, `create`, `configure`, `start`, `stop`, `delete`, `migrate`, `diagnostics`, `env` |
+| VM | `vm list`, `status`, `create`, `configure`, `start`, `stop`, `delete`, `diagnostics`, `env` |
 | Docker containers | `docker containers list`, `inspect`, `logs`, `stats`, `start`, `stop`, `restart`, `delete` |
 | Docker inventory | `docker images list`, `docker volumes list`, `docker networks list` |
 | Kubernetes selection | `k8s contexts list`, `k8s namespaces list` |
@@ -67,18 +62,18 @@ latest operation record, which may now describe the completed stop.
 | Kubernetes details | `k8s <resource> inspect <name>` for every listed resource and namespaces; JSON object and YAML |
 | Kubernetes logs | `k8s pods logs` |
 | Kubernetes mutations | `k8s deployments scale/restart`, `statefulsets scale/restart`, `daemonsets restart`, `pods delete` |
-| Maintenance | `system upgrade`, `system update`, `system uninstall` |
+| Maintenance | `system upgrade`, `system uninstall` |
 
 VM requests require `--profile`, except `vm list`. Docker requests require exactly
 one of `--profile` or `--context`. External contexts use Docker CLI authentication
 and transport; `--docker-config` optionally selects its configuration directory.
 They do not query or mutate Hamn profiles. VM create and
 configure accept `--cpu`, `--memory` (GiB), and `--disk` (GiB). `vm diagnostics`
-accepts `--path` for an archive. `system upgrade` and its `system update` alias accept
+accepts `--path` for an archive. `system upgrade` accepts
 `--manifest`, `--check` (read-only, no `--yes` required), and `--force`
 (same-version reinstall, still requires `--yes`). `--check` conflicts with `--force`.
-Use `hamn --headless system update --help` for update-specific usage and recovery.
-See [installation and update experience](INSTALLATION.md) for progress and compatibility.
+Use `hamn --headless system upgrade --help` for upgrade-specific usage and recovery.
+See [installation and upgrade experience](INSTALLATION.md) for progress and compatibility.
 `vm env` returns Docker connection information, not shell text.
 
 Kubernetes requests require `--context`, except context listing. Namespaced

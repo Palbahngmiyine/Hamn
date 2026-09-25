@@ -55,7 +55,7 @@ credentials are read locally; context selection does not rewrite source files.
 Mutations resolve object identity and use resource-version/UID preconditions.
 Automatic HTTP retries are disabled to avoid replaying a mutation.
 
-## Guest configuration and retirement
+## Guest configuration and recovery
 
 The signed Ubuntu 24.04 arm64 image owns hamnd, Docker, shared containerd, runc,
 CNI, binfmt and normal guest helpers. There is no unsigned cloud-image fallback
@@ -77,24 +77,16 @@ profile disk is never rebased or replaced; only an explicit larger configured
 size grows its existing inode. Full hash validation adds first-use and reuse
 I/O, so shared storage does not imply universally faster profile creation.
 
-For a legacy profile, SSH readiness starts managed K3s retirement before normal
-provisioning. The existing EFI boot path is preserved; old K3s can briefly run
-before SSH becomes available. The fixed guest-side Python payload and replacement verifier
-and transaction helper are embedded in the signed host binary. This narrowly
-scoped, one-time replacement updates existing guest disks without treating the
-host checkout as a general guest configuration source.
-
-The root-owned guest journal records verified ownership, service stop/mask,
-`k8s.io` resource cleanup, dedicated file removal, helper replacement and Docker
-readiness. Interrupted stages retry. Shared content, Docker objects, user
-mounts and source kubeconfig files are preserved. K3s data deletion cannot be
-undone by restoring an older binary. C publishes the new profile format only
-after guest retirement and profile-local forward cleanup succeed.
-
 The normal guest transaction snapshots managed runtime configuration and
 service state before changing it. The deployment fingerprint is recorded after
-commit and Docker/containerd readiness. Retirement is separate from that
-rollback: restoring runtime configuration does not resurrect K3s data.
+commit and Docker/containerd readiness. A backup left by an interrupted
+transaction is resolved before the next deployment and before a running VM is
+reported ready: under the guest deployment lock, the host sends a fixed
+recovery script (`host/core/deployment_recovery.h`) that rolls back exactly one
+complete, owned backup through the image's own transaction helper, and refuses
+incomplete, ambiguous or unsafe entries for inspection. The script comes from
+the host because installed images have no recovery action of their own; it
+installs nothing in the guest.
 
 ## Single executable build
 
@@ -117,9 +109,8 @@ Before the host executable is authenticated, the bootstrap uses macOS's stock
 `zsh/system` for the shared per-digest lock and bounded partial writes. It verifies
 the pinned size and SHA-256 before reading the executable through `tar` stdout.
 That process releases its download lock before the native updater runs. Subsequent
-manifest, receipt and transfer decisions execute inside Hamn; host installation
-does not run Python. Release-build validators and test references may use Python,
-and legacy retirement's embedded Python payload runs in the guest.
+manifest, receipt and transfer decisions execute inside Hamn; installation
+does not run Python.
 The scanner has a process-group deadline, and both install roots remain locked
 through update recovery and collection. See [Installation](INSTALLATION.md) for
 retention and compatibility limits.

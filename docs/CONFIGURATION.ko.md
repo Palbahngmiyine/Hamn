@@ -143,9 +143,9 @@ hamn --headless k8s pods list --context dev --namespace default
 
 `--kubeconfig`, `KUBECONFIG`, 기본 `~/.kube/config` 순서로 설정을 선택하며 원본 파일을
 바꾸지 않습니다. 인증과 변경 대상 지정은 [API](API.ko.md)를 참고하세요.
-구형 YAML의 `kubernetes` 항목은 K3s 전환을 위해서만 읽고 정리 성공 후 제거합니다.
-신규 프로필 설정이 아닙니다. K3s 클러스터 데이터·전용 볼륨은 삭제하고
-Docker 데이터·원본 kubeconfig는 보존합니다.
+매니지드 K3s용 `kubernetes` 항목은 제거되었습니다. 이 항목이 남은 프로필은 알 수
+없는 설정 키로 거부합니다. 프로필을 사용하려면 `config.yaml`에서 해당 항목을
+삭제하세요. 제거된 릴리스의 K3s 데이터는 이전하지 않습니다.
 
 ## Provisioning hook
 

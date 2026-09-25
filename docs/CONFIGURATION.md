@@ -149,10 +149,10 @@ hamn --headless k8s pods list --context dev --namespace default
 
 `--kubeconfig` takes precedence over `KUBECONFIG` and the default `~/.kube/config`.
 Selection does not modify the source files. See [API](API.md) for authentication
-and explicit mutation targets. The legacy `kubernetes` YAML mapping is read
-only for K3s retirement and is removed after successful cleanup. It is not a
-new-profile setting. K3s cluster data and dedicated volumes are deleted;
-Docker data and the original kubeconfig are preserved.
+and explicit mutation targets. The managed K3s `kubernetes` mapping was
+removed: a profile that still contains it is refused as an unknown
+configuration key. Delete the mapping from `config.yaml` to use the profile;
+the removed releases' K3s data is not migrated.
 
 ## Provisioning hooks
 

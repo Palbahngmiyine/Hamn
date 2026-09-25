@@ -37,7 +37,7 @@ The `a` key toggles Docker's `--all` value, including grouped flags such as `-as
 and repeated boolean options. It preserves filters, size, and `--last`/`--latest`;
 those last two options retain Docker's behavior of including all container states.
 Kubernetes opens Pods in the current valid context, otherwise the context picker.
-Entering Kubernetes neither starts a VM nor migrates a Hamn profile.
+Entering Kubernetes does not start a VM.
 Selecting contexts or namespaces does not write kubeconfig or Docker configuration.
 Esc cancels an environment, context, or namespace picker and restores the previous
 query, explicit connection options, row filter, selection, and scroll position.
@@ -162,11 +162,10 @@ remote completion. If settlement cannot be verified, further guest mutations in
 that operation are blocked and the VM is preserved for recovery.
 External changes are not described as rolled back merely because their CLI exited.
 
-A successful VM stop can include an earlier retirement warning. The operation
-status and log retain that warning; an `outcomeUnknown` warning also retains the
-original profile and `vm migrate` diagnostic in `!`. Known failures remain warnings
-without being relabeled unknown. These results stay in the Containers workspace
-when another workspace is visible and are printed after terminal restoration on exit.
+A failed change keeps its status and log in the workspace that started it, even
+while another workspace is visible; an `outcomeUnknown` failure also keeps the
+original target in `!`. Known failures are not relabeled unknown. These results
+are printed again after terminal restoration on exit.
 Long diagnostics use a one-line header summary with `! log`; the complete text
 remains in the scrollable operation detail without hiding the resource list.
 
@@ -176,11 +175,10 @@ socket and a real Docker `/_ping` response. An interrupted operation retains its
 identity and outcome for inspection on the next launch. Rejected preflight input
 with no VM changes is a known failure; it does not create a new recovery alarm. See [API](API.md).
 
-Completed K3s retirement and unfinished Docker deployment are checked separately.
-A complete, owned backup with matching helper contract and retirement provenance
-can be rolled back and retried. Legacy backups require trusted helper identities
-and full metadata validation. Ambiguous, partial, or altered backups are preserved
-with an error. Recovery never deletes Docker containers, images, or volumes.
+An interrupted guest deployment is recovered before start continues: a single
+complete, owned backup is rolled back and the deployment retried. Ambiguous or
+incomplete backups are preserved with an error for inspection. Recovery never
+deletes Docker containers, images, or volumes.
 
 ## Preferences
 

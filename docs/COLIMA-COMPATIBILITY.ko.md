@@ -53,8 +53,5 @@ Colima의 VM·Docker context·소켓·설치·상태를 보존합니다. Hamn을
 연결합니다. 애플리케이션의 Compose·buildx·SDK 동작을 확인하고 Hamn 정지 후
 Colima 상태가 동일한지 확인합니다. Docker 객체를 Colima에서 자동 복사하지 않습니다.
 
-구형 Hamn 업데이트에는 별도의 자동 K3s 전환이 적용됩니다. K3s 클러스터 데이터와
-전용 로컬 볼륨은 영구 삭제하며 Docker 객체·이름 있는 볼륨·사용자 마운트는
-보존합니다. 원본 kubeconfig 파일은 보존하고 기존 Hamn 소유 로컬 context는
-사용 불가로 표시합니다. 바이너리를 롤백해도 K3s 데이터는 복구되지 않습니다.
-전환 시점과 실패 처리는 [설정](CONFIGURATION.ko.md)을 참고하세요.
+Hamn은 더 이상 K3s를 관리하지 않으며, 제거된 `kubernetes` 설정이 남은 프로필은
+거부합니다. [설정](CONFIGURATION.ko.md)을 참고하세요.

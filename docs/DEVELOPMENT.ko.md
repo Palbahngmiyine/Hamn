@@ -62,7 +62,7 @@ make test-local-macos
 ```
 
 `test-control`은 Rust 서비스, C 경계, worker 격리, 모의 Docker/Kubernetes API,
-K3s 전환, PTY 터미널 복구와 바이너리 게시를 검사합니다. `test-release-gate`는
+게스트 배포 복구, PTY 터미널 복구와 바이너리 게시를 검사합니다. `test-release-gate`는
 VM 없이 증거 계약을 검사합니다. 둘 다 물리 환경 릴리스 증거는 아닙니다.
 `test-local-macos`는 로컬 소스·게스트·설치·업데이트·릴리스 검증을 실행하며
 Nix 셸이 제공하는 `actionlint`가 필요합니다. 패키징·업데이트 테스트가 공개 `build/hamn` 경로에
@@ -78,20 +78,16 @@ PR CI는 이 검증을 `make ci-macos-shard-1`부터 `ci-macos-shard-5`까지 �
 검증을 정확히 한 번씩 실행하지 않으면 실패합니다. 릴리스 워크플로는 게시 산출물을
 만드는 release 프로필로 `test-local-macos`를 계속 순서대로 실행합니다.
 
-## 게스트 이미지와 전환
+## 게스트 이미지
 
 `guest/image/release-inputs.json`은 Ubuntu 기반 이미지 URL과 SHA-256을 고정합니다.
 `guest/image/build-ubuntu-24.04-arm64.sh`는 libguestfs가 있는 Linux arm64에서
 실행합니다. `HAMN_GUEST_BASE_IMAGE`, `HAMN_GUEST_BASE_SHA256`,
 `HAMN_GUEST_OUTPUT`을 지정하면 기반 이미지 digest를 검증하고 커밋된 `guest/`와
 `vendor/`만 아카이브합니다. Docker·containerd·runc·CNI·binfmt·DNS·hamnd는
-계속 이미지가 소유합니다. 신규 이미지에는 매니지드 K3s가 없습니다.
-
-`host/migration/`의 고정 payload는 서명된 호스트 바이너리에 내장됩니다. K3s
-제거와 기존 게스트 검증기·helper의 일회성 갱신만 허용하며 일반 소프트웨어 설치
-통로가 아닙니다. 단계별 기록으로 재개하며 Docker의 `moby`와 공용 content를
-보존하고 Docker 준비 상태를 확인한 뒤 완료합니다. 호스트 바이너리를 롤백해도
-K3s 데이터는 복구되지 않습니다. [설정](CONFIGURATION.ko.md)을 참고하세요.
+계속 이미지가 소유하며 이미지에는 매니지드 K3s가 없습니다. 호스트는 게스트
+소프트웨어를 설치하지 않으며, [아키텍처](ARCHITECTURE.ko.md)에서 설명하는 고정 배포
+복구 스크립트만 보냅니다.
 
 ## 실행 검증
 
@@ -113,7 +109,7 @@ packaging/release/physical-e2e.sh --help
 ## 소스 경계
 
 - `control/`: 타입화한 요청·결과, 공통 서비스, TUI, 헤드리스 출력.
-- `host/core/`: C ABI, 프로필, VM 수명주기, 이미지·전환 조정.
+- `host/core/`: C ABI, 프로필, VM 수명주기, 게스트 배포 트랜잭션.
 - `host/vz/`: Virtualization.framework 전용.
 - `host/fwd/`: 소유권을 관리하는 Docker 소켓·공개 포트 포워딩.
 - `guest/agent/`, `guest/scripts/`: 게스트 관리와 이미지 소유 helper.

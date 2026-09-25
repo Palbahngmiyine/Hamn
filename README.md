@@ -83,18 +83,11 @@ Explicit `docker context use` and `kubectl config` commands retain their normal
 write semantics. Headless authentication remains noninteractive; native CLI
 authentication runs according to the installed CLI in the embedded terminal.
 
-## Migration and data
+## Data
 
-This revision replaces the old CLI and JSON format. Managed K3s is removed.
-TUI entry performs no retirement. Legacy profiles retire on their next VM/Docker
-mutation; stopped profiles can retire during their next start.
-Read-only commands report pending migration without running it.
-
-**K3s cluster data and its dedicated local volumes are permanently deleted.**
-Rolling back the Hamn executable cannot recover them. Retirement preserves
-Docker's `moby` namespace, Docker volumes, shared containerd content storage,
-user mounts, and the original kubeconfig. Interrupted retirement resumes from
-its durable journal and does not mark a failed migration complete.
+Hamn no longer manages K3s. A profile that still has the removed `kubernetes`
+setting is refused until that mapping is deleted from its `config.yaml`; its
+old K3s data is not migrated.
 
 `vm delete` stops and hides a profile while preserving its disk and Docker data.
 `system uninstall --yes` permanently removes all Hamn profiles and managed

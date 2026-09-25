@@ -54,9 +54,5 @@ the intended Docker commands or SDK to its socket. Verify your application's
 Compose/buildx/SDK behavior, then stop Hamn and check Colima is unchanged.
 Docker objects are not copied from Colima automatically.
 
-Upgrading an old Hamn installation is different: managed K3s is retired
-automatically. Its cluster data and dedicated local volumes are permanently
-deleted; Docker objects, named volumes, and user mounts are preserved.
-Original kubeconfig files are preserved, while old owned local contexts are
-reported unavailable. Binary rollback cannot restore K3s data. See
-[Configuration](CONFIGURATION.md) for migration timing and failure handling.
+Hamn no longer manages K3s, and profiles that still carry the removed
+`kubernetes` setting are refused; see [Configuration](CONFIGURATION.md).

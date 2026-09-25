@@ -62,7 +62,7 @@ make test-local-macos
 ```
 
 `test-control` covers Rust services, the C boundary, worker isolation, mock
-Docker/Kubernetes APIs, K3s retirement, terminal restoration in a PTY, and
+Docker/Kubernetes APIs, guest deployment recovery, terminal restoration in a PTY, and
 binary publication. `test-release-gate` tests the evidence contract without a
 VM. Neither is physical release proof. `test-local-macos` runs the local
 source, guest, installation, update, and release gates; it requires actionlint,
@@ -81,21 +81,16 @@ fails unless the shards together run every `test-local-macos` gate exactly once.
 The release workflow still runs `test-local-macos` serially with the release
 profile, the one that builds published artifacts.
 
-## Guest images and retirement
+## Guest images
 
 `guest/image/release-inputs.json` pins the Ubuntu base URL and SHA-256.
 `guest/image/build-ubuntu-24.04-arm64.sh` runs on Linux arm64 with libguestfs.
 Supply `HAMN_GUEST_BASE_IMAGE`, `HAMN_GUEST_BASE_SHA256`, and
 `HAMN_GUEST_OUTPUT`; the builder verifies the base digest and archives only
 committed `guest/` and `vendor/` sources. Docker, containerd, runc, CNI, binfmt,
-DNS, and hamnd remain image-owned. New images contain no managed K3s.
-
-The fixed payload in `host/migration/` is embedded in the signed host binary.
-It may retire K3s and replace the old guest verifier/helpers once; this is not
-a general host-to-guest software installation path. Retirement records its
-steps, preserves Docker's `moby` namespace and shared content, and verifies
-Docker readiness before completing. K3s data cannot be restored by rolling
-back the host binary. See [Configuration](CONFIGURATION.md).
+DNS, and hamnd remain image-owned; images contain no managed K3s. The host
+never installs guest software; it only sends the fixed deployment recovery
+script described in [Architecture](ARCHITECTURE.md).
 
 ## Runtime validation
 
@@ -117,7 +112,7 @@ prove Docker data preservation on actual Apple Silicon. See
 ## Source boundaries
 
 - `control/`: typed requests/results, shared services, TUI, headless output.
-- `host/core/`: C ABI, profiles, VM lifecycle, image and migration coordination.
+- `host/core/`: C ABI, profiles, VM lifecycle and guest deployment transactions.
 - `host/vz/`: Virtualization.framework only.
 - `host/fwd/`: owned Docker socket and published-port forwarding.
 - `guest/agent/` and `guest/scripts/`: guest management and image-owned helpers.

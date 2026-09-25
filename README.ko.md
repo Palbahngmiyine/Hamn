@@ -82,16 +82,11 @@ UI 선택은 Docker의 현재 context나 kubeconfig의 `current-context`를 바�
 명시적 `docker context use`·`kubectl config`는 원래 설정 변경 의미를 유지합니다.
 헤드리스 인증은 비대화형이며, 네이티브 CLI 인증은 내부 터미널에서 해당 CLI 규칙을 따릅니다.
 
-## 기존 설치 전환과 데이터
+## 데이터
 
-이번 변경은 기존 CLI·JSON 형식을 대체하고 매니지드 K3s를 제거합니다.
-TUI 진입은 정리를 실행하지 않습니다. 구형 프로필은 다음 VM·Docker 변경 작업에서
-정리하며, 정지된 프로필은 다음 시작 때 정리할 수 있습니다. 조회는 대기 상태만 표시합니다.
-
-**K3s 클러스터 데이터와 전용 로컬 볼륨은 영구 삭제됩니다.** 실행 파일을 이전 버전으로
-되돌려도 복구되지 않습니다. Docker의 `moby` 네임스페이스, Docker 볼륨, 공용
-containerd content 저장소, 사용자 마운트, 원본 kubeconfig는 보존합니다.
-중단된 전환은 기록된 단계부터 재개하고 실패를 완료로 표시하지 않습니다.
+Hamn은 더 이상 K3s를 관리하지 않습니다. 제거된 `kubernetes` 설정이 남은 프로필은
+`config.yaml`에서 해당 항목을 삭제할 때까지 거부하며, 이전 K3s 데이터는 이전하지
+않습니다.
 
 `vm delete`는 VM을 멈추고 목록에서 숨기며 디스크·Docker 데이터를 보존합니다.
 `system uninstall --yes`는 모든 Hamn 프로필과 관리 설치 파일을 영구 삭제합니다.

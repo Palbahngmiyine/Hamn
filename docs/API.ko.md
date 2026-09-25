@@ -46,16 +46,11 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 이 전달은 VM 준비 완료를 뜻하거나 이전 `recoveryRequired` 상태를 해제하지 않습니다.
 이후 시작이 실제로 성공해야 완료로 확정합니다.
 
-사전 retirement가 실패한 뒤에도 `vm stop`은 성공할 수 있습니다. 이때 중지 응답은
-성공을 유지하고 `data.migrationError`에 앞선 `{code,message}`를 남깁니다.
-이 필드는 중지 결과와 별도로 확인해야 합니다. 최신 작업 기록은 이미 완료된
-중지 작업을 나타낼 수 있습니다.
-
 ## 지원 작업
 
 | 영역 | 작업 |
 | --- | --- |
-| VM | `vm list`, `status`, `create`, `configure`, `start`, `stop`, `delete`, `migrate`, `diagnostics`, `env` |
+| VM | `vm list`, `status`, `create`, `configure`, `start`, `stop`, `delete`, `diagnostics`, `env` |
 | Docker 컨테이너 | `docker containers list`, `inspect`, `logs`, `stats`, `start`, `stop`, `restart`, `delete` |
 | Docker 목록 | `docker images list`, `docker volumes list`, `docker networks list` |
 | Kubernetes 선택 | `k8s contexts list`, `k8s namespaces list` |
@@ -63,18 +58,18 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 | Kubernetes 상세 | 위 목록의 모든 리소스와 namespaces에 `k8s <resource> inspect <name>` 지원; 객체 JSON과 YAML |
 | Kubernetes 로그 | `k8s pods logs` |
 | Kubernetes 변경 | `k8s deployments scale/restart`, `statefulsets scale/restart`, `daemonsets restart`, `pods delete` |
-| 유지관리 | `system upgrade`, `system update`, `system uninstall` |
+| 유지관리 | `system upgrade`, `system uninstall` |
 
 VM 작업은 `vm list`를 제외하고 `--profile`이 필요합니다. Docker는 `--profile`과
 `--context` 중 정확히 하나를 지정합니다. 외부 context는 Docker CLI의 인증·전송을
 사용하며 `--docker-config`로 설정 디렉터리를 지정할 수 있습니다. 이 경로는 Hamn
 프로필 조회·변경을 수행하지 않습니다. 생성·설정은
 `--cpu`, `--memory`(GiB), `--disk`(GiB)를 받습니다. `vm diagnostics`의 `--path`는
-아카이브 경로입니다. `system upgrade`와 별칭 `system update`는 `--manifest`,
+아카이브 경로입니다. `system upgrade`는 `--manifest`,
 `--check`(조회 전용, `--yes` 불필요), `--force`(동일 버전 재설치, `--yes` 필요)를
 지원하며 `--check`와 `--force`는 함께 쓸 수 없습니다.
-`hamn --headless system update --help`로 작업별 사용법과 복구 방법을 확인합니다.
-진행 안내와 호환성은 [설치와 업데이트 경험](INSTALLATION.ko.md)을 참고하세요.
+`hamn --headless system upgrade --help`로 작업별 사용법과 복구 방법을 확인합니다.
+진행 안내와 호환성은 [설치와 업그레이드 경험](INSTALLATION.ko.md)을 참고하세요.
 `vm env`는 셸 코드 대신 Docker 접속 정보를 반환합니다.
 
 Kubernetes는 context 목록을 제외하고 `--context`가 필요합니다. 네임스페이스 변경
