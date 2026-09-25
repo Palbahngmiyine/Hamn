@@ -92,9 +92,13 @@ ARTIFACT_ROOT="$WORK/hamn-${VERSION}-darwin-arm64"
 mkdir -m 0755 "$ARTIFACT_ROOT"
 mkdir -m 0755 "$ARTIFACT_ROOT/bin"
 install -m 0755 "$ROOT/build/hamn" "$ARTIFACT_ROOT/bin/hamn"
+# Stage through a file: a reading tar stops at the end-of-archive marker, so
+# a writer still sending the final record's padding can fail with EPIPE
+# ("tar: Write error", CI run 36145944094).
 git -C "$ROOT" ls-files -z -- scripts packaging |
-    tar -C "$ROOT" --null -T - -cf - |
-    tar -C "$ARTIFACT_ROOT" -xf -
+    tar -C "$ROOT" --null -T - -cf "$WORK/sources.tar"
+tar -C "$ARTIFACT_ROOT" -xf "$WORK/sources.tar"
+rm "$WORK/sources.tar"
 printf '%s\n' "$MANIFEST_URL" \
     >"$ARTIFACT_ROOT/packaging/release/update-manifest-url"
 chmod 0644 "$ARTIFACT_ROOT/packaging/release/update-manifest-url"
