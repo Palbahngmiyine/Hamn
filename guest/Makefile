@@ -6,6 +6,10 @@ CC      ?= gcc
 CFLAGS  := -std=gnu11 -O2 -g -Wall -Wextra \
            -Werror=implicit-function-declaration -D_GNU_SOURCE \
            -Iagent -I../vendor
+# Extra flags for test programs only, e.g. SANITIZE=-fsanitize=address,undefined
+# with TEST_BUILD=build/sanitize so instrumented and normal objects never mix.
+SANITIZE ?=
+TEST_BUILD ?= build
 
 AGENT_SRCS := agent/main.c agent/api/cri_status.c agent/api/mount_inotify.c \
               agent/api/router.c \
@@ -16,6 +20,10 @@ AGENT_SRCS := agent/main.c agent/api/cri_status.c agent/api/mount_inotify.c \
 AGENT_BIN := build/hamnd-agent
 AGENT_TEST_BIN := build/hamnd-agent-test
 CRI_STATUS_TEST := build/test_cri_status
+
+# Strict JSON used by guest-side C tools.
+STRICT_JSON := json/strict_json.c json/strict_json.h
+STRICT_JSON_TEST := $(TEST_BUILD)/test_strict_json
 
 all: $(AGENT_BIN)
 
@@ -68,5 +76,13 @@ test-mount-inotify:
 test-deployment-transaction:
 	bash tests/test_guest_deployment_transaction.sh
 
-.PHONY: all install install-common clean test-agent test-cri-status test-mount-inotify \
-	test-deployment-transaction
+$(STRICT_JSON_TEST): tests/test_strict_json.c $(STRICT_JSON) Makefile
+	@mkdir -p $(TEST_BUILD)
+	$(CC) $(CFLAGS) $(SANITIZE) -I. tests/test_strict_json.c \
+		json/strict_json.c -lm -o $@
+
+test-strict-json: $(STRICT_JSON_TEST)
+	$(STRICT_JSON_TEST)
+
+.PHONY: all install install-common clean test-agent test-cri-status \
+	test-mount-inotify test-deployment-transaction test-strict-json

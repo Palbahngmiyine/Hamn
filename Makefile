@@ -421,6 +421,7 @@ test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)
 	bash guest/tests/test_guest_image_builder.sh
 	python3 guest/tests/test_image_size.py
 	python3 guest/tests/test_image_evidence.py
+	$(MAKE) -C guest test-strict-json
 
 test-diagnostics: host
 	HAMN=$(HOST_BIN) bash tests/host/test_diagnostics.sh
