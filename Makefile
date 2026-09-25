@@ -236,7 +236,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_picker_restore.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_environment_actions.py
 	python3 tests/host/test_workspace_kubernetes_assertions.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_tls_target.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-tls-target
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_backpressure.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_guarded_delete.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py

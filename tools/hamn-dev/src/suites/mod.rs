@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 mod single_binary;
 mod tui_native_regressions;
+mod tui_tls_target;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
@@ -12,10 +13,12 @@ type Fixture = fn(&str, &[String]) -> ExitCode;
 const SUITES: &[Suite] = &[
     ("single-binary", single_binary::main),
     ("tui-native-regressions", tui_native_regressions::main),
+    ("tui-tls-target", tui_tls_target::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
     ("native-regressions", tui_native_regressions::fixture),
+    ("exec-real", crate::support::real_cli::exec_real),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

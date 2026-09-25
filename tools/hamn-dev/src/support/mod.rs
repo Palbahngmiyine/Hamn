@@ -1,7 +1,11 @@
 //! Shared test support: PTYs, the screen recorder, temporary directories and
 //! the TUI harness.
 pub mod http;
+pub mod kube_api;
 pub mod pty;
+pub mod py_http;
+pub mod py_text;
+pub mod real_cli;
 pub mod screen;
 pub mod tmp;
 pub mod tui;
