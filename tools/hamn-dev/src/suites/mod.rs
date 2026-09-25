@@ -3,6 +3,9 @@
 //! contain a filter (all cases without filters).
 use std::process::ExitCode;
 
+mod release_consumer;
+mod release_github;
+mod release_physical;
 mod single_binary;
 mod tui_native_regressions;
 
@@ -10,6 +13,9 @@ type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
+    ("release-github", release_github::main),
+    ("release-physical", release_physical::main),
+    ("release-publisher-consumer", release_consumer::main),
     ("single-binary", single_binary::main),
     ("tui-native-regressions", tui_native_regressions::main),
 ];

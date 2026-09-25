@@ -5,6 +5,7 @@
 //! private `bin/`), the executable acts as that suite's recorded CLI fixture.
 mod build_host;
 mod fixture;
+mod release;
 mod runner;
 mod suites;
 // Shared by suites; not every helper is used by every build of them.
@@ -27,8 +28,9 @@ fn main() -> ExitCode {
             [binary] => build_host::check_host_binary(binary.as_ref()),
             _ => Err("usage: hamn-dev check-host-binary BINARY".into()),
         },
+        Some("release") => release::run(&args[1..]),
         Some("test") => return suites::run(&args[1..]),
-        _ => Err(format!("usage: hamn-dev build-host|check-host-binary|test ...\n{}", suites::usage())),
+        _ => Err(format!("usage: hamn-dev build-host|check-host-binary|release|test ...\n{}\n{}", release::usage(), suites::usage())),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
