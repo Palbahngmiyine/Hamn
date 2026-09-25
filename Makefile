@@ -548,7 +548,7 @@ test-kubernetes-cli: host
 	bash guest/tests/test_configure_containerd.sh
 
 test-core-quality: host
-	bash tests/host/test_core_quality.sh
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test core-quality
 
 clean:
 	rm -rf $(BUILD)
