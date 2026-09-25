@@ -8,7 +8,7 @@ const HOSTED_EVIDENCE: &str = "tools/hamn-dev/src/release/hosted.rs";
 const PUBLISH: &str = "packaging/release/publish-release.sh";
 const CANDIDATE: &str = "tools/hamn-dev/src/release/candidate.rs";
 const INSTALLER: &str = "packaging/release/install.sh.in";
-const UPDATER: &str = "scripts/update-host.sh";
+const UPDATER: &str = "control/install_support/update.rs";
 const RELEASE_WORKFLOW: &str = ".github/workflows/release.yml";
 
 pub fn release_fixtures_do_not_inherit_workflow_identity() {

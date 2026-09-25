@@ -6,8 +6,8 @@
 use crate::runner::{self, case};
 use crate::support::tmp::TempDir;
 use crate::support::upgrade::{
-    self, Artifact, Group, await_ready, copy_release_support, digest, mkfifo, pack_release, ready_fifo, version_wrapper,
-    write_executable, write_private_json,
+    self, Artifact, Group, await_ready, digest, mkfifo, pack_release, ready_fifo, version_wrapper, write_executable,
+    write_pointer, write_private_json,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -156,8 +156,7 @@ fn generated_profile_trees_survive_noop_repair_and_recovery(case: u64, point: &s
     // The real-binary CLI suite owns frontend coverage. Only the version is
     // generated; every private operation runs the frozen real executable.
     write_executable(&release.join("bin/hamn"), &version_wrapper(&version, &native));
-    copy_release_support(&release);
-    fs::write(release.join("packaging/release/update-manifest-url"), "https://fixture.test/manifest-v3.json\n").unwrap();
+    write_pointer(&release, "https://fixture.test/manifest-v3.json");
     let archive = root.join("host.tar.gz");
     pack_release(&release, &archive);
     let guest = root.join("guest.img");
@@ -168,15 +167,14 @@ fn generated_profile_trees_survive_noop_repair_and_recovery(case: u64, point: &s
     let manifest_path = root.join("manifest.json");
     write_private_json(&manifest_path, &value);
     let command = bindir.join("hamn");
-    let installed_updater = || {
-        let target = fs::canonicalize(&command).unwrap();
-        target.parent().and_then(Path::parent).unwrap().join("share/hamn/src/scripts/update-host.sh")
-    };
+    let release_binary = release.join("bin/hamn");
     let updater = |path: &Path, bootstrap: bool, extra: &[(&str, &Path)]| {
-        let script = if bootstrap { upgrade::checkout().join("scripts/update-host.sh") } else { installed_updater() };
-        let mut process = Command::new("bash");
+        // A bootstrap runs the release's executable; later transactions run
+        // the installed generation's.
+        let program = if bootstrap { release_binary.clone() } else { fs::canonicalize(&command).unwrap() };
+        let mut process = Command::new(program);
         process
-            .arg(script)
+            .args(["__install-support", "update"])
             .arg("--bindir")
             .arg(&bindir)
             .arg("--datadir")

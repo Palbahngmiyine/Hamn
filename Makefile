@@ -89,7 +89,7 @@ $(VERSION_STAMP): FORCE
 $(VERSIONED_OBJS): $(VERSION_STAMP)
 
 install: host
-	bash scripts/install-host.sh "$(HOST_BIN)" "$(BINDIR)" "$(DATADIR)"
+	$(HOST_BIN) __install-support install "$(HOST_BIN)" "$(BINDIR)" "$(DATADIR)"
 
 $(BUILD)/libhamn_core.a: $(HOST_OBJS)
 	@mkdir -p $(dir $@)

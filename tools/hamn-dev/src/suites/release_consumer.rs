@@ -7,9 +7,9 @@
 //! Production curl, TLS hostname verification, the manifest and the
 //! installer are unchanged.
 //!
-//! Inputs (environment): `HAMN_SOURCE_ROOT` (checkout with
-//! scripts/update-host.sh), `HAMN_PUBLISHED_DIR`, `HAMN_CANDIDATE_DIR` and
-//! `HAMN_CONSUMER_WORK` (created here; must not exist).
+//! Inputs (environment): `HAMN_PUBLISHED_DIR`, `HAMN_CANDIDATE_DIR` and
+//! `HAMN_CONSUMER_WORK` (created here; must not exist). The candidate's own
+//! executable, unpacked from its host archive, installs the release.
 use crate::release::files::sha256_file;
 use crate::release::process::{self, Spec};
 use crate::runner::{self, case};
@@ -166,7 +166,6 @@ fn tunnel(
 }
 
 fn published_manifest_is_consumed_unchanged() {
-    let root = input("HAMN_SOURCE_ROOT");
     let published = input("HAMN_PUBLISHED_DIR");
     let candidate = input("HAMN_CANDIDATE_DIR");
     let work = input("HAMN_CONSUMER_WORK");
@@ -228,8 +227,20 @@ fn published_manifest_is_consumed_unchanged() {
     let home = work.join("home-v3");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
     let before = requests().len();
+    let unpacked = work.join("unpacked");
+    fs::DirBuilder::new().mode(0o700).create(&unpacked).unwrap();
+    let host_archive = fs::read_dir(&candidate)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_str().is_some_and(|name| name.ends_with("-darwin-arm64.tar.gz")))
+        .expect("candidate host archive");
+    let tar: Vec<OsString> = vec!["-xzf".into(), host_archive.clone().into(), "-C".into(), unpacked.clone().into()];
+    command(&work, Path::new("/usr/bin/tar"), &tar);
+    let stem = host_archive.file_name().unwrap().to_str().unwrap().trim_end_matches(".tar.gz").to_owned();
+    let release_binary = unpacked.join(stem).join("bin/hamn");
     let bootstrap: Vec<OsString> = vec![
-        root.join("scripts/update-host.sh").into(),
+        "__install-support".into(),
+        "update".into(),
         "--bootstrap".into(),
         "--output-json".into(),
         "--bindir".into(),
@@ -239,14 +250,14 @@ fn published_manifest_is_consumed_unchanged() {
         "--manifest".into(),
         manifest_path.clone().into(),
     ];
-    let result: Value = serde_json::from_str(&command(&home, Path::new("/bin/bash"), &bootstrap)).unwrap();
+    let result: Value = serde_json::from_str(&command(&home, &release_binary, &bootstrap)).unwrap();
     assert!(result["completed"] == Value::Bool(true) && result["latestVersion"] == "0.0.1", "{result}");
     assert_eq!(result["profileDisksChanged"], Value::Bool(false), "{result}");
     let fetched = requests()[before..].to_vec();
     assert_eq!(fetched.len(), 2, "{fetched:?}");
     assert_eq!(fetched.into_iter().collect::<BTreeSet<_>>(), expected_paths);
     let count = requests().len();
-    let repeat: Value = serde_json::from_str(&command(&home, Path::new("/bin/bash"), &bootstrap)).unwrap();
+    let repeat: Value = serde_json::from_str(&command(&home, &release_binary, &bootstrap)).unwrap();
     assert_eq!(repeat["status"], "up-to-date", "{repeat}");
     assert_eq!(requests().len(), count, "a healthy repeat made a payload request");
 

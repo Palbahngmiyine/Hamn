@@ -33,6 +33,9 @@ enum Operation {
     Check(Metadata),
     Automatic(Automatic),
     Schedule(Automatic),
+    /// Parses a manifest with this client and prints its version and artifact
+    /// URLs/digests. The release publisher validates a new manifest by
+    /// running the candidate's own executable with this operation.
     Fields {
         manifest: PathBuf,
     },
@@ -163,7 +166,7 @@ fn automatic_at(
     }
     download::atomic_json(&cache.join("update-check-v1.json"), &record)
 }
-fn system_macos() -> Result<String> {
+pub(super) fn system_macos() -> Result<String> {
     let output = Command::new("/usr/bin/sw_vers")
         .arg("-productVersion")
         .output()?;
@@ -276,7 +279,12 @@ fn guest_healthy(cache: &Path, artifact: &manifest::Artifact) -> bool {
     })()
     .unwrap_or(false)
 }
-fn receipt_run(mode: &str, target: &str, manifest: &Manifest, cache: &Path) -> Result<()> {
+pub(super) fn receipt_run(
+    mode: &str,
+    target: &str,
+    manifest: &Manifest,
+    cache: &Path,
+) -> Result<()> {
     // The receipt binds digests, not byte sizes. `check` also validates the
     // selected guest image against the manifest's exact size, as check-only
     // status does, before it may authorize a no-op or report reused bytes.
@@ -295,7 +303,7 @@ fn receipt_run(mode: &str, target: &str, manifest: &Manifest, cache: &Path) -> R
     }
     Ok(())
 }
-fn version_status(
+pub(super) fn version_status(
     current: &str,
     value: &Manifest,
     cache: &Path,
@@ -325,7 +333,7 @@ fn empty_counts() -> Counts {
         ..Counts::default()
     }
 }
-fn result(
+pub(super) fn result(
     current: &str,
     value: &Manifest,
     status: &str,
@@ -362,6 +370,55 @@ fn unsupported(current: &str) -> Value {
     "artifacts":{"manifest":empty_counts(),"host":empty_counts(),"guestImage":empty_counts()},"profileDisksChanged":false,"completed":true})
 }
 
+/// The read-only `--check` result: fetches only the manifest and reads the
+/// installed receipt and selection of `home`; never creates or changes
+/// state, and never contacts the network for an unstable `current`.
+pub(super) fn check(
+    manifest_ref: &str,
+    current: &str,
+    macos: &str,
+    architecture: &str,
+    home: &Path,
+    target: Option<&str>,
+) -> Result<Value> {
+    if manifest::stable_version(current).is_err() {
+        return Ok(unsupported(current));
+    }
+    let (bytes, amount) = download::fetch_manifest(manifest_ref, false)?;
+    let value = manifest::parse(&bytes, macos, architecture)?;
+    let status = version_status(current, &value, &home.join(".hamn/cache"), target)?;
+    let counts = Counts {
+        downloaded_bytes: amount,
+        source: if amount == 0 { "local" } else { "network" }.into(),
+        ..Counts::default()
+    };
+    result(
+        current,
+        &value,
+        status,
+        BTreeMap::from([("manifest".into(), counts)]),
+    )
+}
+
+/// `reusedBytes` records of already installed, verified artifacts.
+pub(super) fn installed_counts(
+    value: &Manifest,
+    names: &[&str],
+) -> Result<BTreeMap<String, Counts>> {
+    let mut counts = BTreeMap::new();
+    for name in names {
+        counts.insert(
+            (*name).to_owned(),
+            Counts {
+                reused_bytes: value.artifact(name)?.size,
+                source: "installed".into(),
+                ..Counts::default()
+            },
+        );
+    }
+    Ok(counts)
+}
+
 pub(super) fn run(args: &[String]) -> Result<()> {
     let operation = Cli::try_parse_from(
         std::iter::once("upgrade-support".to_owned()).chain(args.iter().cloned()),
@@ -387,34 +444,17 @@ pub(super) fn run(args: &[String]) -> Result<()> {
             )?;
             println!("{amount}");
         }
-        Operation::Check(args) => {
-            if manifest::stable_version(&args.current_version).is_err() {
-                println!("{}", unsupported(&args.current_version));
-                return Ok(());
-            }
-            let (bytes, amount) = download::fetch_manifest(&args.manifest, false)?;
-            let value = manifest::parse(&bytes, &args.macos, &args.architecture)?;
-            let status = version_status(
+        Operation::Check(args) => println!(
+            "{}",
+            check(
+                &args.manifest,
                 &args.current_version,
-                &value,
-                &args.home.join(".hamn/cache"),
-                args.target.as_deref(),
-            )?;
-            let counts = Counts {
-                downloaded_bytes: amount,
-                source: if amount == 0 { "local" } else { "network" }.into(),
-                ..Counts::default()
-            };
-            println!(
-                "{}",
-                result(
-                    &args.current_version,
-                    &value,
-                    status,
-                    BTreeMap::from([("manifest".into(), counts)])
-                )?
-            );
-        }
+                &args.macos,
+                &args.architecture,
+                &args.home,
+                args.target.as_deref()
+            )?
+        ),
         Operation::Fields { manifest: path } => manifest::load(&path)?.print_fields(),
         Operation::Status {
             manifest: path,
@@ -509,16 +549,8 @@ pub(super) fn run(args: &[String]) -> Result<()> {
             };
             // The caller verified these artifacts (receipt and guest checks)
             // against the manifest, whose sizes are exact.
-            for name in names {
-                let artifact = value.artifact(name)?;
-                download::atomic_json(
-                    &counts.join(format!("{name}.json")),
-                    &Counts {
-                        reused_bytes: artifact.size,
-                        source: "installed".into(),
-                        ..Counts::default()
-                    },
-                )?;
+            for (name, record) in installed_counts(&value, names)? {
+                download::atomic_json(&counts.join(format!("{name}.json")), &record)?;
             }
         }
     }

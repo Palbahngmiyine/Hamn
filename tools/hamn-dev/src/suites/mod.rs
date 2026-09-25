@@ -179,6 +179,7 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("workspace-live-exec-witness", workspace_live::exec_witness),
     ("workspace-management-kubectl", workspace_live::checks::management_kubectl),
     ("generation-wait", generation_cleanup::waiting_executable),
+    ("generation-lock-holder", generation_cleanup::lock_holder),
     ("bootstrap-curl", bootstrap_acquire::curl_fixture),
     ("update-check-cli", update_check::cli_fixture),
 ];

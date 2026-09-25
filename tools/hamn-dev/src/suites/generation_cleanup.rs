@@ -1,8 +1,9 @@
-//! Generation collection by the real installer and `install_support prune`,
-//! with every write inside a disposable root: bounded generations, foreign
-//! and symlinked entries, recovery references from other homes, the shared
-//! transaction lock, running executables, an unavailable process scan and
-//! interrupted retirement.
+//! Generation collection by the native installer (`hamn __install-support
+//! install`) and `hamn __install-support prune`, with every write inside a
+//! disposable root: bounded generations, foreign and symlinked entries,
+//! recovery references from other homes, the shared transaction lock,
+//! running executables, an unavailable process scan and interrupted
+//! retirement.
 use crate::runner::{self, case};
 use crate::support::real_cli::Reaped;
 use crate::support::tmp::TempDir;
@@ -36,9 +37,26 @@ pub fn waiting_executable(_program: &str, _args: &[String]) -> ExitCode {
     }
 }
 
+/// The lock-holder fixture: takes an exclusive lock on each argument path
+/// (as any installer or updater transaction does), reports ready, and holds
+/// the locks until it is killed.
+pub fn lock_holder(_program: &str, args: &[String]) -> ExitCode {
+    let mut held = Vec::new();
+    for path in args {
+        let file = fs::OpenOptions::new().append(true).open(path).unwrap_or_else(|error| panic!("{path}: {error}"));
+        // SAFETY: flock locks this fixture's own open file description.
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) }, 0, "lock {path}");
+        held.push(file);
+    }
+    println!("ready");
+    std::io::stdout().flush().expect("flush ready");
+    loop {
+        // SAFETY: pause only waits for a signal.
+        unsafe { libc::pause() };
+    }
+}
+
 const RUN: Duration = Duration::from_secs(60);
-const PRUNE: &str = "ROOT=$PWD; source scripts/install-support.sh; source scripts/install-transaction.sh; \
-                     install_support prune \"$BINDIR\" \"$DATADIR\" \"$1\" \"$PWD\"";
 
 struct Roots {
     root: PathBuf,
@@ -49,9 +67,7 @@ struct Roots {
 
 impl Roots {
     fn installer(&self, source: &Path, bindir: &Path, datadir: &Path) -> Command {
-        let mut command = Command::new("bash");
-        command.arg("scripts/install-host.sh").arg(source).arg(bindir).arg(datadir).env("HOME", &self.home);
-        command
+        upgrade::install_command(&hamn(), source, bindir, datadir, &self.home)
     }
 
     /// Installs `source` and returns the new active generation.
@@ -66,26 +82,23 @@ impl Roots {
         target.parent().and_then(Path::parent).unwrap().to_path_buf()
     }
 
-    /// `install_support prune` under both root locks, as the installer runs it.
-    fn prune(&self, previous: &str, sandbox: Option<&Path>) -> upgrade::Output {
+    /// `hamn __install-support prune BINDIR DATADIR [KEEP]`, which takes both
+    /// transaction locks as any installer does.
+    fn prune(&self, keep: Option<&str>, sandbox: Option<&Path>) -> upgrade::Output {
         let mut command = match sandbox {
             Some(profile) => {
                 let mut command = Command::new("/usr/bin/sandbox-exec");
-                command.arg("-f").arg(profile).arg("bash");
+                command.arg("-f").arg(profile).arg(hamn());
                 command
             }
-            None => Command::new("bash"),
+            None => Command::new(hamn()),
         };
-        command
-            .args(["-c", PRUNE, "collect", previous])
-            .env("BINDIR", &self.bindir)
-            .env("DATADIR", &self.datadir)
-            .env("HOME", &self.home);
+        command.args(["__install-support", "prune"]).arg(&self.bindir).arg(&self.datadir).args(keep).env("HOME", &self.home);
         upgrade::run(&mut command, RUN)
     }
 
-    fn collect(&self, previous: &str) {
-        let result = self.prune(previous, None);
+    fn collect(&self, keep: Option<&str>) {
+        let result = self.prune(keep, None);
         assert_eq!(result.returncode, 0, "{}", result.stderr());
     }
 
@@ -123,7 +136,7 @@ fn generations_are_bounded_and_collected_only_when_unreferenced() {
     assert!(!first.exists(), "repeated installs accumulated obsolete generations");
     assert!(second.exists() && third.exists(), "active/predecessor removed");
     assert_eq!(roots.generation_count(), 2);
-    roots.collect(third.join("bin/hamn").to_str().unwrap());
+    roots.collect(Some(third.join("bin/hamn").to_str().unwrap()));
     assert!(second.exists(), "unchanged release collection removed predecessor");
 
     // Unknown directories and symlinks are never adopted.
@@ -143,6 +156,7 @@ fn generations_are_bounded_and_collected_only_when_unreferenced() {
     recovery_metadata_preserves_generations(&roots, &binary, &third, &fourth);
     transaction_lock_spans_recovery_and_publication(&roots, &binary);
     running_executable_is_kept(&roots, &binary);
+    earlier_layout_generation_is_never_collected(&roots);
 
     // An owned, unreferenced generation is collected without the retired
     // pre-0.1.2 `.hamn-retention` opt-in marker (never written any more).
@@ -151,14 +165,14 @@ fn generations_are_bounded_and_collected_only_when_unreferenced() {
     let name = current.file_name().unwrap().to_str().unwrap();
     let unmarked = current.with_file_name(format!("{}-UNMARK", &name[..64]));
     copy_tree(&current, &unmarked);
-    roots.collect("");
+    roots.collect(None);
     assert!(!unmarked.exists());
 
     // An invalid predecessor reference fails collection loudly.
     let previous_record = current.join(".hamn-previous-target");
     let saved_previous = fs::read(&previous_record).unwrap();
     fs::write(&previous_record, "").unwrap();
-    let invalid = roots.prune("", None);
+    let invalid = roots.prune(None, None);
     assert_ne!(invalid.returncode, 0);
     assert!(invalid.stderr().contains("invalid predecessor reference"), "{}", invalid.stderr());
     fs::write(&previous_record, saved_previous).unwrap();
@@ -170,10 +184,10 @@ fn generations_are_bounded_and_collected_only_when_unreferenced() {
     copy_tree(&candidate, &spare);
     let profile = roots.root.join("deny-scanner.sb");
     fs::write(&profile, "(version 1)(allow default)(deny process-exec (literal \"/usr/sbin/lsof\"))\n").unwrap();
-    let failed = roots.prune("", Some(&profile));
+    let failed = roots.prune(None, Some(&profile));
     assert_ne!(failed.returncode, 0);
     assert!(spare.exists());
-    roots.collect("");
+    roots.collect(None);
     assert!(!spare.exists());
 
     // Interrupted retirement is retryable even after the binary has gone.
@@ -182,7 +196,7 @@ fn generations_are_bounded_and_collected_only_when_unreferenced() {
     let retired = old.with_file_name(format!(".retired-{}", old.file_name().unwrap().to_str().unwrap()));
     fs::rename(&old, &retired).unwrap();
     fs::remove_dir_all(retired.join("bin")).unwrap();
-    roots.collect("");
+    roots.collect(None);
     assert!(!retired.exists());
 }
 
@@ -218,20 +232,17 @@ fn recovery_metadata_preserves_generations(roots: &Roots, binary: &Path, third: 
     assert!(!third.exists());
 }
 
-/// The same transaction lock spans updater recovery and installer
+/// The same transaction locks span updater recovery and installer
 /// publication: an installer waits for a holder, and SIGKILL of the holder
-/// releases the lock without stale-lock cleanup.
+/// releases the locks without stale-lock cleanup.
 fn transaction_lock_spans_recovery_and_publication(roots: &Roots, binary: &Path) {
     let active = roots.active_generation();
-    let holder = Command::new("bash")
-        .args([
-            "-c",
-            "ROOT=$PWD; source scripts/install-support.sh; source scripts/install-transaction.sh; echo ready; read -r release",
-        ])
-        .env("BINDIR", &roots.bindir)
-        .env("DATADIR", &roots.datadir)
-        .env("HOME", &roots.home)
-        .stdin(Stdio::piped())
+    let holder_program = roots.root.join("lock-holder");
+    std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &holder_program).unwrap();
+    let holder = Command::new(&holder_program)
+        .arg(roots.bindir.join(".hamn-transaction.lock"))
+        .arg(roots.root.join(".data.hamn-transaction.lock"))
+        .env("HAMN_DEV_FIXTURE", "generation-lock-holder")
         .stdout(Stdio::piped())
         .spawn()
         .expect("lock holder");
@@ -283,4 +294,21 @@ fn running_executable_is_kept(roots: &Roots, binary: &Path) {
     child.wait().unwrap();
     roots.install(binary);
     assert!(!running.exists(), "an exited executable was never collected");
+}
+
+/// A generation of the earlier layout (version 1 marker, `share/hamn/src`)
+/// is of unknown ownership to this Hamn: collection never removes it.
+fn earlier_layout_generation_is_never_collected(roots: &Roots) {
+    let current = roots.active_generation();
+    let name = current.file_name().unwrap().to_str().unwrap();
+    let earlier = current.with_file_name(format!("{}-EARLY1", &name[..64]));
+    copy_tree(&current, &earlier);
+    let marker = earlier.join(".hamn-generation");
+    let text = fs::read_to_string(&marker).unwrap();
+    assert!(text.starts_with("version=2\n"), "{text}");
+    fs::write(&marker, text.replacen("version=2", "version=1", 1)).unwrap();
+    fs::create_dir_all(earlier.join("share/hamn/src/packaging/release")).unwrap();
+    roots.collect(None);
+    assert!(earlier.join("bin/hamn").is_file(), "an earlier-layout generation was collected");
+    fs::remove_dir_all(&earlier).unwrap();
 }

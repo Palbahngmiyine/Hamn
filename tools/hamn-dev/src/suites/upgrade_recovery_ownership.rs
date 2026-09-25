@@ -1,10 +1,11 @@
 //! A pending transaction may restore only the generation it actually
-//! published. The real installer and updater scripts and a frozen copy of
-//! the Hamn under test run in owned homes; FIFO boundaries and process-group
-//! SIGKILL make interruptions reproducible. No VM, release network or shared
-//! build is involved.
+//! published. The native installer and updater of version-wrapped releases
+//! and a frozen copy of the Hamn under test run in owned homes; test
+//! barriers, the updater's fault seam and process-group SIGKILL make
+//! interruptions reproducible. No VM, release network or shared build is
+//! involved.
 use crate::runner::{self, case};
-use crate::support::upgrade::{self, Releases, await_ready, digest, file_digest, mkfifo, ready_fifo, write_executable};
+use crate::support::upgrade::{self, Barrier, Releases, digest, file_digest};
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -60,38 +61,25 @@ fn snapshot(directory: &Path) -> Snapshot {
 /// Holds an installed-generation update at barrier `point`, then SIGKILLs
 /// its process group. Returns the journal the killed update left.
 fn interrupt(fixture: &Releases, manifest: &Path, point: &str) -> PathBuf {
-    let (ready, ready_fd) = ready_fifo(&fixture.root, "ready");
-    let release = fixture.root.join("release-fifo");
-    mkfifo(&release);
-    let child = fixture.spawn(
-        &fixture.installed_updater(),
-        manifest,
-        &[],
-        &[
-            (&format!("HAMN_TEST_UPDATE_{point}_READY_FIFO"), &ready),
-            (&format!("HAMN_TEST_UPDATE_{point}_RELEASE_FIFO"), &release),
-        ],
-    );
-    await_ready(&ready_fd, Duration::from_secs(20), point);
+    let barrier = Barrier::new(&fixture.root, point, "interrupt");
+    let mut command = fixture.updater(&fixture.installed(), manifest, &[]);
+    let child = upgrade::Group::spawn(barrier.apply(&mut command));
+    barrier.await_ready(Duration::from_secs(20), point);
     child.signal_group(libc::SIGKILL);
     let result = child.finish(Duration::from_secs(5));
     assert_eq!(result.returncode, -libc::SIGKILL, "{}", result.stderr());
-    fs::remove_file(&ready).unwrap();
-    fs::remove_file(&release).unwrap();
     fixture.journal()
 }
 
 /// Runs an updater (the installed one by default) with a malformed
 /// manifest: it recovers any pending transaction first, then fails.
-fn recover(fixture: &Releases, script: Option<&Path>, bootstrap: bool, env: &[(&str, &Path)]) -> upgrade::Output {
+fn recover(fixture: &Releases, program: Option<&Path>, bootstrap: bool, env: &[(&str, &str)]) -> upgrade::Output {
     let invalid = fixture.root.join("invalid.json");
     fs::write(&invalid, "{").unwrap();
-    let script = script.map_or_else(|| fixture.installed_updater(), Path::to_path_buf);
+    let program = program.map_or_else(|| fixture.installed(), Path::to_path_buf);
     let options: &[&str] = if bootstrap { &["--bootstrap"] } else { &[] };
-    let mut command = fixture.updater(&script, &invalid, options);
-    for (name, value) in env {
-        command.env(name, value);
-    }
+    let mut command = fixture.updater(&program, &invalid, options);
+    command.envs(env.iter().copied());
     upgrade::run(&mut command, WAIT)
 }
 
@@ -114,7 +102,7 @@ fn later_home_survives_old_recovery(host_mutation: bool) {
     fs::create_dir(&other).unwrap();
     fs::set_permissions(&other, fs::Permissions::from_mode(0o700)).unwrap();
     let from_other = |manifest: &Path| {
-        let mut command = fixture.updater(&fixture.installed_updater(), manifest, &[]);
+        let mut command = fixture.updater(&fixture.installed(), manifest, &[]);
         command.env("HOME", &other);
         let result = upgrade::run(&mut command, WAIT);
         assert_eq!(result.returncode, 0, "{}", result.stderr());
@@ -153,28 +141,14 @@ fn publication_interruption(bootstrap: bool) {
         selected = Some(fs::read(&fixture.selection).unwrap());
     }
     let (script, pending) = fixture.release("1.0.2");
-    let (ready, ready_fd) = ready_fifo(&fixture.root, "before-publication");
-    let release = fixture.root.join("before-publication-release");
-    mkfifo(&release);
-    // Hold the release's installer right before it publishes the command
-    // link, after it recorded the attempted target, then repack the release.
-    let installer = script.parent().unwrap().join("install-host.sh");
-    let source = fs::read_to_string(&installer).unwrap();
-    let boundary = "hamn_link_stage=$(make_link_stage .hamn-link \"$generation/bin/hamn\")";
-    assert_eq!(source.matches(boundary).count(), 1);
-    let barrier = format!("printf \"ready\\n\" > '{}'\nIFS= read -r _ < '{}'\n", ready.display(), release.display());
-    write_executable(&installer, &source.replace(boundary, &format!("{barrier}{boundary}")));
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&pending).unwrap()).unwrap();
-    let archive = PathBuf::from(value["artifacts"]["host"]["url"].as_str().unwrap().strip_prefix("file://").unwrap());
-    upgrade::pack_release(script.parent().and_then(Path::parent).unwrap(), &archive);
-    let repacked = upgrade::Artifact::local(&archive);
-    value["artifacts"]["host"]["sha256"] = repacked.sha256.into();
-    value["artifacts"]["host"]["size"] = repacked.size.into();
-    upgrade::write_json(&pending, &value);
-    let invoked = if bootstrap { script.clone() } else { fixture.installed_updater() };
+    // Hold the installer right before it publishes the command link, after
+    // it recorded the attempted target.
+    let barrier = Barrier::new(&fixture.root, "BEFORE_LINK_PUBLICATION", "publication");
+    let invoked = if bootstrap { script.clone() } else { fixture.installed() };
     let options: &[&str] = if bootstrap { &["--bootstrap"] } else { &[] };
-    let child = fixture.spawn(&invoked, &pending, options, &[]);
-    await_ready(&ready_fd, Duration::from_secs(20), "installer publication");
+    let mut command = fixture.updater(&invoked, &pending, options);
+    let child = upgrade::Group::spawn(barrier.apply(&mut command));
+    barrier.await_ready(Duration::from_secs(20), "installer publication");
     let journal = fixture.journal();
     let attempted = PathBuf::from(fs::read_to_string(journal.join("new-target")).unwrap().trim_end());
     assert_ne!(Some(&attempted), original.as_ref());
@@ -208,21 +182,13 @@ fn recovery_failure_keeps_exact_target_for_next_retry() {
     let attempted = fixture.active();
     let recorded = format!("{}\n", attempted.display());
     assert_eq!(fs::read_to_string(journal.join("new-target")).unwrap(), recorded);
-    // The updater's tool seam: `mv` fails only for the rollback link rename.
-    let transport = fixture.root.join("transport");
-    fs::create_dir(&transport).unwrap();
-    let mover = transport.join("mv");
-    write_executable(
-        &mover,
-        "#!/bin/bash\nfor arg in \"$@\"; do\ncase \"$arg\" in */.hamn-update-rollback.*/hamn) exit 74;; esac\ndone\nexec /bin/mv \"$@\"\n",
-    );
-    let failed = recover(&fixture, None, false, &[("HAMN_TEST_UPDATE_TOOL_DIR", &transport)]);
+    // The fault seam fails only the rollback link rename.
+    let failed = recover(&fixture, None, false, &[("HAMN_TEST_UPDATE_FAULTS", "rollback-link")]);
     assert_ne!(failed.returncode, 0);
     assert!(failed.stderr().contains("could not be safely recovered"), "{}", failed.stderr());
     assert_eq!(fixture.active(), attempted);
     assert_eq!(fs::read_to_string(journal.join("new-target")).unwrap(), recorded);
-    fs::remove_file(&mover).unwrap();
-    let recovered = recover(&fixture, None, false, &[("HAMN_TEST_UPDATE_TOOL_DIR", &transport)]);
+    let recovered = recover(&fixture, None, false, &[]);
     assert_ne!(recovered.returncode, 0);
     assert!(recovered.stderr().contains("recovered the previous binary"), "{}", recovered.stderr());
     assert_eq!(fixture.active(), original);
@@ -237,6 +203,10 @@ fn generations(fixture: &Releases) -> Vec<PathBuf> {
     entries
 }
 
+/// The installer records the attempted target only into the journal its
+/// own transaction published: there is no journal argument to hand it a
+/// foreign one, and a journal replaced while the transaction waits is
+/// refused before any generation is created or anything written into it.
 fn installer_rejects_foreign_journal_without_writing_it() {
     let fixture = Releases::new("hamn-recovery-ownership-");
     let (script, initial) = fixture.release("1.0.1");
@@ -248,23 +218,40 @@ fn installer_rejects_foreign_journal_without_writing_it() {
     fs::write(foreign.join("sentinel"), "must remain unchanged").unwrap();
     let before = snapshot(&foreign);
     let before_generations = generations(&fixture);
-    let release = script.parent().and_then(Path::parent).unwrap();
     let result = upgrade::run(
-        Command::new("bash")
-            .arg(release.join("scripts/install-host.sh"))
-            .arg(release.join("bin/hamn"))
+        Command::new(&script)
+            .args(["__install-support", "install"])
+            .arg(&script)
             .arg(&fixture.bindir)
             .arg(&fixture.datadir)
             .arg(&foreign)
-            .env("HOME", &fixture.home)
-            .env("TMPDIR", &fixture.root),
+            .env("HOME", &fixture.home),
         WAIT,
     );
-    assert_ne!(result.returncode, 0);
-    assert!(result.stderr().contains("unsafe update journal handoff"), "{}", result.stderr());
+    assert_eq!(result.returncode, 2, "{}", result.stderr());
+    assert!(result.stderr().contains("usage: hamn __install-support install"), "{}", result.stderr());
     assert_eq!(snapshot(&foreign), before);
     assert_eq!(fixture.active(), active);
     assert_eq!(generations(&fixture), before_generations);
+
+    // Replace the prepared journal with the foreign directory while the
+    // update waits after publishing it.
+    let (_, pending) = fixture.release("1.0.2");
+    let barrier = Barrier::new(&fixture.root, "PREPARED", "prepared");
+    let mut command = fixture.updater(&fixture.installed(), &pending, &[]);
+    let child = upgrade::Group::spawn(barrier.apply(&mut command));
+    barrier.await_ready(Duration::from_secs(20), "prepared transaction");
+    let journal = fixture.journal();
+    fs::rename(&journal, fixture.root.join("own-journal")).unwrap();
+    fs::rename(&foreign, &journal).unwrap();
+    barrier.release(WAIT);
+    let result = child.finish(WAIT);
+    assert_ne!(result.returncode, 0);
+    assert!(result.stderr().contains("unsafe update journal handoff"), "{}", result.stderr());
+    assert!(result.stderr().contains("host install failed and the recovery journal could not be applied"), "{}", result.stderr());
+    assert_eq!(snapshot(&journal), before, "the installer wrote into a foreign journal");
+    assert_eq!(fixture.active(), active);
+    assert_eq!(generations(&fixture), before_generations, "a generation was created for a foreign journal");
 }
 
 /// Replaces the four legacy recovery cases: v1 journals (Hamn 0.1.2 and

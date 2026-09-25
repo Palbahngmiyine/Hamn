@@ -6,8 +6,7 @@
 use crate::runner::{self, case};
 use crate::support::tmp::TempDir;
 use crate::support::upgrade::{
-    self, Artifact, Group, Output, await_ready, copy_release_support, file_digest, mkfifo, pack_release, ready_fifo,
-    write_json,
+    self, Artifact, Group, Output, await_ready, file_digest, mkfifo, pack_release, ready_fifo, release_payload, write_json,
 };
 use serde_json::Value;
 use std::fs;
@@ -82,21 +81,9 @@ fn upgrade_command_checks_repairs_and_recovers() {
     let home = root.join("home");
     fs::create_dir(&home).unwrap();
     let (bindir, datadir) = (home.join("bin"), home.join("source"));
-    let installed = upgrade::run(
-        Command::new("bash")
-            .arg(upgrade::checkout().join("scripts/install-host.sh"))
-            .arg(&hamn)
-            .arg(&bindir)
-            .arg(&datadir)
-            .env("HOME", &home),
-        RUN,
-    );
-    assert_eq!(installed.returncode, 0, "{}", installed.stderr());
+    upgrade::install(&hamn, &hamn, &bindir, &datadir, &home);
     let release = root.join("release");
-    fs::create_dir_all(release.join("bin")).unwrap();
-    fs::copy(&hamn, release.join("bin/hamn")).unwrap();
-    copy_release_support(&release);
-    fs::write(release.join("packaging/release/update-manifest-url"), "https://example.invalid/manifest-v3.json\n").unwrap();
+    release_payload(&release, &hamn, "https://example.invalid/manifest-v3.json");
     let archive = root.join("host.tar.gz");
     pack_release(&release, &archive);
     let guest = root.join("guest.img");
@@ -247,17 +234,17 @@ fn checks_and_failures_change_nothing(install: &Install, original: &Path) {
 /// Selection-only journal interruption matrix, including recovery followed by
 /// a malformed manifest. No host pointer may be rewritten.
 fn selection_only_interruptions_recover(install: &Install, active: &Path, selection: &Path) {
-    let helper = active.parent().and_then(Path::parent).unwrap().join("share/hamn/src/scripts/update-host.sh");
+    // The installed generation's own executable runs the transaction.
+    let helper = active.to_path_buf();
     for point in ["PREPARED", "AFTER_GUEST_SELECTION"] {
         for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGKILL] {
             let _ = fs::remove_file(selection);
             let (ready, ready_fd) = ready_fifo(&install.root, "ready");
             let release = install.root.join("release-fifo");
             mkfifo(&release);
-            let mut command = Command::new("bash");
+            let mut command = Command::new(&helper);
             command
-                .arg(&helper)
-                .arg("--bindir")
+                .args(["__install-support", "update", "--bindir"])
                 .arg(&install.bindir)
                 .arg("--datadir")
                 .arg(&install.datadir)
