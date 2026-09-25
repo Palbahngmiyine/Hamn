@@ -34,7 +34,8 @@ pub fn communicate(child: &mut Child, captured: &mut Captured, timeout: Duration
         let remaining = deadline.checked_duration_since(Instant::now())?;
         let ready = pty::readable(&open, remaining);
         if ready.is_empty() {
-            return None;
+            // The loop re-reads the clock, so an early wakeup is not a timeout.
+            continue;
         }
         for fd in ready {
             let (pipe, sink): (&mut dyn Read, &mut Vec<u8>) = if Some(fd) == stdout {
@@ -123,6 +124,13 @@ mod tests {
             .spawn()
             .unwrap();
         let mut captured = Captured::default();
+        // Output read by one timed-out call is kept for the next; wait for the
+        // line first so that a slow shell cannot be killed before it echoes.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while captured.stdout.is_empty() {
+            assert!(Instant::now() < deadline, "the child never wrote its first line");
+            assert!(communicate(&mut child, &mut captured, Duration::from_millis(50)).is_none());
+        }
         let started = Instant::now();
         assert!(communicate(&mut child, &mut captured, Duration::from_millis(300)).is_none());
         assert!(started.elapsed() >= Duration::from_millis(300));

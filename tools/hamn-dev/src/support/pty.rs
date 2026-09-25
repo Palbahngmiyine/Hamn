@@ -74,7 +74,9 @@ pub fn fifo(path: &Path) -> OwnedFd {
 /// the readable ones (empty on timeout).
 pub fn readable(fds: &[RawFd], timeout: Duration) -> Vec<RawFd> {
     let mut polls: Vec<libc::pollfd> = fds.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
-    let millis = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // Round up: a truncated timeout would let poll report "nothing ready"
+    // before the caller's deadline.
+    let millis = timeout.as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32;
     loop {
         // SAFETY: polls holds fds.len() initialized entries.
         let result = unsafe { libc::poll(polls.as_mut_ptr(), polls.len() as libc::nfds_t, millis) };
