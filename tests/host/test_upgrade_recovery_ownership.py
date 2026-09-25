@@ -12,6 +12,7 @@ from pathlib import Path
 import shlex
 import signal
 import subprocess
+import sys
 import tarfile
 import unittest
 
@@ -252,4 +253,11 @@ class RecoveryOwnership(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    # CI runs the legacy-journal tests and the others as separate gates; every
+    # test is in exactly one part, and no argument runs both.
+    parts = {"legacy": True, "current": False}
+    selected = [parts[part] for part in sys.argv[1:]] or list(parts.values())
+    names = [name for name in unittest.TestLoader().getTestCaseNames(RecoveryOwnership)
+             if ("_legacy_" in name) in selected]
+    result = unittest.TextTestRunner().run(unittest.TestSuite(map(RecoveryOwnership, names)))
+    raise SystemExit(not result.wasSuccessful())
