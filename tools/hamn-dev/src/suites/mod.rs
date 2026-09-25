@@ -3,6 +3,7 @@
 //! contain a filter (all cases without filters).
 use std::process::ExitCode;
 
+mod remote_cancel_boundaries;
 mod single_binary;
 mod tui_native_regressions;
 
@@ -10,6 +11,7 @@ type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
+    ("remote-cancel-boundaries", remote_cancel_boundaries::main),
     ("single-binary", single_binary::main),
     ("tui-native-regressions", tui_native_regressions::main),
 ];

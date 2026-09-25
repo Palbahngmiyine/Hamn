@@ -199,7 +199,7 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	$(BUILD)/tests/test_remote_mutation
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_early_exit.c -o $(BUILD)/tests/test_proc_early_exit
 	$(BUILD)/tests/test_proc_early_exit
-	python3 tests/host/test_remote_cancel_boundaries.py
+	$(HAMN_DEV) test remote-cancel-boundaries
 	python3 tests/host/workspace_live_transport.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_start_preflight.py
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_cancellation.c host/util/proc.c -o $(BUILD)/tests/test_proc_cancellation
