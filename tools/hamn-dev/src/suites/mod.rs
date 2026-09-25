@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 mod control_signed_bootstrap;
 mod core_worker;
+mod diagnostics;
 mod docker_api;
 mod docker_context;
 mod docker_readiness;
@@ -46,6 +47,7 @@ type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
+    ("diagnostics", diagnostics::main),
     ("docker-readiness", docker_readiness::main),
     ("observer-requests", observer_requests::main),
     ("remote-cancel-boundaries", remote_cancel_boundaries::main),

@@ -423,7 +423,7 @@ test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)
 	python3 guest/tests/test_image_evidence.py
 
 test-diagnostics: host
-	HAMN=$(HOST_BIN) bash tests/host/test_diagnostics.sh
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test diagnostics
 
 test-install-script: host
 	HAMN=$(HOST_BIN) bash tests/host/test_install.sh

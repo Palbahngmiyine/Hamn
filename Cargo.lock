@@ -874,6 +874,7 @@ name = "hamn-dev"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "regex",
  "rustls",
  "serde",
  "serde_json",
