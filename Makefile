@@ -212,7 +212,7 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test docker-api
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test docker-context
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test kubernetes-api
-	HAMN=$(HOST_BIN) python3 tests/host/test_exec_auth.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test exec-auth
 
 # The TUI, workspace and packaging regressions of test-control, after test-control-native.
 test-control-tui: host

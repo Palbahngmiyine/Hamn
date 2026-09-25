@@ -6,6 +6,7 @@ use std::process::ExitCode;
 mod core_worker;
 mod docker_api;
 mod docker_context;
+mod exec_auth;
 mod kubernetes_api;
 mod single_binary;
 mod tui_native_regressions;
@@ -17,6 +18,7 @@ const SUITES: &[Suite] = &[
     ("core-worker", core_worker::main),
     ("docker-api", docker_api::main),
     ("docker-context", docker_context::main),
+    ("exec-auth", exec_auth::main),
     ("kubernetes-api", kubernetes_api::main),
     ("single-binary", single_binary::main),
     ("tui-native-regressions", tui_native_regressions::main),
@@ -24,6 +26,7 @@ const SUITES: &[Suite] = &[
 
 const FIXTURES: &[(&str, Fixture)] = &[
     ("core-worker-external-cli", core_worker::external_cli_fixture),
+    ("exec-auth", exec_auth::fixture),
     ("native-regressions", tui_native_regressions::fixture),
 ];
 
