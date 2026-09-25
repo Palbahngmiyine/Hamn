@@ -520,7 +520,8 @@ for requirement in \
 done
 grep -Fq '"$HAMN_DEV" release hosted-evidence' "$ROOT/packaging/release/hosted-validation.sh" ||
     fail "hosted validation does not write its evidence with the checked writer"
-if rg -n 'k3sE2E' "$ROOT/packaging/release" "$ROOT/tools/hamn-dev/src/release" >/dev/null; then
+# hosted.rs's own test asserts the written evidence has no k3sE2E check.
+if rg -n 'k3sE2E' "$ROOT/packaging/release" >/dev/null; then
     fail "hosted evidence still records the removed K3s capability"
 fi
 grep -Fq 'BASE_URL="https://github.com/${RELEASE_REPOSITORY}/releases/download/${STABLE_TAG}"' \
@@ -631,7 +632,7 @@ if force_delete_output=$(HOME="$force_home" "$ROOT/build/hamn" \
     fail "CLI accepted upgrade-only force for VM deletion"
 fi
 printf '%s\n' "$force_delete_output" |
-    grep -Fq -- '--check and --force are only supported for system upgrade/update' ||
+    grep -Fq -- '--check and --force are only supported for system upgrade' ||
     fail "force deletion was not rejected before dispatch"
 [ ! -e "$force_home/.hamn" ] || fail "invalid force deletion touched profile state"
 

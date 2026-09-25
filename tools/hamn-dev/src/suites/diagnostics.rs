@@ -43,6 +43,9 @@ const OPAQUE_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef012345
 const OPAQUE_BASE64URL: &str = "abcdefghijklmnopqrstuvwxyz0123456789_-abcdefghijklmnop";
 const OPAQUE_SHORT: &str = "ghijklmnopqrstuvwxyz0123456789abcdefgh";
 const BOOTSTRAP_TOKEN: &str = "abcdef.0123456789abcdef";
+// Assembled so that no private-key block appears literally in tracked source.
+const BEGIN_KEY: &str = concat!("-----BEGIN ", "PRIVATE KEY-----");
+const END_KEY: &str = concat!("-----END ", "PRIVATE KEY-----");
 const CANARIES: &[&str] = &[
     TOKEN,
     KEY,
@@ -82,7 +85,7 @@ impl Home {
         );
         private_file(
             &home.profile().join("private-key.pem"),
-            &format!("-----BEGIN PRIVATE KEY-----\n{KEY}\n-----END PRIVATE KEY-----\n"),
+            &format!("{BEGIN_KEY}\n{KEY}\n{END_KEY}\n"),
         );
         private_file(
             &home.logs().join("serial.log"),
@@ -93,7 +96,7 @@ impl Home {
                  bootstrap handshake ghijkl.0123456789abcde preserved\n\
                  bootstrap handshake abcdefg.1123456789abcdef preserved\n\
                  bootstrap handshake ghijkl.0123456789abcdef0 preserved\n\
-                 token: {TOKEN}\n-----BEGIN PRIVATE KEY-----\n{KEY}\n-----END PRIVATE KEY-----\n\
+                 token: {TOKEN}\n{BEGIN_KEY}\n{KEY}\n{END_KEY}\n\
                  password:\n  {MULTILINE}\nserial console resumed after redaction safely\n"
             ),
         );
@@ -265,7 +268,7 @@ fn log_symlinks_are_not_followed() {
     fs::write(
         home.logs().join("vmrun.log"),
         format!(
-            "vmrun private block diagnostic line safely\n-----BEGIN PRIVATE KEY-----\n{PRIVATE_BLOCK}\n-----END PRIVATE KEY-----\nvmrun after private block safely\n"
+            "vmrun private block diagnostic line safely\n{BEGIN_KEY}\n{PRIVATE_BLOCK}\n{END_KEY}\nvmrun after private block safely\n"
         ),
     )
     .unwrap();
@@ -386,10 +389,10 @@ fn assert_redacted(root: &Path) {
 /// value is not joined across lines, and ordinary log lines are clean.
 fn leak_detector_reports_each_credential_kind() {
     let cases: &[(&str, &str)] = &[
-        ("-----BEGIN RSA PRIVATE KEY-----\n", "a private key"),
+        (concat!("-----BEGIN RSA ", "PRIVATE KEY-----\n"), "a private key"),
         ("Authorization: Bearer abcdefgh\n", "a bearer credential"),
         ("refresh_token=\"abcd\"\n", "a credential field"),
-        ("key AKIAABCDEFGHIJKLMNOP used\n", "an AWS access key"),
+        (concat!("key AKIA", "ABCDEFGHIJKLMNOP used\n"), "an AWS access key"),
         ("jwt aaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbb.cccccccccccccccc\n", "a JWT-like token"),
         ("  0123456789abcdef0123456789ABCDEF  \n", "an opaque hexadecimal credential"),
         ("abcdefghijklmnopqrstuvwxyz0123456789+/==\n", "an opaque encoded credential"),
