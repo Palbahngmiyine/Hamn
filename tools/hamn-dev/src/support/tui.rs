@@ -1,6 +1,6 @@
 //! A real Hamn TUI on a PTY, with recorded `docker` and `kubectl` fixtures
-//! (links to this executable) in a disposable HOME. Suites share it the way
-//! the Python suites shared `test_tui_native_regressions.Harness`.
+//! (links to this executable) in a disposable HOME, shared by the TUI and
+//! workspace suites.
 use super::pty::{self, Pty};
 use super::screen::RatatuiScreen;
 use super::tmp::TempDir;
