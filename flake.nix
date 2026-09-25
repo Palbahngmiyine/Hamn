@@ -117,7 +117,6 @@
         gnumake
         jq
         openssh
-        python3
         (rustToolchainFor pkgs)
       ];
     in

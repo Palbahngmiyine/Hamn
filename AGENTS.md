@@ -82,7 +82,7 @@ working on the CLI-only product.
 ## Build Commands
 
 Host builds require Apple Silicon macOS 13+, Apple command-line developer tools,
-the Rust toolchain in `rust-toolchain.toml`, and Python 3. The locked `flake.nix`
+and the Rust toolchain in `rust-toolchain.toml`. The locked `flake.nix`
 shells provide the test toolchain, including that Rust release and `actionlint`:
 `nix develop .#ci --command make -j1 test-local-macos` runs the local gates, and
 `.#live` adds kubectl and kind. See [Development](docs/DEVELOPMENT.md) for setup.

@@ -11,7 +11,7 @@ Hamn은 Apple Silicon macOS 13 이상을 지원합니다. Rust는 Ratatui TUI,
 
 Apple 명령줄 개발 도구와 flakes를 활성화한 [Nix](https://nixos.org/download/)를
 한 번 설치합니다. 나머지는 잠긴 `flake.nix`가 제공합니다. `rust-toolchain.toml`의
-Rust 릴리스와 rustfmt·clippy, Python, jq, actionlint, Git, GNU Make,
+Rust 릴리스와 rustfmt·clippy, jq, actionlint, Git, GNU Make,
 OpenSSH, Compose·buildx 플러그인을 포함한 Docker CLI입니다. Homebrew·apt·Rust
 설치 도구 단계는 필요하지 않습니다.
 
