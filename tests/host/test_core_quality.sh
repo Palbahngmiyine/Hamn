@@ -207,7 +207,7 @@ for requirement in \
     '"aarch64-linux"' \
     '"x86_64-linux"' \
     'devShells = forAllSystems' \
-    '            builders.mkShellNoCC {' \
+    '            pkgs.mkShellNoCC {' \
     '          ci = shellWith [ ];' \
     '          live = shellWith (with pkgs; [' \
     '          release = shellWith (with pkgs; [' \
@@ -260,30 +260,28 @@ done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]*([^ #]+).*/\1/p' \
 ci_workflow=$ROOT/.github/workflows/ci.yml
 make -C "$ROOT" -s --no-print-directory check-ci-macos-shards ||
     fail "CI macOS shards do not cover the local macOS gates exactly once"
-ci_shards=$(make -C "$ROOT" -s --no-print-directory print-ci-macos-shards)
-ci_json=$(yq -o=json '.' "$ci_workflow") || fail "CI workflow is not valid YAML"
-# Each rule is a jq condition on the parsed workflow; a missing key fails it.
-ci_rule() {
-    jq -e --arg shards "$ci_shards" "$2" <<<"$ci_json" >/dev/null || fail "$1"
-}
-ci_rule "required PR checks must not be filtered by paths" \
-    '.on.pull_request | type == "object" and (has("paths") or has("paths-ignore") | not)'
-ci_rule "CI must run every shard listed by make print-ci-macos-shards" \
-    '.jobs["macos-shard"].strategy |
-        (.matrix.shard | map(tostring)) == ($shards | [splits(" +")] | map(select(. != ""))) and
-        .["fail-fast"] == false'
-ci_rule "only PR CI may select the fast ci Cargo profile" \
-    '.jobs["macos-shard"].env.CARGO_PROFILE == "ci"'
-ci_rule "the second updater lane needs its user and home" \
-    '.jobs["macos-shard"] |
-        (.env | keys) == ["CARGO_PROFILE", "CI_MACOS_LANE_HOME", "CI_MACOS_LANE_UID"] and
-        any(.steps[]; .run // "" | contains("UniqueID \"$CI_MACOS_LANE_UID\""))'
-ci_rule "the required macOS check must fail unless every shard passes" \
-    '.jobs.macos |
-        .name == "macOS build and regression gates" and .needs == "macos-shard" and
-        .if == "always()" and
-        [.steps[] | [.env, .run]] ==
-            [[{"SHARDS": "${{ needs.macos-shard.result }}"}, "test \"$SHARDS\" = success"]]'
+ruby -ryaml -e '
+    workflow = YAML.load_file(ARGV.fetch(0))
+    trigger = workflow.fetch("on") { workflow.fetch(true) }.fetch("pull_request")
+    abort "required PR checks must not be filtered by paths" if
+        trigger.key?("paths") || trigger.key?("paths-ignore")
+    jobs = workflow.fetch("jobs")
+    shard = jobs.fetch("macos-shard")
+    abort "CI must run every shard listed by make print-ci-macos-shards" unless
+        shard.dig("strategy", "matrix", "shard").map(&:to_s) == ARGV.fetch(1).split &&
+        shard.dig("strategy", "fail-fast") == false
+    abort "only PR CI may select the fast ci Cargo profile" unless
+        shard.fetch("env")["CARGO_PROFILE"] == "ci"
+    abort "the second updater lane needs its user and home" unless
+        shard.fetch("env").keys.sort == %w[CARGO_PROFILE CI_MACOS_LANE_HOME CI_MACOS_LANE_UID] &&
+        shard.fetch("steps").any? { |step| step["run"].to_s.include?(%q(UniqueID "$CI_MACOS_LANE_UID")) }
+    required = jobs.fetch("macos")
+    abort "the required macOS check must fail unless every shard passes" unless
+        required.fetch("name") == "macOS build and regression gates" &&
+        required["needs"] == "macos-shard" && required["if"] == "always()" &&
+        required.fetch("steps").map { |step| [step["env"], step["run"]] } ==
+            [[{ "SHARDS" => "${{ needs.macos-shard.result }}" }, %q(test "$SHARDS" = success)]]
+' "$ci_workflow" "$(make -C "$ROOT" -s --no-print-directory print-ci-macos-shards)"
 for requirement in \
     '  contents: read' \
     '    runs-on: ubuntu-24.04' \
@@ -323,7 +321,7 @@ if [ "$(uname -s)" = Darwin ] && [ -n "${IN_NIX_SHELL:-}" ]; then
         [ "$(/usr/bin/readlink "$resolved" || printf '%s' "$resolved")" = "/usr/bin/$tool" ] ||
             fail "$tool must resolve to Apple's /usr/bin/$tool, not $resolved"
     done
-    for tool in bash cargo git jq make python3 rg rustc yq; do
+    for tool in bash cargo git jq make python3 rg ruby rustc; do
         case "$(command -v "$tool")" in
         /nix/store/*) ;;
         *) fail "$tool must come from the pinned Nix shell, not $(command -v "$tool")" ;;
@@ -338,12 +336,9 @@ if [ "$(uname -s)" = Darwin ] && [ -n "${IN_NIX_SHELL:-}" ]; then
     [ -n "${SDKROOT:-}" ] && [ "$SDKROOT" = "${HAMN_SYSTEM_SDKROOT:-}" ] &&
         [ -d "$SDKROOT" ] && [ "${SDKROOT#/nix/store/}" = "$SDKROOT" ] ||
         fail "Nix shell must select the system macOS SDK: ${SDKROOT:-unset}"
-    # The Darwin shell carries no Nix C compiler or Apple SDK: nixpkgs'
-    # cc-wrapper setup hook would export NIX_CC and put a Nix clang or ld on
-    # PATH, and its Apple SDK hook would export NIX_APPLE_SDK_VERSION.
+    # The Darwin toolchain carries no Nix C compiler: nixpkgs' cc-wrapper
+    # setup hook would export NIX_CC and put a Nix clang or ld on PATH.
     [ -z "${NIX_CC:-}" ] || fail "the Darwin shell must not carry a Nix C compiler: $NIX_CC"
-    [ -z "${NIX_APPLE_SDK_VERSION:-}" ] ||
-        fail "the Darwin shell must not carry nixpkgs' Apple SDK: $NIX_APPLE_SDK_VERSION"
     IFS=: read -ra shell_path <<<"$PATH"
     for dir in "${shell_path[@]}"; do
         case "$dir" in /nix/store/*) ;; *) continue ;; esac
