@@ -98,6 +98,8 @@ GitHub artifact attestation은 산출물을 저장소·workflow·소스 commit·
 연결합니다. 자동 배포 증명은 hosted runner에서 생성합니다. Manifest에는
 `validationMode: github-hosted-no-vm`, hosted 증거에는 `physicalE2E: false`를
 기록하며 실제 VM이나 전환 E2E를 검증했다고 주장하지 않습니다.
+게시 단계는 digest를 검증한 후보 archive의 실행 파일, 즉 설치된 client와 같은
+parser로 v2와 v3 manifest를 검증하고 두 manifest가 같은 artifact를 가리키는지 확인합니다.
 
 설정 후 읽기 전용 검사를 실행합니다.
 

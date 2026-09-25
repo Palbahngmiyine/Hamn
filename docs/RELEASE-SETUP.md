@@ -106,6 +106,9 @@ GitHub artifact attestations bind built artifacts to repository, workflow,
 source commit, and run. Automated release provenance comes from hosted runners.
 The manifest records `validationMode: github-hosted-no-vm`; hosted evidence
 records `physicalE2E: false` and does not claim real VM or migration E2E.
+Publication validates the v2 and v3 manifests with the executable from the
+digest-verified candidate archive, the same parser installed clients use, and
+requires both manifests to name identical artifacts.
 
 Run the read-only settings check after configuration:
 

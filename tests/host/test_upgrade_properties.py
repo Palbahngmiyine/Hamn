@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Bounded generated upgrade cases, seed 20260921.
+"""Bounded generated upgrade cases, seed 20260921, against the shipped binary.
 
-These complement the fixed fault/signal matrices; they are not a proof over all
-inputs or a guest boot/functional-equivalence test. All installs, HTTP traffic,
+These complement the fixed fault/signal matrices and the native Rust property
+tests in control/install_support; they are not a proof over all inputs or a
+guest boot/functional-equivalence test. All installs, network observations,
 processes and files belong to a temporary fixture. No build output is changed.
 """
 import contextlib
@@ -18,7 +19,6 @@ import shlex
 import shutil
 import signal
 import socketserver
-import stat
 import subprocess
 import sys
 import tarfile
@@ -27,10 +27,9 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from test_upgrade_support import HttpFixture, ROOT, manifest, upgrade
+from test_upgrade_native import BINARY, ROOT, manifest
 
 SEED = 20260921
-SUPPORT = ROOT / "scripts/upgrade_support.py"
 
 
 @contextlib.contextmanager
@@ -149,28 +148,14 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
-@contextlib.contextmanager
-def transfer_fixture(root, payload):
-    with HttpFixture(payload) as server:
-        transport = root / "transport"
-        transport.mkdir()
-        shim = transport / "curl"
-        shim.write_text(f"#!{sys.executable}\n" + f'''import os, sys
-args = sys.argv[1:]
-assert args[args.index('--proto') + 1] == '=https'
-assert args[args.index('--proto-redir') + 1] == '=https'
-assert args[-1].startswith('https://fixture.test/')
-for key in ('--proto', '--proto-redir'):
-    args[args.index(key) + 1] = '=http'
-args[-1] = args[-1].replace('https://fixture.test', 'http://127.0.0.1:{server.server.server_port}')
-os.execv('/usr/bin/curl', ['curl'] + args)
-''')
-        shim.chmod(0o755)
-        with patch.dict(os.environ, PATH=f"{transport}:{os.environ.get('PATH', '')}"):
-            yield server
-
-
 class GeneratedContracts(unittest.TestCase):
+    def native_fields(self, path):
+        """The shipped client's five-line field view of a manifest file."""
+        result = subprocess.run([BINARY, "__install-support", "manifest", path, "13.0", "arm64"],
+                                capture_output=True, text=True, timeout=8)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.splitlines()
+
     def test_legacy_v2_reachability_and_v3_digest_identity(self):
         rng = random.Random(SEED)
         with tempfile.TemporaryDirectory(prefix="hamn-property-manifest-") as temporary:
@@ -189,146 +174,23 @@ class GeneratedContracts(unittest.TestCase):
                     v2["schemaVersion"] = 2
                     v2["artifacts"] = {name: {key: artifact[key] for key in ("url", "sha256")}
                                        for name, artifact in value["artifacts"].items()}
-                    parsed = [upgrade.parse_manifest(json.dumps(item).encode(), "13.0", "arm64")
-                              for item in (v2, value)]
-                    for name in ("host", "guestImage"):
-                        for key in ("url", "sha256"):
-                            self.assertEqual(parsed[0]["artifacts"][name][key], parsed[1]["artifacts"][name][key])
+                    expected = [version,
+                        value["artifacts"]["host"]["url"], value["artifacts"]["host"]["sha256"],
+                        value["artifacts"]["guestImage"]["url"], value["artifacts"]["guestImage"]["sha256"]]
+                    # The shipped client selects identical bytes from either schema.
+                    for item in (v2, value):
+                        private_json(path, item)
+                        self.assertEqual(self.native_fields(path), expected)
                     private_json(path, v2)
                     output = io.StringIO()
                     with patch.object(sys, "argv", ["legacy", str(path), "13.0", "arm64"]), contextlib.redirect_stdout(output):
                         exec(compile(LEGACY_PARSER, "frozen-v2-consumer", "exec"), {})
-                    self.assertEqual(output.getvalue().splitlines(), [version,
-                        value["artifacts"]["host"]["url"], value["artifacts"]["host"]["sha256"],
-                        value["artifacts"]["guestImage"]["url"], value["artifacts"]["guestImage"]["sha256"]])
+                    self.assertEqual(output.getvalue().splitlines(), expected)
                     # A legacy client cannot consume v3's extra size fields;
                     # keeping the separate v2 endpoint is material, not cosmetic.
                     private_json(path, value)
                     with patch.object(sys, "argv", ["legacy", str(path), "13.0", "arm64"]), self.assertRaises(SystemExit):
                         exec(compile(LEGACY_PARSER, "frozen-v2-consumer", "exec"), {})
-
-    def test_generated_accounting_sums_all_sources_and_rejects_overflow(self):
-        rng = random.Random(SEED + 4)
-        for case in range(24):
-            with self.subTest(seed=SEED + 4, case=case):
-                total = rng.randrange(1 << 20) if case < 12 else upgrade.MAX_COUNTER + (case % 5) - 2
-                cuts = sorted((0, rng.randrange(total + 1), rng.randrange(total + 1), total))
-                received = [right - left for left, right in zip(cuts, cuts[1:])]
-                records = {name: {"downloadedBytes": count, "resumedBytes": rng.randrange(count + 1),
-                                  "reusedBytes": rng.randrange(65537), "source": "generated"}
-                           for name, count in zip(("manifest", "host", "guestImage"), received)}
-                expected = {field: sum(item[field] for item in records.values())
-                            for field in ("downloadedBytes", "resumedBytes", "reusedBytes")}
-                if total > upgrade.MAX_COUNTER:
-                    with self.assertRaises(ValueError): upgrade.result("1.2.2", manifest(), "updated", records)
-                else:
-                    actual = upgrade.result("1.2.2", manifest(), "updated", records)
-                    self.assertEqual({field: actual[field] for field in expected}, expected)
-                    self.assertEqual(actual["artifacts"], records)
-
-
-class GeneratedAcquisition(unittest.TestCase):
-    def test_generated_partial_cache_states_and_byte_conservation(self):
-        rng = random.Random(SEED + 1)
-        cases = [("cold", 1), ("cold", 65537), ("resume", 2), ("resume", 4097),
-                 ("resume", 65536), ("complete", 31), ("corrupt-final", 8193),
-                 ("corrupt-prefix", 257), ("ignored-range", 2049), ("legacy-partial", 4096)]
-        with tempfile.TemporaryDirectory(prefix="hamn-property-transfer-") as temporary:
-            root = Path(temporary)
-            with transfer_fixture(root, b"unused") as server:
-                for index, (state, size) in enumerate(cases):
-                    with self.subTest(seed=SEED + 1, case=index, state=state, size=size):
-                        home = root / str(index)
-                        home.mkdir()
-                        cache = upgrade.cache_root(home)
-                        downloads = cache / "downloads"
-                        downloads.mkdir(mode=0o700)
-                        payload = rng.randbytes(size)
-                        server.payload, server.mode = payload, "normal"
-                        name = "host" if index % 2 else "guestImage"
-                        artifact = manifest(payload)["artifacts"][name]
-                        if state == "legacy-partial":
-                            artifact = {key: artifact[key] for key in ("url", "sha256")}
-                        key = artifact["sha256"]
-                        partial = downloads / f".{key}.partial"
-                        final = downloads / f"{key}.artifact"
-                        offset = 0
-                        if state in ("resume", "complete", "corrupt-prefix", "ignored-range", "legacy-partial"):
-                            offset = size if state == "complete" else (1 if index == 2 else rng.randrange(1, size))
-                            prefix = bytearray(payload[:offset])
-                            if state == "corrupt-prefix": prefix[rng.randrange(offset)] ^= 0xff
-                            partial.write_bytes(prefix)
-                            partial.chmod(0o600)
-                            private_json(downloads / f".{key}.validator", {
-                                "schemaVersion": 1, "sha256": key, "size": size, "validator": '"fixture-v1"'})
-                        if state == "corrupt-final":
-                            final.write_bytes(payload[:-1] + bytes([payload[-1] ^ 0xff]))
-                            final.chmod(0o600)
-                        if state == "ignored-range": server.mode = "ignore"
-                        before_bytes, before_requests = server.body_bytes, len(server.requests)
-                        if state == "corrupt-prefix":
-                            with self.assertRaises(ValueError): upgrade.acquire(cache, artifact, name)
-                            self.assertFalse(final.exists())
-                            self.assertFalse(partial.exists())
-                            self.assertFalse((downloads / f".{key}.validator").exists())
-                            self.assertEqual(server.body_bytes - before_bytes, size - offset)
-                            before_bytes, before_requests, offset = server.body_bytes, len(server.requests), 0
-                        path, counts = upgrade.acquire(cache, artifact, name)
-                        self.assertEqual(path.read_bytes(), payload)
-                        self.assertEqual(sha(path.read_bytes()), key)
-                        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-                        self.assertFalse(partial.exists())
-                        downloaded = 0 if state == "complete" else size - offset if state == "resume" else 2 * size if state == "ignored-range" else size
-                        reused = offset if state in ("resume", "complete") else 0
-                        self.assertEqual(counts["downloadedBytes"], downloaded)
-                        self.assertEqual(counts["downloadedBytes"], server.body_bytes - before_bytes)
-                        self.assertEqual(counts["resumedBytes"], downloaded if state == "resume" else 0)
-                        self.assertEqual(counts["reusedBytes"], reused)
-                        self.assertEqual(downloaded + reused, 2 * size if state == "ignored-range" else size)
-                        if state == "resume":
-                            self.assertEqual(server.requests[before_requests], {"range": f"bytes={offset}-", "ifRange": '"fixture-v1"'})
-                        if state == "legacy-partial": self.assertIsNone(server.requests[before_requests]["range"])
-                        requests = len(server.requests)
-                        _, warm = upgrade.acquire(cache, artifact, name)
-                        self.assertEqual(len(server.requests), requests)
-                        self.assertEqual((warm["downloadedBytes"], warm["resumedBytes"], warm["reusedBytes"]), (0, 0, size))
-                        summary = upgrade.result("1.2.2", manifest(payload), "updated", {name: counts})
-                        for field in ("downloadedBytes", "resumedBytes", "reusedBytes"):
-                            self.assertEqual(summary[field], counts[field])
-
-    def test_generated_payloads_single_flight_across_processes(self):
-        rng = random.Random(SEED + 2)
-        with tempfile.TemporaryDirectory(prefix="hamn-property-flight-") as temporary:
-            root = Path(temporary)
-            with transfer_fixture(root, b"unused") as server:
-                for width in (2, 3, 4):
-                    with self.subTest(seed=SEED + 2, processes=width):
-                        payload = rng.randbytes(rng.randrange(4096, 32769))
-                        server.payload = payload
-                        home = root / str(width)
-                        home.mkdir()
-                        cache = upgrade.cache_root(home)
-                        path = home / "manifest.json"
-                        private_json(path, manifest(payload))
-                        before_bytes, before_requests = server.body_bytes, len(server.requests)
-                        children = []
-                        try:
-                            for index in range(width):
-                                children.append(subprocess.Popen([sys.executable, SUPPORT, "acquire", path,
-                                    "guestImage", cache, home / f"counts-{index}.json"], stdout=subprocess.PIPE, stderr=subprocess.PIPE))
-                            results = [child.communicate(timeout=15) for child in children]
-                            for child, result in zip(children, results): self.assertEqual(child.returncode, 0, result)
-                            self.assertEqual(len({result[0] for result in results}), 1)
-                            self.assertEqual(Path(results[0][0].decode().strip()).read_bytes(), payload)
-                            self.assertEqual(server.body_bytes - before_bytes, len(payload))
-                            self.assertEqual(len(server.requests) - before_requests, 1)
-                            records = [json.loads((home / f"counts-{index}.json").read_text()) for index in range(width)]
-                            self.assertEqual(sum(record["downloadedBytes"] for record in records), len(payload))
-                            self.assertEqual(sum(record["reusedBytes"] for record in records), (width - 1) * len(payload))
-                        finally:
-                            for child in children:
-                                if child.poll() is None: child.kill()
-                                child.communicate(timeout=5)
 
 
 class GeneratedTransactions(unittest.TestCase):
@@ -357,7 +219,7 @@ class GeneratedTransactions(unittest.TestCase):
                     contextlib.ExitStack() as services:
                 root = Path(temporary).resolve()
                 native = root / "native-hamn"
-                shutil.copy2(Path(os.environ.get("HAMN", ROOT / "build/hamn")).resolve(), native)
+                shutil.copy2(BINARY, native)
                 home = root / "home"
                 home.mkdir()
                 bindir, datadir = home / "bin", home / "source"

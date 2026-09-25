@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
-"""Real managed-install/PTY notice checks and isolated checker policy tests.
+"""Real managed-install/PTY notice checks for the shipped update checker.
 
 Never rebuilds, runs a VM or accesses a release service. The native checker uses an invalid offline manifest URL, so dispatch is observed
 through its owned lock/cache files without release network. Native Rust tests
-cover sanitized launcher argv/environment/stdio and controlled policy boundaries;
-the historical Python policy oracle remains an independent comparison.
+in control/upgrade.rs and control/install_support/upgrade.rs cover sanitized
+launcher argv/environment/stdio, TTL/backoff boundaries, failed refreshes, the
+automatic transfer deadline and the cross-process single-flight lock.
 """
-import argparse
 import fcntl
-import importlib.util
 import json
-import multiprocessing
 import os
 from pathlib import Path
 import pty
@@ -26,15 +24,10 @@ import tempfile
 import termios
 import time
 import unittest
-from unittest.mock import patch
 
 from terminal_screen import RatatuiScreen
 
 ROOT = Path(__file__).resolve().parents[2]
-HELPER = ROOT / "scripts/upgrade_support.py"
-spec = importlib.util.spec_from_file_location("update_check_helper", HELPER)
-helper = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(helper)
 
 
 def write_json(path, value, mode=0o600):
@@ -69,8 +62,6 @@ class ManagedNotice(unittest.TestCase):
         cls.generation = cls.managed.resolve().parent.parent
         source = cls.generation / "share/hamn/src"
         (source / "packaging/release/update-manifest-url").write_text("invalid-offline-url\n")
-        # A normal install must check updates without an external language helper.
-        (source / "scripts/upgrade_support.py").unlink(missing_ok=True)
         cls.tools = cls.root / "tools"
         cls.tools.mkdir()
         cli = '''#!/usr/bin/python3
@@ -291,72 +282,6 @@ elif "get" in sys.argv:
         self.assert_no_notice(self.run_tui())
         self.assertTrue(self.notice_path.is_symlink())
         self.assertEqual(external.read_text(), "preserve")
-
-
-class CheckerPolicy(unittest.TestCase):
-    def setUp(self):
-        self.work = tempfile.TemporaryDirectory(prefix="hamn-check-policy-")
-        self.addCleanup(self.work.cleanup)
-        self.home = Path(self.work.name)
-        self.cache = helper.cache_root(self.home)
-        self.args = argparse.Namespace(home=str(self.home), current_version="1.2.3", manifest="https://unused.invalid/manifest", macos="13.0", architecture="arm64")
-        self.now = 1000000
-        self.record = {"schemaVersion": 1, "checkedAt": self.now, "ok": True, "latestVersion": "1.3.0"}
-
-    def test_success_ttl_and_failure_backoff_boundaries(self):
-        for ok, ttl in ((True, 86400), (False, 21600)):
-            for age, calls in ((ttl - 1, 0), (ttl, 1)):
-                with self.subTest(ok=ok, age=age):
-                    write_json(self.cache / "update-check-v1.json", {**self.record, "ok": ok, "checkedAt": self.now - age})
-                    with patch.object(helper.time, "time", return_value=self.now), patch.object(helper, "fetch_manifest", return_value=({"version": "v1.4.0"}, 100)) as fetch:
-                        helper.automatic(self.args)
-                    self.assertEqual(fetch.call_count, calls)
-                    if calls:
-                        self.assertTrue(fetch.call_args.kwargs["automatic"])
-                        record = json.loads((self.cache / "update-check-v1.json").read_text())
-                        self.assertEqual(record, {**self.record, "latestVersion": "1.4.0"})
-
-    def test_failed_refresh_retains_prior_notice_and_never_touches_profiles(self):
-        write_json(self.cache / "update-check-v1.json", {**self.record, "checkedAt": self.now - 86400})
-        profile = self.home / ".hamn/profile"
-        profile.mkdir()
-        disk = profile / "disk.img"
-        disk.write_bytes(b"preserved")
-        with patch.object(helper.time, "time", return_value=self.now), patch.object(helper, "fetch_manifest", side_effect=OSError("offline")):
-            helper.automatic(self.args)
-        record = json.loads((self.cache / "update-check-v1.json").read_text())
-        self.assertEqual(record, {**self.record, "ok": False})
-        self.assertEqual(disk.read_bytes(), b"preserved")
-        self.assertEqual(stat.S_IMODE((self.cache / "update-check-v1.json").stat().st_mode), 0o600)
-
-    def test_single_flight_uses_a_real_cross_process_lock(self):
-        context = multiprocessing.get_context("fork")
-        ready = context.Event()
-        release = context.Event()
-        calls = self.home / "fetch-calls"
-
-        def fetch(*args, **kwargs):
-            with calls.open("ab") as output: output.write(b"x")
-            ready.set()
-            if not release.wait(5): raise OSError("test barrier timeout")
-            return {"version": "v1.4.0"}, 100
-
-        def run():
-            with patch.object(helper, "fetch_manifest", side_effect=fetch):
-                helper.automatic(self.args)
-
-        child = context.Process(target=run)
-        child.start()
-        try:
-            self.assertTrue(ready.wait(5), "first checker did not acquire lock")
-            with patch.object(helper, "fetch_manifest", side_effect=AssertionError("duplicate fetch")):
-                with self.assertRaises(BlockingIOError): helper.automatic(self.args)
-            self.assertEqual(calls.read_bytes(), b"x")
-        finally:
-            release.set()
-            child.join(timeout=5)
-            if child.is_alive(): child.kill(); child.join(timeout=5)
-        self.assertEqual(child.exitcode, 0)
 
 
 if __name__ == "__main__":

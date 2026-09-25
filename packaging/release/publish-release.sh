@@ -190,15 +190,13 @@ GUEST_HASH=$(sha256_file "$CANDIDATE_DIR/$GUEST_FILE")
 MANIFEST=$OUTPUT_DIR/hamn-update-manifest.json
 python3 - "$MANIFEST" "$version" "$RELEASE_REPOSITORY" "$COMMIT" \
     "$BASE_URL" "$HOST_FILE" "$HOST_HASH" "$GUEST_FILE" "$GUEST_HASH" \
-    "$CANDIDATE_DIR" "$ROOT" <<'PY'
+    "$CANDIDATE_DIR" <<'PY'
 import json
 import os
 import sys
 
 (path, version, repository, commit, base, host_name, host_hash, guest_name,
- guest_hash, candidate_dir, root) = sys.argv[1:]
-sys.path.insert(0, os.path.join(root, "scripts"))
-from upgrade_support import parse_manifest
+ guest_hash, candidate_dir) = sys.argv[1:]
 value = {
     "schemaVersion": 2,
     "channel": "stable",
@@ -216,17 +214,43 @@ value = {
 with open(path, "w", encoding="utf-8", newline="\n") as output:
     json.dump(value, output, sort_keys=True, separators=(",", ":"))
     output.write("\n")
-parse_manifest(json.dumps(value).encode(), "13.0", "arm64")
 value["schemaVersion"] = 3
 value["artifacts"]["host"]["size"] = os.path.getsize(os.path.join(candidate_dir, host_name))
 value["artifacts"]["guestImage"].update(
     size=os.path.getsize(os.path.join(candidate_dir, guest_name)),
     format="qcow2", compression="zlib", virtualSize=8 * 1024 ** 3)
-parse_manifest(json.dumps(value).encode(), "13.0", "arm64")
 with open(path.replace(".json", "-v3.json"), "w", encoding="utf-8", newline="\n") as output:
     json.dump(value, output, sort_keys=True, separators=(",", ":"))
     output.write("\n")
 PY
+
+# Validate both manifests with the exact candidate client's parser (schema,
+# HTTPS URLs and compatibility) instead of a second implementation. The archive
+# digest was verified above; extract only its executable, as install.sh does.
+validator=$(mktemp -d "${TMPDIR:-/tmp}/hamn-publish-validator.XXXXXX") ||
+    fail "cannot create manifest validator workspace"
+trap 'rm -rf "$validator"' EXIT
+validator_member=
+while IFS= read -r member; do
+    if [[ "$member" =~ ^[A-Za-z0-9._-]+/bin/hamn$ ]]; then
+        [ -z "$validator_member" ] || fail "candidate host archive has duplicate executables"
+        validator_member=$member
+    fi
+done < <(tar -tzf "$CANDIDATE_DIR/$HOST_FILE")
+[ -n "$validator_member" ] || fail "candidate host archive has no executable"
+tar -xzOf "$CANDIDATE_DIR/$HOST_FILE" -- "$validator_member" >"$validator/hamn" ||
+    fail "cannot read the candidate executable"
+chmod 0700 "$validator/hamn"
+manifest_fields() {
+    "$validator/hamn" __install-support upgrade fields "$1" >/dev/null &&
+        "$validator/hamn" __install-support manifest "$1" 13.0 arm64
+}
+v2_fields=$(manifest_fields "$MANIFEST") ||
+    fail "the candidate client rejects the generated v2 manifest"
+v3_fields=$(manifest_fields "${MANIFEST%.json}-v3.json") ||
+    fail "the candidate client rejects the generated v3 manifest"
+[ "$v2_fields" = "$v3_fields" ] ||
+    fail "v2 and v3 manifests name different release artifacts"
 cp "$candidate" "$OUTPUT_DIR/candidate.json"
 cp "$checksums" "$OUTPUT_DIR/SHA256SUMS"
 cp "$evidence" "$OUTPUT_DIR/hosted-validation-evidence.json"
