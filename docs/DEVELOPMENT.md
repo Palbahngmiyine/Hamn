@@ -46,6 +46,13 @@ workspace crate, never shipped) serializes publication, signs and checks a tempo
 Virtualization entitlement. This is ad-hoc signing, not Developer ID signing
 or notarization. Do not distribute a separate core executable or dynamic library.
 
+`make install` publishes `build/hamn` as a new managed generation with the
+executable's own native installer (`build/hamn __install-support install`), under
+`PREFIX` (default `~/.local`); `BINDIR` and `DATADIR` select the command and data
+directories. It installs only the executable, with no source files, and refuses
+an installation of the earlier layout unchanged; see
+[Installation](INSTALLATION.md#installed-layout-and-earlier-installations).
+
 Docker CLI is optional for users of the built-in Engine API client. External
 Docker CLI, Compose, buildx, and SDKs can use the profile's public socket.
 A VM needs an installed, verified managed guest image; there is no unsigned
@@ -112,6 +119,7 @@ authority.
 ## Source boundaries
 
 - `control/`: typed requests/results, shared services, TUI, headless output.
+- `control/install_support/`: the native installer and updater (`__install-support`).
 - `host/core/`: C ABI, profiles, VM lifecycle and guest deployment transactions.
 - `host/vz/`: Virtualization.framework only.
 - `host/fwd/`: owned Docker socket and published-port forwarding.

@@ -38,7 +38,7 @@
 
 ## Repository Map
 
-- `control/`: Rust TUI, headless requests, shared service, Docker/Kubernetes clients, streams, and cancellation. `control/main.rs` is the executable entrypoint.
+- `control/`: Rust TUI, headless requests, shared service, Docker/Kubernetes clients, streams, and cancellation. `control/main.rs` is the executable entrypoint. `control/install_support/` is the native installer and updater (the private `__install-support` mode); no shell script installs or updates Hamn.
 - `host/`: C/Objective-C VM core, statically linked into the Rust executable through `build.rs` and `Makefile`.
 - `host/vz/`: the only place for Objective-C Virtualization.framework code.
 - `host/core/`: profile configuration/state, lifecycle, control API, provisioning, and guest deployment transactions.
@@ -104,7 +104,7 @@ release profile without LTO). Release candidates and `release.yml` always use th
 release profile and run `test-local-macos` serially.
 
 - `make host`: build, ad-hoc codesign, verify, and publish the single Rust + C/Objective-C `build/hamn`. Use `Cargo.lock` and `rust-toolchain.toml`.
-- `make install`: install only `hamn` and its versioned source into `~/.local`.
+- `make install`: publish `build/hamn` as a managed generation in `~/.local` through the executable's native installer (`__install-support install`); no source files are installed.
 - `make test-control`: Rust unit tests plus worker, Docker/Kubernetes API, TUI, SSH deadline, and single-binary regressions.
 - `make test-workflows`: lint GitHub Actions workflows with `actionlint`.
 - `make test-portable`: portable source and guest-script checks; this does not build or run the full guest agent.

@@ -102,15 +102,24 @@ library is required at runtime.
 `control/install_support/` implements the private `__install-support` mode in the
 same executable, before Tokio or terminal initialization. It owns archive and
 manifest validation, stable version decisions, manifest-only checks, artifact
-acquisition and byte accounting, version-1 receipt compatibility, host install
-locks, recovery references and obsolete-generation collection. Shell scripts retain
-transaction ordering and transfer verified paths/identities as explicit arguments.
+acquisition and byte accounting, receipt compatibility, and the whole install
+and update transaction: the transaction, cache and install locks in their fixed
+order (`locks.rs`), the version-3 recovery journal and rollback (`journal.rs`),
+generation staging and atomic command-link publication (`generation.rs`), signal
+checkpoints (`interrupt.rs`), the update sequence (`update.rs`) and
+obsolete-generation collection (`retention.rs`). One process holds every lock of
+a transaction and installs a release's `bin/hamn` itself, so a host archive is
+only a generation payload (`bin/hamn` and `share/hamn/update-manifest-url`) and
+nothing in it is executed to install it. `hamn upgrade` reaches the updater
+through the core worker (`host/cmd/cmd_update.c`), which passes its own version
+and generation so the updater can refuse a generation that changed while it
+waited; `make install` and the bootstrap call the private mode directly.
 Before the host executable is authenticated, the bootstrap uses macOS's stock
 `zsh/system` for the shared per-digest lock and bounded partial writes. It verifies
 the pinned size and SHA-256 before reading the executable through `tar` stdout.
 That process releases its download lock before the native updater runs. Subsequent
 manifest, receipt and transfer decisions execute inside Hamn; installation
-does not run Python.
+runs no Python and no shell script.
 The scanner has a process-group deadline, and both install roots remain locked
 through update recovery and collection. See [Installation](INSTALLATION.md) for
 retention and compatibility limits.

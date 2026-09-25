@@ -92,14 +92,22 @@ kubeconfig 인증 플러그인은 허용합니다. 별도 호스트 코어나 �
 
 `control/install_support/`는 같은 실행 파일의 내부 `__install-support` 모드를
 구현하며 Tokio·터미널 초기화 전에 실행합니다. 아카이브·manifest 검증, stable 버전
-판정, manifest-only 검사, artifact 획득과 byte 집계, version-1 설치 기록 호환,
-호스트 설치 잠금, 복구 참조, 불필요한 설치본 정리를
-담당합니다. Shell 스크립트가 트랜잭션 순서를 유지하고 검증된 경로·식별자를
-명시적 인자로 전달합니다. 호스트 실행 파일을 검증하기 전에는 macOS 기본
+판정, manifest-only 검사, artifact 획득과 byte 집계, 설치 기록 호환, 그리고 설치·
+업데이트 거래 전체를 담당합니다. 고정된 순서의 거래·캐시·설치 잠금(`locks.rs`),
+version-3 복구 저널과 롤백(`journal.rs`), generation staging과 원자적 명령 링크
+게시(`generation.rs`), signal checkpoint(`interrupt.rs`), 업데이트 순서(`update.rs`),
+불필요한 설치본 정리(`retention.rs`)가 여기에 있습니다. 한 프로세스가 거래의 모든
+잠금을 보유하고 릴리스의 `bin/hamn`을 직접 설치하므로, 호스트 아카이브는 generation
+payload(`bin/hamn`과 `share/hamn/update-manifest-url`)일 뿐이며 설치를 위해 그 안의
+어떤 것도 실행하지 않습니다. `hamn upgrade`는 core worker(`host/cmd/cmd_update.c`)를
+거쳐 업데이트기에 도달하며, worker는 자신의 버전과 generation을 전달해 대기 중에
+generation이 바뀌면 업데이트기가 거부하게 합니다. `make install`과 최초 설치기는
+내부 모드를 직접 호출합니다. 호스트 실행 파일을 검증하기 전에는 macOS 기본
 `zsh/system`이 공통 digest 잠금과 크기를 제한한 partial 기록을 소유합니다.
 고정 크기·SHA-256을 검증한 다음 `tar` 표준 출력으로 실행 파일을 읽으며, native
 updater를 호출하기 전에 다운로드 프로세스와 잠금을 정리합니다. 이후 manifest·설치
-기록·전송 판단은 Hamn 내부에서 실행하며 설치는 Python을 실행하지 않습니다.
+기록·전송 판단은 Hamn 내부에서 실행하며 설치는 Python이나 shell 스크립트를
+실행하지 않습니다.
 조회 프로세스 그룹에는 실행 시간 제한을 적용하며, 업데이트 복구와 정리가
 끝날 때까지 두 설치 경로의 잠금을 유지합니다. 보존·호환 범위는
 [설치 문서](INSTALLATION.ko.md)를 참고하세요.
