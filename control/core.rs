@@ -414,30 +414,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_waits_for_the_owned_workers_cleanup_result() {
-        use std::os::unix::fs::OpenOptionsExt;
-        let path =
-            std::env::temp_dir().join(format!("hamn-cancel-worker-{}.py", std::process::id()));
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o700)
-            .open(&path)
-            .unwrap();
-        file.write_all(format!("#!{}\n", worker_lifetime_tests::python()).as_bytes())
-            .unwrap();
-        file.write_all(
-            br#"import json, signal, sys
-json.load(sys.stdin)
-def cleanup(*_):
-    print(json.dumps({'Ok': {'cleanup': 'completed'}}), flush=True)
-    sys.exit(0)
-signal.signal(signal.SIGTERM, cleanup)
-print('ready', file=sys.stderr, flush=True)
-signal.pause()
-"#,
-        )
-        .unwrap();
-        drop(file);
+        let fixture = worker_lifetime_tests::Fixture::new("cancel-cleanup", "CANCEL_CLEANUP");
         let cancel = tokio_util::sync::CancellationToken::new();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
         let request = Request {
@@ -447,7 +424,7 @@ signal.pause()
         let done = tokio_util::sync::CancellationToken::new();
         let call = async {
             let result =
-                call_executable(&request, path.as_os_str(), Some(&cancel), Some(&sender)).await;
+                call_executable(&request, fixture.worker.as_os_str(), Some(&cancel), Some(&sender)).await;
             done.cancel();
             result
         };
@@ -463,7 +440,6 @@ signal.pause()
         })
         .await
         .unwrap();
-        std::fs::remove_file(path).unwrap();
         assert_eq!(result.unwrap()["cleanup"], "completed");
     }
 

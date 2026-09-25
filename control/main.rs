@@ -23,6 +23,8 @@ mod service;
 mod stream;
 mod terminal_io;
 mod terminal_session;
+#[cfg(test)]
+mod test_fixture;
 mod tui;
 mod tui_state;
 mod upgrade;

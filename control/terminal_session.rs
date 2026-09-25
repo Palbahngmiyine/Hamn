@@ -46,11 +46,14 @@ impl Session {
     }
     pub fn start(invocation: Invocation, width: u16, height: u16) -> io::Result<Self> {
         let mut command = invocation.command(false);
-        let _input = invocation
-            .body
-            .as_deref()
-            .map(|body| crate::command_input::attach(&mut command, body))
-            .transpose()?;
+        let _input = match invocation.body.as_deref() {
+            Some(body) => {
+                let (file, path) = crate::command_input::attach(&mut command, body)?;
+                command.args(["--filename", &path]);
+                Some(file)
+            }
+            None => None,
+        };
         Self::spawn(command, invocation, width, height)
     }
     fn spawn(
