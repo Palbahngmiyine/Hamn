@@ -52,9 +52,13 @@
   immutable-image validation.
 - `guest/image/`: external Linux builder for the signed Ubuntu 24.04 arm64 guest image.
 - `guest/systemd/`: the `hamnd.service` unit.
-- `packaging/release/`: candidate assembly, physical validation evidence, and stable
-  promotion. It must not rebuild an already validated RC.
-- `tests/host/`, `guest/tests/`, and inline Rust tests: host, guest, and control-plane regressions. `tests/release/` and `packaging/release/` cover release evidence and runtime validation.
+- `packaging/release/`: the release installer template and stable promotion. It must
+  not rebuild an already validated RC.
+- `tools/hamn-dev/`: never-shipped build, test, and release tooling: host publication,
+  regression suites (`hamn-dev test`), and the release drivers (`hamn-dev release`)
+  for version resolution, candidate assembly, hosted and physical validation, and
+  repository preflight.
+- `tests/host/`, `guest/tests/`, and inline Rust tests: host, guest, and control-plane regressions. `tools/hamn-dev` suites cover release evidence, release drivers, and runtime validation.
 - `docs/`: English source documentation and corresponding Korean Markdown translations.
 - `vendor/`: vendored C dependencies. Avoid replacing these casually.
 
