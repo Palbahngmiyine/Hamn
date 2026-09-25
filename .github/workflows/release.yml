@@ -31,10 +31,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Build release tooling
+        shell: bash
+        # rust-toolchain.toml selects the pinned toolchain through rustup.
+        run: cargo build --locked -p hamn-dev
       - name: Resolve push or recovery request
         id: release
         shell: bash
         env:
+          HAMN_DEV: ${{ github.workspace }}/target/debug/hamn-dev
           PREVIOUS_REF: ${{ github.event.before }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = push ]; then
@@ -285,6 +290,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Build release tooling
+        shell: bash
+        # rust-toolchain.toml selects the pinned toolchain through rustup.
+        run: cargo build --locked -p hamn-dev
       - name: Download exact candidate bytes
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -325,6 +334,7 @@ jobs:
       - name: Verify hosted evidence and generate immutable manifest
         shell: bash
         env:
+          HAMN_DEV: ${{ github.workspace }}/target/debug/hamn-dev
           HAMN_RELEASE_REPOSITORY: ${{ github.repository }}
           STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
           CANDIDATE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
@@ -339,9 +349,7 @@ jobs:
       - name: Attest immutable update manifest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: |
-            ${{ runner.temp }}/hamn-publish/hamn-update-manifest.json
-            ${{ runner.temp }}/hamn-publish/hamn-update-manifest-v3.json
+          subject-path: ${{ runner.temp }}/hamn-publish/hamn-update-manifest-v3.json
       - name: Create and verify draft release
         shell: bash
         env:
@@ -360,7 +368,6 @@ jobs:
             "$candidate/hamn-${STABLE_TAG}-ubuntu-24.04-arm64.img" \
             "$candidate/hamn-${STABLE_TAG}.spdx.json" \
             "$candidate/install.sh" \
-            "$publish/hamn-update-manifest.json" \
             "$publish/hamn-update-manifest-v3.json" \
             "$publish/hosted-validation-evidence.json" \
             "$publish/candidate.json" \
@@ -368,30 +375,11 @@ jobs:
             "$publish/promoted-from-rc" \
             --draft --target "$GITHUB_SHA" --title "Hamn $STABLE_TAG" \
             --generate-notes \
-            --notes "Built and statically validated on GitHub-hosted runners using these exact RC bytes; this release does not claim physical VM end-to-end validation. Legacy managed K3s data and local volumes are permanently deleted; Docker data is preserved. Binary rollback cannot recover K3s data."
+            --notes "Built and statically validated on GitHub-hosted runners using these exact RC bytes; this release does not claim physical VM end-to-end validation."
           gh release view "$STABLE_TAG" --json tagName,targetCommitish,isDraft,isPrerelease,assets \
             > "$RUNNER_TEMP/hamn-draft-release.json"
-          python3 - "$RUNNER_TEMP/hamn-draft-release.json" "$STABLE_TAG" "$GITHUB_SHA" <<'PY'
-          import json
-          import sys
-
-          path, tag, commit = sys.argv[1:]
-          with open(path, encoding="utf-8") as source:
-              release = json.load(source)
-          expected = {
-              "hamn-" + tag + "-darwin-arm64.tar.gz",
-              "hamn-" + tag + "-ubuntu-24.04-arm64.img",
-              "hamn-" + tag + ".spdx.json",
-              "install.sh", "hamn-update-manifest.json", "hamn-update-manifest-v3.json",
-              "hosted-validation-evidence.json", "candidate.json",
-              "SHA256SUMS", "promoted-from-rc",
-          }
-          names = {asset.get("name") for asset in release.get("assets", [])}
-          if release.get("tagName") != tag or release.get("targetCommitish") != commit or \
-                  release.get("isDraft") is not True or \
-                  release.get("isPrerelease") is not False or names != expected:
-              raise SystemExit("draft release does not bind every keyless artifact")
-          PY
+          "$GITHUB_WORKSPACE/target/debug/hamn-dev" release verify-draft-release \
+            "$RUNNER_TEMP/hamn-draft-release.json" "$STABLE_TAG" "$GITHUB_SHA"
       - name: Publish immutable release and verify assets
         shell: bash
         env:
@@ -416,4 +404,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
-        run: python3 packaging/release/complete-release-pr.py "$STABLE_TAG" "$GITHUB_SHA"
+        run: target/debug/hamn-dev release complete-pr "$STABLE_TAG" "$GITHUB_SHA"

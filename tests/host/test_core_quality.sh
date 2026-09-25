@@ -150,10 +150,16 @@ for requirement in \
         "$ROOT/guest/agent/api/router.c" ||
         fail "mountInotify guest boundary is incomplete: $requirement"
 done
-for requirement in 'dockerWithoutCli' 'k3sRunningRetirement' 'k3sStoppedRetirement' 'dockerDataPreserved' 'vmSurvivesTuiExit'; do
-    grep -Fq "$requirement" "$ROOT/packaging/release/physical_contract.py" ||
+physical_contract=$ROOT/tools/hamn-dev/src/release/contract.rs
+for requirement in '"dockerWithoutCli"' '"vmSurvivesTuiExit"' '"externalKubernetes"' \
+    '"kubeconfigUnchanged"' 'pub const PHYSICAL_SCHEMA_VERSION: u64 = 3;'; do
+    grep -Fq "$requirement" "$physical_contract" ||
         fail "physical release contract is incomplete: $requirement"
 done
+if rg -n 'k3sRunningRetirement|k3sStoppedRetirement|dockerDataPreserved|HAMN_LEGACY_' \
+    "$ROOT/tools/hamn-dev/src/release" "$ROOT/packaging/release" >/dev/null; then
+    fail "physical release gate still requires legacy K3s retirement"
+fi
 grep -Fq 'environment: hamn-promotion' "$ROOT/.github/workflows/release.yml" || fail 'promotion environment missing'
 grep -Fqx '  contents: read' "$ROOT/.github/workflows/release.yml" ||
     fail "release workflow must default to read-only repository contents"
@@ -372,7 +378,7 @@ for requirement in \
     '    types: [completed]' \
     "    if: (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip release]'))" \
     '          ref: main' \
-    '        run: python3 packaging/release/release-pr-ready.py' \
+    '        run: cargo run --locked -p hamn-dev -- release pr-ready' \
     "        if: steps.publication.outputs.ready == 'true'" \
     '  contents: read' \
     '        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0' \
@@ -504,28 +510,33 @@ printf '%s\n' "$publish_job" |
 printf '%s\n' "$publish_job" | grep -Fq -- '--deny-self-hosted-runners' ||
     fail "keyless promotion accepts provenance from self-hosted runners"
 
+hosted_evidence=$ROOT/tools/hamn-dev/src/release/hosted.rs
 for requirement in \
     '"validationMode": "github-hosted-no-vm"' \
-    '"physicalE2E": False' \
-    '"vmLifecycle": False' \
-    '"dockerE2E": False' \
-    '"k3sE2E": False'; do
-    grep -Fq "$requirement" "$ROOT/packaging/release/hosted-validation.sh" ||
+    '"physicalE2E": false' \
+    'pub const HOSTED_NOT_EXERCISED: [&str; 3] = ["vmLifecycle", "dockerE2E", "colimaCoexistence"];'; do
+    grep -Fq "$requirement" "$hosted_evidence" ||
         fail "hosted evidence overstates validation: $requirement"
 done
+grep -Fq '"$HAMN_DEV" release hosted-evidence' "$ROOT/packaging/release/hosted-validation.sh" ||
+    fail "hosted validation does not write its evidence with the checked writer"
+if rg -n 'k3sE2E' "$ROOT/packaging/release" "$ROOT/tools/hamn-dev/src/release" >/dev/null; then
+    fail "hosted evidence still records the removed K3s capability"
+fi
 grep -Fq 'BASE_URL="https://github.com/${RELEASE_REPOSITORY}/releases/download/${STABLE_TAG}"' \
     "$ROOT/packaging/release/publish-release.sh" ||
     fail "keyless promotion does not derive the canonical GitHub Release base"
-grep -Fq 'candidate artifact directory contains unexpected entries' \
-    "$ROOT/packaging/release/publish-release.sh" ||
+grep -Fq 'candidate artifact directory contains unexpected entries' "$hosted_evidence" &&
+    grep -Fq '"$HAMN_DEV" release verify-hosted' "$ROOT/packaging/release/publish-release.sh" ||
     fail "keyless promotion does not reject unbound candidate files"
 grep -Fq 'CANONICAL_MANIFEST_URL="https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/hamn-update-manifest-v3.json"' \
     "$ROOT/packaging/release/build-candidate.sh" ||
     fail "candidate does not embed the latest v3 manifest URL"
-for manifest in hamn-update-manifest.json hamn-update-manifest-v3.json; do
-    printf '%s\n' "$publish_job" | grep -Fq "\"\$publish/$manifest\"" ||
-        fail "promotion omits a compatible manifest asset: $manifest"
-done
+printf '%s\n' "$publish_job" | grep -Fq '"$publish/hamn-update-manifest-v3.json"' ||
+    fail "promotion omits the v3 manifest asset"
+if printf '%s\n' "$publish_job" | grep -Fq 'hamn-update-manifest.json'; then
+    fail "promotion still publishes the removed schema v2 manifest"
+fi
 if rg -n 'HAMN_UPDATE_PUBLIC_KEY|hamn-update-manifest\.json\.sig' \
     "$ROOT/packaging/release/build-candidate.sh" \
     "$ROOT/packaging/release/install.sh.in" \

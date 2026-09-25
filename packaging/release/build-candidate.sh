@@ -26,9 +26,12 @@ GUEST_IMAGE=${HAMN_GUEST_IMAGE:-}
 ALLOW_DIRTY=${HAMN_RELEASE_ALLOW_DIRTY:-0}
 ALLOW_LOCAL=${HAMN_RELEASE_ALLOW_LOCAL:-0}
 RELEASE_REPOSITORY=${GITHUB_REPOSITORY:-${HAMN_RELEASE_REPOSITORY:-}}
+# Release metadata writer (tools/hamn-dev); `make release-candidate` builds it.
+HAMN_DEV=${HAMN_DEV:-}
 
 [ -n "$RELEASE_REF" ] && [ -n "$RELEASE_TAG" ] && [ -n "$OUTPUT_DIR" ] ||
     fail "RELEASE_REF, RELEASE_TAG, and OUTPUT_DIR are required"
+[ -x "$HAMN_DEV" ] || fail "HAMN_DEV must name the built hamn-dev executable"
 if [[ ! "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-rc\.([0-9]+)$ ]]; then
     fail "RELEASE_TAG must be a vX.Y.Z-rc.N tag"
 fi
@@ -122,122 +125,25 @@ else
     HOST_URL="file://$HOST_ARTIFACT"
     GUEST_URL="file://$GUEST_ARTIFACT"
 fi
-python3 - "$ROOT/packaging/release/install.sh.in" "$INSTALLER" \
-    "$VERSION" "$COMMIT" "$HOST_URL" "$HOST_HASH" "$GUEST_URL" \
-    "$GUEST_HASH" "$HOST_ARTIFACT" "$GUEST_ARTIFACT" <<'PY'
-import os
-import shlex
-import sys
-
-(template_path, output_path, version, commit, host_url, host_hash,
- guest_url, guest_hash, host_path, guest_path) = sys.argv[1:]
-with open(template_path, encoding="utf-8") as source:
-    rendered = source.read()
-values = {
-    "__HAMN_VERSION__": version,
-    "__HAMN_COMMIT__": commit,
-    "__HAMN_HOST_URL__": host_url,
-    "__HAMN_HOST_SHA256__": host_hash,
-    "__HAMN_GUEST_URL__": guest_url,
-    "__HAMN_GUEST_SHA256__": guest_hash,
-    "__HAMN_HOST_SIZE__": str(os.path.getsize(host_path)),
-    "__HAMN_GUEST_SIZE__": str(os.path.getsize(guest_path)),
-}
-for placeholder, value in values.items():
-    if rendered.count(placeholder) != 1:
-        raise SystemExit("installer template placeholder is malformed: " + placeholder)
-    rendered = rendered.replace(placeholder, shlex.quote(value))
-if "__HAMN_" in rendered:
-    raise SystemExit("installer template has an unresolved placeholder")
-with open(output_path, "w", encoding="utf-8", newline="\n") as output:
-    output.write(rendered)
-PY
+"$HAMN_DEV" release render-installer "$ROOT/packaging/release/install.sh.in" \
+    "$INSTALLER" "$VERSION" "$COMMIT" "$HOST_URL" "$HOST_HASH" "$GUEST_URL" \
+    "$GUEST_HASH" "$HOST_ARTIFACT" "$GUEST_ARTIFACT"
 chmod 0755 "$INSTALLER"
 INSTALLER_HASH=$(sha256_file "$INSTALLER")
 SBOM="$OUTPUT_DIR/hamn-${VERSION}.spdx.json"
-python3 - "$SBOM" "$VERSION" "$COMMIT" "$SOURCE_TREE" "$COMMIT_EPOCH" \
-    "$(basename "$HOST_ARTIFACT")" "$HOST_HASH" \
-    "$(basename "$GUEST_ARTIFACT")" "$GUEST_HASH" <<'PY'
-import datetime
-import json
-import sys
-
-(path, version, commit, tree, commit_epoch, host_name, host_hash, guest_name,
- guest_hash) = sys.argv[1:]
-created = datetime.datetime.fromtimestamp(int(commit_epoch),
-                                          datetime.timezone.utc).isoformat()
-created = created.replace("+00:00", "Z")
-document = {
-    "SPDXID": "SPDXRef-DOCUMENT",
-    "spdxVersion": "SPDX-2.3",
-    "name": "Hamn " + version,
-    "dataLicense": "CC0-1.0",
-    "documentNamespace": "https://hamn.dev/spdx/" + version + "/" + commit,
-    "creationInfo": {
-        "creators": ["Tool: hamn-release-candidate"],
-        "created": created,
-        "licenseListVersion": "3.23",
-    },
-    "packages": [
-        {
-            "SPDXID": "SPDXRef-HamnHost",
-            "name": host_name,
-            "versionInfo": version,
-            "downloadLocation": "NOASSERTION",
-            "filesAnalyzed": False,
-            "checksums": [{"algorithm": "SHA256", "checksumValue": host_hash}],
-        },
-        {
-            "SPDXID": "SPDXRef-HamnGuest",
-            "name": guest_name,
-            "versionInfo": version,
-            "downloadLocation": "NOASSERTION",
-            "filesAnalyzed": False,
-            "checksums": [{"algorithm": "SHA256", "checksumValue": guest_hash}],
-        },
-    ],
-    "annotations": [{
-        "annotationType": "OTHER",
-        "annotator": "Tool: hamn-release-candidate",
-        "comment": "commit=" + commit + " sourceTree=" + tree,
-    }],
-}
-with open(path, "w", encoding="utf-8", newline="\n") as output:
-    json.dump(document, output, sort_keys=True, separators=(",", ":"))
-    output.write("\n")
-PY
+"$HAMN_DEV" release write-sbom "$SBOM" "$VERSION" "$COMMIT" "$SOURCE_TREE" \
+    "$COMMIT_EPOCH" "$(basename "$HOST_ARTIFACT")" "$HOST_HASH" \
+    "$(basename "$GUEST_ARTIFACT")" "$GUEST_HASH"
 chmod 0644 "$SBOM"
 SBOM_HASH=$(sha256_file "$SBOM")
 
 CANDIDATE="$OUTPUT_DIR/candidate.json"
-python3 - "$CANDIDATE" "$RELEASE_TAG" "$VERSION" "$COMMIT" "$SOURCE_TREE" \
+"$HAMN_DEV" release write-candidate "$CANDIDATE" "$RELEASE_TAG" "$VERSION" \
+    "$COMMIT" "$SOURCE_TREE" \
     "$(basename "$HOST_ARTIFACT")" "$HOST_HASH" \
     "$(basename "$GUEST_ARTIFACT")" "$GUEST_HASH" \
     "$(basename "$INSTALLER")" "$INSTALLER_HASH" \
-    "$(basename "$SBOM")" "$SBOM_HASH" <<'PY'
-import json
-import sys
-
-(path, tag, version, commit, tree, host_name, host_hash, guest_name,
- guest_hash, installer_name, installer_hash, sbom_name, sbom_hash) = sys.argv[1:]
-document = {
-    "schemaVersion": 1,
-    "kind": "hamn-release-candidate",
-    "tag": tag,
-    "version": version,
-    "commit": commit,
-    "sourceTree": tree,
-    "artifacts": [
-        {"name": host_name, "sha256": host_hash},
-        {"name": guest_name, "sha256": guest_hash},
-        {"name": installer_name, "sha256": installer_hash},
-        {"name": sbom_name, "sha256": sbom_hash},
-    ],
-}
-with open(path, "w", encoding="utf-8", newline="\n") as output:
-    json.dump(document, output, sort_keys=True, separators=(",", ":"))
-    output.write("\n")
-PY
+    "$(basename "$SBOM")" "$SBOM_HASH"
 chmod 0644 "$CANDIDATE"
 
 {

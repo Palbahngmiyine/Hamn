@@ -16,6 +16,9 @@ mod native_query_lifetime;
 mod observer_requests;
 mod profile_yaml;
 mod qcow2;
+mod release_consumer;
+mod release_github;
+mod release_physical;
 mod remote_cancel_boundaries;
 mod repository;
 mod rust_sdk;
@@ -55,6 +58,9 @@ const SUITES: &[Suite] = &[
     ("docker-readiness", docker_readiness::main),
     ("observer-requests", observer_requests::main),
     ("remote-cancel-boundaries", remote_cancel_boundaries::main),
+    ("release-github", release_github::main),
+    ("release-physical", release_physical::main),
+    ("release-publisher-consumer", release_consumer::main),
     ("single-binary", single_binary::main),
     ("ssh-deadline", ssh_deadline::main),
     ("control-signed-bootstrap", control_signed_bootstrap::main),

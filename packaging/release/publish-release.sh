@@ -9,10 +9,6 @@ fail() {
     exit 1
 }
 
-sha256_file() {
-    shasum -a 256 "$1" | awk '{print $1}'
-}
-
 safe_regular() {
     local path=$1
     [ -f "$path" ] && [ ! -L "$path" ] || return 1
@@ -30,10 +26,13 @@ EXPECTED_WORKFLOW_ATTEMPT=${HAMN_EXPECTED_WORKFLOW_ATTEMPT:-}
 PROVENANCE=${HAMN_RELEASE_PROVENANCE:-workflow}
 RELEASE_REPOSITORY=${HAMN_RELEASE_REPOSITORY:-}
 RELEASE_BASE_URL=${HAMN_RELEASE_BASE_URL:-}
+# Evidence verifier and manifest writer (tools/hamn-dev).
+HAMN_DEV=${HAMN_DEV:-}
 
 [ -n "$STABLE_TAG" ] && [ -n "$RC_TAG" ] && [ -n "$RELEASE_REF" ] &&
     [ -n "$INPUT_DIR" ] && [ -n "$OUTPUT_DIR" ] ||
     fail "usage: publish-release.sh vX.Y.Z vX.Y.Z-rc.N COMMIT INPUT_DIR OUTPUT_DIR"
+[ -x "$HAMN_DEV" ] || fail "HAMN_DEV must name the built hamn-dev executable"
 [[ "$STABLE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
     fail "stable tag is invalid"
 [[ "$RC_TAG" =~ ^${STABLE_TAG}-rc\.[0-9]+$ ]] ||
@@ -64,7 +63,6 @@ if [ -n "$RELEASE_REPOSITORY" ]; then
 else
     BASE_URL=$RELEASE_BASE_URL
     [ -n "$BASE_URL" ] || fail "HAMN_RELEASE_BASE_URL is required outside GitHub Actions"
-    RELEASE_REPOSITORY=local/hamn
 fi
 case "$BASE_URL" in https://*) ;; *) fail "release base URL must use HTTPS" ;; esac
 
@@ -78,7 +76,6 @@ EVIDENCE_DIR=$INPUT_DIR/hamn-evidence
 [ -d "$CANDIDATE_DIR" ] && [ ! -L "$CANDIDATE_DIR" ] &&
     [ -d "$EVIDENCE_DIR" ] && [ ! -L "$EVIDENCE_DIR" ] ||
     fail "candidate or hosted evidence directory is missing"
-version=${STABLE_TAG#v}
 HOST_FILE="hamn-${STABLE_TAG}-darwin-arm64.tar.gz"
 GUEST_FILE="hamn-${STABLE_TAG}-ubuntu-24.04-arm64.img"
 SBOM_FILE="hamn-${STABLE_TAG}.spdx.json"
@@ -98,74 +95,10 @@ COMMIT=$(git -C "$ROOT" rev-parse --verify "$RELEASE_REF^{commit}") ||
     fail "RELEASE_REF is not a commit"
 SOURCE_TREE=$(git -C "$ROOT" rev-parse "$COMMIT^{tree}") ||
     fail "cannot resolve release source tree"
-CANDIDATE_HASH=$(sha256_file "$candidate")
-CHECKSUMS_HASH=$(sha256_file "$checksums")
-
-python3 - "$CANDIDATE_DIR" "$candidate" "$evidence" "$STABLE_TAG" \
-    "$RC_TAG" "$COMMIT" "$SOURCE_TREE" "$CANDIDATE_HASH" \
-    "$CHECKSUMS_HASH" "$EXPECTED_WORKFLOW_RUN" \
-    "$EXPECTED_WORKFLOW_ATTEMPT" "$HOST_FILE" "$GUEST_FILE" \
-    "$SBOM_FILE" "$INSTALLER_FILE" <<'PY'
-import json
-import os
-import stat
-import sys
-
-(directory, candidate_path, evidence_path, stable_tag, rc_tag, commit, tree,
- candidate_hash, checksums_hash, expected_run, expected_attempt, host, guest,
- sbom, installer) = sys.argv[1:]
-expected_files = {host, guest, sbom, installer, "candidate.json", "SHA256SUMS"}
-actual = set()
-with os.scandir(directory) as entries:
-    for entry in entries:
-        info = entry.stat(follow_symlinks=False)
-        if entry.is_symlink() or not stat.S_ISREG(info.st_mode):
-            raise SystemExit("candidate artifact directory contains an unsafe entry")
-        actual.add(entry.name)
-if actual != expected_files:
-    raise SystemExit("candidate artifact directory contains unexpected entries")
-with open(candidate_path, encoding="utf-8") as source:
-    candidate = json.load(source)
-with open(evidence_path, encoding="utf-8") as source:
-    evidence = json.load(source)
-if candidate.get("tag") != rc_tag or candidate.get("version") != stable_tag or \
-        candidate.get("commit") != commit or candidate.get("sourceTree") != tree:
-    raise SystemExit("candidate provenance mismatch")
-artifacts = candidate.get("artifacts")
-if not isinstance(artifacts, list):
-    raise SystemExit("candidate artifacts are invalid")
-artifact_map = {item.get("name"): item.get("sha256") for item in artifacts
-                if isinstance(item, dict)}
-if set(artifact_map) != {host, guest, sbom, installer}:
-    raise SystemExit("candidate artifact names are invalid")
-if set(evidence) != {
-        "schemaVersion", "kind", "validationMode", "physicalE2E", "tag",
-        "commit", "sourceTree", "workflow", "candidate", "checks"}:
-    raise SystemExit("hosted validation evidence schema is invalid")
-if evidence["schemaVersion"] != 1 or \
-        evidence["kind"] != "hamn-hosted-validation-evidence" or \
-        evidence["validationMode"] != "github-hosted-no-vm" or \
-        evidence["physicalE2E"] is not False or evidence["tag"] != rc_tag or \
-        evidence["commit"] != commit or evidence["sourceTree"] != tree:
-    raise SystemExit("hosted validation identity mismatch")
-if evidence.get("workflow") != {
-        "run": expected_run, "attempt": expected_attempt}:
-    raise SystemExit("hosted validation workflow provenance mismatch")
-bound = evidence.get("candidate")
-if not isinstance(bound, dict) or \
-        bound.get("candidateJsonSha256") != candidate_hash or \
-        bound.get("checksumsSha256") != checksums_hash or \
-        bound.get("artifacts") != artifact_map:
-    raise SystemExit("hosted validation candidate binding mismatch")
-checks = evidence.get("checks")
-if not isinstance(checks, dict) or checks.get("testLocalMacOS") is not True or \
-        checks.get("artifactHashes") is not True or \
-        checks.get("archiveSafety") is not True or \
-        checks.get("guestImageContract") is not True or \
-        any(checks.get(name) is not False for name in (
-            "vmLifecycle", "dockerE2E", "k3sE2E", "colimaCoexistence")):
-    raise SystemExit("hosted validation capabilities are invalid")
-PY
+"$HAMN_DEV" release verify-hosted "$CANDIDATE_DIR" "$evidence" "$STABLE_TAG" \
+    "$RC_TAG" "$COMMIT" "$SOURCE_TREE" "$EXPECTED_WORKFLOW_RUN" \
+    "$EXPECTED_WORKFLOW_ATTEMPT" "$HOST_FILE" "$GUEST_FILE" "$SBOM_FILE" \
+    "$INSTALLER_FILE"
 
 SIZE_REPORT=$EVIDENCE_DIR/guest-image-size-report.json
 SIZE_BUDGET=$ROOT/guest/image/release-size-budget.json
@@ -177,54 +110,16 @@ fi
 python3 "$ROOT/guest/image/verify-release-size.py" \
     "$CANDIDATE_DIR/$GUEST_FILE" "$SIZE_REPORT" "$SIZE_BUDGET" ||
     fail "guest image size evidence or reviewed release budget is missing or invalid"
-python3 - "$SIZE_REPORT" "$COMMIT" <<'PY_SIZE_SOURCE'
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as source:
-    report = json.load(source)
-if report.get("sourceRevision") != sys.argv[2]:
-    raise SystemExit("guest image size report belongs to a different source revision")
-PY_SIZE_SOURCE
+jq -e --arg commit "$COMMIT" '.sourceRevision == $commit' "$SIZE_REPORT" >/dev/null ||
+    fail "guest image size report belongs to a different source revision"
 
-HOST_HASH=$(sha256_file "$CANDIDATE_DIR/$HOST_FILE")
-GUEST_HASH=$(sha256_file "$CANDIDATE_DIR/$GUEST_FILE")
-MANIFEST=$OUTPUT_DIR/hamn-update-manifest.json
-python3 - "$MANIFEST" "$version" "$RELEASE_REPOSITORY" "$COMMIT" \
-    "$BASE_URL" "$HOST_FILE" "$HOST_HASH" "$GUEST_FILE" "$GUEST_HASH" \
-    "$CANDIDATE_DIR" <<'PY'
-import json
-import os
-import sys
+# Only the schema v3 manifest is published; clients up to v0.1.2 read the
+# removed v2 manifest and must reinstall with install.sh.
+MANIFEST=$OUTPUT_DIR/hamn-update-manifest-v3.json
+"$HAMN_DEV" release write-manifest "$MANIFEST" "$STABLE_TAG" "$COMMIT" \
+    "$BASE_URL" "$CANDIDATE_DIR" "$HOST_FILE" "$GUEST_FILE"
 
-(path, version, repository, commit, base, host_name, host_hash, guest_name,
- guest_hash, candidate_dir) = sys.argv[1:]
-value = {
-    "schemaVersion": 2,
-    "channel": "stable",
-    "version": "v" + version,
-    # Stable v2 clients reject unknown keys; repository is already in artifact URLs.
-    "commit": commit,
-    "validationMode": "github-hosted-no-vm",
-    "compatibility": {
-        "os": "darwin", "architecture": "arm64", "minimumMacOS": "13.0"},
-    "artifacts": {
-        "host": {"url": base + "/" + host_name, "sha256": host_hash},
-        "guestImage": {"url": base + "/" + guest_name, "sha256": guest_hash},
-    },
-}
-with open(path, "w", encoding="utf-8", newline="\n") as output:
-    json.dump(value, output, sort_keys=True, separators=(",", ":"))
-    output.write("\n")
-value["schemaVersion"] = 3
-value["artifacts"]["host"]["size"] = os.path.getsize(os.path.join(candidate_dir, host_name))
-value["artifacts"]["guestImage"].update(
-    size=os.path.getsize(os.path.join(candidate_dir, guest_name)),
-    format="qcow2", compression="zlib", virtualSize=8 * 1024 ** 3)
-with open(path.replace(".json", "-v3.json"), "w", encoding="utf-8", newline="\n") as output:
-    json.dump(value, output, sort_keys=True, separators=(",", ":"))
-    output.write("\n")
-PY
-
-# Validate both manifests with the exact candidate client's parser (schema,
+# Validate the manifest with the exact candidate client's parser (schema,
 # HTTPS URLs and compatibility) instead of a second implementation. The archive
 # digest was verified above; extract only its executable, as install.sh does.
 validator=$(mktemp -d "${TMPDIR:-/tmp}/hamn-publish-validator.XXXXXX") ||
@@ -241,16 +136,8 @@ done < <(tar -tzf "$CANDIDATE_DIR/$HOST_FILE")
 tar -xzOf "$CANDIDATE_DIR/$HOST_FILE" -- "$validator_member" >"$validator/hamn" ||
     fail "cannot read the candidate executable"
 chmod 0700 "$validator/hamn"
-manifest_fields() {
-    "$validator/hamn" __install-support upgrade fields "$1" >/dev/null &&
-        "$validator/hamn" __install-support manifest "$1" 13.0 arm64
-}
-v2_fields=$(manifest_fields "$MANIFEST") ||
-    fail "the candidate client rejects the generated v2 manifest"
-v3_fields=$(manifest_fields "${MANIFEST%.json}-v3.json") ||
+"$validator/hamn" __install-support upgrade fields "$MANIFEST" >/dev/null ||
     fail "the candidate client rejects the generated v3 manifest"
-[ "$v2_fields" = "$v3_fields" ] ||
-    fail "v2 and v3 manifests name different release artifacts"
 cp "$candidate" "$OUTPUT_DIR/candidate.json"
 cp "$checksums" "$OUTPUT_DIR/SHA256SUMS"
 cp "$evidence" "$OUTPUT_DIR/hosted-validation-evidence.json"

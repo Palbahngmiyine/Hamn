@@ -12,80 +12,10 @@ fail() {
     echo "FAIL: $*" >&2
     exit 1
 }
+[ -x "${HAMN_DEV:-}" ] || fail "HAMN_DEV must name the built hamn-dev"
 
 validate_release_state() {
-    python3 - "$1" <<'PY'
-import json
-import pathlib
-import re
-import sys
-
-root = pathlib.Path(sys.argv[1])
-semver = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
-
-
-def read_text(relative):
-    path = root / relative
-    if not path.is_file() or path.is_symlink():
-        raise SystemExit(f"release version source is missing or unsafe: {relative}")
-    return path.read_text(encoding="utf-8")
-
-
-def read_json(relative):
-    try:
-        return json.loads(read_text(relative))
-    except json.JSONDecodeError as error:
-        raise SystemExit(f"release JSON is invalid: {relative}: {error}")
-
-
-config = read_json("release-please-config.json")
-if not isinstance(config, dict):
-    raise SystemExit("Release Please configuration must be an object")
-initial = config.get("initial-version")
-if initial != "0.0.1" or not semver.fullmatch(initial):
-    raise SystemExit("initial release version policy is not 0.0.1")
-if config.get("bump-minor-pre-major") is not True or \
-        config.get("bump-patch-for-minor-pre-major") is not True:
-    raise SystemExit("pre-major release policy is incomplete")
-
-manifest = read_json(".release-please-manifest.json")
-if not isinstance(manifest, dict) or set(manifest) != {"."}:
-    raise SystemExit("release manifest must contain only the root package")
-manifest_version = manifest["."]
-if not isinstance(manifest_version, str) or not semver.fullmatch(manifest_version):
-    raise SystemExit("manifest version is not canonical SemVer")
-
-version_text = read_text("version.txt")
-version_match = re.fullmatch(
-    r"((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\n",
-    version_text,
-)
-if not version_match:
-    raise SystemExit("version.txt is not one canonical SemVer line")
-source_version = version_match.group(1)
-
-make_versions = re.findall(
-    r"^VERSION[ \t]+\?=[ \t]+([^ \t#\r\n]+)[ \t]*$",
-    read_text("Makefile"),
-    re.MULTILINE,
-)
-if make_versions != [source_version]:
-    raise SystemExit("Makefile version does not match version.txt")
-
-flake_versions = re.findall(
-    r'^\s*hamnVersion = "([^"]+)";\s*# x-release-please-version\s*$',
-    read_text("flake.nix"),
-    re.MULTILINE,
-)
-if flake_versions != [source_version]:
-    raise SystemExit("flake.nix version does not match version.txt")
-
-if manifest_version == "0.0.0":
-    if source_version != initial:
-        raise SystemExit("bootstrap source version does not match initial-version")
-elif source_version != manifest_version:
-    raise SystemExit("released source version does not match the manifest")
-PY
+    "$HAMN_DEV" release check-version-state "$1"
 }
 
 write_state_fixture() {

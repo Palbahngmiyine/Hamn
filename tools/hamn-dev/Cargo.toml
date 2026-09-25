@@ -10,6 +10,9 @@ name = "hamn-dev"
 path = "src/main.rs"
 
 [dependencies]
+# Candidate host archives are gzip tarballs; the physical harness validates
+# every member before extracting (the product already locks both crates).
+flate2 = "1"
 libc = "0.2"
 # Diagnostic leak patterns are extended regular expressions.
 regex = "1"
@@ -20,4 +23,5 @@ serde_json = "1"
 # Workflow YAML syntax checks; the product already locks this parser.
 serde_yaml = "0.9"
 sha2 = "0.10"
+tar = "0.4"
 unicode-width = "0.2"

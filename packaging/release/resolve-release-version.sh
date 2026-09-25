@@ -33,74 +33,8 @@ fi
     fail "GITHUB_RUN_ID must be a positive decimal integer"
 [ "$COMMIT" = "$(git -C "$ROOT" rev-parse --verify HEAD)" ] ||
     fail "GITHUB_SHA does not match the checked-out commit"
+[ -x "${HAMN_DEV:-}" ] || fail "HAMN_DEV must name the built hamn-dev executable"
 
-python3 - "$ROOT" "$PREVIOUS_REF" "$COMMIT" "$RUN_ID" "$OUTPUT" <<'PY'
-import json
-import pathlib
-import re
-import subprocess
-import sys
-
-root, previous_ref, commit, run_id, output_path = sys.argv[1:]
-
-
-def blob(ref, path):
-    return subprocess.check_output(
-        ["git", "-C", root, "show", ref + ":" + path], text=True
-    )
-
-
-def manifest(ref):
-    try:
-        value = json.loads(blob(ref, ".release-please-manifest.json"))
-    except (json.JSONDecodeError, subprocess.CalledProcessError) as error:
-        raise SystemExit("release manifest is invalid: " + str(error))
-    if not isinstance(value, dict) or set(value) != {"."}:
-        raise SystemExit("release manifest must contain only the root package")
-    return version(value["."])
-
-
-def version(value):
-    if not isinstance(value, str):
-        raise SystemExit("release version is not a string")
-    match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value)
-    if not match:
-        raise SystemExit("release version is not canonical SemVer")
-    return value, tuple(int(part) for part in match.groups())
-
-
-old_text, old_value = manifest(previous_ref)
-new_text, new_value = manifest(commit)
-if new_value <= old_value:
-    raise SystemExit("release version did not increase")
-
-version_file = blob(commit, "version.txt")
-if version_file != new_text + "\n":
-    raise SystemExit("version.txt does not match the release manifest")
-
-makefile = blob(commit, "Makefile")
-make_match = re.search(r"^VERSION[ \t]+\?=[ \t]+([^ \t#\r\n]+)[ \t]*$", makefile,
-                       re.MULTILINE)
-if not make_match or make_match.group(1) != new_text:
-    raise SystemExit("Makefile does not match the release manifest")
-
-flake = blob(commit, "flake.nix")
-flake_versions = re.findall(
-    r'^\s*hamnVersion = "([^"]+)";\s*# x-release-please-version\s*$',
-    flake,
-    re.MULTILINE,
-)
-if flake_versions != [new_text]:
-    raise SystemExit("flake.nix does not match the release manifest")
-
-stable_tag = "v" + new_text
-candidate_tag = stable_tag + "-rc." + run_id
-with open(output_path, "a", encoding="utf-8", newline="\n") as output:
-    output.write("should_release=true\n")
-    output.write("version=" + new_text + "\n")
-    output.write("stable_tag=" + stable_tag + "\n")
-    output.write("candidate_tag=" + candidate_tag + "\n")
-    output.write("commit=" + commit + "\n")
-PY
+"$HAMN_DEV" release resolve-version "$ROOT" "$PREVIOUS_REF" "$COMMIT" "$RUN_ID" "$OUTPUT"
 
 echo "automated release version resolved from Release Please manifest"

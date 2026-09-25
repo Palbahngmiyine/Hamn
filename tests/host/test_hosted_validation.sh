@@ -33,27 +33,20 @@ GITHUB_RUN_ID=417123456 \
 GITHUB_RUN_ATTEMPT=2 \
     bash "$ROOT/packaging/release/hosted-validation.sh" >/dev/null
 
-python3 - "$evidence/hosted-validation-evidence.json" \
-    "$release_ref" "$(git -C "$ROOT" rev-parse HEAD^{tree})" <<'PY'
-import json
-import sys
-
-path, commit, tree = sys.argv[1:]
-with open(path, encoding="utf-8") as source:
-    evidence = json.load(source)
-if evidence.get("kind") != "hamn-hosted-validation-evidence" or \
-        evidence.get("validationMode") != "github-hosted-no-vm" or \
-        evidence.get("physicalE2E") is not False or \
-        evidence.get("commit") != commit or evidence.get("sourceTree") != tree or \
-        evidence.get("workflow") != {"run": "417123456", "attempt": "2"}:
-    raise SystemExit("hosted validation evidence identity is invalid")
-checks = evidence.get("checks")
-if not isinstance(checks, dict) or checks.get("testLocalMacOS") is not True or \
-        checks.get("artifactHashes") is not True or \
-        checks.get("vmLifecycle") is not False or \
-        checks.get("dockerE2E") is not False or checks.get("k3sE2E") is not False:
-    raise SystemExit("hosted validation capabilities are overstated")
-PY
+# Identity and the exact capability claims: hosted evidence never states a
+# VM, Docker, Colima or physical run, and names no removed K3s check.
+jq -e --arg commit "$release_ref" --arg tree "$(git -C "$ROOT" rev-parse HEAD^{tree})" '
+    .kind == "hamn-hosted-validation-evidence" and
+    .validationMode == "github-hosted-no-vm" and .physicalE2E == false and
+    .commit == $commit and .sourceTree == $tree and
+    .workflow == {"run": "417123456", "attempt": "2"} and
+    .checks == {"testLocalMacOS": true, "artifactHashes": true,
+        "archiveSafety": true, "guestImageContract": true,
+        "vmLifecycle": false, "dockerE2E": false, "colimaCoexistence": false}
+' "$evidence/hosted-validation-evidence.json" >/dev/null || {
+    echo "FAIL: hosted validation evidence identity or capabilities are invalid" >&2
+    exit 1
+}
 
 tampered=$candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 printf 'tampered\n' >>"$tampered"

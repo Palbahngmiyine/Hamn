@@ -873,6 +873,7 @@ dependencies = [
 name = "hamn-dev"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "libc",
  "regex",
  "rustls",
@@ -880,6 +881,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "tar",
  "unicode-width",
 ]
 

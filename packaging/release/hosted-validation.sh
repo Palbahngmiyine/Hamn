@@ -9,10 +9,6 @@ fail() {
     exit 1
 }
 
-sha256_file() {
-    shasum -a 256 "$1" | awk '{print $1}'
-}
-
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 RELEASE_REF=${RELEASE_REF:-}
 RELEASE_TAG=${RELEASE_TAG:-}
@@ -20,10 +16,13 @@ CANDIDATE_DIR=${CANDIDATE_DIR:-}
 OUTPUT_DIR=${OUTPUT_DIR:-}
 RUN_ID=${GITHUB_RUN_ID:-local}
 RUN_ATTEMPT=${GITHUB_RUN_ATTEMPT:-local}
+# Evidence writer (tools/hamn-dev); `make release-hosted-validation` builds it.
+HAMN_DEV=${HAMN_DEV:-}
 
 [ -n "$RELEASE_REF" ] && [ -n "$RELEASE_TAG" ] &&
     [ -n "$CANDIDATE_DIR" ] && [ -n "$OUTPUT_DIR" ] ||
     fail "RELEASE_REF, RELEASE_TAG, CANDIDATE_DIR, and OUTPUT_DIR are required"
+[ -x "$HAMN_DEV" ] || fail "HAMN_DEV must name the built hamn-dev executable"
 [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]] ||
     fail "RELEASE_TAG must be a release candidate tag"
 case "$RUN_ID:$RUN_ATTEMPT" in
@@ -58,73 +57,7 @@ checksums=$CANDIDATE_DIR/SHA256SUMS
     fail "candidate artifact hashes do not match"
 
 evidence=$OUTPUT_DIR/hosted-validation-evidence.json
-python3 - "$candidate" "$checksums" "$evidence" "$RELEASE_TAG" \
-    "$COMMIT" "$SOURCE_TREE" "$RUN_ID" "$RUN_ATTEMPT" \
-    "$(sha256_file "$candidate")" "$(sha256_file "$checksums")" <<'PY'
-import json
-import re
-import sys
-
-(candidate_path, checksums_path, evidence_path, tag, commit, tree, run,
- attempt, candidate_hash, checksums_hash) = sys.argv[1:]
-with open(candidate_path, encoding="utf-8") as source:
-    candidate = json.load(source)
-if set(candidate) != {
-        "schemaVersion", "kind", "tag", "version", "commit", "sourceTree",
-        "artifacts"}:
-    raise SystemExit("candidate schema is invalid")
-if candidate["schemaVersion"] != 1 or \
-        candidate["kind"] != "hamn-release-candidate" or \
-        candidate["tag"] != tag or candidate["commit"] != commit or \
-        candidate["sourceTree"] != tree:
-    raise SystemExit("candidate identity does not match hosted validation")
-if candidate["version"] != tag.rsplit("-rc.", 1)[0]:
-    raise SystemExit("candidate version does not match release tag")
-artifacts = candidate["artifacts"]
-if not isinstance(artifacts, list) or len(artifacts) != 4:
-    raise SystemExit("candidate artifact list is invalid")
-artifact_map = {}
-for item in artifacts:
-    if not isinstance(item, dict) or set(item) != {"name", "sha256"} or \
-            not isinstance(item["name"], str) or \
-            not re.fullmatch(r"[A-Za-z0-9._-]+", item["name"]) or \
-            not isinstance(item["sha256"], str) or \
-            not re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) or \
-            item["name"] in artifact_map:
-        raise SystemExit("candidate artifact entry is invalid")
-    artifact_map[item["name"]] = item["sha256"]
-with open(checksums_path, encoding="utf-8") as source:
-    checksum_names = {line.split(None, 1)[1].strip() for line in source if line.strip()}
-if checksum_names != set(artifact_map) | {"candidate.json"}:
-    raise SystemExit("candidate checksum set is incomplete")
-evidence = {
-    "schemaVersion": 1,
-    "kind": "hamn-hosted-validation-evidence",
-    "validationMode": "github-hosted-no-vm",
-    "physicalE2E": False,
-    "tag": tag,
-    "commit": commit,
-    "sourceTree": tree,
-    "workflow": {"run": run, "attempt": attempt},
-    "candidate": {
-        "candidateJsonSha256": candidate_hash,
-        "checksumsSha256": checksums_hash,
-        "artifacts": artifact_map,
-    },
-    "checks": {
-        "testLocalMacOS": True,
-        "artifactHashes": True,
-        "archiveSafety": True,
-        "guestImageContract": True,
-        "vmLifecycle": False,
-        "dockerE2E": False,
-        "k3sE2E": False,
-        "colimaCoexistence": False,
-    },
-}
-with open(evidence_path, "w", encoding="utf-8", newline="\n") as output:
-    json.dump(evidence, output, sort_keys=True, separators=(",", ":"))
-    output.write("\n")
-PY
+"$HAMN_DEV" release hosted-evidence "$CANDIDATE_DIR" "$evidence" "$RELEASE_TAG" \
+    "$COMMIT" "$SOURCE_TREE" "$RUN_ID" "$RUN_ATTEMPT"
 chmod 0644 "$evidence"
 echo "bound hosted validation to exact candidate ${RELEASE_TAG}"
