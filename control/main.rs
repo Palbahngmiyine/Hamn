@@ -12,7 +12,6 @@ mod headless;
 mod install_support;
 mod kubeconfig;
 mod kubernetes;
-mod migration;
 mod model;
 mod native;
 mod native_actions;

@@ -66,8 +66,6 @@ fn main() {
         "vendor",
         "Makefile",
         "version.txt",
-        "scripts/embed-retirement.py",
-        "guest/scripts",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }

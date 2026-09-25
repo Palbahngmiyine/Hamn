@@ -78,6 +78,12 @@ for path in \
 done
 
 for path in \
+    host/core/retirement.c \
+    host/core/retirement.h \
+    host/migration/legacy-k3s.service \
+    host/migration/retire_k3s.py \
+    scripts/embed-retirement.py \
+    tests/host/test_k3s_retirement.py \
     guest/agent/ip_reporter.c \
     guest/agent/ip_reporter.h \
     guest/tests/test_ip_reporter.c \
@@ -89,8 +95,8 @@ for path in \
 done
 
 if rg -n \
-    'cmd_nerdctl|cmd_kubectl_connection|cmd_kubernetes_connections|managed_kind_cli|legacy_k3s_cli|hamn-engine|HamnDesktop|SMAppService' \
-    "$ROOT/host" "$ROOT/Makefile" >/dev/null; then
+    'cmd_nerdctl|cmd_kubectl_connection|cmd_kubernetes_connections|managed_kind_cli|legacy_k3s|k3s_retirement|retirement_run|hamn_control_migrate|hamn-engine|HamnDesktop|SMAppService' \
+    "$ROOT/host" "$ROOT/Makefile" "$ROOT/build.rs" "$ROOT/control" >/dev/null; then
     fail "host build still refers to a removed public runtime or Kubernetes catalog"
 fi
 

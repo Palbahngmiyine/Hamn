@@ -6,7 +6,6 @@ pub fn describe() -> Value {
         "formats": ["json", "ndjson"], "schemaVersion": 1,
         "invocation": "hamn --headless <operation> [name] [arguments]",
         "confirmation": "Mutations require explicit targets and --yes. TUI always confirms the target and impact.",
-        "legacyRetirement": "Before Hamn-profile VM/Docker mutations, pending managed K3s data and local volumes are permanently deleted. Docker data is preserved. Stopped profiles retire on their next start.",
         "cancellation": "Timeout and cancellation do not undo accepted mutations; uncertain mutation results use outcomeUnknown."})
 }
 

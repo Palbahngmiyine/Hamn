@@ -1,8 +1,6 @@
 """Opt-in cancellation barriers inside the workspace-owned physical VM only.
 
-The retirement case resumes an already-complete retirement journal with an
-explicit legacy-profile fixture. It tests retirement_run cancellation/cleanup,
-not destruction of a live K3s installation. No signed helper is replaced.
+No signed helper is replaced.
 """
 import hashlib
 import json
@@ -25,9 +23,8 @@ root = pathlib.Path({directory!r})
 args = sys.argv[1:]
 action = {action!r}
 before_lock = {before_lock!r}
-lock = '/run/hamn-retirement.lock' if action == 'retirement' else '/run/hamn-deployment.lock'
-match = lock in args and ((action == 'retirement' and 'recover-only' not in args and 'python3' in args)
-    or (len(args) > 2 and args[-2] == action and args[-3].endswith('/guest-deployment-transaction')))
+lock = '/run/hamn-deployment.lock'
+match = lock in args and len(args) > 2 and args[-2] == action and args[-3].endswith('/guest-deployment-transaction')
 if match:
     try:
         (root / 'claimed').mkdir()
@@ -114,7 +111,6 @@ test "$(command -v flock)" = {WRAPPER}
         # Only remove our exact wrapper; never replace a concurrent user's file.
         self.runtime.ssh(f'''test "$(sha256sum {WRAPPER} | cut -d' ' -f1)" = {expected}
 /usr/bin/flock --wait 120 /run/hamn-deployment.lock true
-/usr/bin/flock --wait 600 /run/hamn-retirement.lock true
 rm {WRAPPER}
 rm -r {self.directory}
 ''', profile='verify')
@@ -126,32 +122,24 @@ def cancellation_boundaries(root, runtime, snapshot):
     assert Path(owner['home']).resolve() == runtime.home.resolve() == (root / 'home').resolve()
     assert Path(owner['workspace']).resolve() == Path(__file__).resolve().parents[2]
     path = runtime.home / '.hamn/verify/operation.json'
-    config = path.parent / 'config.yaml'
     before = snapshot(runtime)
     hashes = runtime.ssh(f'sha256sum {HELPERS}/verify-image-contract {HELPERS}/guest-deployment-transaction {HELPERS}/configure-docker', profile='verify')
     evidence = []
     cases = [('refresh', 'begin'), ('refresh', 'commit'), ('reconcile', 'begin'),
-             ('reconcile', 'commit'), ('retirement', 'retirement')]
+             ('reconcile', 'commit')]
     for mode, action, queued in [(m, a, False) for m, a in cases] + [
             (m, a, True) for m, a in cases if m != 'reconcile']:
         runtime.call('vm', 'start', profile='verify', yes=True)
         original_pid = (path.parent / 'vmrun.pid').read_bytes()
-        original_config = config.read_bytes()
         gate = BoundaryGate(runtime, action, queued)
         child = None
         try:
             if mode == 'refresh':
                 (path.parent / 'guest-deployment.version').unlink(missing_ok=True)
-            elif mode == 'reconcile':
-                runtime.call('vm', 'stop', profile='verify', yes=True)
             else:
-                # A complete journal avoids deleting any real K3s workloads.
-                runtime.ssh("python3 -c \"import json; assert json.load(open('/var/lib/hamn/k3s-retirement-v1.json')) == {'version': 1, 'stage': 'complete'}\"", profile='verify')
-                assert b'kubernetes:' not in original_config
-                config.write_bytes(original_config + b'\nkubernetes:\n  enabled: false\n  version: v1.35.1+k3s1\n')
+                runtime.call('vm', 'stop', profile='verify', yes=True)
             previous = json.loads(path.read_bytes()).get('operationId')
-            operation = 'migrate' if mode == 'retirement' else 'start'
-            child = subprocess.Popen([runtime.binary, '--headless', 'vm', operation,
+            child = subprocess.Popen([runtime.binary, '--headless', 'vm', 'start',
                 '--profile', 'verify', '--yes'], env=runtime.environment,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             active = wait_record(path, lambda value: value.get('operationId') != previous and
@@ -165,8 +153,7 @@ def cancellation_boundaries(root, runtime, snapshot):
                 gate.release()
             else:
                 wait_record(path, lambda value: value.get('phase') == 'fencing-after-cancel', timeout=30)
-                lock = '/run/hamn-retirement.lock' if mode == 'retirement' else '/run/hamn-deployment.lock'
-                runtime.ssh(f'! /usr/bin/flock -n {lock} true', profile='verify')
+                runtime.ssh('! /usr/bin/flock -n /run/hamn-deployment.lock true', profile='verify')
                 assert child.poll() is None, 'frontend exited while original writer held its lock'
                 gate.release()
                 stdout, stderr = child.communicate(timeout=240)
@@ -195,8 +182,6 @@ def cancellation_boundaries(root, runtime, snapshot):
                 child.send_signal(signal.SIGINT)
                 child.communicate(timeout=240)
             gate.close()
-            if mode == 'retirement':
-                config.write_bytes(original_config)
     (root / 'cancel-boundary-results.json').write_text(json.dumps(evidence, indent=2))
 
 
@@ -208,11 +193,10 @@ if __name__ == '__main__':
     from unittest.mock import patch
     class Dispatched(Exception):
         pass
-    for action in ('begin', 'commit', 'retirement'):
+    for action in ('begin', 'commit'):
         for queued in (False, True):
             with tempfile.TemporaryDirectory(prefix='hamn-flock-fixture-') as directory:
-                lock = '/run/hamn-retirement.lock' if action == 'retirement' else '/run/hamn-deployment.lock'
-                argv = ['flock', '--wait', '120', lock, 'python3' if action == 'retirement' else 'bash', HELPERS + '/guest-deployment-transaction', action, 'a' * 32]
+                argv = ['flock', '--wait', '120', '/run/hamn-deployment.lock', 'bash', HELPERS + '/guest-deployment-transaction', action, 'a' * 32]
                 source = wrapper_source(directory, action, queued)
                 with patch('sys.argv', argv), patch('os.execv', side_effect=Dispatched) as execute:
                     for first in (True, False):

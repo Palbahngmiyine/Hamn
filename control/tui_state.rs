@@ -639,12 +639,6 @@ impl State {
         };
         match self.request.operation().as_str() {
             "k8s contexts list" => {
-                if row["available"] == false {
-                    return Err(Failure::new(
-                        "managedK3sRemoved",
-                        "legacy Hamn context is unavailable",
-                    ));
-                }
                 self.invalidate_results();
                 self.request.context = row["name"].as_str().map(String::from);
                 self.request.namespace = row["namespace"].as_str().map(String::from);
@@ -776,15 +770,6 @@ fn confirmation(request: &Request, width: u16) -> Vec<String> {
         "\nImpact: {}\n\ny = execute; Esc / n = cancel",
         request.impact()
     ));
-    if request.mutates()
-        && matches!(
-            request.words.first().map(String::as_str),
-            Some("vm" | "docker")
-        )
-        && request.operation() != "vm create"
-    {
-        text.push_str("\nPending legacy K3s retirement permanently deletes its cluster data and local volumes before this operation. Docker data is preserved.");
-    }
     wrap_lines(&text, width)
 }
 

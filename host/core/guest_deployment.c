@@ -15,8 +15,8 @@
 #include <unistd.h>
 
 #include "cli.h"
+#include "core/deployment_recovery.h"
 #include "core/log.h"
-#include "core/retirement.h"
 #include "core/operation.h"
 #include "core/remote_mutation.h"
 #include "sshmgr/ssh.h"
@@ -183,17 +183,54 @@ static int guest_deployment_wait_cloud_init(const struct profile *profile,
 }
 
 /* SSH cancellation does not prove a remote command has exited. Every guest
- * writer and rollback shares this guest lock, with a remote operation deadline. */
+ * writer and rollback shares the guest deployment lock, with a remote
+ * operation deadline. */
 static int deployment_exec_locked(const struct profile *profile, const char *ip,
                                    const char *const command[])
 {
-    return remote_mutation_run(profile, ip, "/run/hamn-deployment.lock",
-                               120, 60, command, NULL, 0, NULL);
+    return remote_mutation_run(profile, ip, 120, 60, command, NULL, 0, NULL);
 }
 
 static int recovery_complete, cleanup_pending;
 int guest_deployment_cleanup_pending(void) { return cleanup_pending; }
 int guest_deployment_recovery_complete(void) { return recovery_complete; }
+
+int guest_deployment_recover(const struct profile *profile, const char *ip)
+{
+    recovery_complete = cleanup_pending = 0;
+    const char *command[] = { "sudo", "bash", "-c", DEPLOYMENT_RECOVERY_SCRIPT,
+        "--", "/var/lib/hamn/deployment-transactions",
+        GUEST_DEPLOYMENT_TRANSACTION_SCRIPT, NULL };
+    char reason[4096] = {0};
+    int truncated = 0;
+    int rc = remote_mutation_run(profile, ip, 120, 120, command, reason,
+                                 sizeof(reason), &truncated);
+    if (rc != 0)
+        logerr("deployment recovery failed: %s%s",
+               reason[0] ? reason : "guest connection or recovery interrupted",
+               truncated ? " (truncated)" : "");
+    if (rc != 0 && proc_cancelled()) {
+        /* The remote recovery can outlive its SSH client. Run it again behind
+         * the same lock, then wait for actual Docker readiness. */
+        proc_cleanup_begin();
+        cleanup_pending = 1;
+        (void)operation_phase("recovering-after-cancel");
+        logmsg("waiting for remote deployment recovery and cleanup");
+        reason[0] = '\0';
+        if (remote_mutation_run(profile, ip, 120, 120, command, reason,
+                                sizeof(reason), &truncated) == 0)
+            cleanup_pending = 0;
+        recovery_complete = !cleanup_pending &&
+            !remote_mutation_cleanup_pending() &&
+            guest_deployment_forward_sockets(profile, ip) == 0 &&
+            guest_deployment_runtime_ready(profile, ip, 30) == 0;
+        if (!recovery_complete)
+            logerr("cancelled deployment still needs recovery: %s",
+                   reason[0] ? reason : "Docker readiness could not be confirmed");
+        proc_cleanup_end();
+    }
+    return rc;
+}
 
 static int guest_deployment_configure_docker(const struct profile *profile,
                                              const char *ip)
@@ -403,7 +440,7 @@ static void deployment_cancel_recover(const struct profile *profile, const char 
     const char *barrier[] = { "sudo", "true", NULL };
     if (deployment_exec_locked(profile, ip, barrier) == 0) {
         cleanup_pending = 0;
-        recovery_complete = retirement_recover(profile, ip) == 0 &&
+        recovery_complete = guest_deployment_recover(profile, ip) == 0 &&
             guest_deployment_forward_sockets(profile, ip) == 0 &&
             guest_deployment_runtime_ready(profile, ip, 30) == 0;
     }
@@ -433,7 +470,7 @@ static int deployment_refresh_locked(const struct profile *profile,
     logmsg("guest image configuration %s; applying helpers and forwards ...",
            force ? "failed readiness" : "fingerprint changed");
     if (ssh_master_start(profile, state->ip, 15) != 0 ||
-        retirement_recover(profile, state->ip) != 0 ||
+        guest_deployment_recover(profile, state->ip) != 0 ||
         guest_deployment_wait_cloud_init(profile, state->ip, 600) != 0)
         return -1;
 

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Debug, Default, Parser, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[command(name = "hamn", version = crate::core::version(), about = "VM, Docker and Kubernetes console",
-    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. system uninstall permanently removes all Hamn data.\nLegacy managed K3s data is automatically retired before VM/Docker mutations; Docker data is preserved.")]
+    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. system uninstall permanently removes all Hamn data.")]
 pub struct Request {
     #[arg(long)]
     pub uid: Option<String>,
@@ -91,7 +91,6 @@ pub const OPERATIONS: &[(&str, bool)] = &[
     ("vm status", false),
     ("vm create", true),
     ("vm configure", true),
-    ("vm migrate", true),
     ("vm start", true),
     ("vm stop", true),
     ("vm delete", true),
@@ -175,10 +174,9 @@ impl Request {
         match self.operation().as_str() {
             "vm create" => "Create a profile and its VM configuration.".into(),
             "vm configure" => "Change the stopped VM's CPU, memory or disk settings.".into(),
-            "vm start" => "Start the VM. Pending legacy K3s data will be permanently deleted; Docker data is preserved.".into(),
+            "vm start" => "Start the VM.".into(),
             "vm stop" => "Stop the VM and interrupt its running containers.".into(),
             "vm delete" => "Stop and remove the profile from active listings. Its disk and Docker data are preserved.".into(),
-            "vm migrate" => "Permanently delete owned legacy K3s cluster data and local volumes. Docker data is preserved; binary rollback cannot recover K3s data.".into(),
             "vm diagnostics" => "Write a redacted diagnostic archive to the selected path.".into(),
             "system update" | "system upgrade" => "Download and publish a verified Hamn release and managed guest image.".into(),
             "system uninstall" => "Permanently remove ALL Hamn profiles, VM disks, Docker data and the managed installation.".into(),

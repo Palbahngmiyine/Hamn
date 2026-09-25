@@ -414,7 +414,6 @@ static char *build_status_json(const struct profile *profile)
         !cJSON_AddNumberToObject(vm, "memoryMiB", profile->mem_mib) ||
         !cJSON_AddNumberToObject(vm, "diskGiB", profile->disk_gib) ||
         !cJSON_AddStringToObject(vm, "dockerContext", context) ||
-        !cJSON_AddBoolToObject(root, "migrationPending", profile->legacy_k3s) ||
         !(logs = cJSON_AddObjectToObject(root, "logs")) ||
         !cJSON_AddNumberToObject(logs, "tailBytes",
                                 DIAGNOSTIC_LOG_TAIL_BYTES) ||

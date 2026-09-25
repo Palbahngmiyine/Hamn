@@ -38,8 +38,6 @@ static void profile_defaults(struct profile *profile)
     profile->mem_mib = 4096;
     profile->disk_gib = 60;
     profile->mount_home = 1;
-    snprintf(profile->legacy_k3s_version, sizeof(profile->legacy_k3s_version),
-             "v1.36.2+k3s1");
 }
 
 int profile_name_valid(const char *name)
@@ -418,47 +416,6 @@ static int parse_docker(struct yaml_parse *parse, yaml_event_t *event,
     }
 }
 
-static int parse_legacy_kubernetes(struct yaml_parse *parse, yaml_event_t *event,
-                            struct profile *profile)
-{
-    profile->legacy_k3s = 1;
-    if (yaml_mapping_start(parse, event) != 0)
-        return -1;
-    char seen[PROFILE_SEEN_KEY_CAP][64] = {{0}};
-    size_t count = 0;
-    for (;;) {
-        yaml_event_t key_event;
-        if (yaml_next(parse, &key_event) != 0)
-            return -1;
-        if (key_event.type == YAML_MAPPING_END_EVENT) {
-            yaml_event_delete(&key_event);
-            return 0;
-        }
-        char key[64];
-        if (yaml_string(parse, &key_event, key, sizeof(key)) != 0 ||
-            seen_key(seen, &count, key) != 0) {
-            yaml_fail(parse, "duplicate or invalid kubernetes key");
-            return -1;
-        }
-        yaml_event_t value;
-        if (yaml_next(parse, &value) != 0)
-            return -1;
-        int rc;
-        if (strcmp(key, "enabled") == 0)
-            rc = yaml_bool(parse, &value, &profile->legacy_k3s_enabled);
-        else if (strcmp(key, "version") == 0)
-            rc = yaml_string(parse, &value, profile->legacy_k3s_version,
-                             sizeof(profile->legacy_k3s_version));
-        else {
-            yaml_event_delete(&value);
-            yaml_fail(parse, "unknown kubernetes key: %s", key);
-            return -1;
-        }
-        if (rc != 0)
-            return -1;
-    }
-}
-
 static int parse_mount(struct yaml_parse *parse, yaml_event_t *event,
                        struct profile_mount *mount)
 {
@@ -661,8 +618,6 @@ static int parse_root(struct yaml_parse *parse, yaml_event_t *event,
             rc = yaml_bool(parse, &value, &profile->mount_inotify);
         else if (strcmp(key, "docker") == 0)
             rc = parse_docker(parse, &value, profile);
-        else if (strcmp(key, "kubernetes") == 0)
-            rc = parse_legacy_kubernetes(parse, &value, profile);
         else if (strcmp(key, "rosetta") == 0)
             rc = yaml_bool(parse, &value, &profile->rosetta);
         else if (strcmp(key, "nestedVirtualization") == 0)
@@ -912,12 +867,6 @@ static int profile_serialize(const struct profile *profile,
         return -1;
     if (text_append(text, "docker:\n  daemonJson: ") != 0 ||
         text_quote(text, profile->docker_daemon_json) != 0)
-        return -1;
-    /* Preserve migration evidence until guest cleanup and Docker readiness pass. */
-    if (profile->legacy_k3s &&
-        (text_append(text, "\nkubernetes:\n  enabled: %s\n  version: ",
-                    profile->legacy_k3s_enabled ? "true" : "false") != 0 ||
-        text_quote(text, profile->legacy_k3s_version) != 0))
         return -1;
     if (text_append(text,
                     "\nrosetta: %s\nnestedVirtualization: %s\nsshAgent: %s\n",

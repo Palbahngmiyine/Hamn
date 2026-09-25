@@ -153,7 +153,6 @@ grep -q '^\[REDACTED sensitive log line\]$' \
     "$WORK/extracted/logs/serial.log"
 grep -q '"schemaVersion":1' "$WORK/extracted/status.json"
 grep -q '"dockerContext":"hamn"' "$WORK/extracted/status.json"
-grep -q '"migrationPending":false' "$WORK/extracted/status.json"
 grep -q '"collectionPolicy":"allowlisted metadata and bounded log tails"' \
     "$WORK/extracted/manifest.json"
 

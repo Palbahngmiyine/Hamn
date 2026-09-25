@@ -71,16 +71,14 @@ int main(void)
                 fault = scenario; failure_code = failures[code];
                 struct profile p = {0};
                 const char *command[] = { "sudo", "true", NULL };
-                int result = remote_mutation_run(&p, "192.0.2.1", "/run/hamn-deployment.lock",
-                                                  120, 60, command, NULL, 0, NULL);
+                int result = remote_mutation_run(&p, "192.0.2.1", 120, 60, command, NULL, 0, NULL);
                 assert(result == (fault ? failure_code : 0) && depth == 0 && !held);
                 assert(calls == (fault == 0 ? 1 : fault == 3 ? 2 : 3));
                 assert(phase == !!fault);
                 assert(remote_mutation_cleanup_pending() == (fault >= 3));
                 if (fault >= 3) {
                     int prior_calls = calls;
-                    assert(remote_mutation_run(&p, "192.0.2.1", "/run/hamn-deployment.lock",
-                        120, 60, command, NULL, 0, NULL) == -1);
+                    assert(remote_mutation_run(&p, "192.0.2.1", 120, 60, command, NULL, 0, NULL) == -1);
                     assert(calls == prior_calls); /* no rollback overtakes an unverified writer */
                 }
                 if (fault == 2) assert(fenced); /* delayed original must see its fence */

@@ -37,7 +37,7 @@ class Gate:
         self.runtime = runtime
         status = runtime.call('vm', 'status', profile='verify')
         runtime.ssh('mkdir -m 700 /run/hamn-workspace-gate; mkfifo /run/hamn-workspace-gate/release', profile='verify')
-        command = ['sudo','flock','/run/hamn-retirement.lock','bash','-c',
+        command = ['sudo','flock','/run/hamn-deployment.lock','bash','-c',
             'echo LOCK_READY; read token < /run/hamn-workspace-gate/release; test "$token" = release']
         self.child = subprocess.Popen(['/usr/bin/ssh','-F','none','-i',runtime.home / '.hamn/verify/id_ed25519',
             '-o','BatchMode=yes','-o','IdentitiesOnly=yes','-o','StrictHostKeyChecking=no',

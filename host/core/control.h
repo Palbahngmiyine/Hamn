@@ -11,7 +11,6 @@ int hamn_control_configure(const char *profile, unsigned cpus,
                            unsigned memory_gib, unsigned disk_gib, int create);
 int hamn_control_stop(const char *profile);
 int hamn_control_delete(const char *profile);
-int hamn_control_migrate(const char *profile);
 int hamn_control_diagnostics(const char *profile, const char *path, char **result);
 int hamn_control_update(const char *manifest);
 /* manifest is optional borrowed NUL-terminated UTF-8. check_only and force are

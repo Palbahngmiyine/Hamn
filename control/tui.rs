@@ -87,41 +87,17 @@ impl Drop for Job {
 
 impl Job {
     // Normal completion and shutdown draining must consume the same result.
-    // A successful stop may carry an unresolved earlier retirement operation.
     fn finish_mutation(&mut self, result: Result<Value>, state: &mut State, other: &mut State) {
         let Some(request) = self.mutation.take() else {
             return;
         };
         let progress = mutation_progress(&request, state, other);
-        let mut failed_request = request.clone();
         let (status, error) = match result {
-            Ok(value) => match value.get("migrationError") {
-                Some(warning) => {
-                    let error = serde_json::from_value::<crate::model::Failure>(warning.clone())
-                        .unwrap_or_else(|_| {
-                            crate::model::Failure::new(
-                                "coreProtocol",
-                                format!("Invalid retirement result: {warning}"),
-                            )
-                        });
-                    failed_request.words = vec!["vm".into(), "migrate".into()];
-                    (
-                        format!(
-                            "{} completed; vm migrate (profile {}): {}: {}",
-                            request.operation(),
-                            request.profile.as_deref().unwrap_or("default"),
-                            error.code,
-                            error.message
-                        ),
-                        Some(error),
-                    )
-                }
-                None => ("Operation completed".into(), None),
-            },
+            Ok(_) => ("Operation completed".into(), None),
             Err(error) => (format!("{}: {}", error.code, error.message), Some(error)),
         };
         if let Some(error) = error.filter(|e| e.code == "outcomeUnknown") {
-            let mut outcome = uncertain(&failed_request);
+            let mut outcome = uncertain(&request);
             outcome["error"] = serde_json::json!(error);
             progress.uncertain.push(outcome);
         }
@@ -1138,7 +1114,7 @@ mod tests {
         assert!(resized && keyed);
     }
     #[test]
-    fn successful_stop_retains_retirement_warning_in_owner_screen_and_exit_output() {
+    fn failed_stop_is_reported_in_its_owner_screen_and_exit_output() {
         for hidden in [false, true] {
             for code in ["outcomeUnknown", "operationFailed"] {
                 let request = Request {
@@ -1164,8 +1140,10 @@ mod tests {
                     std::mem::swap(&mut state, &mut other);
                 }
                 job.finish_mutation(
-                    Ok(serde_json::json!({"state":"stopped",
-                    "migrationError":{"code":code,"message":"retirement reconnect diagnostic"}})),
+                    Err(crate::model::Failure::new(
+                        code,
+                        "stop reconnect diagnostic",
+                    )),
                     &mut state,
                     &mut other,
                 );
@@ -1176,23 +1154,18 @@ mod tests {
                     (&state, &other)
                 };
                 assert!(unrelated.operation_status.is_empty() && unrelated.uncertain.is_empty());
-                assert!(
-                    owner
-                        .operation_status
-                        .starts_with("vm stop completed; vm migrate (profile owned-original):")
+                assert_eq!(
+                    owner.operation_status,
+                    format!("{code}: stop reconnect diagnostic")
                 );
-                assert!(
-                    owner
-                        .operation_log
-                        .contains("retirement reconnect diagnostic")
-                );
+                assert!(owner.operation_log.contains("stop reconnect diagnostic"));
                 assert_eq!(owner.uncertain.len(), usize::from(code == "outcomeUnknown"));
                 if code == "outcomeUnknown" {
-                    assert_eq!(owner.uncertain[0]["operation"], "vm migrate");
+                    assert_eq!(owner.uncertain[0]["operation"], "vm stop");
                     assert_eq!(owner.uncertain[0]["target"]["profile"], "owned-original");
                     assert_eq!(
                         owner.uncertain[0]["error"]["message"],
-                        "retirement reconnect diagnostic"
+                        "stop reconnect diagnostic"
                     );
                 }
                 let mut terminal =
@@ -1207,17 +1180,10 @@ mod tests {
                     .iter()
                     .map(|cell| cell.symbol())
                     .collect();
-                assert!(
-                    rendered.contains("vm stop completed; vm migrate (profile owned-original)"),
-                    "{rendered}"
-                );
-                assert!(
-                    rendered.contains("retirement reconnect diagnostic"),
-                    "{rendered}"
-                );
+                assert!(rendered.contains("stop reconnect diagnostic"), "{rendered}");
                 let status = owner.operation_status.clone();
                 // Both the ordinary receiver and cancellation drain use this
-                // consuming method. A duplicate result cannot erase the warning.
+                // consuming method. A duplicate result cannot erase the failure.
                 job.finish_mutation(Ok(Value::Null), &mut state, &mut other);
                 assert_eq!(
                     if hidden { &other } else { &state }.operation_status,
@@ -1227,9 +1193,9 @@ mod tests {
                 write_outcomes(&mut output, &[&state, &other]).unwrap();
                 let output = String::from_utf8(output).unwrap();
                 assert!(
-                    output.contains("owned-original")
+                    output.contains("owned-original") == (code == "outcomeUnknown")
                         && output.contains(code)
-                        && output.contains("retirement reconnect diagnostic")
+                        && output.contains("stop reconnect diagnostic")
                 );
                 assert_eq!(
                     output.lines().count(),
@@ -1240,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn final_outcomes_distinguish_success_known_failure_unknown_and_invalid_warning() {
+    fn final_outcomes_distinguish_success_known_failure_and_unknown() {
         for (result, expected_code, count) in [
             (Ok(Value::Null), "Operation completed", 0),
             (
@@ -1255,11 +1221,6 @@ mod tests {
                 )),
                 "outcomeUnknown",
                 1,
-            ),
-            (
-                Ok(serde_json::json!({"migrationError":"invalid"})),
-                "coreProtocol",
-                0,
             ),
         ] {
             let request = Request {

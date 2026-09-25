@@ -25,7 +25,6 @@
 #include "core/remote_mutation.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
-#include "core/retirement.h"
 #include "core/provision.h"
 #include "core/state.h"
 #include "fwd/docker_observer.h"
@@ -494,11 +493,7 @@ static int cmd_start_execute(const struct start_options *options,
             if (ssh_master_start(&p, running_state.ip, 15) != 0)
                 goto out;
             start_trace_stage(&trace, "recovering-deployment");
-            if (retirement_recover(&p, running_state.ip) != 0)
-                goto out;
-            if (p.legacy_k3s &&
-                (ssh_master_start(&p, running_state.ip, 15) != 0 ||
-                 retirement_run(&p, running_state.ip) != 0))
+            if (guest_deployment_recover(&p, running_state.ip) != 0)
                 goto out;
             if (deployment_current == 0 &&
                 guest_deployment_refresh_locked(&p, &running_state) != 0) {
@@ -789,8 +784,6 @@ static int cmd_start_execute(const struct start_options *options,
         goto rollback;
     }
     start_trace_stage(&trace, "ssh-ready");
-    if (retirement_run(&p, ip) != 0)
-        goto rollback;
 
     if (provision_run_stage(&p, ip, "system") != 0 ||
         provision_run_stage(&p, ip, "user") != 0)
@@ -846,7 +839,7 @@ static int cmd_start_execute(const struct start_options *options,
 rollback:
     proc_cleanup_begin();
     if (start_spawned && !guest_deployment_cleanup_pending() &&
-        !retirement_cleanup_pending() && !remote_mutation_cleanup_pending())
+        !remote_mutation_cleanup_pending())
         start_restored = rollback_incomplete_start(&p) == 0;
     proc_cleanup_end();
 out:
@@ -862,7 +855,7 @@ static int cmd_start_locked(const struct start_options *options, const char *pro
     if (start_unchanged) return operation_finish_unchanged(rc);
     return operation_finish(rc, !remote_mutation_cleanup_pending() &&
         (start_restored || (!start_spawned &&
-         (guest_deployment_recovery_complete() || retirement_cancel_recovered()))));
+         guest_deployment_recovery_complete())));
 }
 
 int hamn_control_start(const char *profile, unsigned cpus,

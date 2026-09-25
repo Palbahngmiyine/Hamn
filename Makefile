@@ -17,7 +17,7 @@ CFLAGS     := -std=c11 -Wall -Wextra -O2 -g \
               -MMD -MP \
               -mmacosx-version-min=$(MACOS_MIN) \
               -DHAVE_CONFIG_H \
-              -Ihost -Ivendor -Ivendor/libyaml/include -I$(BUILD)/generated
+              -Ihost -Ivendor -Ivendor/libyaml/include
 LDFLAGS    := -framework Virtualization -framework Foundation -framework CoreServices -lz \
               -mmacosx-version-min=$(MACOS_MIN)
 ifneq ($(strip $(SDKROOT)),)
@@ -47,6 +47,7 @@ FS_TEST := $(BUILD)/tests/test_fs
 SEED_MOUNTS_TEST := $(BUILD)/tests/test_cloudinit_mounts
 PROVISION_TEST := $(BUILD)/tests/test_provision
 DEPLOYMENT_FINGERPRINT_TEST := $(BUILD)/tests/test_guest_deployment_fingerprint
+DEPLOYMENT_RECOVERY_TEST := $(BUILD)/tests/test_deployment_recovery
 MANAGED_GUEST_IMAGE_TEST := $(BUILD)/tests/test_managed_guest_image
 SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
 PROFILE_READ_TEST := $(BUILD)/tests/test_profile_read
@@ -78,10 +79,6 @@ $(VERSION_STAMP): FORCE
 		mv $@.tmp $@; \
 	fi
 
-$(BUILD)/generated/k3s_retirement.h: scripts/embed-retirement.py host/migration/retire_k3s.py host/migration/legacy-k3s.service guest/scripts/verify-image-contract.sh guest/scripts/guest-deployment-transaction.sh guest/scripts/configure-docker.sh
-	python3 scripts/embed-retirement.py $@
-
-$(HOST_OBJS): $(BUILD)/generated/k3s_retirement.h
 $(VERSIONED_OBJS): $(VERSION_STAMP)
 
 install: host
@@ -135,6 +132,11 @@ $(PROVISION_TEST): tests/host/test_provision.c host/core/provision.c \
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< host/core/provision.c \
 		host/util/fs.c -o $@
 
+$(DEPLOYMENT_RECOVERY_TEST): tests/host/test_deployment_recovery.c \
+		host/core/deployment_recovery.h
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< -o $@
+
 $(DEPLOYMENT_FINGERPRINT_TEST): tests/host/test_guest_deployment_fingerprint.c \
 		$(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
@@ -154,8 +156,7 @@ $(SSH_OPTIONS_TEST): tests/host/test_ssh_options.c $(HOST_TEST_OBJS)
 
 # Compiles every host source itself, including VERSIONED_OBJS' sources.
 $(START_DOCKER_CONTEXT_RETRY_TEST): tests/host/test_start_docker_context_retry.c \
-		host/cmd/cmd_start.c $(HOST_C_SRCS) $(VERSION_STAMP) \
-		$(BUILD)/generated/k3s_retirement.h
+		host/cmd/cmd_start.c $(HOST_C_SRCS) $(VERSION_STAMP)
 	@mkdir -p $(dir $@)
 	clang -DHAMN_TEST $(filter-out -MMD -MP,$(CFLAGS)) $(VERSION_CFLAGS) $< \
 		$(filter-out host/main.c host/cmd/cmd_start.c,$(HOST_C_SRCS)) \
@@ -240,7 +241,6 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_backpressure.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_guarded_delete.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py
-	python3 tests/host/test_k3s_retirement.py
 	cargo test --locked -p hamn-dev
 	python3 tests/host/test_rust_sdk.py
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test single-binary
@@ -409,10 +409,11 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		bash tests/host/test_profile_yaml.sh
 	bash guest/tests/test_guest_deployment_transaction.sh
 
-test-guest-deployment: host
+test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)
 	$(MAKE) -C guest test-cri-status
 	$(MAKE) -C guest test-mount-inotify
 	bash guest/tests/test_guest_deployment_transaction.sh
+	$(DEPLOYMENT_RECOVERY_TEST)
 	bash guest/tests/test_make_install_targets.sh
 	bash guest/tests/test_configure_docker.sh
 	bash guest/tests/test_configure_rosetta.sh
@@ -509,7 +510,6 @@ release-gate:
 
 test-kubernetes-cli: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
-	python3 tests/host/test_k3s_retirement.py
 	bash guest/tests/test_configure_containerd.sh
 
 test-core-quality: host

@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Every guest writer and rollback shares this one guest lock. */
+static const char lock[] = "/run/hamn-deployment.lock";
 static int cleanup_pending;
 int remote_mutation_cleanup_pending(void) { return cleanup_pending; }
 
@@ -30,15 +32,13 @@ static const char fence[] = SECURE_MARKERS
     "test ! -L \"$d/$1\"; : > \"$d/$1\"";
 
 int remote_mutation_run(const struct profile *profile, const char *ip,
-                        const char *lock, unsigned wait_seconds,
-                        unsigned run_seconds, const char *const command[],
+                        unsigned wait_seconds, unsigned run_seconds,
+                        const char *const command[],
                         char *output, size_t capacity, int *truncated)
 {
     assert(command && command[0] && !strcmp(command[0], "sudo"));
     assert(wait_seconds > 0 && wait_seconds <= 600 &&
            run_seconds > 0 && run_seconds <= 600);
-    assert(!strcmp(lock, "/run/hamn-deployment.lock") ||
-           !strcmp(lock, "/run/hamn-retirement.lock"));
     /* No subsequent rollback may race a writer we could not settle. A fresh
      * operation must inspect/recover the preserved guest state instead. */
     if (cleanup_pending) {

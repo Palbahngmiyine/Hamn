@@ -88,7 +88,19 @@ set -u
 printf '%s\n' "$*" >>"$SYSCTL_LOG"
 [ "${FAIL_SYSCTL:-0}" != 1 ]
 EOF
-chmod +x "$BIN/systemctl" "$BIN/sysctl"
+# One line of operands per sync(1) call; FAIL_SYNC_AT=N fails the Nth call.
+export SYNC_LOG="$WORK/sync.log"
+: >"$SYNC_LOG"
+cat >"$BIN/sync" <<'EOF'
+#!/bin/bash
+set -u
+printf '%s\n' "$*" >>"$SYNC_LOG"
+if [ "$(wc -l <"$SYNC_LOG")" -eq "${FAIL_SYNC_AT:-0}" ]; then
+    echo 'injected durability failure' >&2
+    exit 1
+fi
+EOF
+chmod +x "$BIN/systemctl" "$BIN/sysctl" "$BIN/sync"
 export PATH="$BIN:$PATH"
 
 write_file "$ROOT/usr/local/bin/hamnd" old-hamnd
@@ -115,11 +127,15 @@ TRANSACTION="$TRANSACTION_ROOT/$TOKEN"
 [ "$(cat "$TRANSACTION/phase")" = ready ] || fail "transaction phase"
 [ "$(file_mode "$TRANSACTION/phase")" = 600 ] || fail "phase mode"
 [ ! -e "$TRANSACTION/.phase" ] || fail "unpublished phase remains"
-python3 - "$TRANSACTION/provenance.json" <<'PY_CHECK'
-import json, sys
-value = json.load(open(sys.argv[1]))
-assert value == {'version': 1, 'retirement': None, 'helpers': {}}
-PY_CHECK
+# The first barrier covered every backup file and directory before the phase.
+[ "$(wc -l <"$SYNC_LOG")" -eq 3 ] || fail "unexpected sync barriers"
+while IFS= read -r entry; do
+    head -n 1 "$SYNC_LOG" | tr ' ' '\n' | grep -Fqx -- "$entry" ||
+        fail "backup entry was not synced: $entry"
+done < <(find "$TRANSACTION" \( -type f -o -type d \) ! -name phase)
+[ "$(sed -n 2p "$SYNC_LOG")" = "-- $TRANSACTION/.phase" ] || fail "phase was not synced"
+[ "$(sed -n 3p "$SYNC_LOG")" = "-- $TRANSACTION $TRANSACTION_ROOT" ] ||
+    fail "published phase directories were not synced"
 for key in hamnd libexec_hamn hamnd_unit etc_hamn containerd_config \
     docker_config docker_dropin host_dns_config host_dns_unit modules_config \
     sysctl_config cni_bin; do
@@ -203,47 +219,16 @@ rm "$ROOT/etc/docker"
 mv "$ROOT/etc/docker-real" "$ROOT/etc/docker"
 
 # A failed durability barrier must never publish a recoverable ready backup.
-export REAL_PYTHON TEST_PYTHON_INTERPRETER
-TEST_PYTHON_INTERPRETER=$(python3 -c 'import sys; print(sys.executable)')
-# Model developer-tool launchers such as /usr/bin/python3: resolving their
-# command name again after installing our same-name wrapper is unsafe.
-mkdir "$WORK/python-launcher"
-cat >"$WORK/python-launcher/python3" <<'PY_LAUNCHER'
-#!/bin/bash
-if [ "$(command -v python3)" != "$0" ]; then
-    echo "error: unable to execute tool 'python3' after PATH shadowing" >&2
-    exit 92
-fi
-exec "$TEST_PYTHON_INTERPRETER" "$@"
-PY_LAUNCHER
-chmod +x "$WORK/python-launcher/python3"
-export PATH="$BIN:$WORK/python-launcher:$PATH"
-# Pin the interpreter, not the macOS developer-tool launcher. The launcher
-# fixture above makes using `command -v python3` here fail deterministically.
-REAL_PYTHON=$(python3 -c 'import sys; print(sys.executable)')
-cat >"$BIN/python3" <<'PY_WRAPPER'
-#!/bin/bash
-exec "$REAL_PYTHON" -c 'import os, sys
-script = sys.stdin.read()
-sys.argv.pop(1)
-original = os.fsync
-count = 0
-def sync(fd):
-    global count
-    count += 1
-    if count == int(os.environ["FAIL_SYNC_AT"]):
-        raise OSError("injected durability failure")
-    original(fd)
-os.fsync = sync
-exec(compile(script, "<transaction>", "exec"))' "$@"
-PY_WRAPPER
-chmod +x "$BIN/python3"
-for failure in 1 3; do
+# Each sync(1) call is one barrier: backup contents, the unpublished phase,
+# then the directories that hold the published phase.
+for failure in 1 2 3; do
+    : >"$SYNC_LOG"
     if FAIL_SYNC_AT="$failure" bash "$SCRIPT" begin \
         4123456789abcdef0123456789abcdef >"$WORK/sync.out" 2>"$WORK/sync.err"; then
         fail "accepted a failed durability barrier"
     fi
     grep -Fq 'injected durability failure' "$WORK/sync.err"
+    [ "$(wc -l <"$SYNC_LOG")" -eq "$failure" ] || fail "barrier $failure was not the last sync"
     test ! -e "$TRANSACTION_ROOT/4123456789abcdef0123456789abcdef"
     assert_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
 done

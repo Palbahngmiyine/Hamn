@@ -41,13 +41,12 @@
 - `control/`: Rust TUI, headless requests, shared service, Docker/Kubernetes clients, streams, and cancellation. `control/main.rs` is the executable entrypoint.
 - `host/`: C/Objective-C VM core, statically linked into the Rust executable through `build.rs` and `Makefile`.
 - `host/vz/`: the only place for Objective-C Virtualization.framework code.
-- `host/core/`: profile configuration/state, lifecycle, control API, provisioning, and legacy K3s retirement coordination.
+- `host/core/`: profile configuration/state, lifecycle, control API, provisioning, and guest deployment transactions.
 - `host/fwd/`, `host/sshmgr/`, `host/vmrun/`: profile-local forwarding,
   SSH control, and VM ownership. Keep resource ownership explicit and atomic.
 - `host/seed/`, `host/util/`: cloud-init seed generation and shared low-level helpers, respectively.
 - `host/image/`: signed managed guest-image selection and verification. Never add an
   unsigned cloud-image fallback.
-- `host/migration/`: embedded, narrowly scoped legacy K3s retirement payload and service reference; not an active managed Kubernetes runtime.
 - `guest/agent/`: Linux guest management agent `hamnd`; it is not a container engine.
 - `guest/scripts/`: guest configuration for system containerd, Docker, Rosetta, and
   immutable-image validation.
@@ -172,7 +171,7 @@ local change does not require unrelated fuzzing or optimization experiments.
 - Bound blocking SSH/process operations at the layer that can terminate and reap them. An outer async timeout alone is insufficient. Preserve independently owned VM supervisors when frontend operations end.
 - A timed-out mutation can have taken effect remotely. Preserve `outcomeUnknown`, re-observe state before retrying, and avoid replaying non-idempotent actions blindly.
 - Validate live behavior with an isolated disposable profile and known resource ownership. Never terminate or delete a resource based only on a reused PID or a matching name.
-- Distinguish binary rollback from state recovery. Verify interrupted migrations and compatibility; legacy K3s data retirement is irreversible and must preserve Docker/user data.
+- Distinguish binary rollback from state recovery. Verify interrupted migrations and compatibility, and preserve Docker/user data.
 
 ## Improvement Workflow
 

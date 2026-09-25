@@ -86,23 +86,20 @@ def recovery(root, runtime):
     baseline = root / 'before.json'
     baseline.write_text(json.dumps(before, indent=2))
     pid = (runtime.home / '.hamn/verify/vmrun.pid').read_text()
-    runtime.ssh('''test ! -e /usr/local/libexec/hamn/configure-k3s
-printf '{"version":1,"stage":"complete"}' > /var/lib/hamn/k3s-retirement-v1.json
-chmod 600 /var/lib/hamn/k3s-retirement-v1.json''', profile='verify')
-    results = []
-    for legacy, token in [(False, 'c' * 32), (True, 'd' * 32)]:
-        path = '/var/lib/hamn/deployment-transactions/' + token
-        runtime.ssh(f'flock /run/hamn-deployment.lock bash /usr/local/libexec/hamn/guest-deployment-transaction begin {token}', profile='verify')
-        if legacy: runtime.ssh(f'rm {path}/provenance.json', profile='verify')
-        (runtime.home / '.hamn/verify/docker.sock').unlink()
-        result = runtime.call('vm', 'start', profile='verify', yes=True)
-        assert result['dockerStatus'] == 'ready' and result['lastOperation']['status'] == 'completed'
-        assert not result['lastOperation']['startedVm']
-        assert (runtime.home / '.hamn/verify/vmrun.pid').read_text() == pid
-        runtime.ssh(f'test ! -e {path}; test ! -e /usr/local/libexec/hamn/configure-k3s', profile='verify')
-        assert snapshot(runtime) == before
-        results.append({'legacy':legacy, 'status':result})
-        print('PASS: socket recovery and data preservation; legacy =', legacy, flush=True)
+    # A ready backup left by an interrupted transaction is rolled back before
+    # the running VM's Docker socket is repaired.
+    token = 'c' * 32
+    path = '/var/lib/hamn/deployment-transactions/' + token
+    runtime.ssh(f'flock /run/hamn-deployment.lock bash /usr/local/libexec/hamn/guest-deployment-transaction begin {token}', profile='verify')
+    (runtime.home / '.hamn/verify/docker.sock').unlink()
+    result = runtime.call('vm', 'start', profile='verify', yes=True)
+    assert result['dockerStatus'] == 'ready' and result['lastOperation']['status'] == 'completed'
+    assert not result['lastOperation']['startedVm']
+    assert (runtime.home / '.hamn/verify/vmrun.pid').read_text() == pid
+    runtime.ssh(f'test ! -e {path}', profile='verify')
+    assert snapshot(runtime) == before
+    results = [{'status': result}]
+    print('PASS: socket recovery and data preservation', flush=True)
     (root / 'recovery-results.json').write_text(json.dumps(results, indent=2))
     runtime.call('vm', 'stop', profile='verify', yes=True)
     restarted = runtime.call('vm', 'start', profile='verify', yes=True)
