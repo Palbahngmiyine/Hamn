@@ -210,7 +210,7 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	$(PROFILE_READ_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test core-worker
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test docker-api
-	HAMN=$(HOST_BIN) python3 tests/host/test_docker_context.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test docker-context
 	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_exec_auth.py
 
