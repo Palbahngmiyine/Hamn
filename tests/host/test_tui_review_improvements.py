@@ -59,6 +59,9 @@ def scenario(workspace):
         harness.until(':SELECTION_BARRIER')
         assert 'Confirm delete' not in harness.screen.text()
         os.write(harness.master, b'\x1b')
+        # An ESC and R read together are one Alt-R key, so the refresh must
+        # wait until the command line has closed.
+        harness.wait(lambda: ':SELECTION_BARRIER' not in harness.screen.text())
         write_rows(harness, [alpha, beta, row('marker-paste', 'id-d')])
         harness.send(b'R', 'marker-paste')
         harness.send(b'/\x1b[200~beta\x1b[201~\r', 'beta')
