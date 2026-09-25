@@ -68,8 +68,10 @@ Nix 셸이 제공하는 `actionlint`가 필요합니다. 패키징·업데이트
 다른 버전을 일시적으로 빌드하므로 Make 검증은 순서대로 실행합니다.
 
 PR CI는 이 검증을 `make ci-macos-shard-1`부터 `ci-macos-shard-5`까지 나누어 각각
-별도 runner에서 순서대로 실행하고, `CARGO_PROFILE=ci`(LTO를 끈 release 프로필)로
-빌드합니다. `make check-ci-macos-shards`는 샤드 전체가 `test-local-macos`의 모든
+별도 runner에서 실행합니다. 샤드 안에서 updater를 실행하지 않고 `build/hamn`을 다시
+빌드하지 않는 검증(`CI_MACOS_SIDE_GATES`)은 다른 검증과 동시에 실행하고, 다른 버전을
+빌드하는 검증(`CI_MACOS_ALONE_GATES`)은 마지막에 실행합니다. PR CI는
+`CARGO_PROFILE=ci`(LTO를 끈 release 프로필)로 빌드합니다. `make check-ci-macos-shards`는 샤드 전체가 `test-local-macos`의 모든
 검증을 정확히 한 번씩 실행하지 않으면 실패합니다. 릴리스 워크플로는 게시 산출물을
 만드는 release 프로필로 `test-local-macos`를 계속 순서대로 실행합니다.
 

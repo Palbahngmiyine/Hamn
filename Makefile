@@ -249,24 +249,47 @@ test-update_PARTS := test-update-properties test-update-native \
 	test-update-cli test-update-ux test-update-script
 LOCAL_MACOS_LEAVES := $(foreach gate,$(LOCAL_MACOS_GATES),$(or $($(gate)_PARTS),$(gate)))
 
-# PR CI runs the same leaves on independent macOS machines, each shard
-# serially in its own checkout (installer tests must not share a machine:
-# generation cleanup scans every process of the user). Balance by measured
-# durations; check-ci-macos-shards proves the shards partition the leaves.
+# PR CI runs the same leaves on independent macOS machines (GitHub runs at
+# most five macOS jobs at once), each shard in its own checkout. Installer
+# and updater gates must not overlap on one machine: generation cleanup
+# refuses to prune while any process of the user has scripts/update-host.sh
+# open without the transaction lock. Within a shard:
+# - the main lane runs every other gate serially;
+# - CI_MACOS_SIDE_GATES run beside it: they never run the updater, never
+#   open scripts/update-host.sh, never rebuild build/hamn and only read it;
+# - CI_MACOS_ALONE_GATES rebuild build/hamn as other versions, so they run
+#   after both lanes.
+# Balance by measured durations; check-ci-macos-shards proves the shards
+# partition the leaves.
 CI_MACOS_SHARDS := 1 2 3 4 5
-CI_MACOS_SHARD_1 := test-update-ux test-update-check test-install-bootstrap
-CI_MACOS_SHARD_2 := test-control-native test-guest-deployment \
-	test-port-forwarding test-core-quality
-CI_MACOS_SHARD_3 := test-update-script test-update-recovery test-install-cleanup \
-	test-install-script
-CI_MACOS_SHARD_4 := test-control-rust test-release-artifacts test-release-publish \
-	test-hosted-validation test-portable test-release-gate
-CI_MACOS_SHARD_5 := host test-update-cli test-profile-state \
-	test-update-concurrency test-update-properties test-install-system-tools \
-	test-kubernetes-cli test-update-native test-diagnostics test-uninstall \
-	test-release-repository-preflight test-release-version test-public-export \
-	test-release-request test-workflows
+CI_MACOS_SHARD_1 := test-update-ux test-control-native
+CI_MACOS_SHARD_2 := test-update-cli test-update-recovery test-update-check \
+	test-profile-state test-guest-deployment test-port-forwarding \
+	test-kubernetes-cli test-diagnostics test-release-gate test-workflows
+CI_MACOS_SHARD_3 := test-install-cleanup test-install-script \
+	test-install-system-tools test-install-bootstrap test-update-native \
+	test-uninstall test-hosted-validation
+CI_MACOS_SHARD_4 := test-control-rust test-update-concurrency \
+	test-update-properties test-core-quality test-portable test-public-export \
+	test-release-version test-release-request test-release-repository-preflight
+CI_MACOS_SHARD_5 := host test-update-script test-release-artifacts \
+	test-release-publish
 CI_MACOS_LEAVES := $(foreach shard,$(CI_MACOS_SHARDS),$(CI_MACOS_SHARD_$(shard)))
+CI_MACOS_SIDE_GATES := test-control-native test-profile-state \
+	test-guest-deployment test-port-forwarding test-kubernetes-cli \
+	test-diagnostics test-release-gate test-workflows
+CI_MACOS_ALONE_GATES := test-update-script test-release-artifacts \
+	test-release-publish test-hosted-validation
+ci_macos_side = $(filter $(CI_MACOS_SIDE_GATES),$(CI_MACOS_SHARD_$(1)))
+ci_macos_alone = $(filter $(CI_MACOS_ALONE_GATES),$(CI_MACOS_SHARD_$(1)))
+ci_macos_main = $(filter-out $(CI_MACOS_SIDE_GATES) $(CI_MACOS_ALONE_GATES),$(CI_MACOS_SHARD_$(1)))
+# One recipe line per gate, so a failure stops its lane and, with GNU Make
+# 4's --output-sync=line, each gate's output appears when it finishes.
+define ci-macos-gate
+$(MAKE) $(1)
+
+endef
+CI_MACOS_OUTPUT_SYNC := $(if $(filter output-sync,$(.FEATURES)),--output-sync=line)
 
 test-local-macos:
 	$(foreach gate,$(LOCAL_MACOS_GATES),$(MAKE) $(gate) &&) :
@@ -274,14 +297,27 @@ test-local-macos:
 test-control test-install test-update:
 	$(foreach part,$($@_PARTS),$(MAKE) $(part) &&) :
 
+# Build build/hamn once, run the two lanes together, then the alone gates.
+# A shard without side gates runs its main lane outside a jobserver, so
+# Cargo and the C core keep every CPU.
 ci-macos-shard-%: check-ci-macos-shards
 	@test -n "$(CI_MACOS_SHARD_$*)" || { echo "FAIL: unknown CI macOS shard: $*" >&2; exit 2; }
-	$(foreach gate,$(CI_MACOS_SHARD_$*),$(MAKE) $(gate) &&) :
+	$(MAKE) host
+	$(MAKE) $(if $(call ci_macos_side,$*),-j2 $(CI_MACOS_OUTPUT_SYNC)) ci-macos-main-$* ci-macos-side-$*
+	$(foreach gate,$(call ci_macos_alone,$*),$(call ci-macos-gate,$(gate)))
+
+ci-macos-main-%:
+	$(foreach gate,$(call ci_macos_main,$*),$(call ci-macos-gate,$(gate)))
+
+ci-macos-side-%:
+	$(foreach gate,$(call ci_macos_side,$*),$(call ci-macos-gate,$(gate)))
 
 check-ci-macos-shards:
 	@test "$(sort $(CI_MACOS_LEAVES))" = "$(sort $(LOCAL_MACOS_LEAVES))" && \
 		test "$(words $(CI_MACOS_LEAVES))" = "$(words $(LOCAL_MACOS_LEAVES))" || { \
 		echo "FAIL: CI macOS shards must run every local macOS gate exactly once" >&2; exit 1; }
+	@test -z "$(filter-out $(LOCAL_MACOS_LEAVES),$(CI_MACOS_SIDE_GATES) $(CI_MACOS_ALONE_GATES))" || { \
+		echo "FAIL: CI macOS lane classes name unknown gates" >&2; exit 1; }
 
 print-ci-macos-shards:
 	@echo $(CI_MACOS_SHARDS)
