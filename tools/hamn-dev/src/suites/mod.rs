@@ -17,6 +17,7 @@ mod observer_requests;
 mod profile_yaml;
 mod qcow2;
 mod release_consumer;
+mod release_gate;
 mod release_github;
 mod release_physical;
 mod release_request;
@@ -100,6 +101,7 @@ const SUITES: &[Suite] = &[
     ("tui-tls-target", tui_tls_target::main),
     ("release-version", release_version::main),
     ("release-request", release_request::main),
+    ("release-gate", release_gate::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
@@ -128,6 +130,7 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("create-plugins-kubectl", tui_create_plugins::kubectl_recorded),
     ("create-plugin", tui_create_plugins::plugin),
     ("create-shadow-plugin", tui_create_plugins::shadow_plugin),
+    ("release-uname", crate::support::release_driver::uname),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

@@ -507,7 +507,8 @@ test-hosted-validation: hamn-dev
 	$(RELEASE_TOOL) bash tests/host/test_hosted_validation.sh
 
 test-release-gate: hamn-dev
-	$(RELEASE_TOOL) bash tests/host/test_release_gate.sh
+	$(HAMN_DEV) test release-physical
+	$(HAMN_DEV) test release-gate
 
 test-release-publish: hamn-dev
 	$(RELEASE_TOOL) bash tests/host/test_release_publish.sh
@@ -535,7 +536,7 @@ release-hosted-validation: hamn-dev
 # The physical harness is hamn-dev built here from the checkout that the
 # gate then requires to be clean and to match the candidate's source.
 release-gate: hamn-dev
-	$(RELEASE_TOOL) bash packaging/release/release-gate.sh
+	$(HAMN_DEV) release gate
 
 test-kubernetes-cli: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test kubernetes-api

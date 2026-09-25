@@ -132,7 +132,6 @@ for requirement in \
 done
 for release_test in \
     tests/host/test_release_artifacts.sh \
-    tests/host/test_release_gate.sh \
     tests/host/test_release_publish.sh; do
     grep -Fq 'unset GITHUB_ACTIONS GITHUB_REPOSITORY GITHUB_RUN_ID GITHUB_RUN_ATTEMPT' \
         "$ROOT/$release_test" ||

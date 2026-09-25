@@ -1,12 +1,14 @@
 //! `release physical-e2e`: runs the exact candidate bytes on a physical
 //! Apple Silicon Mac in an isolated HOME and writes evidence only when every
-//! physical check in [`CHECKS`] passed.
+//! physical check in [`CHECKS`] passed. `release gate` binds that run to the
+//! checked-out source and the candidate's contract (see [`gate`]).
 //!
 //! No user VM or kubeconfig is changed: profiles live in a private
 //! workspace under /private/tmp, which is removed only after every owned
 //! profile was proven stopped.
 use super::archive::unpack;
-use super::contract::{CHECKS, physical_evidence, validate_physical};
+use super::checkout::{Checkout, empty_output_directory, existing_directory, machine, required};
+use super::contract::{CHECKS, physical_evidence, validate_candidate, validate_physical};
 use super::files::{canonical_json, owned_regular, read_json_limited, sha256_file, write, write_new};
 use super::kubernetes;
 use super::process::{self, Spec};
@@ -67,6 +69,63 @@ impl Config {
             attempt: lookup("GITHUB_RUN_ATTEMPT").unwrap_or_else(|| "local".into()),
         })
     }
+}
+
+/// `gate`: validates exact candidate bytes on a physical Apple Silicon Mac
+/// and never rebuilds them. Inputs (environment): `RELEASE_REF`,
+/// `RELEASE_TAG`, `CANDIDATE_DIR`, `OUTPUT_DIR` (created; must be empty)
+/// and the harness inputs of [`USAGE`] other than `HAMN_CANDIDATE_DIR` and
+/// `HAMN_E2E_OUTPUT`, which the gate sets.
+///
+/// The harness is this executable, which `make release-gate` builds from
+/// the checkout; the gate therefore requires a clean checkout at the
+/// candidate's commit, and the harness runs the candidate's archived
+/// executable, never a local build. Every input is checked before OUTPUT_DIR
+/// is created; its only entry is then `physical-validation-evidence.json`,
+/// written only when every physical check passed.
+pub fn gate(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: hamn-dev release gate (inputs are environment variables)".into());
+    }
+    run_gate().map_err(|error| format!("release gate: {error}"))
+}
+
+fn run_gate() -> Result<(), String> {
+    let [reference, tag, candidate_dir, output_dir] = required(
+        ["RELEASE_REF", "RELEASE_TAG", "CANDIDATE_DIR", "OUTPUT_DIR"],
+        "RELEASE_REF, RELEASE_TAG, CANDIDATE_DIR, and OUTPUT_DIR are required",
+    )?;
+    let evidence = Path::new(&output_dir).join("physical-validation-evidence.json");
+    let config = Config::from_env(|key| match key {
+        "HAMN_CANDIDATE_DIR" => Some(candidate_dir.clone()),
+        "HAMN_E2E_OUTPUT" => Some(evidence.to_string_lossy().into_owned()),
+        _ => std::env::var(key).ok(),
+    })?;
+    if machine()? != "arm64" {
+        return Err("physical Apple Silicon validator required".into());
+    }
+    let checkout = Checkout::current()?;
+    if checkout.is_dirty()? {
+        return Err("validator source tree is dirty".into());
+    }
+    let commit = checkout.commit(&reference).map_err(|_| "RELEASE_REF is not a commit")?;
+    if commit != checkout.head()? {
+        return Err("release commit differs from checkout".into());
+    }
+    let tree = checkout.tree(&commit)?;
+    let candidate = existing_directory(&candidate_dir, "CANDIDATE_DIR is unsafe")?;
+    validate_candidate(candidate, &tag, &commit, &tree)?;
+    empty_output_directory(&output_dir)?;
+    run(&config)?;
+    validate_physical(
+        &candidate.join("candidate.json"),
+        &candidate.join("SHA256SUMS"),
+        &evidence,
+        &config.run,
+        &config.attempt,
+    )?;
+    println!("validated exact candidate {tag}; physical evidence is in {output_dir}");
+    Ok(())
 }
 
 pub fn main(args: &[String]) -> Result<(), String> {

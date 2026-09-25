@@ -30,6 +30,18 @@ pub fn variable(name: &str) -> Result<String, String> {
     }
 }
 
+/// The values of `names`, or `message` when any is empty.
+pub fn required<const N: usize>(names: [&str; N], message: &str) -> Result<[String; N], String> {
+    let mut values: [String; N] = std::array::from_fn(|_| String::new());
+    for (value, name) in values.iter_mut().zip(names) {
+        *value = variable(name)?;
+        if value.is_empty() {
+            return Err(message.to_owned());
+        }
+    }
+    Ok(values)
+}
+
 /// Our environment plus `LC_ALL=C` and `overrides`, for a child's exact
 /// environment. A variable that is not UTF-8 is an error, not dropped.
 pub fn environment(overrides: &[(&str, &str)]) -> Result<BTreeMap<String, String>, String> {
@@ -46,9 +58,39 @@ pub fn environment(overrides: &[(&str, &str)]) -> Result<BTreeMap<String, String
     Ok(environment)
 }
 
+/// Runs a tool that must succeed and returns its standard output.
+pub fn tool<S: AsRef<OsStr>>(program: &str, args: &[S], timeout: Duration) -> Result<String, String> {
+    let environment = environment(&[])?;
+    process::run(OsStr::new(program), args, &Spec { environment: Some(&environment), ..Spec::default() }, timeout)
+}
+
+/// `uname -m`, looked up on PATH as the shell drivers did.
+pub fn machine() -> Result<String, String> {
+    Ok(tool("uname", &["-m"], Duration::from_secs(30))?.trim_end_matches('\n').to_owned())
+}
+
 /// `[1-9][0-9]*`
 pub fn is_positive_decimal(text: &str) -> bool {
     text.bytes().next().is_some_and(|first| first != b'0') && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// `path` if it names an existing directory that is not a link; `message`
+/// otherwise.
+pub fn existing_directory<'a>(path: &'a str, message: &str) -> Result<&'a Path, String> {
+    let directory = fs::symlink_metadata(path).is_ok_and(|info| info.file_type().is_dir());
+    if directory { Ok(Path::new(path)) } else { Err(message.to_owned()) }
+}
+
+/// Creates `OUTPUT_DIR` with its parents like `mkdir -p`; it must then be a
+/// directory, not a link, with no entries.
+pub fn empty_output_directory(path: &str) -> Result<&Path, String> {
+    fs::create_dir_all(path).map_err(|error| format!("cannot create OUTPUT_DIR {path}: {error}"))?;
+    let directory = existing_directory(path, "OUTPUT_DIR is unsafe")?;
+    let mut entries = fs::read_dir(directory).map_err(|error| format!("{path}: {error}"))?;
+    if entries.next().is_some() {
+        return Err("OUTPUT_DIR must be empty".into());
+    }
+    Ok(directory)
 }
 
 /// The GitHub step output file: an existing regular file, not a link.
@@ -105,11 +147,27 @@ impl Checkout {
     pub fn head(&self) -> Result<String, String> {
         self.git_text(&["rev-parse", "--verify", "HEAD"])
     }
+
+    /// The commit `reference` names.
+    pub fn commit(&self, reference: &str) -> Result<String, String> {
+        self.git_text(&["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
+    }
+
+    pub fn tree(&self, commit: &str) -> Result<String, String> {
+        self.git_text(&["rev-parse", &format!("{commit}^{{tree}}")])
+    }
+
+    /// Whether `git status --porcelain` lists anything: a change, or an
+    /// untracked file that is not ignored.
+    pub fn is_dirty(&self) -> Result<bool, String> {
+        Ok(!self.git_text(&["status", "--porcelain"])?.is_empty())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::support::tmp::TempDir;
 
     #[test]
     fn positive_decimals_have_no_sign_or_leading_zero() {
@@ -119,5 +177,24 @@ mod tests {
         for rejected in ["", "0", "01", "-1", "+1", "1.0", " 1", "1 ", "local", "１"] {
             assert!(!is_positive_decimal(rejected), "{rejected:?}");
         }
+    }
+
+    #[test]
+    fn output_directory_is_created_and_must_be_empty_and_unlinked() {
+        let directory = TempDir::new("hamn-release-checkout-");
+        let text = |path: &Path| path.to_str().unwrap().to_owned();
+        let nested = directory.path().join("a/b");
+        assert_eq!(empty_output_directory(&text(&nested)).unwrap(), nested);
+        fs::write(nested.join("entry"), "").unwrap();
+        assert_eq!(empty_output_directory(&text(&nested)).unwrap_err(), "OUTPUT_DIR must be empty");
+        let link = directory.path().join("link");
+        std::os::unix::fs::symlink(directory.path().join("a"), &link).unwrap();
+        assert_eq!(empty_output_directory(&text(&link)).unwrap_err(), "OUTPUT_DIR is unsafe");
+        let file = directory.path().join("file");
+        fs::write(&file, "").unwrap();
+        assert!(empty_output_directory(&text(&file)).unwrap_err().starts_with("cannot create OUTPUT_DIR"));
+        assert!(existing_directory(&text(&link), "unsafe").is_err());
+        assert!(existing_directory(&text(&directory.path().join("missing")), "unsafe").is_err());
+        assert!(existing_directory(&text(directory.path()), "unsafe").is_ok());
     }
 }

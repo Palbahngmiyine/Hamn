@@ -37,6 +37,7 @@ const COMMANDS: &[(&str, &str, Command)] = &[
         candidate::write_sbom,
     ),
     ("write-candidate", "OUTPUT TAG VERSION COMMIT TREE (NAME SHA256)x4", candidate::write_candidate),
+    ("gate", "(env)", physical::gate),
     ("validate-candidate", "DIR TAG COMMIT TREE", validate_candidate),
     ("hosted-evidence", "CANDIDATE_DIR OUTPUT TAG COMMIT TREE RUN ATTEMPT", hosted::hosted_evidence),
     (
