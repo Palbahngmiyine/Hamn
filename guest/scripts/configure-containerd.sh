@@ -2,7 +2,6 @@
 set -euo pipefail
 
 MARKER=${HAMN_CONTAINERD_MARKER:-/etc/hamn/containerd-kubernetes-v2}
-LEGACY_MARKER=${HAMN_LEGACY_CONTAINERD_MARKER:-/etc/hamn/containerd-kubernetes-v1}
 CONFIG=${HAMN_CONTAINERD_CONFIG:-/etc/containerd/config.toml}
 MODULES_CONFIG=${HAMN_MODULES_CONFIG:-/etc/modules-load.d/hamn-kubernetes.conf}
 SYSCTL_CONFIG=${HAMN_SYSCTL_CONFIG:-/etc/sysctl.d/99-hamn-kubernetes.conf}
@@ -23,25 +22,6 @@ atomic_replace() {
         return 0
     fi
     mv -fh -- "$source" "$destination"
-}
-
-validate_legacy_marker() {
-    if [ ! -e "$LEGACY_MARKER" ] && [ ! -L "$LEGACY_MARKER" ]; then
-        return 0
-    fi
-    if { [ ! -f "$LEGACY_MARKER" ] && [ ! -L "$LEGACY_MARKER" ]; } ||
-       { [ -d "$LEGACY_MARKER" ] && [ ! -L "$LEGACY_MARKER" ]; }; then
-        echo "hamn: refusing unsafe legacy containerd marker" >&2
-        return 1
-    fi
-}
-
-remove_legacy_marker() {
-    validate_legacy_marker
-    if [ ! -e "$LEGACY_MARKER" ] && [ ! -L "$LEGACY_MARKER" ]; then
-        return 0
-    fi
-    rm -f -- "$LEGACY_MARKER"
 }
 
 snapshot_cni_plugin() {
@@ -169,7 +149,6 @@ case "${1:-}" in
     ;;
 esac
 
-validate_legacy_marker
 command -v "$CONTAINERD" >/dev/null
 command -v "$RUNC" >/dev/null
 ensure_cni_plugins
@@ -236,7 +215,6 @@ fi
 for _ in $(seq 1 50); do
     if "$CTR" plugins ls 2>/dev/null | awk '($1 ~ /cri/ || $2 ~ /cri/) && $NF == "ok" { found=1 } END { exit !found }'; then
         touch "$MARKER"
-        remove_legacy_marker
         exit 0
     fi
     sleep 0.1
