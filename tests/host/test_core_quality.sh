@@ -277,8 +277,7 @@ for requirement in \
     '/nix/store/*)' \
     'FAIL: Hamn must not compile against the Nix Apple SDK' \
     'export SDKROOT=$HAMN_SYSTEM_SDKROOT HAMN_SYSTEM_SDKROOT' \
-    'export PATH=$hamn_nix/usr/bin:/bin:/usr/sbin:/sbin$hamn_rest' \
-    'gnuUserland = pkgs.lib.subtractLists packages pkgs.stdenvNoCC.initialPath;' \
+    'export PATH=${pkgs.lib.makeBinPath packages}:/usr/bin:/bin:/usr/sbin:/sbin:$PATH' \
     '(tool: { name = "bin/${tool}"; path = "/usr/bin/${tool}"; })' \
     '[ "ar" "c++" "cc" "clang" "clang++" "codesign" "ld" "otool" "ranlib" "xcrun" ]);' \
     'shellHook = lib.optionalString stdenv.isDarwin (darwinShellHook pkgs packages);'; do

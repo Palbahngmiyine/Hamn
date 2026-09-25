@@ -68,26 +68,12 @@
       appleToolchainFor = pkgs: pkgs.linkFarm "hamn-apple-toolchain" (map
         (tool: { name = "bin/${tool}"; path = "/usr/bin/${tool}"; })
         [ "ar" "c++" "cc" "clang" "clang++" "codesign" "ld" "otool" "ranlib" "xcrun" ]);
-      # Darwin shells: stdenv puts GNU coreutils/findutils/sed/grep/awk/tar
-      # ahead of the caller's PATH, but Hamn's scripts target the macOS (BSD)
-      # userland. Order PATH as pinned Nix tools, macOS system directories,
-      # then the caller's PATH, and select the system SDK for every build.
+      # Darwin shells: the pinned Nix tools come first, then the macOS (BSD)
+      # userland Hamn's scripts target, ahead of the GNU tools stdenv adds to
+      # the caller's PATH. Every build uses the system SDK, never a Nix one.
       darwinShellHook = pkgs: packages:
-        let
-          gnuUserland = pkgs.lib.subtractLists packages pkgs.stdenvNoCC.initialPath;
-        in
         ''
-          hamn_nix= hamn_rest=
-          IFS=: read -ra hamn_dirs <<<"$PATH"
-          for hamn_dir in "''${hamn_dirs[@]}"; do
-            case "$hamn_dir" in
-            ${pkgs.lib.concatMapStringsSep " | " (p: "\"${p}/bin\"") gnuUserland}) ;;
-            /nix/store/*) hamn_nix=$hamn_nix$hamn_dir: ;;
-            *) hamn_rest=$hamn_rest:$hamn_dir ;;
-            esac
-          done
-          export PATH=$hamn_nix/usr/bin:/bin:/usr/sbin:/sbin$hamn_rest
-          unset hamn_nix hamn_rest hamn_dirs hamn_dir
+          export PATH=${pkgs.lib.makeBinPath packages}:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
           case "''${DEVELOPER_DIR:-}" in /nix/store/*) unset DEVELOPER_DIR ;; esac
           HAMN_SYSTEM_SDKROOT=$(/usr/bin/env -u SDKROOT -u DEVELOPER_DIR \
             /usr/bin/xcrun --sdk macosx --show-sdk-path) || HAMN_SYSTEM_SDKROOT=
