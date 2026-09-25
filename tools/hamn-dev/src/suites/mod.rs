@@ -4,11 +4,20 @@
 use std::process::ExitCode;
 
 mod docker_readiness;
+mod native_query_lifetime;
 mod observer_requests;
 mod remote_cancel_boundaries;
 mod single_binary;
 mod ssh_deadline;
+mod tui_backpressure;
+mod tui_environment_actions;
 mod tui_native_regressions;
+mod tui_outcomes;
+mod tui_picker_restore;
+mod tui_quoting;
+mod tui_reload;
+mod tui_review_improvements;
+mod tui_session_management;
 mod udp_proxy;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
@@ -22,11 +31,30 @@ const SUITES: &[Suite] = &[
     ("ssh-deadline", ssh_deadline::main),
     ("tui-native-regressions", tui_native_regressions::main),
     ("udp-proxy", udp_proxy::main),
+    ("tui-review-improvements", tui_review_improvements::main),
+    ("tui-session-management", tui_session_management::main),
+    ("tui-outcomes", tui_outcomes::main),
+    ("tui-quoting", tui_quoting::main),
+    ("tui-reload", tui_reload::main),
+    ("native-query-lifetime", native_query_lifetime::main),
+    ("tui-environment-actions", tui_environment_actions::main),
+    ("tui-picker-restore", tui_picker_restore::main),
+    ("tui-backpressure", tui_backpressure::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
     ("native-regressions", tui_native_regressions::fixture),
     (ssh_deadline::UNRESPONSIVE_SSH, ssh_deadline::unresponsive_ssh),
+    ("tui-review-improvements", tui_review_improvements::peer),
+    ("tui-review-improvements-compose", tui_review_improvements::compose_peer),
+    ("tui-session-management-forward", tui_session_management::forward_peer),
+    ("tui-session-management-timeout", tui_session_management::timeout_peer),
+    ("tui-quoting-kubectl", tui_quoting::installed_kubectl),
+    ("tui-reload", tui_reload::fixture),
+    ("native-query-lifetime", native_query_lifetime::fixture),
+    ("native-query-lifetime-child", native_query_lifetime::child),
+    ("tui-picker-restore", tui_picker_restore::peer),
+    ("tui-backpressure", tui_backpressure::fixture),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

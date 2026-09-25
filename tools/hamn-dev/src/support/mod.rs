@@ -2,6 +2,7 @@
 //! the TUI harness.
 pub mod bounded_process;
 pub mod c_extract;
+pub mod harness_peers;
 pub mod http;
 pub mod pty;
 pub mod screen;
