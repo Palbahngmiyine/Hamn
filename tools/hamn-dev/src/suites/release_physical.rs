@@ -303,7 +303,7 @@ fn candidate_archive_rejects_links_duplicates_and_traversal() {
     fs::create_dir_all(source.join("bin")).unwrap();
     fs::write(source.join("bin/hamn"), b"executable").unwrap();
     let path = directory.path().join("host.tar.gz");
-    // As build-candidate.sh does: without COPYFILE_DISABLE, macOS tar adds
+    // As `release build-candidate` does: without COPYFILE_DISABLE, macOS tar adds
     // `._*` AppleDouble members, which make a second root.
     let status = Command::new("tar")
         .env("COPYFILE_DISABLE", "1")

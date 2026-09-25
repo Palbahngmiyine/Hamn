@@ -10,12 +10,14 @@ mod docker_api;
 mod docker_context;
 mod docker_readiness;
 mod exec_auth;
+mod hosted_validation;
 mod kubernetes_api;
 mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
 mod profile_yaml;
 mod qcow2;
+mod release_candidate;
 mod release_consumer;
 mod release_gate;
 mod release_github;
@@ -102,6 +104,8 @@ const SUITES: &[Suite] = &[
     ("release-version", release_version::main),
     ("release-request", release_request::main),
     ("release-gate", release_gate::main),
+    ("hosted-validation", hosted_validation::main),
+    ("release-candidate", release_candidate::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[

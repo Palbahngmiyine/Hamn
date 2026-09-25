@@ -26,20 +26,10 @@ use std::path::Path;
 type Command = fn(&[String]) -> Result<(), String>;
 
 const COMMANDS: &[(&str, &str, Command)] = &[
-    (
-        "render-installer",
-        "TEMPLATE OUTPUT VERSION COMMIT HOST_URL HOST_SHA256 GUEST_URL GUEST_SHA256 HOST_PATH GUEST_PATH",
-        candidate::render_installer,
-    ),
-    (
-        "write-sbom",
-        "OUTPUT VERSION COMMIT TREE COMMIT_EPOCH HOST_NAME HOST_SHA256 GUEST_NAME GUEST_SHA256",
-        candidate::write_sbom,
-    ),
-    ("write-candidate", "OUTPUT TAG VERSION COMMIT TREE (NAME SHA256)x4", candidate::write_candidate),
+    ("build-candidate", "(env)", candidate::build_candidate),
+    ("hosted-validation", "(env)", hosted::hosted_validation),
     ("gate", "(env)", physical::gate),
     ("validate-candidate", "DIR TAG COMMIT TREE", validate_candidate),
-    ("hosted-evidence", "CANDIDATE_DIR OUTPUT TAG COMMIT TREE RUN ATTEMPT", hosted::hosted_evidence),
     (
         "verify-hosted",
         "CANDIDATE_DIR EVIDENCE STABLE_TAG RC_TAG COMMIT TREE RUN ATTEMPT HOST GUEST SBOM INSTALLER",

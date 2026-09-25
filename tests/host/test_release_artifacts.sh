@@ -36,7 +36,7 @@ RELEASE_TAG=v0.0.1-rc.1 \
 OUTPUT_DIR="$WORK/non-arm64-candidate" \
 HAMN_GUEST_IMAGE="$WORK/guest.img" \
 HAMN_RELEASE_ALLOW_DIRTY=1 \
-    bash "$ROOT/packaging/release/build-candidate.sh" >"$WORK/non-arm64.out" \
+    "$HAMN_DEV" release build-candidate >"$WORK/non-arm64.out" \
     2>"$WORK/non-arm64.err"; then
     echo "FAIL: candidate builder accepted a non-arm64 host" >&2
     exit 1
@@ -51,7 +51,7 @@ RELEASE_TAG=v0.0.1-rc.1 \
 OUTPUT_DIR="$WORK/canonical-candidate" \
 HAMN_GUEST_IMAGE="$WORK/guest.img" \
 HAMN_RELEASE_ALLOW_DIRTY=1 \
-    bash "$ROOT/packaging/release/build-candidate.sh" >"$WORK/canonical-candidate.out"
+    "$HAMN_DEV" release build-candidate >"$WORK/canonical-candidate.out"
 CANONICAL_HOST_ARTIFACT=$WORK/canonical-candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 [ "$(tar -xOf "$CANONICAL_HOST_ARTIFACT" \
     hamn-v0.0.1-darwin-arm64/packaging/release/update-manifest-url)" = \
@@ -74,7 +74,7 @@ OUTPUT_DIR="$WORK/rejected-candidate" \
 HAMN_GUEST_IMAGE="$WORK/guest.img" \
 HAMN_RELEASE_MANIFEST_URL=https://downloads.example.invalid/other/manifest.json \
 HAMN_RELEASE_ALLOW_DIRTY=1 \
-    bash "$ROOT/packaging/release/build-candidate.sh" >"$WORK/rejected-candidate.out" \
+    "$HAMN_DEV" release build-candidate >"$WORK/rejected-candidate.out" \
     2>"$WORK/rejected-candidate.err"; then
     echo "FAIL: candidate accepted a manifest URL outside its canonical stable release" >&2
     exit 1
@@ -88,7 +88,7 @@ HAMN_GUEST_IMAGE="$WORK/guest.img" \
 HAMN_RELEASE_MANIFEST_URL="file://$WORK/manifest.json" \
 HAMN_RELEASE_ALLOW_LOCAL=1 \
 HAMN_RELEASE_ALLOW_DIRTY=1 \
-    bash "$ROOT/packaging/release/build-candidate.sh" >"$WORK/candidate.out"
+    "$HAMN_DEV" release build-candidate >"$WORK/candidate.out"
 
 HOST_ARTIFACT=$WORK/candidate/hamn-v0.0.1-darwin-arm64.tar.gz
 GUEST_ARTIFACT=$WORK/candidate/hamn-v0.0.1-ubuntu-24.04-arm64.img

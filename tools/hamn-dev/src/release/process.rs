@@ -48,9 +48,32 @@ pub struct Spec<'a> {
 /// start, a timeout or unreadable output is an error; any exit status is
 /// returned for the caller to judge.
 pub fn capture<S: AsRef<OsStr>>(program: &OsStr, args: &[S], spec: &Spec, timeout: Duration) -> Result<Output, String> {
+    execute(program, args, spec, timeout, true)
+}
+
+/// Like [`run`], but the child's standard error goes straight to ours, so a
+/// long build's progress and warnings stay visible; only standard output is
+/// captured, and a failure carries its tail alone.
+pub fn run_passing_stderr<S: AsRef<OsStr>>(
+    program: &OsStr,
+    args: &[S],
+    spec: &Spec,
+    timeout: Duration,
+) -> Result<String, String> {
+    checked(program, execute(program, args, spec, timeout, false)?)
+}
+
+fn execute<S: AsRef<OsStr>>(
+    program: &OsStr,
+    args: &[S],
+    spec: &Spec,
+    timeout: Duration,
+    capture_stderr: bool,
+) -> Result<Output, String> {
     let name = program.to_string_lossy().into_owned();
     let mut command = Command::new(program);
-    command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.args(args).stdout(Stdio::piped());
+    command.stderr(if capture_stderr { Stdio::piped() } else { Stdio::inherit() });
     command.stdin(if spec.input.is_some() { Stdio::piped() } else { Stdio::null() });
     if let Some(environment) = spec.environment {
         command.env_clear().envs(environment);
@@ -65,7 +88,10 @@ pub fn capture<S: AsRef<OsStr>>(program: &OsStr, args: &[S], spec: &Spec, timeou
     .into_iter()
     .enumerate()
     {
-        let mut stream = stream.expect("piped output");
+        let Some(mut stream) = stream else {
+            assert!(index == 1 && !capture_stderr, "standard output is always piped");
+            continue;
+        };
         let sender = sender.clone();
         std::thread::spawn(move || {
             let mut data = Vec::new();
@@ -98,7 +124,8 @@ pub fn capture<S: AsRef<OsStr>>(program: &OsStr, args: &[S], spec: &Spec, timeou
         };
         std::thread::sleep(remaining.min(Duration::from_millis(10)));
     };
-    let mut outputs: [Option<Vec<u8>>; 2] = [None, None];
+    // An inherited standard error has no reader and stays empty here.
+    let mut outputs: [Option<Vec<u8>>; 2] = [None, if capture_stderr { None } else { Some(Vec::new()) }];
     while outputs.iter().any(Option::is_none) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         match receiver.recv_timeout(remaining) {
@@ -114,7 +141,10 @@ pub fn capture<S: AsRef<OsStr>>(program: &OsStr, args: &[S], spec: &Spec, timeou
 /// Runs a command that must succeed and returns its standard output. A
 /// failure names the command and carries the tails of both streams.
 pub fn run<S: AsRef<OsStr>>(program: &OsStr, args: &[S], spec: &Spec, timeout: Duration) -> Result<String, String> {
-    let output = capture(program, args, spec, timeout)?;
+    checked(program, capture(program, args, spec, timeout)?)
+}
+
+fn checked(program: &OsStr, output: Output) -> Result<String, String> {
     if !output.status.success() {
         let status = output.code().map_or_else(|| output.status.to_string(), |code| code.to_string());
         return Err(format!(
@@ -189,6 +219,20 @@ mod tests {
             capture(OsStr::new("/nonexistent/program"), &[] as &[&str], &Spec::default(), Duration::from_secs(1))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn passed_through_stderr_keeps_status_output_and_deadline() {
+        let run = |script: &str, timeout: Duration| {
+            run_passing_stderr(OsStr::new("/bin/sh"), &["-c", script], &Spec::default(), timeout)
+        };
+        let seconds = Duration::from_secs(10);
+        assert_eq!(run("echo out; echo passed-through >&2", seconds).unwrap(), "out\n");
+        let failure = run("echo partial; exit 5", seconds).unwrap_err();
+        assert!(failure.contains("failed (5)") && failure.contains("partial"), "{failure}");
+        let started = Instant::now();
+        let error = run("sleep 30", Duration::from_millis(300)).unwrap_err();
+        assert!(error.contains("timed out") && started.elapsed() < Duration::from_secs(10), "{error}");
     }
 
     #[test]

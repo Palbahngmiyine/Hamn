@@ -517,7 +517,7 @@ for requirement in \
     grep -Fq "$requirement" "$hosted_evidence" ||
         fail "hosted evidence overstates validation: $requirement"
 done
-grep -Fq '"$HAMN_DEV" release hosted-evidence' "$ROOT/packaging/release/hosted-validation.sh" ||
+grep -Fq 'let evidence = evidence_for(candidate_dir, &tag, &commit, &tree, &run, &attempt)?;' "$hosted_evidence" ||
     fail "hosted validation does not write its evidence with the checked writer"
 # hosted.rs's own test asserts the written evidence has no k3sE2E check.
 if rg -n 'k3sE2E' "$ROOT/packaging/release" >/dev/null; then
@@ -529,8 +529,8 @@ grep -Fq 'BASE_URL="https://github.com/${RELEASE_REPOSITORY}/releases/download/$
 grep -Fq 'candidate artifact directory contains unexpected entries' "$hosted_evidence" &&
     grep -Fq '"$HAMN_DEV" release verify-hosted' "$ROOT/packaging/release/publish-release.sh" ||
     fail "keyless promotion does not reject unbound candidate files"
-grep -Fq 'CANONICAL_MANIFEST_URL="https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/hamn-update-manifest-v3.json"' \
-    "$ROOT/packaging/release/build-candidate.sh" ||
+grep -Fq 'format!("https://github.com/{repository}/releases/latest/download/hamn-update-manifest-v3.json")' \
+    "$ROOT/tools/hamn-dev/src/release/candidate.rs" ||
     fail "candidate does not embed the latest v3 manifest URL"
 printf '%s\n' "$publish_job" | grep -Fq '"$publish/hamn-update-manifest-v3.json"' ||
     fail "promotion omits the v3 manifest asset"
@@ -538,14 +538,14 @@ if printf '%s\n' "$publish_job" | grep -Fq 'hamn-update-manifest.json'; then
     fail "promotion still publishes the removed schema v2 manifest"
 fi
 if rg -n 'HAMN_UPDATE_PUBLIC_KEY|hamn-update-manifest\.json\.sig' \
-    "$ROOT/packaging/release/build-candidate.sh" \
+    "$ROOT/tools/hamn-dev/src/release/candidate.rs" \
     "$ROOT/packaging/release/install.sh.in" \
     "$ROOT/packaging/release/publish-release.sh" \
     "$ROOT/scripts/update-host.sh" "$release_workflow" >/dev/null; then
     fail "keyless release path still depends on a long-lived release signature"
 fi
 if rg -n 'ssh-keygen -Y sign' \
-    "$ROOT/packaging/release/build-candidate.sh" \
+    "$ROOT/tools/hamn-dev/src/release/candidate.rs" \
     "$ROOT/packaging/release/install.sh.in" \
     "$ROOT/packaging/release/publish-release.sh" \
     "$ROOT/scripts/update-host.sh" >/dev/null; then
