@@ -134,18 +134,29 @@ bind the candidate to the source tree at their start.
 For real VM, Docker, Compose, buildx, and disposable kind/Kubernetes validation:
 
 ```sh
-python3 tests/host/test_workspace_live.py --binary build/hamn --cache "$HOME/.hamn/cache"
+make hamn-dev
+target/release/hamn-dev test workspace-live --binary build/hamn --cache "$HOME/.hamn/cache"
 ```
 
 Run it inside `nix develop .#live`, which provides Docker CLI with its
 Compose/buildx plugins, kubectl, and kind. The cache must contain the selected signed guest image and verification marker. The harness
 creates an owned `/tmp` HOME, uses only its explicit Docker socket, and records
-binary/image hashes and results there. It checks backup/socket recovery, data
+binary/image hashes and results there. Its children, including the TUI under
+test, find only the Docker CLI, kubectl, and kind it resolved from `PATH`, then
+Homebrew and system directories. It checks backup/socket recovery, data
 preservation, cancellation/forced worker exit, native PTY commands, and Kubernetes
 apply/exec/port-forward. It deletes the kind cluster and stops its VMs; the test
 HOME remains available for inspection. `--root` resumes only an owned test root;
 `--keep-running` retains the main test VM for additional diagnosis. Remove that
 owned test directory after reviewing evidence. Never use a user profile as a fixture.
+
+`hamn-dev test workspace-live-management --root ROOT` reruns only the
+management review against an existing kind cluster in a kept root's engine.
+`hamn-dev test guest-image-live --help` lists the inputs of the same-contract
+runtime test for locally built guest images, which gives each image its own
+HOME and VM. `make test-control` runs `hamn-dev test workspace-live-checks`,
+which checks the harness's guards, guest barrier scripts, and transport
+fixtures without a VM.
 
 The local control suite requires Docker CLI for the external-context transport
 fixture. It connects only to the test-owned Unix socket; no Docker daemon or VM
