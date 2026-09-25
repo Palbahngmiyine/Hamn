@@ -196,7 +196,7 @@ def check(terminal):
             before_calls = (work / 'transport-requests').read_bytes()
             before_mtime = selection.stat().st_mtime_ns
             repeated = update()
-            assert repeated.returncode == 0, repeated.stderr
+            assert repeated.returncode == 0, (repeated.stdout, repeated.stderr)
             assert json.loads(repeated.stdout)['data']['completed'] is True
             # A no-op is exactly two human lines.
             assert repeated.stderr == b'Checking for updates...\nHamn ' + version.encode() + b' is up to date.\n', repeated.stderr
@@ -375,7 +375,7 @@ def check(terminal):
                 manifest_path.write_text(json.dumps(manifest))
                 recover_changed_generation()
                 recovered = update()
-                assert recovered.returncode == 0, recovered.stderr
+                assert recovered.returncode == 0, (recovered.stdout, recovered.stderr)
                 assert b'is up to date' in recovered.stderr
                 assert os.readlink(bindir / 'hamn') == active and selection.read_bytes() == saved
                 assert not (home / '.hamn/cache/.hamn-update-transaction').exists()
