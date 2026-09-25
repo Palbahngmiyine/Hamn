@@ -4,6 +4,7 @@
 use std::process::ExitCode;
 
 mod docker_readiness;
+mod observer_requests;
 mod remote_cancel_boundaries;
 mod single_binary;
 mod ssh_deadline;
@@ -14,6 +15,7 @@ type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
     ("docker-readiness", docker_readiness::main),
+    ("observer-requests", observer_requests::main),
     ("remote-cancel-boundaries", remote_cancel_boundaries::main),
     ("single-binary", single_binary::main),
     ("ssh-deadline", ssh_deadline::main),
