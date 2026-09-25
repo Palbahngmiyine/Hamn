@@ -50,7 +50,8 @@
 - `guest/agent/`: Linux guest management agent `hamnd`; it is not a container engine.
 - `guest/scripts/`: guest configuration for system containerd, Docker, Rosetta, and
   immutable-image validation.
-- `guest/image/`: external Linux builder for the signed Ubuntu 24.04 arm64 guest image.
+- `guest/image/`: external Linux builder for the signed Ubuntu 24.04 arm64 guest image
+  and its C evidence/size tool `hamn-image-tool`.
 - `guest/json/`: strict JSON for guest-side C tools and the in-guest `guest-json`
   helper that configuration scripts use instead of an interpreter.
 - `guest/systemd/`: the `hamnd.service` unit.
