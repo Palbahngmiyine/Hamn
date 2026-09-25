@@ -19,7 +19,8 @@ Developer builds, release assembly and tests still require their documented
 toolchain.
 
 Use the [official installer](../README.md#install) for a first installation or
-an incompatible older installation (see below). For a managed installation:
+to move a Hamn 0.1.x installation to this release (see below). For a managed
+installation:
 
 ```sh
 hamn upgrade --check
@@ -95,8 +96,8 @@ is also retried. Unmarked directories, incomplete staging copies, external packa
 manager files, profiles and guest images are outside collection. Do not manually
 launch inactive generation paths during collection. Updaters from Hamn 0.1.1 and
 earlier do not take the transaction locks and are not detected; do not run one
-while installing or upgrading. Generations of the earlier layout (below) are
-never collected.
+while installing or upgrading. A migrated Hamn 0.1.x generation (below) is
+collected like any other once it is neither active nor the predecessor.
 
 
 A successful interactive TUI exit may display cached update information and
@@ -152,23 +153,36 @@ generation, the target it replaced. Generations carry no scripts or source
 files; the data directory keeps its earlier name, `share/hamn/src`, so the
 default paths of existing setups remain valid.
 
-Installations made by Hamn 0.1.2 and earlier, and by pre-release builds, use the
-earlier layout (layout version 1), whose generations carried the updater's shell
-scripts. The current installer never adopts or changes such a generation:
-`install.sh` and `make install` refuse it, unchanged, with a message naming the
-command link and data directory to move aside. Move both aside, then run the
-official installer again:
+Hamn 0.1.x installations use layout version 1, whose generations also carried
+the updater's shell scripts and packaging under `share/hamn/src`. Their own
+`hamn upgrade` cannot reach a new release (it reads only the retired schema v2
+manifest; below), so a Hamn 0.1.x user runs the official installer once.
+`install.sh` (and `make install`) migrates the installation in place. The
+0.1.x generation must pass every check Hamn 0.1.2's installer applied before
+replacing it: owned by you, mode 0755 with a single-link executable of the
+digest in its name, real `scripts` and `packaging` directories, and the exact
+marker for these directories. The installer then publishes a new-layout
+generation with one rename of the command link and keeps the 0.1.x generation
+as its predecessor. A failed or interrupted `install.sh` rolls back to the
+working 0.1.2 command; a `make install` interrupted before the link rename
+leaves it untouched. The 0.1.x generation, with its scripts, is collected by a
+later installation or update. Profiles, VM disks and the guest image cache
+under `~/.hamn` are not touched. The same holds for pre-release builds of that
+layout.
+
+Anything else is refused unchanged, with a message naming what to move aside:
+a 0.1.x generation that fails those checks (for example a changed binary, a
+second hard link or a group-writable directory), and pre-generation installs
+(a standalone `hamn`, `.hamn-binary.sha256`, an empty `.hamn-managed`).
+For such an installation, move the command link and data directory aside,
+then run the official installer again:
 
 ```sh
 mv ~/.local/bin/hamn ~/.local/bin/hamn.earlier
 mv ~/.local/share/hamn/src ~/.local/share/hamn/src.earlier
 ```
 
-Profiles, VM disks and the guest image cache under `~/.hamn` are kept. Remove
-the moved paths once the new installation works. Hamn 0.1.2 and earlier cannot
-reach a new release in place (below); a pre-release build that reads schema v3
-fails its own `hamn upgrade` at host artifact validation, because new archives
-contain no installer scripts. Both are reinstalled the same way.
+Remove the moved paths once the new installation works.
 
 ## Manifest compatibility and release evidence
 
@@ -177,8 +191,8 @@ point to. V3 names exact artifact sizes, the qcow2/zlib guest format and an 8 Gi
 virtual size. Manifests are limited to 256 KiB, host archives to 128 MiB, and guest
 artifacts to less than 2 GiB. Duplicate, unknown and null JSON keys are rejected,
 including the retired v2 `repository` extension. Hamn 0.1.2 and earlier read only
-schema v2, so they cannot upgrade in place; reinstall them with the official
-installer as described above. Published
+schema v2, so they cannot upgrade in place; run the official installer once,
+which migrates them as described above. Published
 historical releases are not rewritten.
 
 Publication requires actual image size evidence and a reviewed
@@ -213,3 +227,9 @@ active state. Update tests also exercise bootstrap TERM/SIGKILL, recovery follow
 receipt invalidation, repeated releases, and PATH shadowing. Controlled
 transport verifies protocol separation and independently counted HTTP fixture bytes;
 it does not establish production network throughput or VM boot.
+
+Migration tests install Hamn 0.1.2 with the 0.1.2 installer and packaging read
+from the release commit in Git history, so they need a full clone. A stand-in
+answers for the 0.1.2 executable itself, which this checkout cannot build. The
+tests then migrate that installation through `install.sh`, the bootstrap updater
+and `make install`, with SIGKILL and an injected failure at each step.

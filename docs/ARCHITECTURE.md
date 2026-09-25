@@ -105,7 +105,8 @@ manifest validation, stable version decisions, manifest-only checks, artifact
 acquisition and byte accounting, receipt compatibility, and the whole install
 and update transaction: the transaction, cache and install locks in their fixed
 order (`locks.rs`), the version-3 recovery journal and rollback (`journal.rs`),
-generation staging and atomic command-link publication (`generation.rs`), signal
+generation staging, the migration of verified Hamn 0.1.x generations and
+command-link publication by one rename (`generation.rs`), signal
 checkpoints (`interrupt.rs`), the update sequence (`update.rs`) and
 obsolete-generation collection (`retention.rs`). One process holds every lock of
 a transaction and installs a release's `bin/hamn` itself, so a host archive is

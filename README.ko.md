@@ -37,9 +37,9 @@ Run hamn to get started. Update later with hamn upgrade.
 
 `~/.local/bin`이 PATH에 없으면 사용 중인 shell에 추가할 한 줄을 알려 줍니다.
 macOS 기본 도구만 사용하므로 Python, Homebrew, Rust, Xcode Command Line Tools를
-따로 설치할 필요가 없습니다. Hamn 0.1.2 이하의 설치는 제자리에서 업그레이드할 수
-없으므로 [설치 문서](docs/INSTALLATION.ko.md#설치-배치와-이전-설치)에 따라 옮긴 뒤
-설치기를 다시 실행합니다.
+따로 설치할 필요가 없습니다. Hamn 0.1.2 이하는 스스로 이 릴리스로 업데이트할 수
+없으므로 위 설치기를 한 번 실행합니다. 설치기가 기존 설치를 제자리에서 이전합니다
+([설치 문서](docs/INSTALLATION.ko.md#설치-배치와-이전-설치) 참고).
 
 소스 빌드는 [개발 문서](docs/DEVELOPMENT.ko.md)를 참고하세요.
 서명된 릴리스 설치는 [릴리스 설정](docs/RELEASE-SETUP.ko.md)을 참고하세요.

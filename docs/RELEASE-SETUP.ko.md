@@ -213,10 +213,11 @@ hosted 검사가 통과했더라도 자동 배포를 거부합니다.
 설치해 원자적으로 게시합니다. 호스트 아카이브는 설치기 스크립트 없이 generation
 payload 하나(`bin/hamn`과 `share/hamn/update-manifest-url`)만 담습니다. v3 manifest를
 읽는 설치 버전은 `hamn --headless system upgrade --yes`를 사용할 수 있습니다. Hamn
-v0.1.2 이하와 출시 전 빌드는 제자리에서 업그레이드할 수 없는 이전 설치 배치를
-사용하므로, [설치 문서](INSTALLATION.ko.md#설치-배치와-이전-설치)에 따라 명령 링크와
-데이터 디렉터리를 옮긴 뒤 `install.sh`로 다시 설치해야 합니다. Hosted manifest는
-0.0.1 릴리스에서 사용한 `github-hosted-no-vm` 검증 모드를 유지합니다.
+v0.1.2 이하는 이를 읽지 못하므로 사용자가 `install.sh`를 한 번 실행합니다.
+설치기는 [설치 문서](INSTALLATION.ko.md#설치-배치와-이전-설치)에 설명한 대로 검증
+가능한 0.1.x 설치를 제자리에서 이전하고, 그 밖의 이전 설치는 바꾸지 않고
+거부합니다. Hosted manifest는 0.0.1 릴리스에서 사용한 `github-hosted-no-vm` 검증
+모드를 유지합니다.
 
 매니지드 K3s 프로필은 더 이상 전환하지 않습니다. 매니지드 K3s의 `kubernetes:`
 키가 남은 프로필은 거부합니다. 릴리스 노트에는 더 이상 K3s 데이터 삭제 경고를

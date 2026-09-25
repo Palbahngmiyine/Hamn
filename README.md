@@ -38,9 +38,9 @@ Run hamn to get started. Update later with hamn upgrade.
 If `~/.local/bin` is not on your PATH, the installer prints the one line to add
 for your shell. It needs only macOS system tools; Python, Homebrew, Rust, and
 Xcode Command Line Tools are not required for installation or updates.
-An installation of Hamn 0.1.2 or earlier cannot be upgraded in place: move it
-aside as [installation](docs/INSTALLATION.md#installed-layout-and-earlier-installations)
-describes, then run the installer again.
+Hamn 0.1.2 and earlier cannot update themselves to this release: run the
+installer above once, which migrates the existing installation in place (see
+[installation](docs/INSTALLATION.md#installed-layout-and-earlier-installations)).
 
 For source builds, see [Development](docs/DEVELOPMENT.md).
 Signed release installation is described in [release setup](docs/RELEASE-SETUP.md).

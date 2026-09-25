@@ -94,8 +94,9 @@ kubeconfig 인증 플러그인은 허용합니다. 별도 호스트 코어나 �
 구현하며 Tokio·터미널 초기화 전에 실행합니다. 아카이브·manifest 검증, stable 버전
 판정, manifest-only 검사, artifact 획득과 byte 집계, 설치 기록 호환, 그리고 설치·
 업데이트 거래 전체를 담당합니다. 고정된 순서의 거래·캐시·설치 잠금(`locks.rs`),
-version-3 복구 저널과 롤백(`journal.rs`), generation staging과 원자적 명령 링크
-게시(`generation.rs`), signal checkpoint(`interrupt.rs`), 업데이트 순서(`update.rs`),
+version-3 복구 저널과 롤백(`journal.rs`), generation staging, 검증된 Hamn 0.1.x
+generation의 이전과 rename 한 번으로 하는 명령 링크 게시(`generation.rs`), signal
+checkpoint(`interrupt.rs`), 업데이트 순서(`update.rs`),
 불필요한 설치본 정리(`retention.rs`)가 여기에 있습니다. 한 프로세스가 거래의 모든
 잠금을 보유하고 릴리스의 `bin/hamn`을 직접 설치하므로, 호스트 아카이브는 generation
 payload(`bin/hamn`과 `share/hamn/update-manifest-url`)일 뿐이며 설치를 위해 그 안의

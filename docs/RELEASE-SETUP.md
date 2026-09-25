@@ -238,10 +238,10 @@ execute it. The installer validates pinned host/guest digests, then the release'
 own verified `hamn` installs itself and publishes atomically; the host archive is
 one generation payload (`bin/hamn` and `share/hamn/update-manifest-url`) with no
 installer scripts. Installed versions that read the v3 manifest can run
-`hamn --headless system upgrade --yes`. Hamn v0.1.2 and earlier, and pre-release
-builds, use an earlier installation layout that cannot be upgraded in place:
-move their command link and data directory aside and reinstall with
-`install.sh`, as [Installation](INSTALLATION.md#installed-layout-and-earlier-installations)
+`hamn --headless system upgrade --yes`. Hamn v0.1.2 and earlier cannot read it;
+their users run `install.sh` once, which migrates a verifiable 0.1.x
+installation in place and refuses any other earlier installation unchanged, as
+[Installation](INSTALLATION.md#installed-layout-and-earlier-installations)
 describes. The hosted manifest retains the `github-hosted-no-vm` validation
 mode used by the 0.0.1 release.
 

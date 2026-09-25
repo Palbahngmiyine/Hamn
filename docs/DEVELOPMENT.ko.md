@@ -49,8 +49,10 @@ Ad-hoc 서명이며 Developer ID 서명이나 공증은 아닙니다. 코어 실
 `make install`은 실행 파일 자체의 native 설치기(`build/hamn __install-support install`)로
 `build/hamn`을 `PREFIX`(기본 `~/.local`) 아래의 새 관리형 generation으로 게시합니다.
 `BINDIR`와 `DATADIR`로 명령·데이터 디렉터리를 지정합니다. 소스 파일 없이 실행 파일만
-설치하며, 이전 배치의 설치는 아무것도 바꾸지 않고 거부합니다.
-[설치 문서](INSTALLATION.ko.md#설치-배치와-이전-설치)를 참고하세요.
+설치하며, 검증 가능한 Hamn 0.1.x 설치는 이전하고 그 밖의 이전 설치는 아무것도
+바꾸지 않고 거부합니다. [설치 문서](INSTALLATION.ko.md#설치-배치와-이전-설치)를
+참고하세요. 이전 테스트는 v0.1.2 릴리스 commit의 설치기로 Hamn 0.1.2를 설치하므로
+설치기 게이트에는 shallow clone이 아닌 전체 clone이 필요합니다.
 
 내장 Engine API에는 Docker CLI가 필요하지 않습니다. 외부 Docker CLI·Compose·
 buildx·SDK는 프로필 공개 소켓을 사용할 수 있습니다. VM에는 설치·검증된 관리형
