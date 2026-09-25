@@ -17,6 +17,7 @@ mod observer_requests;
 mod profile_yaml;
 mod qcow2;
 mod remote_cancel_boundaries;
+mod repository;
 mod rust_sdk;
 mod single_binary;
 mod ssh_deadline;
@@ -48,6 +49,7 @@ type Suite = (&'static str, fn(&[String]) -> ExitCode);
 type Fixture = fn(&str, &[String]) -> ExitCode;
 
 const SUITES: &[Suite] = &[
+    ("repository", repository::main),
     ("qcow2", qcow2::main),
     ("diagnostics", diagnostics::main),
     ("docker-readiness", docker_readiness::main),

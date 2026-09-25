@@ -17,5 +17,7 @@ regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["logging", "ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Workflow YAML syntax checks; the product already locks this parser.
+serde_yaml = "0.9"
 sha2 = "0.10"
 unicode-width = "0.2"

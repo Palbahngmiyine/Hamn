@@ -177,8 +177,15 @@ $(START_DOCKER_CONTEXT_RETRY_TEST): tests/host/test_start_docker_context_retry.c
 		$(filter-out host/main.c host/cmd/cmd_start.c,$(HOST_C_SRCS)) \
 		host/cmd/cmd_start.c $(HOST_M_SRCS) $(LDFLAGS) -o $@
 
-test-portable:
-	bash tests/ci/test_portable.sh
+test-portable: hamn-dev
+	$(HAMN_DEV) test repository
+	bash guest/tests/test_configure_containerd.sh
+	bash guest/tests/test_configure_docker.sh
+	bash guest/tests/test_configure_rosetta.sh
+	bash guest/tests/test_make_install_targets.sh
+	bash guest/tests/test_guest_deployment_transaction.sh
+	bash guest/tests/test_verify_image_contract.sh
+	bash guest/tests/test_guest_image_builder.sh
 
 $(PROFILE_READ_TEST): tests/host/test_profile_read.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
