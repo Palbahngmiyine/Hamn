@@ -61,8 +61,25 @@
           '';
         };
       # The channel, profile and components declared in rust-toolchain.toml.
+      # On Darwin, Rust links through Apple's /usr/bin/cc with the system SDK,
+      # so the toolchain neither propagates nixpkgs' clang wrapper nor records
+      # a Nix Apple SDK for rust-lld. Both are unused there, and they were
+      # about 1 GiB of the shell (LLVM, clang, cctools and apple-sdk).
       rustToolchainFor = pkgs:
-        (rust-overlay.lib.mkRustBin { } pkgs).fromRustupToolchainFile ./rust-toolchain.toml;
+        let
+          inherit (pkgs.stdenv) isDarwin;
+          rustPkgs = pkgs // pkgs.lib.optionalAttrs isDarwin {
+            callPackage = pkgs.newScope { apple-sdk = null; };
+          };
+          toolchain = (rust-overlay.lib.mkRustBin { } rustPkgs).fromRustupToolchainFile ./rust-toolchain.toml;
+        in
+        if isDarwin then
+          toolchain.overrideAttrs (_: {
+            depsHostHostPropagated = [ ];
+            propagatedBuildInputs = [ ];
+          })
+        else
+          toolchain;
       # Hamn links against the macOS SDK and is signed with Apple's codesign.
       # These names resolve to Apple's /usr/bin tools, never a Nix compiler.
       appleToolchainFor = pkgs: pkgs.linkFarm "hamn-apple-toolchain" (map

@@ -217,7 +217,7 @@ for requirement in \
     'checks = forAllSystems' \
     '      actionlintVersion = "1.7.12";' \
     'inputs.nixpkgs.follows = "nixpkgs";' \
-    '(rust-overlay.lib.mkRustBin { } pkgs).fromRustupToolchainFile ./rust-toolchain.toml;' \
+    '(rust-overlay.lib.mkRustBin { } rustPkgs).fromRustupToolchainFile ./rust-toolchain.toml;' \
     'actionlint -config-file'; do
     grep -Fq "$requirement" "$ROOT/flake.nix" ||
         fail "Nix flake is missing required integration: $requirement"
@@ -336,6 +336,18 @@ if [ "$(uname -s)" = Darwin ] && [ -n "${IN_NIX_SHELL:-}" ]; then
     [ -n "${SDKROOT:-}" ] && [ "$SDKROOT" = "${HAMN_SYSTEM_SDKROOT:-}" ] &&
         [ -d "$SDKROOT" ] && [ "${SDKROOT#/nix/store/}" = "$SDKROOT" ] ||
         fail "Nix shell must select the system macOS SDK: ${SDKROOT:-unset}"
+    # The Darwin toolchain carries no Nix C compiler: nixpkgs' cc-wrapper
+    # setup hook would export NIX_CC and put a Nix clang or ld on PATH.
+    [ -z "${NIX_CC:-}" ] || fail "the Darwin shell must not carry a Nix C compiler: $NIX_CC"
+    IFS=: read -ra shell_path <<<"$PATH"
+    for dir in "${shell_path[@]}"; do
+        case "$dir" in /nix/store/*) ;; *) continue ;; esac
+        for tool in cc clang ld; do
+            [ -e "$dir/$tool" ] || continue
+            [ "$(/usr/bin/readlink "$dir/$tool")" = "/usr/bin/$tool" ] ||
+                fail "a Nix $tool is on the shell PATH: $dir/$tool"
+        done
+    done
     toolchain_channel=$(sed -nE 's/^channel = "([0-9.]+)"$/\1/p' "$ROOT/rust-toolchain.toml")
     [ -n "$toolchain_channel" ] || fail "rust-toolchain.toml does not pin a stable channel"
     case "$(rustc --version)" in

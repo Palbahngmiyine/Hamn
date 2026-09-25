@@ -22,7 +22,8 @@ nix develop .#live                                   # also kubectl and kind
 ```
 
 On macOS the shells use Apple's `/usr/bin` compiler, linker, and `codesign`,
-export the system SDK as `SDKROOT` (never a Nix SDK), and place the macOS
+export the system SDK as `SDKROOT` (never a Nix SDK), contain no Nix C compiler
+or Apple SDK (the Rust toolchain does not propagate them), and place the macOS
 userland (`stat`, `sed`, `find`, `tar`) ahead of stdenv's GNU tools because
 Hamn's scripts target it. Pinned Nix tools stay first on `PATH`. CI runs the
 same shells, and `make test-core-quality` checks this resolution inside them.
