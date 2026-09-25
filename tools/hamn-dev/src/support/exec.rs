@@ -17,6 +17,12 @@ pub fn wait_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus> 
     if let Some(status) = child.try_wait().expect("wait") {
         return Some(status);
     }
+    wait_exit_until(child, deadline)
+}
+
+/// Waits for an exit notification from kqueue.
+#[cfg(target_os = "macos")]
+fn wait_exit_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
     // SAFETY: kqueue returns a new descriptor or -1.
     let queue = unsafe { libc::kqueue() };
     assert!(queue >= 0, "kqueue: {}", io::Error::last_os_error());
@@ -55,6 +61,21 @@ pub fn wait_timeout(child: &mut Child, timeout: Duration) -> Option<ExitStatus> 
             continue;
         }
         return if count > 0 { Some(child.wait().expect("wait")) } else { child.try_wait().expect("wait") };
+    }
+}
+
+/// Without kqueue (the Linux portable gate), polls at a bounded interval.
+#[cfg(not(target_os = "macos"))]
+fn wait_exit_until(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
+    loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            return Some(status);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(5)));
     }
 }
 

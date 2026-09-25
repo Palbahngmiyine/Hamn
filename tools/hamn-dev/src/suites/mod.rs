@@ -13,6 +13,9 @@ mod docker_context;
 mod docker_readiness;
 mod exec_auth;
 mod generation_cleanup;
+// Suites that use Darwin process and kqueue APIs build only on macOS; the
+// Linux portable gate needs the source-tree suites alone.
+#[cfg(target_os = "macos")]
 mod guest_image_live;
 mod hosted_validation;
 mod install_system_tools;
@@ -21,6 +24,7 @@ mod measure_upgrade_download;
 mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
+#[cfg(target_os = "macos")]
 mod port_forwarding;
 mod profile_yaml;
 mod public_export;
@@ -41,6 +45,7 @@ mod single_binary;
 mod ssh_deadline;
 mod start_preflight;
 mod tui;
+#[cfg(target_os = "macos")]
 mod tui_backpressure;
 mod tui_cluster_target;
 mod tui_create_plugins;
@@ -69,6 +74,7 @@ mod upgrade_concurrency;
 mod upgrade_native;
 mod upgrade_properties;
 mod upgrade_recovery_ownership;
+#[cfg(target_os = "macos")]
 mod workspace_live;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
@@ -80,6 +86,7 @@ const SUITES: &[Suite] = &[
     ("diagnostics", diagnostics::main),
     ("docker-readiness", docker_readiness::main),
     ("observer-requests", observer_requests::main),
+    #[cfg(target_os = "macos")]
     ("port-forwarding", port_forwarding::main),
     ("remote-cancel-boundaries", remote_cancel_boundaries::main),
     ("release-github", release_github::main),
@@ -106,6 +113,7 @@ const SUITES: &[Suite] = &[
     ("native-query-lifetime", native_query_lifetime::main),
     ("tui-environment-actions", tui_environment_actions::main),
     ("tui-picker-restore", tui_picker_restore::main),
+    #[cfg(target_os = "macos")]
     ("tui-backpressure", tui_backpressure::main),
     ("native-flag-inventory", native_flag_inventory::main),
     ("rust-sdk", rust_sdk::main),
@@ -129,9 +137,13 @@ const SUITES: &[Suite] = &[
     ("release-repository-preflight", release_repository_preflight::main),
     ("public-export", public_export::main),
     ("release-network", release_network::main),
+    #[cfg(target_os = "macos")]
     ("workspace-live-checks", workspace_live::checks::main),
+    #[cfg(target_os = "macos")]
     ("workspace-live", workspace_live::main),
+    #[cfg(target_os = "macos")]
     ("workspace-live-management", workspace_live::management_main),
+    #[cfg(target_os = "macos")]
     ("guest-image-live", guest_image_live::main),
     ("bootstrap-acquire", bootstrap_acquire::main),
     ("generation-cleanup", generation_cleanup::main),
@@ -161,6 +173,7 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("native-query-lifetime", native_query_lifetime::fixture),
     ("native-query-lifetime-child", native_query_lifetime::child),
     ("tui-picker-restore", tui_picker_restore::peer),
+    #[cfg(target_os = "macos")]
     ("tui-backpressure", tui_backpressure::fixture),
     ("rust-sdk", rust_sdk::fixture),
     ("tui-guarded-delete", tui_guarded_delete::fixture),
@@ -175,8 +188,11 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("release-uname", crate::support::release_driver::uname),
     ("release-preflight-gh", release_repository_preflight::gh),
     ("release-network-sudo", release_network::sudo),
+    #[cfg(target_os = "macos")]
     ("workspace-live-argv", workspace_live::checks::argv_recorder),
+    #[cfg(target_os = "macos")]
     ("workspace-live-exec-witness", workspace_live::exec_witness),
+    #[cfg(target_os = "macos")]
     ("workspace-management-kubectl", workspace_live::checks::management_kubectl),
     ("generation-wait", generation_cleanup::waiting_executable),
     ("bootstrap-curl", bootstrap_acquire::curl_fixture),
