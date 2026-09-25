@@ -200,14 +200,14 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	$(BUILD)/tests/test_remote_mutation
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_early_exit.c -o $(BUILD)/tests/test_proc_early_exit
 	$(BUILD)/tests/test_proc_early_exit
-	python3 tests/host/test_remote_cancel_boundaries.py
+	$(HAMN_DEV) test remote-cancel-boundaries
 	python3 tests/host/workspace_live_transport.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_start_preflight.py
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_cancellation.c host/util/proc.c -o $(BUILD)/tests/test_proc_cancellation
 	$(BUILD)/tests/test_proc_cancellation
 	$(BUILD)/tests/test_proc_deadline
-	SSH_DEADLINE_TEST=$(BUILD)/tests/test_ssh_deadline python3 tests/host/test_ssh_deadline.py
-	python3 tests/host/test_docker_readiness.py
+	SSH_DEADLINE_TEST=$(BUILD)/tests/test_ssh_deadline $(HAMN_DEV) test ssh-deadline
+	$(HAMN_DEV) test docker-readiness
 	$(PROFILE_READ_TEST)
 	HAMN=$(HOST_BIN) python3 tests/host/test_core_worker.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_docker_api.py
@@ -383,8 +383,8 @@ check-ci-macos-shards:
 print-ci-macos-shards:
 	@echo $(CI_MACOS_SHARDS)
 
-test-port-forwarding:
-	bash tests/host/test_port_forwarding.sh
+test-port-forwarding: hamn-dev
+	HAMN_DEV=$(HAMN_DEV) bash tests/host/test_port_forwarding.sh
 
 test-qcow2: host
 	@test -n "$(HAMN_QCOW2_IMAGE)" || { \

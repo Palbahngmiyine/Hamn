@@ -3,6 +3,8 @@ set -euo pipefail
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 source "$REPO_ROOT/tests/host/fixtures/bounded_wait.sh"
+# The hamn-dev executable (`make hamn-dev`) runs the observer and UDP suites.
+HAMN_DEV=${HAMN_DEV:?HAMN_DEV must name the hamn-dev executable}
 
 WORK=$(mktemp -d)
 TEST_BIN="$WORK/test-port-forwarding"
@@ -45,15 +47,15 @@ export PORT_TEST_EVENTS="$EVENTS"
 
 "$TEST_BIN" inspect-fixtures
 "$TEST_BIN" list-fixtures
-python3 "$REPO_ROOT/tests/host/test_observer_requests.py" "$TEST_BIN" "$WORK"
+"$HAMN_DEV" test observer-requests "$TEST_BIN" "$WORK"
 "$TEST_BIN" snapshot-fixture "$PROFILE"
 
 UDP_EXECUTABLE=${HAMN_UDP_EXECUTABLE:-$TEST_BIN}
 if [ -n "${HAMN_UDP_EXECUTABLE:-}" ]; then
-    python3 "$REPO_ROOT/tests/host/test_udp_proxy.py" "$UDP_EXECUTABLE" \
+    "$HAMN_DEV" test udp-proxy "$UDP_EXECUTABLE" \
         "$WORK/udp-proxy" --production
 else
-    python3 "$REPO_ROOT/tests/host/test_udp_proxy.py" "$UDP_EXECUTABLE" \
+    "$HAMN_DEV" test udp-proxy "$UDP_EXECUTABLE" \
         "$WORK/udp-proxy"
 fi
 
