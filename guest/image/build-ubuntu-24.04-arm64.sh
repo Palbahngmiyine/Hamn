@@ -56,25 +56,36 @@ for artifact in "$OUTPUT" "$OUTPUT.sha256" "$OUTPUT.packages-before.tsv" \
     [ ! -e "$artifact" ] && [ ! -L "$artifact" ] ||
         fail "guest image output already exists: $artifact"
 done
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/hamn-guest-image.XXXXXX") ||
+    fail "cannot create image build workspace"
+STAGE_DIR=
+STAGE=
+COMPACT=
+cleanup() {
+    rm -rf "$WORK"
+    if [ -n "$STAGE_DIR" ]; then
+        rm -f "$STAGE" "$COMPACT"
+        rmdir "$STAGE_DIR"
+    fi
+}
+trap cleanup EXIT
+
+# Evidence and size gates are C programs built here with the builder's own
+# compiler into the private workspace; the builder needs no interpreter or Rust.
+IMAGE_TOOL=$WORK/hamn-image-tool
+make -s --no-print-directory -C "$ROOT/guest" IMAGE_TOOL="$IMAGE_TOOL" image-tool ||
+    fail "cannot build the guest image tools"
 if [ -n "$BASELINE_OUTPUT" ]; then
-    python3 "$ROOT/guest/image/image_evidence.py" check "$BASELINE_OUTPUT" \
+    "$IMAGE_TOOL" evidence check "$BASELINE_OUTPUT" \
         "$OUTPUT" "$OUTPUT.sha256" "$OUTPUT.packages-before.tsv" \
         "$OUTPUT.packages-after.tsv" "$OUTPUT.size-report.json" \
         "$OUTPUT.size-report.budget-proposal.json"
 fi
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/hamn-guest-image.XXXXXX") ||
-    fail "cannot create image build workspace"
 STAGE_DIR=$(mktemp -d "$OUTPUT_DIR/.hamn-guest-image.XXXXXX") ||
     fail "cannot create private image stage"
 STAGE=$STAGE_DIR/image.img
 COMPACT=$STAGE_DIR/compressed.img
-cleanup() {
-    rm -rf "$WORK"
-    rm -f "$STAGE" "$COMPACT"
-    rmdir "$STAGE_DIR"
-}
-trap cleanup EXIT
 
 GUEST_MANIFEST=$WORK/guest-image.json
 printf '%s\n' \
@@ -196,10 +207,10 @@ cc -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -Werror=implicit-function-declaratio
 "$QEMU_IMG" convert -q -f qcow2 -O raw "$COMPACT" "$WORK/reference.raw"
 [ "$(sha256_file "$WORK/extracted.raw")" = "$(sha256_file "$WORK/reference.raw")" ] || \
     fail "custom extractor differs from qemu-img reference bytes"
-python3 "$ROOT/guest/image/verify-raw.py" "$WORK/extracted.raw"
+"$IMAGE_TOOL" verify-raw "$WORK/extracted.raw"
 SIZE_OPTIONS=()
 [ "$REVIEW_ONLY" = 0 ] || SIZE_OPTIONS+=(--review-only)
-python3 "$ROOT/guest/image/verify-size.py" \
+"$IMAGE_TOOL" verify-size \
     --baseline "$BASELINE" --candidate "$COMPACT" \
     --packages-before "$OUTPUT.packages-before.tsv" --packages-after "$OUTPUT.packages-after.tsv" \
     --report "$OUTPUT.size-report.json" --budget "$ROOT/guest/image/release-size-budget.json" \
@@ -214,7 +225,7 @@ printf '%s  %s\n' "$(sha256_file "$OUTPUT")" "$(basename "$OUTPUT")" \
 chmod 0644 "$OUTPUT" "$OUTPUT.sha256"
 if [ -n "$BASELINE_OUTPUT" ]; then
     # Preserve the actual pre-cleanup artifact only after every existing gate.
-    python3 "$ROOT/guest/image/image_evidence.py" publish \
+    "$IMAGE_TOOL" evidence publish \
         "$BASELINE" "$BASELINE_OUTPUT" "$OUTPUT.size-report.json"
 fi
 if [ "$REVIEW_ONLY" = 1 ]; then

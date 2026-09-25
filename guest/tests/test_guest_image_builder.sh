@@ -41,6 +41,11 @@ if grep -Eq 'shared|\.\./shared' "$BUILDER" "$GUEST_ROOT/Makefile"; then
     echo "FAIL: guest image source inputs retain the removed shared tree" >&2
     exit 1
 fi
+# Evidence and size gates run as the C tool built into the private workspace.
+grep -Fq 'make -s --no-print-directory -C "$ROOT/guest" IMAGE_TOOL="$IMAGE_TOOL" image-tool' "$BUILDER"
+for gate in 'evidence check' 'verify-raw' 'verify-size' 'evidence publish'; do
+    grep -Fq "\"\$IMAGE_TOOL\" $gate" "$BUILDER"
+done
 
 # Exercise the archive path in an isolated Git checkout. The injected
 # untracked shared/ file must not become an immutable image input.
@@ -51,8 +56,11 @@ mkdir -p "$REPO"
 git -C "$PROJECT_ROOT" archive --format=tar -o "$WORK/sources.tar" HEAD -- \
     guest vendor host/image
 tar -C "$REPO" -xf "$WORK/sources.tar"
-cp "$GUEST_ROOT"/image/*.sh "$GUEST_ROOT"/image/*.py "$GUEST_ROOT"/image/*.c \
+cp "$GUEST_ROOT"/image/*.sh "$GUEST_ROOT"/image/*.c "$GUEST_ROOT"/image/*.h \
     "$GUEST_ROOT"/image/*.json "$REPO/guest/image/"
+mkdir -p "$REPO/guest/json"
+cp "$GUEST_ROOT"/json/*.c "$GUEST_ROOT"/json/*.h "$REPO/guest/json/"
+cp "$GUEST_ROOT/Makefile" "$REPO/guest/Makefile"
 cp "$PROJECT_ROOT"/host/image/qcow2.{c,h} "$REPO/host/image/"
 git -C "$REPO" init -q
 git -C "$REPO" config user.name hamn-test
