@@ -52,6 +52,12 @@ MANAGED_GUEST_IMAGE_TEST := $(BUILD)/tests/test_managed_guest_image
 SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
 PROFILE_READ_TEST := $(BUILD)/tests/test_profile_read
 START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retry
+RAW_CACHE_TEST := $(BUILD)/tests/test_raw_cache
+# HAMN_TEST_SANITIZERS=1 builds the raw cache test with ASan and UBSan.
+SANITIZER_CFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
+RAW_CACHE_TEST_CFLAGS := -std=c11 -Wall -Wextra -Werror=implicit-function-declaration \
+	-Wno-deprecated-declarations -DHAMN_TEST -Ihost \
+	$(if $(filter 1,$(HAMN_TEST_SANITIZERS)),$(SANITIZER_CFLAGS))
 
 -include $(HOST_DEPS)
 
@@ -142,6 +148,15 @@ $(DEPLOYMENT_FINGERPRINT_TEST): tests/host/test_guest_deployment_fingerprint.c \
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
 		$(LDFLAGS) -o $@
+
+# The test substitutes its own extractor for raw_cache.c's qcow2_extract_fd.
+$(RAW_CACHE_TEST): tests/host/test_raw_cache.c host/image/raw_cache.c \
+		host/image/disk.c host/image/qcow2.c FORCE
+	@mkdir -p $(dir $@)
+	clang $(RAW_CACHE_TEST_CFLAGS) -Dqcow2_extract_fd=test_extract \
+		-c host/image/raw_cache.c -o $@-raw_cache.o
+	clang $(RAW_CACHE_TEST_CFLAGS) tests/host/test_raw_cache.c host/image/disk.c \
+		host/image/qcow2.c $@-raw_cache.o -lz -o $@
 
 $(MANAGED_GUEST_IMAGE_TEST): tests/host/test_managed_guest_image.c \
 		$(HOST_TEST_OBJS)
@@ -395,8 +410,10 @@ test-qcow2: host
 test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
-		$(START_DOCKER_CONTEXT_RETRY_TEST)
-	bash tests/host/test_raw_cache.sh
+		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST)
+	rm -rf $(BUILD)/tests/raw-cache-data && mkdir -p $(BUILD)/tests/raw-cache-data
+	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
+	rm -rf $(BUILD)/tests/raw-cache-data
 	$(CTLSOCK_TEST)
 	$(FS_TEST)
 	$(SEED_MOUNTS_TEST)
