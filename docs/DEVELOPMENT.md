@@ -116,7 +116,9 @@ authority.
 - `host/vz/`: Virtualization.framework only.
 - `host/fwd/`: owned Docker socket and published-port forwarding.
 - `guest/agent/` and `guest/scripts/`: guest management and image-owned helpers.
-- `packaging/release/`: exact candidate assembly, validation, promotion.
+- `packaging/release/`: the release installer template.
+- `tools/hamn-dev/` (`hamn-dev release`): exact candidate assembly, validation,
+  promotion.
 
 Internal worker dispatch runs before terminal or asynchronous runtime setup.
 Keep C process-global state and fork/exit behavior in the worker. TUI exit
