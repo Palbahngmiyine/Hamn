@@ -15,7 +15,6 @@ CFLAGS     := -std=c11 -Wall -Wextra -O2 -g \
               -MMD -MP \
               -mmacosx-version-min=$(MACOS_MIN) \
               -DHAVE_CONFIG_H \
-              -DHAMN_VERSION=\"$(VERSION)\" \
               -Ihost -Ivendor -Ivendor/libyaml/include -I$(BUILD)/generated
 LDFLAGS    := -framework Virtualization -framework Foundation -framework CoreServices -lz \
               -mmacosx-version-min=$(MACOS_MIN)
@@ -34,6 +33,11 @@ HOST_OBJS   := $(patsubst %.c,$(BUILD)/%.o,$(HOST_C_SRCS)) \
                $(patsubst %.m,$(BUILD)/%.o,$(HOST_M_SRCS))
 HOST_DEPS   := $(HOST_OBJS:.o=.d)
 HOST_TEST_OBJS := $(filter-out $(BUILD)/host/main.o,$(HOST_OBJS))
+# Only these objects compile in the release version, so a version change
+# rebuilds them and relinks instead of rebuilding the whole C core.
+VERSIONED_OBJS := $(BUILD)/host/cmd/cmd_update.o $(BUILD)/host/cmd/cmd_diagnostics.o \
+	$(BUILD)/host/core/control.o
+$(VERSIONED_OBJS): CFLAGS += -DHAMN_VERSION=\"$(VERSION)\"
 LIFECYCLE_LOCK_TEST := $(BUILD)/tests/test_lifecycle_lock
 CTLSOCK_TEST := $(BUILD)/tests/test_ctlsock
 FS_TEST := $(BUILD)/tests/test_fs
@@ -74,7 +78,8 @@ $(VERSION_STAMP): FORCE
 $(BUILD)/generated/k3s_retirement.h: scripts/embed-retirement.py host/migration/retire_k3s.py host/migration/legacy-k3s.service guest/scripts/verify-image-contract.sh guest/scripts/guest-deployment-transaction.sh guest/scripts/configure-docker.sh
 	python3 scripts/embed-retirement.py $@
 
-$(HOST_OBJS): $(VERSION_STAMP) $(BUILD)/generated/k3s_retirement.h
+$(HOST_OBJS): $(BUILD)/generated/k3s_retirement.h
+$(VERSIONED_OBJS): $(VERSION_STAMP)
 
 install: host
 	bash scripts/install-host.sh "$(HOST_BIN)" "$(BINDIR)" "$(DATADIR)"

@@ -1,9 +1,9 @@
 #ifndef HAMN_CLI_H
 #define HAMN_CLI_H
 
-#ifndef HAMN_VERSION
-#define HAMN_VERSION "0.1.0-dev"
-#endif
+/* HAMN_VERSION is defined only for the Makefile's VERSIONED_OBJS; anywhere
+ * else it is an undeclared identifier, so a new use cannot silently build
+ * a wrong version. */
 
 int cmd_start(int argc, char **argv);
 int cmd_configure(int argc, char **argv);
