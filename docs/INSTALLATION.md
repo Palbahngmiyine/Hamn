@@ -128,8 +128,11 @@ Bootstrap and the updater use a fixed system-tool PATH (`/usr/bin:/bin:/usr/sbin
 run by `/bin/bash`), so GNU tools earlier in a caller's PATH cannot change their
 behavior. Bootstrap preserves the caller's PATH only for setup advice, which names
 the line to add for the caller's zsh, bash or fish. It identifies an earlier conflicting `hamn`, and recommends opening
-a new terminal after PATH changes. Legacy regular binaries must be migrated to a
-managed installation first. A local install pass is not physical VM validation.
+a new terminal after PATH changes. Pre-generation installs are not migrated: a
+standalone `hamn` executable, a `.hamn-binary.sha256` marker or an empty
+`.hamn-managed` data marker is refused, unchanged and never executed, with a message
+naming what to move aside before installing again. A local install pass is not
+physical VM validation.
 
 ## Manifest compatibility and release evidence
 

@@ -180,7 +180,7 @@ refresh_installation() {
     # It then has the same validation and rollback obligations as an update.
     if [ "$bootstrap" = 1 ] && ! path_absent "$hamn_link"; then
         [ -L "$hamn_link" ] ||
-            fail "existing hamn is not a managed generation; migrate it with make install before using the release installer"
+            fail "$hamn_link is not a managed Hamn generation link (an older standalone Hamn or another program); move it aside and run the installer again"
         bootstrap=0
     fi
     [ "$bootstrap" = 0 ] || return 0
@@ -189,12 +189,9 @@ refresh_installation() {
     safe_regular "$datadir/.hamn-managed" ||
         fail "managed data marker is missing or unsafe"
     managed_marker=$(cat "$datadir/.hamn-managed")
-    if [ "$managed_marker" != version=1 ]; then
-        # The installer can upgrade the original empty ownership marker after
-        # validating the existing generation. Preserve that bootstrap migration.
-        [ "$bootstrap_entry" = 1 ] && [ -z "$managed_marker" ] ||
-            fail "managed data marker is invalid"
-    fi
+    [ -n "$managed_marker" ] ||
+        fail "$datadir is a pre-release Hamn install (empty data marker), which is no longer migrated; move it aside and run the installer again"
+    [ "$managed_marker" = version=1 ] || fail "managed data marker is invalid"
     # install-host publishes canonical absolute targets. Resolve parent aliases
     # only after rejecting unsafe leaf directories (for example /tmp on macOS).
     bindir=$(cd "$bindir" && pwd -P)
@@ -792,7 +789,7 @@ release_receipt() {
     fi
 }
 
-if [ -n "$old_target" ] && [ "$managed_marker" = version=1 ]; then
+if [ -n "$old_target" ]; then
     if [ "$force" = 0 ] && [ "$status" = up-to-date ] && release_receipt check "$old_target" &&
         [ "$(readlink "$hamn_link")" = "$old_target" ] && path_absent "$update_journal"; then
         # Installed files and guest image match this release: no downloads.

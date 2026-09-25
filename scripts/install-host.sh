@@ -58,6 +58,7 @@ fi
 source "$ROOT/scripts/install-transaction.sh"
 
 HAMN_PATH=$BINDIR/hamn
+# Written only by pre-release (pre-generation) installs, which are refused.
 LEGACY_BINARY_MARKER=$BINDIR/.hamn-binary.sha256
 DATA_MARKER=$DATADIR/.hamn-managed
 GENERATIONS=$DATADIR/.hamn-generations
@@ -203,20 +204,7 @@ file_hash() {
     printf '%s\n' "$output"
 }
 
-legacy_binary_marker_valid() {
-    local expected_hash=$1
-    local algorithm=
-    local marker_hash=
-    local extra=
-    owned_regular "$LEGACY_BINARY_MARKER" 644 || return 1
-    IFS=' ' read -r algorithm marker_hash extra \
-        <"$LEGACY_BINARY_MARKER" || return 1
-    [ "$algorithm" = sha256 ] && [ "$marker_hash" = "$expected_hash" ] &&
-        [ -z "$extra" ]
-}
-
 data_marker_valid() {
-    local marker_text
     [ -f "$DATA_MARKER" ] && [ ! -L "$DATA_MARKER" ] || return 1
     [ "$(stat -f '%u:%l' "$DATA_MARKER")" = "$INSTALL_UID:1" ] ||
         return 1
@@ -224,8 +212,7 @@ data_marker_valid() {
     600|644) ;;
     *) return 1 ;;
     esac
-    marker_text=$(<"$DATA_MARKER")
-    [ -z "$marker_text" ] || [ "$marker_text" = version=1 ]
+    [ "$(<"$DATA_MARKER")" = version=1 ]
 }
 
 generation_marker_valid() {
@@ -309,6 +296,10 @@ elif [ -L "$DATADIR" ] || [ ! -d "$DATADIR" ]; then
     exit 1
 elif [ -e "$DATA_MARKER" ] || [ -L "$DATA_MARKER" ]; then
     data_marker_valid || {
+        if [ -f "$DATA_MARKER" ] && [ ! -L "$DATA_MARKER" ] && [ ! -s "$DATA_MARKER" ]; then
+            echo "hamn: $DATADIR is a pre-release Hamn install (empty data marker), which this installer no longer migrates; move $DATADIR aside and install again" >&2
+            exit 1
+        fi
         echo "hamn: refusing invalid data management marker: $DATA_MARKER" >&2
         exit 1
     }
@@ -328,12 +319,11 @@ fi
 hamn_kind=
 hamn_original_identity=
 hamn_original_target=
-hamn_original_hash=
+path_absent "$LEGACY_BINARY_MARKER" || {
+    echo "hamn: $LEGACY_BINARY_MARKER marks a pre-release Hamn install, which this installer no longer migrates; move it and $HAMN_PATH aside and install again" >&2
+    exit 1
+}
 if path_absent "$HAMN_PATH"; then
-    path_absent "$LEGACY_BINARY_MARKER" || {
-        echo "hamn: refusing legacy marker without hamn executable" >&2
-        exit 1
-    }
     hamn_kind=absent
 elif [ -L "$HAMN_PATH" ]; then
     managed_hamn_link_valid || {
@@ -347,25 +337,10 @@ elif [ -L "$HAMN_PATH" ]; then
     hamn_kind=managed
     hamn_original_target=$(readlink "$HAMN_PATH")
     hamn_original_identity=$(stat -f '%d:%i:%u:%Lp:%l' "$HAMN_PATH")
-elif owned_executable "$HAMN_PATH"; then
-    [ "$data_state" = managed ] || {
-        echo "hamn: legacy adoption requires a managed data marker" >&2
-        exit 1
-    }
-    hamn_original_hash=$(file_hash "$HAMN_PATH")
-    if path_absent "$LEGACY_BINARY_MARKER"; then
-        [ "${HAMN_ADOPT_LEGACY:-0}" = 1 ] || {
-            echo "hamn: refusing unmarked legacy executable; set HAMN_ADOPT_LEGACY=1 to adopt it" >&2
-            exit 1
-        }
-    elif ! legacy_binary_marker_valid "$hamn_original_hash"; then
-        echo "hamn: refusing legacy executable with invalid identity marker" >&2
-        exit 1
-    fi
-    hamn_kind=legacy
-    hamn_original_identity=$(stat -f '%d:%i:%u:%Lp:%l' "$HAMN_PATH")
 else
-    echo "hamn: refusing to replace foreign hamn executable: $HAMN_PATH" >&2
+    # An older standalone Hamn (make install before generations) or another
+    # program: neither is replaced, and it is never executed.
+    echo "hamn: refusing to replace $HAMN_PATH: it is not a managed Hamn generation link (an older standalone Hamn or another program); move it aside and install again" >&2
     exit 1
 fi
 
@@ -431,43 +406,16 @@ create_data_marker() {
     /bin/sync
 }
 
-# Early Hamn installs used an empty marker.  It is sufficient to establish
-# ownership for this one-way installer migration, but the signed updater
-# requires an explicit schema version before it may change either public
-# pointer.  Upgrade only after every existing binary/link ownership check has
-# passed, and publish the new marker atomically.
-upgrade_legacy_data_marker() {
-    local marker_stage
-    data_marker_valid && [ -z "$(<"$DATA_MARKER")" ] || return 1
-    marker_stage=$(/usr/bin/mktemp -d \
-        "$DATA_PARENT/.${DATA_BASE}.hamn-marker-upgrade.XXXXXX")
-    [ "$(stat -f '%u:%Lp' "$marker_stage")" = "$INSTALL_UID:700" ] ||
-        return 1
-    printf 'version=1\n' >"$marker_stage/marker"
-    chmod 0600 "$marker_stage/marker"
-    /bin/sync
-    data_marker_valid && [ -z "$(<"$DATA_MARKER")" ] || return 1
-    /bin/mv -f "$marker_stage/marker" "$DATA_MARKER"
-    data_marker_valid && [ "$(<"$DATA_MARKER")" = version=1 ] || return 1
-    /bin/rmdir "$marker_stage"
-    /bin/sync
-}
-
 if [ "$data_state" = absent ]; then
     mkdir "$DATADIR"
     chmod 0755 "$DATADIR"
 fi
 if [ "$data_state" = absent ] || [ "$data_state" = empty ]; then
     create_data_marker
-elif [ -z "$(<"$DATA_MARKER")" ]; then
-    upgrade_legacy_data_marker || {
-        echo "hamn: cannot upgrade the legacy data management marker" >&2
-        exit 1
-    }
 fi
 [ -d "$DATADIR" ] && [ ! -L "$DATADIR" ] &&
     [ "$(stat -f '%u:%Lp' "$DATADIR")" = "$INSTALL_UID:755" ] &&
-    data_marker_valid && [ "$(<"$DATA_MARKER")" = version=1 ] || {
+    data_marker_valid || {
     echo "hamn: data directory ownership changed during install" >&2
     exit 1
 }
@@ -567,7 +515,7 @@ hamn_link_stage=$(make_link_stage .hamn-link "$generation/bin/hamn")
 hamn_link_temp=$hamn_link_stage/link
 case "$hamn_kind" in
 absent)
-    path_absent "$HAMN_PATH" && path_absent "$LEGACY_BINARY_MARKER" || {
+    path_absent "$HAMN_PATH" || {
         echo "hamn: hamn path changed before commit" >&2
         exit 1
     }
@@ -583,15 +531,9 @@ managed)
     }
     /bin/mv -f "$hamn_link_temp" "$HAMN_PATH"
     ;;
-legacy)
-    owned_executable "$HAMN_PATH" &&
-        [ "$(file_hash "$HAMN_PATH")" = "$hamn_original_hash" ] &&
-        [ "$(stat -f '%d:%i:%u:%Lp:%l' "$HAMN_PATH")" = \
-            "$hamn_original_identity" ] || {
-        echo "hamn: legacy hamn path changed before commit" >&2
-        exit 1
-    }
-    /bin/mv -f "$hamn_link_temp" "$HAMN_PATH"
+*)
+    echo "hamn: unexpected hamn path state: $hamn_kind" >&2
+    exit 1
     ;;
 esac
 /bin/sync
