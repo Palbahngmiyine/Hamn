@@ -9,6 +9,7 @@ mod tui;
 mod tui_guarded_delete;
 mod tui_native_regressions;
 mod tui_navigation;
+mod tui_ssh_timeout;
 mod tui_workspaces;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
@@ -21,6 +22,7 @@ const SUITES: &[Suite] = &[
     ("tui-guarded-delete", tui_guarded_delete::main),
     ("tui-native-regressions", tui_native_regressions::main),
     ("tui-navigation", tui_navigation::main),
+    ("tui-ssh-timeout", tui_ssh_timeout::main),
     ("tui-workspaces", tui_workspaces::main),
 ];
 

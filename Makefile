@@ -239,7 +239,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_tls_target.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_backpressure.py
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-guarded-delete
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-ssh-timeout
 	python3 tests/host/test_k3s_retirement.py
 	cargo test --locked -p hamn-dev
 	python3 tests/host/test_rust_sdk.py
