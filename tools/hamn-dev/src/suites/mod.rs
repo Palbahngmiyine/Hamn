@@ -16,12 +16,14 @@ mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
 mod profile_yaml;
+mod public_export;
 mod qcow2;
 mod release_candidate;
 mod release_consumer;
 mod release_gate;
 mod release_github;
 mod release_physical;
+mod release_repository_preflight;
 mod release_request;
 mod release_version;
 mod remote_cancel_boundaries;
@@ -106,6 +108,8 @@ const SUITES: &[Suite] = &[
     ("release-gate", release_gate::main),
     ("hosted-validation", hosted_validation::main),
     ("release-candidate", release_candidate::main),
+    ("release-repository-preflight", release_repository_preflight::main),
+    ("public-export", public_export::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
@@ -135,6 +139,7 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("create-plugin", tui_create_plugins::plugin),
     ("create-shadow-plugin", tui_create_plugins::shadow_plugin),
     ("release-uname", crate::support::release_driver::uname),
+    ("release-preflight-gh", release_repository_preflight::gh),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

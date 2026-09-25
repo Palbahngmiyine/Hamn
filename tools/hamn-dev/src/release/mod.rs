@@ -1,7 +1,8 @@
 //! `hamn-dev release SUBCOMMAND ...`: release candidate assembly, evidence
-//! contracts, promotion checks, Release Please coordination and the
-//! physical validation harness. The shell drivers in packaging/release and
-//! the release workflows call these subcommands; none of them is shipped.
+//! contracts, promotion checks, Release Please coordination, repository
+//! preflight and the physical validation gate and harness. The Makefile's
+//! release targets, packaging/release/publish-release.sh and the release
+//! workflows call these subcommands; none of them is shipped.
 //!
 //! Drivers named `(env)` below take their inputs from environment variables
 //! (documented on each) and run in the checkout of the working directory;
@@ -10,6 +11,7 @@ pub mod archive;
 pub mod candidate;
 pub mod checkout;
 pub mod contract;
+pub mod export;
 pub mod files;
 pub mod github;
 pub mod hosted;
@@ -47,8 +49,8 @@ const COMMANDS: &[(&str, &str, Command)] = &[
     ("resolve-release", "PREVIOUS_REF (env)", version::resolve_release),
     ("recover-release", "(env)", version::recover_release),
     ("check-version-state", "ROOT", version::check_version_state),
-    ("preflight-rulesets", "RULESETS_JSON OUTPUT", preflight::rulesets),
-    ("preflight-repository", "REPOSITORY RESPONSES_DIR", preflight::repository),
+    ("preflight-repository", "(env)", preflight::repository),
+    ("export-public-source", "OUTPUT_DIRECTORY", export::main),
     ("complete-pr", "TAG COMMIT", github::complete_command),
     ("pr-ready", "", github::ready_command),
 ];

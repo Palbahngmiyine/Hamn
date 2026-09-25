@@ -524,11 +524,11 @@ test-release-version: hamn-dev
 test-release-request: hamn-dev
 	$(HAMN_DEV) test release-request
 
-test-public-export:
-	bash tests/host/test_public_export.sh
+test-public-export: hamn-dev
+	$(HAMN_DEV) test public-export
 
 test-release-repository-preflight: hamn-dev
-	$(RELEASE_TOOL) bash tests/host/test_release_repository_preflight.sh
+	$(HAMN_DEV) test release-repository-preflight
 
 release-candidate: hamn-dev
 	$(HAMN_DEV) release build-candidate
