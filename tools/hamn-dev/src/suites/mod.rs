@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 mod single_binary;
 mod tui_cluster_target;
+mod tui_create_plugins;
 mod tui_docker_all;
 mod tui_docker_config;
 mod tui_docker_images;
@@ -18,6 +19,7 @@ type Fixture = fn(&str, &[String]) -> ExitCode;
 const SUITES: &[Suite] = &[
     ("single-binary", single_binary::main),
     ("tui-cluster-target", tui_cluster_target::main),
+    ("tui-create-plugins", tui_create_plugins::main),
     ("tui-docker-all", tui_docker_all::main),
     ("tui-docker-config", tui_docker_config::main),
     ("tui-docker-images", tui_docker_images::main),
@@ -32,6 +34,9 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("docker-api-1.47", tui_docker_all::docker_api_1_47),
     ("docker-images-recorded", tui_docker_images::docker_images_recorded),
     ("docker-config-root", tui_docker_config::docker_config_root),
+    ("create-plugins-kubectl", tui_create_plugins::kubectl_recorded),
+    ("create-plugin", tui_create_plugins::plugin),
+    ("create-shadow-plugin", tui_create_plugins::shadow_plugin),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {
