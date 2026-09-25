@@ -30,7 +30,7 @@ pub struct Request {
     pub namespace: Option<String>,
     #[arg(long)]
     pub kubeconfig: Option<String>,
-    #[arg(long, help = "Confirm mutations, including system update")]
+    #[arg(long, help = "Confirm mutations, including system upgrade")]
     pub yes: bool,
     #[arg(long)]
     pub cpu: Option<u32>,
@@ -44,14 +44,14 @@ pub struct Request {
     pub path: Option<String>,
     #[arg(
         long,
-        help = "Release manifest URL for system update (defaults to latest stable)"
+        help = "Release manifest URL for system upgrade (defaults to latest stable)"
     )]
     pub manifest: Option<String>,
-    #[arg(long, help = "Read release metadata only for system upgrade/update")]
+    #[arg(long, help = "Read release metadata only for system upgrade")]
     pub check: bool,
     #[arg(
         long,
-        help = "Reinstall the same host release for system upgrade/update; never downgrade"
+        help = "Reinstall the same host release for system upgrade; never downgrade"
     )]
     pub force: bool,
     #[arg(long)]
@@ -96,7 +96,6 @@ pub const OPERATIONS: &[(&str, bool)] = &[
     ("vm delete", true),
     ("vm diagnostics", true),
     ("vm env", false),
-    ("system update", true),
     ("system upgrade", true),
     ("system uninstall", true),
     ("docker containers list", false),
@@ -161,7 +160,7 @@ impl Request {
         if self.check
             && matches!(
                 self.operation().as_str(),
-                "system update" | "system upgrade"
+                "system upgrade"
             )
         {
             return false;
@@ -178,7 +177,7 @@ impl Request {
             "vm stop" => "Stop the VM and interrupt its running containers.".into(),
             "vm delete" => "Stop and remove the profile from active listings. Its disk and Docker data are preserved.".into(),
             "vm diagnostics" => "Write a redacted diagnostic archive to the selected path.".into(),
-            "system update" | "system upgrade" => "Download and publish a verified Hamn release and managed guest image.".into(),
+            "system upgrade" => "Download and publish a verified Hamn release and managed guest image.".into(),
             "system uninstall" => "Permanently remove ALL Hamn profiles, VM disks, Docker data and the managed installation.".into(),
             "docker containers delete" => "Delete the selected container. Named volumes are preserved.".into(),
             "docker containers start" => "Start the selected container.".into(),
@@ -240,11 +239,11 @@ impl Request {
         if (self.check || self.force)
             && !matches!(
                 self.operation().as_str(),
-                "system update" | "system upgrade"
+                "system upgrade"
             )
         {
             return Err(invalid(
-                "--check and --force are only supported for system upgrade/update",
+                "--check and --force are only supported for system upgrade",
             ));
         }
         if self.check && self.force {
@@ -369,8 +368,8 @@ mod tests {
 }
 
 /// Read-only help selection. Parse all other flags normally so option values
-/// named "system" or "update" cannot accidentally select operation help.
-pub fn update_help(args: &[std::ffi::OsString]) -> Option<&'static str> {
+/// named "system" or "upgrade" cannot accidentally select operation help.
+pub fn upgrade_help(args: &[std::ffi::OsString]) -> Option<&'static str> {
     if !args.iter().any(|arg| arg == "--help" || arg == "-h") {
         return None;
     }
@@ -378,17 +377,17 @@ pub fn update_help(args: &[std::ffi::OsString]) -> Option<&'static str> {
         Request::try_parse_from(args.iter().filter(|arg| *arg != "--help" && *arg != "-h")).ok()?;
     if !matches!(
         request.operation().as_str(),
-        "system update" | "system upgrade"
+        "system upgrade"
     ) {
         return None;
     }
     Some(
-        "Update Hamn from the latest stable release.\n\nUsage: hamn --headless system update [--check | --yes [--force]] [--manifest URL]\nAlias: system upgrade\n\nOptions:\n  --check           Read metadata only; no installation or recovery\n  --force           Reinstall the same host release; never downgrade\n  --yes             Required for installation, not --check\n  --manifest URL    Select a release manifest instead of latest stable\n  --timeout SECONDS Operation deadline, 1..3600 (default: 600)\n  -h, --help        Show this help without downloading or installing\n\nProgress is written to stderr; stdout contains the JSON result.\nThe host archive and guest image are verified before installation.\nExisting VMs are not restarted; the selected image is for new profile disks.\n\nRecovery: retry the same command with all original options (including --manifest) to recover an interrupted transaction.\nFor incompatible older installers, see https://github.com/Palbahngmiyine/Hamn#install\n",
+        "Upgrade Hamn to the latest stable release.\n\nUsage: hamn --headless system upgrade [--check | --yes [--force]] [--manifest URL]\n\nOptions:\n  --check           Read metadata only; no installation or recovery\n  --force           Reinstall the same host release; never downgrade\n  --yes             Required for installation, not --check\n  --manifest URL    Select a release manifest instead of latest stable\n  --timeout SECONDS Operation deadline, 1..3600 (default: 600)\n  -h, --help        Show this help without downloading or installing\n\nProgress is written to stderr; stdout contains the JSON result.\nThe host archive and guest image are verified before installation.\nExisting VMs are not restarted; the selected image is for new profile disks.\n\nRecovery: retry the same command with all original options (including --manifest) to recover an interrupted transaction.\nFor incompatible older installers, see https://github.com/Palbahngmiyine/Hamn#install\n",
     )
 }
 
 #[cfg(test)]
-mod update_help_tests {
+mod upgrade_help_tests {
     use super::*;
     #[test]
     fn docker_context_limits_do_not_narrow_existing_kubernetes_contexts() {
@@ -415,7 +414,7 @@ mod update_help_tests {
         }
     }
     fn help(args: &[&str]) -> Option<&'static str> {
-        update_help(
+        upgrade_help(
             &args
                 .iter()
                 .map(std::ffi::OsString::from)
@@ -423,13 +422,13 @@ mod update_help_tests {
         )
     }
     #[test]
-    fn update_help_handles_option_order_without_mutation_confirmation() {
+    fn upgrade_help_handles_option_order_without_mutation_confirmation() {
         for args in [
-            vec!["hamn", "--headless", "system", "update", "--help"],
+            vec!["hamn", "--headless", "system", "upgrade", "--help"],
             vec![
                 "hamn",
                 "system",
-                "update",
+                "upgrade",
                 "-h",
                 "--manifest",
                 "https://example.test/release",
@@ -445,9 +444,10 @@ mod update_help_tests {
     fn unrelated_or_invalid_arguments_keep_normal_parser_help() {
         for args in [
             vec!["hamn", "--help"],
-            vec!["hamn", "system", "update"],
-            vec!["hamn", "--profile", "system", "update", "--help"],
-            vec!["hamn", "system", "update", "--unknown", "--help"],
+            vec!["hamn", "system", "upgrade"],
+            vec!["hamn", "--profile", "system", "upgrade", "--help"],
+            vec!["hamn", "system", "upgrade", "--unknown", "--help"],
+            vec!["hamn", "system", "update", "--help"],
             vec!["hamn", "system", "uninstall", "--help"],
         ] {
             assert!(help(&args).is_none());

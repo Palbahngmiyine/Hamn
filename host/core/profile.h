@@ -50,10 +50,6 @@ int profile_parse_positive(const char *text, unsigned *value);
  * Hamn-owned Docker/containerd boundaries. */
 int profile_docker_daemon_json_valid(const char *text);
 
-/* Resolve --profile > positional profile > HAMN_PROFILE > default. */
-int profile_resolve_name(const char *flag_name, const char *positional_name,
-                         char out[PROFILE_NAME_CAP]);
-
 /* ~/.hamn path. Successful calls return buf. */
 const char *hamn_home(char *buf, size_t cap);
 
@@ -63,12 +59,8 @@ int profile_load(struct profile *profile, const char *name);
 /* Read an existing profile without creating directories or a configuration. */
 int profile_read_existing(struct profile *profile, const char *name);
 
-/* Save config.yaml atomically. Legacy hamn.conf configurations are never
- * converted in place and return EPROTONOSUPPORT. */
+/* Save config.yaml atomically. */
 int profile_save(const struct profile *profile);
-
-/* Emit a copyable default YAML template. */
-int profile_template_print(FILE *out);
 
 /* Docker context is hamn for default and hamn-<profile> otherwise. */
 int profile_docker_context_name(const struct profile *profile, char *out,

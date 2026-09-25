@@ -1,40 +1,11 @@
-#include <getopt.h>
 #include <stdio.h>
 
-#include "cli.h"
 #include "core/control.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/operation.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
-
-static int resolve_stop_profile(int argc, char **argv,
-                                char profile_name[PROFILE_NAME_CAP])
-{
-    const char *flag_profile = NULL;
-    static const struct option options[] = {
-        { "profile", required_argument, NULL, 'p' },
-        { 0 },
-    };
-    optind = 1;
-    optreset = 1;
-    int option;
-    while ((option = getopt_long(argc, argv, "p:", options, NULL)) != -1) {
-        if (option != 'p' || flag_profile) {
-            fprintf(stderr, "usage: hamn stop [-p PROFILE] [PROFILE]\n");
-            return -1;
-        }
-        flag_profile = optarg;
-    }
-    if (optind + 1 < argc ||
-        profile_resolve_name(flag_profile, optind < argc ? argv[optind] : NULL,
-                             profile_name) != 0) {
-        fprintf(stderr, "usage: hamn stop [-p PROFILE] [PROFILE]\n");
-        return -1;
-    }
-    return 0;
-}
 
 static int cmd_stop_locked(const char *profile_name)
 {
@@ -61,14 +32,6 @@ static int cmd_stop_locked(const char *profile_name)
     profile_mutation_unlock(mutation_fd);
     logmsg(was_running ? "stopped" : "not running");
     return operation_finish(0, 1);
-}
-
-int cmd_stop(int argc, char **argv)
-{
-    char profile_name[PROFILE_NAME_CAP];
-    if (resolve_stop_profile(argc, argv, profile_name) != 0)
-        return 2;
-    return hamn_control_stop(profile_name);
 }
 
 int hamn_control_stop(const char *profile_name)

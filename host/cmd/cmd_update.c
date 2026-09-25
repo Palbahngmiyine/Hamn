@@ -13,11 +13,6 @@
 #include "core/log.h"
 #include "util/proc.h"
 
-static void update_usage(FILE *stream)
-{
-    fprintf(stream, "usage: hamn update [--manifest URL_OR_PATH]\n");
-}
-
 static int path_parent(const char *path, char output[PATH_MAX])
 {
     const char *slash = path ? strrchr(path, '/') : NULL;
@@ -106,37 +101,6 @@ static int managed_paths(char executable[PATH_MAX], char datadir[PATH_MAX],
     return lstat(helper, &status) == 0 && S_ISREG(status.st_mode) &&
         status.st_uid == geteuid() && status.st_nlink == 1 &&
         (status.st_mode & 0111) != 0 ? 0 : -1;
-}
-
-int cmd_update(int argc, char **argv)
-{
-    const char *manifest = NULL;
-    for (int index = 1; index < argc; index++) {
-        if (strcmp(argv[index], "--manifest") == 0) {
-            if (++index >= argc || manifest || !argv[index][0]) {
-                update_usage(stderr);
-                return 2;
-            }
-            manifest = argv[index];
-        } else if (strcmp(argv[index], "--help") == 0 ||
-                   strcmp(argv[index], "-h") == 0) {
-            update_usage(stdout);
-            return 0;
-        } else {
-            update_usage(stderr);
-            return 2;
-        }
-    }
-
-    return hamn_control_update(manifest);
-}
-
-int hamn_control_update(const char *manifest)
-{
-    char *result = NULL;
-    int rc = hamn_control_upgrade(manifest, 0, 0, &result);
-    free(result);
-    return rc;
 }
 
 static int unsupported_check_result(char **result)

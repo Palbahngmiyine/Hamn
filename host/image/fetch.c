@@ -167,8 +167,8 @@ int fetch_image_ensure(char *img_out, size_t cap)
     int pending = update_transaction_pending(cache);
     if (pending != 0) {
         logerr(pending > 0 ?
-               "an interrupted update recovery is pending; run hamn update before starting a VM" :
-               "cannot inspect the signed update recovery state");
+               "an interrupted upgrade recovery is pending; run hamn upgrade before starting a VM" :
+               "cannot inspect the signed upgrade recovery state");
         return -1;
     }
 
@@ -176,7 +176,7 @@ int fetch_image_ensure(char *img_out, size_t cap)
     if (managed > 0)
         return 0;
     if (managed < 0) {
-        logerr("managed guest image selection is invalid; run a signed update "
+        logerr("managed guest image selection is invalid; run hamn upgrade "
                "again or remove only the invalid cache selection");
         return -1;
     }

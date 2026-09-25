@@ -9,13 +9,14 @@
 #include <unistd.h>
 
 #include "cli.h"
+#include "core/control.h"
+#include "core/operation.h"
 #include "core/profile.h"
 #include "core/state.h"
 
 /* Test-only seam from host/cmd/cmd_start.c. */
 int hamn_test_start_ensure_signed_guest_image(char *image, size_t capacity,
                                               int *updated);
-int cmd_start(int argc, char **argv);
 
 static int write_text(const char *path, const char *text, mode_t mode)
 {
@@ -129,8 +130,8 @@ int main(void)
         "state=${HAMN_TEST_BOOTSTRAP_STATE:?}\n"
         "if [ \"${1:-}\" = --headless ]; then shift; [ \"$1\" = system ]; shift; fi\n"
         "case \"${1:-}\" in\n"
-        "update)\n"
-        "  printf 'update\\n' >>\"$state\"\n"
+        "upgrade)\n"
+        "  printf 'upgrade\\n' >>\"$state\"\n"
         "  [ \"${HAMN_TEST_BOOTSTRAP_FAIL:-0}\" = 0 ] || exit 77\n"
         "  cache=\"$HOME/.hamn/cache\"\n"
         "  /bin/mkdir -p \"$cache\"\n"
@@ -138,7 +139,6 @@ int main(void)
         "  printf '%s\\n' 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef >\"$cache/hamn-guest-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.img.verified\"\n"
         "  printf '%s\\n' '{\"schemaVersion\":1,\"file\":\"hamn-guest-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.img\",\"sha256\":\"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"}' >\"$cache/guest-image.json\"\n"
         "  ;;\n"
-        "start) printf 'start\\n' >>\"$state\" ;;\n"
         "*) exit 90 ;;\n"
         "esac\n";
     char root[] = "/tmp/hamn-start-context.XXXXXX";
@@ -178,7 +178,7 @@ int main(void)
     }
 
     /* First start downloads only a signed selected image through `hamn
-     * update`, then immediately retries image selection.  A bad selection
+     * upgrade`, then immediately retries image selection.  A bad selection
      * must not invoke the updater, and update failure must leave no selection
      * behind. */
     if (setenv("HOME", bootstrap_home, 1) != 0 ||
@@ -194,7 +194,7 @@ int main(void)
         hamn_test_start_ensure_signed_guest_image(path, sizeof(path),
                                                   &updated) != 0 ||
         !updated || strcmp(path, image) != 0 ||
-        require_text(bootstrap_state, "update\n") != 0) {
+        require_text(bootstrap_state, "upgrade\n") != 0) {
         fprintf(stderr, "missing signed guest image was not bootstrapped\n");
         goto out;
     }
@@ -210,7 +210,7 @@ int main(void)
         hamn_test_start_ensure_signed_guest_image(path, sizeof(path),
                                                   &updated) == 0 ||
         updated ||
-        require_text(bootstrap_state, "update\n") != 0 ||
+        require_text(bootstrap_state, "upgrade\n") != 0 ||
         access(selection, F_OK) == 0) {
         fprintf(stderr, "failed signed-image bootstrap left mutable selection state\n");
         goto out;
@@ -226,8 +226,9 @@ int main(void)
         goto out;
     }
 
-    /* Once update has selected an image, start must release its locks and
-     * exec the newly installed Hamn before it touches a VM disk. */
+    /* Once the upgrade has selected an image, start must release its locks
+     * and ask for a fresh worker of the installed Hamn before it touches a VM
+     * disk. */
     if (setenv("HOME", reexec_home, 1) != 0 ||
         write_text(bootstrap_state, "", 0600) != 0) {
         perror("cannot prepare start re-exec test");
@@ -239,19 +240,27 @@ int main(void)
         goto out;
     }
     if (reexec_pid == 0) {
-        char *start_argv[] = { "start", "--profile", "reexec", NULL };
-        _exit(cmd_start(3, start_argv));
+        _exit(hamn_control_start("reexec", 0, 0, 0));
     }
     int reexec_status;
     if (waitpid(reexec_pid, &reexec_status, 0) != reexec_pid ||
-        !WIFEXITED(reexec_status) || WEXITSTATUS(reexec_status) != 0 ||
-        require_text(bootstrap_state, "update\nstart\n") != 0) {
+        !WIFEXITED(reexec_status) ||
+        WEXITSTATUS(reexec_status) != OPERATION_RESTART_REQUIRED ||
+        require_text(bootstrap_state, "upgrade\n") != 0) {
         fprintf(stderr, "signed-image bootstrap did not restart Hamn start\n");
         goto out;
     }
     if (join_path(path, sizeof(path), reexec_home, ".hamn/reexec/vmrun.pid") != 0 ||
         access(path, F_OK) == 0) {
         fprintf(stderr, "old Hamn process reached VM startup after signed update\n");
+        goto out;
+    }
+    char record[1024];
+    if (join_path(path, sizeof(path), reexec_home, ".hamn/reexec/operation.json") != 0 ||
+        read_text(path, record, sizeof(record)) != 0 ||
+        !strstr(record, "\"status\":\"restartRequired\"") ||
+        !strstr(record, "\"startedVm\":false")) {
+        fprintf(stderr, "signed-image bootstrap did not record a restart request\n");
         goto out;
     }
 
@@ -306,7 +315,10 @@ out:
     (void)rmdir(bin);
     (void)rmdir(no_docker_bin);
     (void)rmdir(profile_dir);
-    (void)rmdir(root);
+    /* Start also leaves its lock files and operation record behind. */
+    char remove[sizeof(root) + 16];
+    snprintf(remove, sizeof(remove), "/bin/rm -rf '%s'", root);
+    (void)system(remove);
     if (rc == 0)
         puts("PASS: signed image bootstrap and re-exec");
     return rc;

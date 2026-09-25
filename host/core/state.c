@@ -48,14 +48,6 @@ int state_load(const struct profile *p, struct vm_state *st)
         snprintf(st->ip, sizeof(st->ip), "%s", v->valuestring);
     if ((v = cJSON_GetObjectItem(j, "started_at")) && cJSON_IsNumber(v))
         st->started_at = (long long)v->valuedouble;
-    if ((v = cJSON_GetObjectItem(j, "prev_docker_context")) &&
-        cJSON_IsString(v))
-        snprintf(st->prev_docker_context, sizeof(st->prev_docker_context),
-                 "%s", v->valuestring);
-    if ((v = cJSON_GetObjectItem(j, "prev_kube_context")) &&
-        cJSON_IsString(v))
-        snprintf(st->prev_kube_context, sizeof(st->prev_kube_context),
-                 "%s", v->valuestring);
     cJSON_Delete(j);
     return 0;
 }
@@ -68,18 +60,6 @@ int state_save(const struct profile *p, const struct vm_state *st)
     if (!cJSON_AddStringToObject(j, "state", st->state) ||
         !cJSON_AddStringToObject(j, "ip", st->ip) ||
         !cJSON_AddNumberToObject(j, "started_at", (double)st->started_at)) {
-        cJSON_Delete(j);
-        return -1;
-    }
-    if (st->prev_docker_context[0] &&
-        !cJSON_AddStringToObject(j, "prev_docker_context",
-                                 st->prev_docker_context)) {
-        cJSON_Delete(j);
-        return -1;
-    }
-    if (st->prev_kube_context[0] &&
-        !cJSON_AddStringToObject(j, "prev_kube_context",
-                                 st->prev_kube_context)) {
         cJSON_Delete(j);
         return -1;
     }

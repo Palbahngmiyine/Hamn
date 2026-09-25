@@ -17,7 +17,6 @@
 #include "util/fs.h"
 
 #define PROFILE_CONFIG_FILE "config.yaml"
-#define PROFILE_LEGACY_CONFIG_FILE "hamn.conf"
 #define PROFILE_YAML_CAP (64 * 1024)
 #define PROFILE_SEEN_KEY_CAP 16
 
@@ -112,22 +111,6 @@ int profile_docker_daemon_json_valid(const char *text)
           cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(features, "buildkit"))));
     cJSON_Delete(json);
     return valid;
-}
-
-int profile_resolve_name(const char *flag_name, const char *positional_name,
-                         char out[PROFILE_NAME_CAP])
-{
-    const char *selected = flag_name && flag_name[0] ? flag_name :
-        positional_name && positional_name[0] ? positional_name :
-        getenv("HAMN_PROFILE");
-    if (!selected || !selected[0])
-        selected = "default";
-    if (!profile_name_valid(selected)) {
-        errno = EINVAL;
-        return -1;
-    }
-    snprintf(out, PROFILE_NAME_CAP, "%s", selected);
-    return 0;
 }
 
 const char *hamn_home(char *buf, size_t cap)
@@ -685,46 +668,6 @@ out:
     return rc;
 }
 
-static int profile_legacy_config_state(const struct profile *profile)
-{
-    char path[PROFILE_PATH_CAP];
-    if (!profile_path(profile, PROFILE_LEGACY_CONFIG_FILE, path, sizeof(path)))
-        return -1;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
-        return errno == ENOENT ? 0 : -1;
-    struct stat status;
-    if (fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
-        status.st_size > 16384) {
-        int saved = errno ? errno : EINVAL;
-        close(fd);
-        errno = saved;
-        return -1;
-    }
-    char text[16385];
-    ssize_t count = read(fd, text, sizeof(text) - 1);
-    int saved = errno;
-    if (close(fd) != 0 && count >= 0)
-        return -1;
-    if (count < 0) {
-        errno = saved;
-        return -1;
-    }
-    text[count] = '\0';
-    char *line = text;
-    while (line && *line) {
-        char *end = strchr(line, '\n');
-        if (end)
-            *end = '\0';
-        if (strcmp(line, "runtime=containerd") == 0 ||
-            strcmp(line, "runtime=hamn") == 0)
-            return 1;
-        line = end ? end + 1 : NULL;
-    }
-    errno = EINVAL;
-    return -1;
-}
-
 static int profile_open_config(const struct profile *profile, FILE **file_out)
 {
     char path[PROFILE_PATH_CAP];
@@ -781,13 +724,6 @@ static int profile_read(struct profile *profile, const char *name, int create)
             return -1;
         }
     }
-    int legacy = profile_legacy_config_state(profile);
-    if (legacy == 1) {
-        errno = EPROTONOSUPPORT;
-        return -1;
-    }
-    if (legacy < 0 && errno != ENOENT)
-        return -1;
     FILE *file = NULL;
     int opened = profile_open_config(profile, &file);
     if (opened == 0) {
@@ -915,13 +851,6 @@ int profile_save(const struct profile *profile)
         errno = EINVAL;
         return -1;
     }
-    int legacy = profile_legacy_config_state(profile);
-    if (legacy == 1) {
-        errno = EPROTONOSUPPORT;
-        return -1;
-    }
-    if (legacy < 0 && errno != ENOENT)
-        return -1;
     struct yaml_text text;
     if (profile_serialize(profile, &text) != 0) {
         errno = EOVERFLOW;
@@ -933,19 +862,4 @@ int profile_save(const struct profile *profile)
         return -1;
     }
     return fs_write_file_atomic(path, text.data, text.length, 0600);
-}
-
-int profile_template_print(FILE *out)
-{
-    if (!out) {
-        errno = EINVAL;
-        return -1;
-    }
-    struct profile profile;
-    profile_defaults(&profile);
-    struct yaml_text text;
-    if (profile_serialize(&profile, &text) != 0 ||
-        fwrite(text.data, 1, text.length, out) != text.length || fflush(out) != 0)
-        return -1;
-    return 0;
 }

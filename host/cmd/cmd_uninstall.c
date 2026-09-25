@@ -476,16 +476,6 @@ static int remove_safe_lock(const char *path, int exists)
     return 0;
 }
 
-int cmd_uninstall(int argc, char **argv)
-{
-    (void)argv;
-    if (argc != 1) {
-        fprintf(stderr, "usage: hamn uninstall\n");
-        return 2;
-    }
-    return hamn_control_uninstall(0);
-}
-
 int hamn_control_uninstall(int confirmed)
 {
     struct uninstall_plan plan;

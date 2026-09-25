@@ -25,7 +25,7 @@ pub async fn execute_stream(
     let managed = (request.words.first().is_some_and(|word| word == "vm") && request.mutates())
         || matches!(
             request.operation().as_str(),
-            "system update" | "system upgrade"
+            "system upgrade"
         );
     if cancel.is_cancelled() {
         return Err(Failure::new("cancelled", "operation cancelled"));

@@ -49,7 +49,7 @@ fn main() {
     if upgrade::is_command(&args) {
         std::process::exit(upgrade::run_cli(&args));
     }
-    if let Some(help) = model::update_help(&std::env::args_os().collect::<Vec<_>>()) {
+    if let Some(help) = model::upgrade_help(&std::env::args_os().collect::<Vec<_>>()) {
         print!("{help}");
         return;
     }

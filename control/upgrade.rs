@@ -1,4 +1,4 @@
-//! Human upgrade aliases and post-TUI cached notices. Mutations use the same
+//! The human `hamn upgrade` command and post-TUI cached notices. Mutations use the same
 //! service/worker contract as headless operations; this module never installs.
 use crate::model::{Failure, Request};
 use std::{
@@ -13,13 +13,12 @@ use std::{
 };
 
 pub fn is_command(args: &[OsString]) -> bool {
-    args.get(1)
-        .is_some_and(|arg| arg == "upgrade" || arg == "update")
+    args.get(1).is_some_and(|arg| arg == "upgrade")
 }
 
 pub fn run_cli(args: &[OsString]) -> i32 {
     let mut request = Request {
-        words: vec!["system".into(), "update".into()],
+        words: vec!["system".into(), "upgrade".into()],
         headless: true,
         yes: true, // Explicit `hamn upgrade` is the human mutation request.
         // The largest permitted operation deadline: a guest image on a slow
@@ -67,7 +66,7 @@ pub fn run_cli(args: &[OsString]) -> i32 {
     match parsed {
         Ok(true) => {
             println!(
-                "Usage: hamn upgrade [--check] [--force] [--manifest URL] [--output json]\n\nInstall the latest stable Hamn release. hamn update is an alias.\n\nOptions:\n  --check        Only report whether an update is available\n  --force        Reinstall the current release (never downgrades)\n  --manifest URL Use another release manifest\n  --output json  Print one JSON result on stdout\n\nRunning VMs are not restarted and existing VM disks are not changed.\nAn interrupted upgrade is recovered and resumed by running it again."
+                "Usage: hamn upgrade [--check] [--force] [--manifest URL] [--output json]\n\nInstall the latest stable Hamn release.\n\nOptions:\n  --check        Only report whether an update is available\n  --force        Reinstall the current release (never downgrades)\n  --manifest URL Use another release manifest\n  --output json  Print one JSON result on stdout\n\nRunning VMs are not restarted and existing VM disks are not changed.\nAn interrupted upgrade is recovered and resumed by running it again."
             );
             return 0;
         }

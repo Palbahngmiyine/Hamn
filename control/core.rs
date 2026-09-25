@@ -120,7 +120,7 @@ fn execute(request: &Request) -> Result<Value> {
                 path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),
                 &mut output,
             ),
-            "system update" | "system upgrade" => hamn_control_upgrade(
+            "system upgrade" => hamn_control_upgrade(
                 manifest.as_ref().map_or(std::ptr::null(), |m| m.as_ptr()),
                 i32::from(request.check),
                 i32::from(request.force),

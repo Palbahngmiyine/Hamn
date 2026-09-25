@@ -817,9 +817,6 @@ static int cleanup_stopped_state(const struct profile *p)
         unlink(path);
     }
 
-    /* Preserve user-selected external Docker and Kubernetes contexts. */
-    st.prev_docker_context[0] = '\0';
-    st.prev_kube_context[0] = '\0';
     snprintf(st.state, sizeof(st.state), "stopped");
     if (state_save(p, &st) != 0) {
         logerr("cannot persist stopped state");

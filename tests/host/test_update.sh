@@ -41,7 +41,7 @@ assert_active_state() {
 run_update() {
     HOME="$HOME_DIR" \
     HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
-        "$BINDIR/hamn" --headless system update --yes --manifest "$1"
+        "$BINDIR/hamn" --headless system upgrade --yes --manifest "$1"
 }
 
 build_release() {
@@ -121,7 +121,7 @@ selection_2=$(selection_hash)
 
 # A direct generation binary cannot update itself, and a modified manifest
 # cannot change either selected generation or guest image.
-if HOME="$HOME_DIR" "$new_target" --headless system update --yes --manifest "$MANIFEST_2" \
+if HOME="$HOME_DIR" "$new_target" --headless system upgrade --yes --manifest "$MANIFEST_2" \
     >"$WORK/direct.out" 2>"$WORK/direct.err"; then
     echo "FAIL: direct generation binary was accepted for update" >&2
     exit 1
@@ -202,7 +202,7 @@ if HOME="$HOME_DIR" "$BINDIR/hamn" --headless vm start --profile default --yes \
     echo "FAIL: pending update transaction allowed VM start" >&2
     exit 1
 fi
-grep -Fq 'interrupted update recovery is pending' "$WORK/pending-start.err"
+grep -Fq 'interrupted upgrade recovery is pending' "$WORK/pending-start.err"
 
 # The next update recovers before it validates the new manifest. A tampered
 # manifest therefore proves recovery without allowing another cutover.

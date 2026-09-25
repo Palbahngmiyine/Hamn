@@ -14,7 +14,7 @@ fn operation(name: &str, mutation: bool) -> Value {
     let domain = words[0];
     let action = *words.last().unwrap();
     let resource = words.get(1).copied().unwrap_or("");
-    let upgrade = matches!(name, "system update" | "system upgrade");
+    let upgrade = matches!(name, "system upgrade");
     let namespaced = domain == "k8s" && !matches!(resource, "contexts" | "namespaces" | "nodes");
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
@@ -208,7 +208,7 @@ mod tests {
             let required = op["arguments"]["required"].as_array().unwrap();
             let upgrade = matches!(
                 op["name"].as_str(),
-                Some("system update" | "system upgrade")
+                Some("system upgrade")
             );
             assert_eq!(
                 required.contains(&json!("yes")),

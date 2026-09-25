@@ -640,61 +640,6 @@ static int default_output_path(char *path, size_t capacity)
     return 0;
 }
 
-int cmd_diagnostics(int argc, char **argv)
-{
-    if (argc < 2 || strcmp(argv[1], "create") != 0) {
-        fprintf(stderr,
-                "usage: hamn diagnostics create [-p PROFILE] [PROFILE] "
-                "[--path FILE] [--output json]\n");
-        return 2;
-    }
-
-    const char *requested_path = NULL;
-    const char *flag_profile = NULL;
-    const char *positional_profile = NULL;
-    for (int i = 2; i < argc; i++) {
-        if (strcmp(argv[i], "--path") == 0 && i + 1 < argc) {
-            if (requested_path) {
-                fprintf(stderr, "usage: hamn diagnostics create [--path FILE] "
-                                "[--output json]\n");
-                return 2;
-            }
-            requested_path = argv[++i];
-        } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc &&
-                   strcmp(argv[i + 1], "json") == 0) {
-            i++;
-        } else if ((strcmp(argv[i], "--profile") == 0 ||
-                    strcmp(argv[i], "-p") == 0) && i + 1 < argc &&
-                   !flag_profile) {
-            flag_profile = argv[++i];
-        } else if (strncmp(argv[i], "--profile=", 10) == 0 &&
-                   argv[i][10] && !flag_profile) {
-            flag_profile = argv[i] + 10;
-        } else if (!positional_profile && argv[i][0] != '-') {
-            positional_profile = argv[i];
-        } else {
-            fprintf(stderr,
-                    "usage: hamn diagnostics create [-p PROFILE] [PROFILE] "
-                    "[--path FILE] [--output json]\n");
-            return 2;
-        }
-    }
-
-    char profile_name[PROFILE_NAME_CAP];
-    if (profile_resolve_name(flag_profile, positional_profile, profile_name) != 0) {
-        logerr("invalid profile name");
-        return 2;
-    }
-
-    char *result = NULL;
-    int rc = hamn_control_diagnostics(profile_name, requested_path, &result);
-    if (rc == 0) {
-        printf("%s\n", result);
-        hamn_control_free(result);
-    }
-    return rc;
-}
-
 int hamn_control_diagnostics(const char *profile_name, const char *requested_path,
                               char **output)
 {
