@@ -234,16 +234,51 @@ fn read_request(stream: &mut dyn Stream) -> io::Result<Option<Request>> {
             headers.push((name.trim().to_owned(), value.trim().to_owned()));
         }
     }
-    let length = headers
+    let chunked = headers
         .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body)?;
+        .any(|(name, value)| name.eq_ignore_ascii_case("transfer-encoding") && value.eq_ignore_ascii_case("chunked"));
+    let body = if chunked {
+        read_chunked(&mut reader)?
+    } else {
+        let length = headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body)?;
+        body
+    };
     // A buffered read past this request's body would belong to the next
     // request; clients here send one request at a time.
     Ok(Some(Request { method, target, headers, body }))
+}
+
+/// Decodes a chunked request body (Go's HTTP client, and so kubectl, sends
+/// streamed bodies this way): chunks of `HEX-SIZE\r\nDATA\r\n`, then
+/// `0\r\n\r\n`. Chunk extensions, trailers and any other framing are
+/// errors, which close the connection without a response.
+fn read_chunked(reader: &mut impl BufRead) -> io::Result<Vec<u8>> {
+    let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("chunked body: {what}"));
+    let mut body = Vec::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let size = usize::from_str_radix(line.trim(), 16).map_err(|_| invalid("chunk size"))?;
+        if size == 0 {
+            let mut end = String::new();
+            reader.read_line(&mut end)?;
+            return if end == "\r\n" { Ok(body) } else { Err(invalid("trailer")) };
+        }
+        let start = body.len();
+        body.resize(start + size, 0);
+        reader.read_exact(&mut body[start..])?;
+        let mut end = [0; 2];
+        reader.read_exact(&mut end)?;
+        if end != *b"\r\n" {
+            return Err(invalid("chunk end"));
+        }
+    }
 }
 
 fn write_response(stream: &mut dyn Stream, response: &Response, keep_alive: bool) -> io::Result<()> {
@@ -360,5 +395,29 @@ mod tests {
         assert_eq!(curl(&["--unix-socket", socket.to_str().unwrap(), "http://localhost/_ping"]), "GET /_ping ");
         drop(unix);
         assert!(!socket.exists());
+    }
+
+    /// Sends a raw request, ends the upload, and returns the whole reply
+    /// ("" when the server closes without one).
+    fn exchange(port: u16, request: &[u8]) -> String {
+        let mut stream = connect(port);
+        stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        stream.write_all(request).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        reply
+    }
+
+    #[test]
+    fn chunked_request_bodies_are_decoded_and_bad_framing_gets_no_response() {
+        let server = Server::tcp(Options::default(), echo);
+        let head = "DELETE /pods/victim HTTP/1.1\r\nHost: fixture\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let reply = exchange(server.port(), format!("{head}4\r\n{{\"a\"\r\nB\r\n:\"chunked\"}}\r\n0\r\n\r\n").as_bytes());
+        assert!(reply.starts_with("HTTP/1.1 200 OK\r\n"), "{reply}");
+        assert!(reply.ends_with("\r\n\r\nDELETE /pods/victim {\"a\":\"chunked\"}"), "{reply}");
+        for framing in ["4\r\nabcdXX0\r\n\r\n", "0\r\nTrailer: x\r\n\r\n", "z\r\n\r\n", "4;ext=1\r\nabcd\r\n0\r\n\r\n", "4\r\nab"] {
+            assert_eq!(exchange(server.port(), format!("{head}{framing}").as_bytes()), "", "{framing:?}");
+        }
     }
 }

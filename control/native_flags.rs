@@ -8,7 +8,7 @@ pub fn takes_value(name: &str, workspace: Workspace) -> bool {
 }
 
 // This is flag arity for routing, not validation or an implementation of commands.
-// tests/host/test_native_flag_inventory.py checks the installed kubectl's whole
+// `hamn-dev test native-flag-inventory` checks the installed kubectl's whole
 // public command tree. The CLI still receives and interprets the original argv.
 const KUBE_COMMAND_VALUES: &[&str] = &[
     "--accept-hosts", "--accept-paths", "--address", "--aggregation-rule", "--allowlist-entry",
@@ -121,7 +121,7 @@ pub fn inspect(args: &[String], workspace: Workspace) -> Vec<String> {
 mod tests {
     use super::*;
     #[test]
-    #[ignore = "run with installed CLI metadata by tests/host/test_native_flag_inventory.py"]
+    #[ignore = "run with installed CLI metadata by `hamn-dev test native-flag-inventory`"]
     fn installed_kubectl_flag_inventory() {
         let path = std::env::var("HAMN_KUBECTL_FLAG_INVENTORY").unwrap();
         let inventory: std::collections::BTreeMap<String, std::collections::BTreeMap<String, bool>> =

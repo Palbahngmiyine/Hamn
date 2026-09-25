@@ -10,22 +10,29 @@ mod docker_context;
 mod docker_readiness;
 mod exec_auth;
 mod kubernetes_api;
+mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
 mod profile_yaml;
 mod remote_cancel_boundaries;
+mod rust_sdk;
 mod single_binary;
 mod ssh_deadline;
 mod start_preflight;
+mod tui;
 mod tui_backpressure;
 mod tui_environment_actions;
+mod tui_guarded_delete;
 mod tui_native_regressions;
+mod tui_navigation;
 mod tui_outcomes;
 mod tui_picker_restore;
 mod tui_quoting;
 mod tui_reload;
 mod tui_review_improvements;
 mod tui_session_management;
+mod tui_ssh_timeout;
+mod tui_workspaces;
 mod udp_proxy;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
@@ -56,6 +63,13 @@ const SUITES: &[Suite] = &[
     ("tui-environment-actions", tui_environment_actions::main),
     ("tui-picker-restore", tui_picker_restore::main),
     ("tui-backpressure", tui_backpressure::main),
+    ("native-flag-inventory", native_flag_inventory::main),
+    ("rust-sdk", rust_sdk::main),
+    ("tui", tui::main),
+    ("tui-guarded-delete", tui_guarded_delete::main),
+    ("tui-navigation", tui_navigation::main),
+    ("tui-ssh-timeout", tui_ssh_timeout::main),
+    ("tui-workspaces", tui_workspaces::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
@@ -74,6 +88,9 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("native-query-lifetime-child", native_query_lifetime::child),
     ("tui-picker-restore", tui_picker_restore::peer),
     ("tui-backpressure", tui_backpressure::fixture),
+    ("rust-sdk", rust_sdk::fixture),
+    ("tui-guarded-delete", tui_guarded_delete::fixture),
+    ("tui-workspaces", tui_workspaces::fixture),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

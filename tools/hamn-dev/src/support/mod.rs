@@ -3,10 +3,12 @@
 pub mod api_fixtures;
 pub mod bounded_process;
 pub mod c_extract;
+pub mod exec;
 pub mod harness_peers;
 pub mod http;
 pub mod pty;
 pub mod screen;
+pub mod termios;
 pub mod tmp;
 pub mod tui;
 

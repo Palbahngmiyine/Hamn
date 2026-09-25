@@ -181,13 +181,13 @@ $(BUILD)/tests/test_ssh_deadline: tests/host/test_ssh_deadline.c $(HOST_TEST_OBJ
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) $(LDFLAGS) -o $@
 
-# These share one debug test build: the flag inventory and test_tui.py run
+# These share one debug test build: the native-flag-inventory and tui suites run
 # `cargo test` binaries themselves, so they stay with `cargo test --locked`.
 test-control-rust: host
-	python3 tests/host/test_native_flag_inventory.py
+	$(HAMN_DEV) test native-flag-inventory
 	cargo test --locked
 	@test "$$(cargo tree --locked --prefix none --format '{p}' | sed -n '/^crossterm v/p' | cut -d ' ' -f 1,2 | sort -u | wc -l | tr -d ' ')" = 1
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui
 
 test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(BUILD)/tests/test_proc_deadline $(BUILD)/tests/test_ssh_deadline
 	$(HAMN_DEV) test control-signed-bootstrap
@@ -217,10 +217,10 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 
 # The TUI, workspace and packaging regressions of test-control, after test-control-native.
 test-control-tui: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_navigation.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-navigation
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-review-improvements
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-session-management
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_workspaces.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-workspaces
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-outcomes
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-native-regressions
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-quoting
@@ -239,10 +239,10 @@ test-control-tui: host
 	python3 tests/host/test_workspace_kubernetes_assertions.py
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui_tls_target.py
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-backpressure
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_guarded_delete.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_tui_ssh_timeout.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-guarded-delete
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-ssh-timeout
 	cargo test --locked -p hamn-dev
-	python3 tests/host/test_rust_sdk.py
+	$(HAMN_DEV) test rust-sdk
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test single-binary
 
 test-workflows:
