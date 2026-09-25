@@ -287,6 +287,7 @@ for requirement in \
     '        run: nix flake check --print-build-logs' \
     '        run: nix develop .#ci --command make -j1 test-portable' \
     '      - name: Run macOS regression gates with the system Apple SDK' \
+    "        run: sudo sh -c 'cat /etc/zshrc >/etc/zshrc.hamn-ci && mv /etc/zshrc.hamn-ci /etc/zshrc'" \
     '        run: nix develop .#ci --command make -j1 ci-macos-shard-${{ matrix.shard }}'; do
     grep -Fqx "$requirement" "$ci_workflow" ||
         fail "Nix CI workflow is incomplete: $requirement"

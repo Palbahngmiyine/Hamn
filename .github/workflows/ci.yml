@@ -63,6 +63,12 @@ jobs:
           [ "$RUNNER_OS" = macOS ]
           [ "$RUNNER_ARCH" = ARM64 ]
           [ "$(uname -m)" = arm64 ]
+      # The Nix installer runs `{ ...; cat /etc/zshrc; } | tee /etc/zshrc`.
+      # Reading the APFS-compressed original while tee truncates it can fail
+      # with "Attribute not found" (run 36128173174, attempt 2), so store it
+      # uncompressed first.
+      - name: Store /etc/zshrc uncompressed for the Nix installer
+        run: sudo sh -c 'cat /etc/zshrc >/etc/zshrc.hamn-ci && mv /etc/zshrc.hamn-ci /etc/zshrc'
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
