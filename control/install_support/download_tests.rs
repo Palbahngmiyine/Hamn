@@ -315,7 +315,7 @@ exec /usr/bin/curl "$@"
         Artifact {
             url: "https://fixture.test/artifact".into(),
             sha256: format!("{:x}", Sha256::digest(&self.payload)),
-            size: Some(self.payload.len() as u64),
+            size: self.payload.len() as u64,
         }
     }
 }
@@ -338,7 +338,7 @@ fn partial(cache: &Path, artifact: &Artifact, bytes: &[u8]) -> PathBuf {
         &downloads.join(format!(".{}.validator", artifact.sha256)),
         &PartialMetadata {
             sha256: artifact.sha256.clone(),
-            size: artifact.size.unwrap(),
+            size: artifact.size,
             validator: Some("\"native-v1\"".into()),
         },
     )
@@ -451,7 +451,7 @@ fn incomplete_validator_schema_restarts_without_a_range_request() {
         format!(
             "hamn-download 1\n{}\n{}\n",
             artifact.sha256,
-            artifact.size.unwrap()
+            artifact.size
         ),
     )
     .unwrap();
@@ -462,7 +462,7 @@ fn incomplete_validator_schema_restarts_without_a_range_request() {
     let without_validator = format!(
         "hamn-download 1\n{}\n{}\n\n",
         artifact.sha256,
-        artifact.size.unwrap()
+        artifact.size
     );
     assert!(
         partial_metadata(without_validator.as_bytes())
@@ -499,7 +499,7 @@ fn bootstrap(root: &Path, fixture: &Fixture, success: bool) {
         .arg(root)
         .arg(&artifact.url)
         .arg(&artifact.sha256)
-        .arg(artifact.size.unwrap().to_string())
+        .arg(artifact.size.to_string())
         .arg(&stage.path)
         .arg("0")
         .env_clear()
@@ -662,7 +662,7 @@ fn generated_native_acquisition(part: u64) {
         let root = Workspace::new();
         let cache = cache_root(root.path()).unwrap();
         let fixture = Fixture::with_payload(root.path(), payload);
-        let mut artifact = fixture.artifact();
+        let artifact = fixture.artifact();
         let name = if case % 2 == 0 { "host" } else { "guestImage" };
         let downloads = cache.join("downloads");
         let final_path = downloads.join(format!("{}.artifact", artifact.sha256));
@@ -711,7 +711,7 @@ fn generated_native_acquisition(part: u64) {
             }
             4 => {
                 let mut oversized = artifact.clone();
-                oversized.size = oversized_size;
+                oversized.size = oversized_size.expect("drawn for every case 4");
                 assert!(acquire_with_curl(&cache, &oversized, name, &fixture.curl).is_err());
                 assert!(
                     fixture.requests().is_empty(),
@@ -738,9 +738,18 @@ fn generated_native_acquisition(part: u64) {
                 expected_downloaded = 2 * size;
             }
             8 => {
-                // A v2 manifest has no size, so a partial cannot be resumed.
+                // Metadata saved for another size is not resume evidence: the
+                // partial is discarded and the transfer restarts from zero.
                 partial(&cache, &artifact, &fixture.payload[..prefix]);
-                artifact.size = None;
+                save_partial_metadata(
+                    &metadata_path,
+                    &PartialMetadata {
+                        sha256: artifact.sha256.clone(),
+                        size: artifact.size + 1,
+                        validator: Some("\"native-v1\"".into()),
+                    },
+                )
+                .unwrap();
             }
             _ => {}
         }
@@ -918,20 +927,6 @@ fn oversize_and_unsafe_cache_are_never_published() {
     assert!(acquire_with_curl(&cache, &artifact, "host", &fixture.curl).is_err());
     assert_eq!(fs::read(external).unwrap(), b"preserve");
     assert_eq!(fixture.requests().len(), 1);
-}
-
-#[test]
-fn legacy_partial_restarts_full_download_and_checks_digest() {
-    let root = Workspace::new();
-    let cache = cache_root(root.path()).unwrap();
-    let fixture = Fixture::new(root.path());
-    let mut artifact = fixture.artifact();
-    partial(&cache, &artifact, &fixture.payload[..1000]);
-    artifact.size = None;
-    let (_, counts) = acquire_with_curl(&cache, &artifact, "host", &fixture.curl).unwrap();
-    assert_eq!(fixture.requests()[0].0, None);
-    assert_eq!(counts.downloaded_bytes, fixture.payload.len() as u64);
-    assert_eq!(counts.reused_bytes, 0);
 }
 
 #[test]

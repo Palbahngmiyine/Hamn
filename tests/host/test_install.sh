@@ -121,86 +121,105 @@ bash "$INSTALL" "$HAMN" "$BINDIR" "$DATADIR" >"$WORK/reinstall.out"
 assert_managed_install "$BINDIR" "$DATADIR" "$HAMN"
 [ -f "$old_target" ]
 
-# Legacy marker+hash ownership migrates automatically. Legacy runtime-source
-# data is deliberately preserved; it is not an in-place install target.
+
+# Pre-generation installs (a standalone executable, the .hamn-binary.sha256
+# marker, or an empty data marker) are no longer migrated or adopted. Each is
+# refused with a message naming what to move aside, before any file changes,
+# and a standalone executable is never run (HAMN_ADOPT_LEGACY is ignored).
+# Every path, type, mode and file digest below each root, except the
+# permanent lock files that any installer run creates before its checks.
+tree_state() {
+    local path
+    for path in "$@"; do
+        (cd "$path" &&
+            find . \( -name .hamn-install.lock -o -name .hamn-transaction.lock \) -prune \
+                -o -print0 | sort -z | xargs -0 stat -f '%N %HT %Lp' &&
+            find . \( -name .hamn-install.lock -o -name .hamn-transaction.lock \) -prune \
+                -o -type f -print0 | sort -z | xargs -0 shasum -a 256)
+    done
+}
+assert_refused_unchanged() {
+    local bindir=$1 datadir=$2 message=$3 label=$4 before
+    before=$(tree_state "$bindir" "$datadir")
+    if SPOOF_SENTINEL="$WORK/legacy-spoof-ran" HAMN_ADOPT_LEGACY=1 \
+        bash "$INSTALL" "$HAMN" "$bindir" "$datadir" \
+        >"$WORK/$label.out" 2>"$WORK/$label.err"; then
+        echo "FAIL: installer adopted a pre-generation install ($label)" >&2
+        exit 1
+    fi
+    grep -Fq "$message" "$WORK/$label.err" || {
+        echo "FAIL: pre-generation refusal is not explained ($label): $(cat "$WORK/$label.err")" >&2
+        exit 1
+    }
+    [ "$(tree_state "$bindir" "$datadir")" = "$before" ] || {
+        echo "FAIL: refusing a pre-generation install changed it ($label)" >&2
+        exit 1
+    }
+    [ ! -e "$WORK/legacy-spoof-ran" ] || {
+        echo "FAIL: installer executed a standalone hamn ($label)" >&2
+        exit 1
+    }
+}
+
 LEGACY_BIN="$WORK/legacy-bin"
 LEGACY_DATA="$WORK/legacy-share/hamn/src"
 mkdir -p "$LEGACY_BIN" "$LEGACY_DATA/guest" "$LEGACY_DATA/vendor"
 cp "$HAMN" "$LEGACY_BIN/hamn"
 chmod 0755 "$LEGACY_BIN/hamn"
-legacy_hash=$(file_hash "$LEGACY_BIN/hamn")
-printf 'sha256 %s\n' "$legacy_hash" \
+printf 'sha256 %s\n' "$(file_hash "$LEGACY_BIN/hamn")" \
     >"$LEGACY_BIN/.hamn-binary.sha256"
 chmod 0644 "$LEGACY_BIN/.hamn-binary.sha256"
 touch "$LEGACY_DATA/.hamn-managed"
 chmod 0644 "$LEGACY_DATA/.hamn-managed"
 printf '%s\n' keep-legacy-guest >"$LEGACY_DATA/guest/sentinel"
 printf '%s\n' keep-legacy-vendor >"$LEGACY_DATA/vendor/sentinel"
-bash "$INSTALL" "$HAMN" "$LEGACY_BIN" "$LEGACY_DATA" \
-    >"$WORK/legacy.out"
+assert_refused_unchanged "$LEGACY_BIN" "$LEGACY_DATA" \
+    "is a pre-release Hamn install (empty data marker), which this installer no longer migrates; move $(cd "$LEGACY_DATA" && pwd -P) aside and install again" \
+    legacy-empty-marker
+# A versioned data marker does not make the binary marker acceptable.
+printf 'version=1\n' >"$LEGACY_DATA/.hamn-managed"
+assert_refused_unchanged "$LEGACY_BIN" "$LEGACY_DATA" \
+    ".hamn-binary.sha256 marks a pre-release Hamn install, which this installer no longer migrates; move it and" \
+    legacy-binary-marker
+# Moving the standalone executable and its marker aside, as advised, allows a
+# fresh managed install that keeps the old source data untouched.
+mv "$LEGACY_BIN/hamn" "$LEGACY_BIN/.hamn-binary.sha256" "$WORK/"
+bash "$INSTALL" "$HAMN" "$LEGACY_BIN" "$LEGACY_DATA" >"$WORK/legacy-moved.out"
 assert_managed_install "$LEGACY_BIN" "$LEGACY_DATA" "$HAMN"
-[ "$(<"$LEGACY_DATA/.hamn-managed")" = version=1 ]
 grep -q '^keep-legacy-guest$' "$LEGACY_DATA/guest/sentinel"
 grep -q '^keep-legacy-vendor$' "$LEGACY_DATA/vendor/sentinel"
 
-# An unmarked legacy executable is never run or adopted implicitly. Explicit
-# adoption requires only the managed Hamn data marker and hashes content.
-ADOPT_BIN="$WORK/adopt-bin"
-ADOPT_DATA="$WORK/adopt-share/hamn/src"
-mkdir -p "$ADOPT_BIN" "$ADOPT_DATA"
+# An unmarked standalone executable (here a script that would record its
+# execution, and a hardlinked copy) is refused, not run or adopted.
+STANDALONE_BIN="$WORK/standalone-bin"
+STANDALONE_DATA="$WORK/standalone-share/hamn/src"
+mkdir -p "$STANDALONE_BIN" "$STANDALONE_DATA"
 printf '%s\n' \
     '#!/bin/sh' \
     'touch "$SPOOF_SENTINEL"' \
-    'exit 0' >"$ADOPT_BIN/hamn"
-chmod 0755 "$ADOPT_BIN/hamn"
-touch "$ADOPT_DATA/.hamn-managed"
-chmod 0644 "$ADOPT_DATA/.hamn-managed"
-if SPOOF_SENTINEL="$WORK/adopt-spoof-ran" \
-    bash "$INSTALL" "$HAMN" "$ADOPT_BIN" "$ADOPT_DATA" \
-    >"$WORK/adopt-refused.out" 2>"$WORK/adopt-refused.err"; then
-    echo "FAIL: installer automatically adopted an unmarked executable" >&2
-    exit 1
-fi
-grep -q 'HAMN_ADOPT_LEGACY=1' "$WORK/adopt-refused.err"
-[ ! -e "$WORK/adopt-spoof-ran" ]
-SPOOF_SENTINEL="$WORK/adopt-spoof-ran" HAMN_ADOPT_LEGACY=1 \
-    bash "$INSTALL" "$HAMN" "$ADOPT_BIN" "$ADOPT_DATA" \
-    >"$WORK/adopted.out"
-[ ! -e "$WORK/adopt-spoof-ran" ]
-assert_managed_install "$ADOPT_BIN" "$ADOPT_DATA" "$HAMN"
+    'exit 0' >"$STANDALONE_BIN/hamn"
+chmod 0755 "$STANDALONE_BIN/hamn"
+printf 'version=1\n' >"$STANDALONE_DATA/.hamn-managed"
+chmod 0644 "$STANDALONE_DATA/.hamn-managed"
+assert_refused_unchanged "$STANDALONE_BIN" "$STANDALONE_DATA" \
+    "refusing to replace $(cd "$STANDALONE_BIN" && pwd -P)/hamn: it is not a managed Hamn generation link (an older standalone Hamn or another program); move it aside and install again" \
+    standalone-script
+rm "$STANDALONE_BIN/hamn"
+cp "$HAMN" "$STANDALONE_BIN/hamn"
+chmod 0755 "$STANDALONE_BIN/hamn"
+ln "$STANDALONE_BIN/hamn" "$WORK/standalone-hardlink"
+assert_refused_unchanged "$STANDALONE_BIN" "$STANDALONE_DATA" \
+    "it is not a managed Hamn generation link" standalone-hardlink
 
-# Hardlinks and invalid legacy hashes are not ownership evidence.
-HARD_BIN="$WORK/hard-bin"
-HARD_DATA="$WORK/hard-share/hamn/src"
-mkdir -p "$HARD_BIN" "$HARD_DATA"
-cp "$HAMN" "$HARD_BIN/hamn"
-chmod 0755 "$HARD_BIN/hamn"
-ln "$HARD_BIN/hamn" "$WORK/hard-hamn-link"
-touch "$HARD_DATA/.hamn-managed"
-chmod 0644 "$HARD_DATA/.hamn-managed"
-if HAMN_ADOPT_LEGACY=1 \
-    bash "$INSTALL" "$HAMN" "$HARD_BIN" "$HARD_DATA" \
-    >"$WORK/hard.out" 2>"$WORK/hard.err"; then
-    echo "FAIL: installer adopted a hardlinked legacy binary" >&2
-    exit 1
-fi
-cmp -s "$HAMN" "$HARD_BIN/hamn"
+# An empty data marker without any executable is refused as well.
+EMPTY_MARKER_BIN="$WORK/empty-marker-bin"
+EMPTY_MARKER_DATA="$WORK/empty-marker-share/hamn/src"
+mkdir -p "$EMPTY_MARKER_BIN" "$EMPTY_MARKER_DATA"
+touch "$EMPTY_MARKER_DATA/.hamn-managed"
+chmod 0644 "$EMPTY_MARKER_DATA/.hamn-managed"
+assert_refused_unchanged "$EMPTY_MARKER_BIN" "$EMPTY_MARKER_DATA" \
+    "is a pre-release Hamn install (empty data marker)" empty-marker-only
 
-BAD_MARKER_BIN="$WORK/bad-marker-bin"
-BAD_MARKER_DATA="$WORK/bad-marker-share/hamn/src"
-mkdir -p "$BAD_MARKER_BIN" "$BAD_MARKER_DATA"
-cp "$HAMN" "$BAD_MARKER_BIN/hamn"
-chmod 0755 "$BAD_MARKER_BIN/hamn"
-printf 'sha256 %064d\n' 0 >"$BAD_MARKER_BIN/.hamn-binary.sha256"
-chmod 0644 "$BAD_MARKER_BIN/.hamn-binary.sha256"
-touch "$BAD_MARKER_DATA/.hamn-managed"
-chmod 0644 "$BAD_MARKER_DATA/.hamn-managed"
-if bash "$INSTALL" "$HAMN" "$BAD_MARKER_BIN" "$BAD_MARKER_DATA" \
-    >"$WORK/bad-marker.out" 2>"$WORK/bad-marker.err"; then
-    echo "FAIL: installer trusted an invalid legacy binary marker" >&2
-    exit 1
-fi
-grep -q 'invalid identity marker' "$WORK/bad-marker.err"
 
 # Existing Docker commands are outside Hamn ownership and remain untouched.
 FOREIGN_DOCKER_BIN="$WORK/foreign-docker-bin"
@@ -229,13 +248,14 @@ mkdir -p "$FOREIGN_LINK_BIN" "$FOREIGN_LINK_DATA"
 printf '%s\n' foreign >"$WORK/foreign-hamn"
 chmod 0755 "$WORK/foreign-hamn"
 ln -s "$WORK/foreign-hamn" "$FOREIGN_LINK_BIN/hamn"
-touch "$FOREIGN_LINK_DATA/.hamn-managed"
+printf 'version=1\n' >"$FOREIGN_LINK_DATA/.hamn-managed"
 chmod 0644 "$FOREIGN_LINK_DATA/.hamn-managed"
 if bash "$INSTALL" "$HAMN" "$FOREIGN_LINK_BIN" "$FOREIGN_LINK_DATA" \
     >"$WORK/foreign-link.out" 2>"$WORK/foreign-link.err"; then
     echo "FAIL: installer replaced a foreign hamn symlink" >&2
     exit 1
 fi
+grep -q 'refusing foreign hamn symlink' "$WORK/foreign-link.err"
 [ "$(readlink "$FOREIGN_LINK_BIN/hamn")" = "$WORK/foreign-hamn" ]
 
 # A managed symlink is trusted only while its generation marker and binary

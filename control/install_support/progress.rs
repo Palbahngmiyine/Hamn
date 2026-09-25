@@ -39,7 +39,8 @@ pub(super) fn bytes(value: u64) -> String {
 pub(super) struct Progress<W: Write> {
     out: W,
     label: String,
-    total: Option<u64>,
+    /// The artifact's exact size in bytes.
+    total: u64,
     live: bool,
     started: Option<Instant>,
     base: u64,
@@ -48,7 +49,7 @@ pub(super) struct Progress<W: Write> {
 }
 
 impl<W: Write> Progress<W> {
-    pub(super) fn new(out: W, label: impl Into<String>, total: Option<u64>, live: bool) -> Self {
+    pub(super) fn new(out: W, label: impl Into<String>, total: u64, live: bool) -> Self {
         Self {
             out,
             label: label.into(),
@@ -70,14 +71,10 @@ impl<W: Write> Progress<W> {
             self.draw(done, Instant::now());
             return;
         }
-        let size = self.total.map(bytes);
-        let line = match (done, size) {
-            (0, Some(size)) => format!("{} ({size})...", self.label),
-            (0, None) => format!("{}...", self.label),
-            (done, Some(size)) => {
-                format!("{} (resuming at {} of {size})...", self.label, bytes(done))
-            }
-            (done, None) => format!("{} (resuming at {})...", self.label, bytes(done)),
+        let size = bytes(self.total);
+        let line = match done {
+            0 => format!("{} ({size})...", self.label),
+            done => format!("{} (resuming at {} of {size})...", self.label, bytes(done)),
         };
         let _ = writeln!(self.out, "{line}");
         let _ = self.out.flush();
@@ -139,12 +136,12 @@ impl<W: Write> Progress<W> {
 
     fn draw(&mut self, done: u64, now: Instant) {
         let mut line = self.label.clone();
-        match self.total {
-            Some(total) if total > 0 => {
-                let percent = (done.min(total) as u128 * 100 / total as u128) as u64;
-                line += &format!("  {percent:>3}%  {} / {}", bytes(done), bytes(total));
-            }
-            _ => line += &format!("  {}", bytes(done)),
+        let total = self.total;
+        if total > 0 {
+            let percent = (done.min(total) as u128 * 100 / total as u128) as u64;
+            line += &format!("  {percent:>3}%  {} / {}", bytes(done), bytes(total));
+        } else {
+            line += &format!("  {}", bytes(done));
         }
         if let Some(started) = self.started {
             let elapsed = now.duration_since(started).as_secs_f64();
@@ -182,28 +179,24 @@ mod tests {
 
     #[test]
     fn line_oriented_output_has_one_start_line_and_no_control_bytes() {
-        let mut progress = Progress::new(Vec::new(), "Downloading guest image", Some(2048), false);
+        let mut progress = Progress::new(Vec::new(), "Downloading guest image", 2048, false);
         progress.start(0);
         progress.update(1024);
         progress.finish(2048, true);
         assert_eq!(text(progress), "Downloading guest image (2.0 KiB)...\n");
 
-        let mut resumed = Progress::new(Vec::new(), "Downloading Hamn 1.2.3", Some(4096), false);
+        let mut resumed = Progress::new(Vec::new(), "Downloading Hamn 1.2.3", 4096, false);
         resumed.start(1024);
         resumed.finish(1024, false);
         assert_eq!(
             text(resumed),
             "Downloading Hamn 1.2.3 (resuming at 1.0 KiB of 4.0 KiB)...\n"
         );
-
-        let mut unknown = Progress::new(Vec::new(), "Downloading guest image", None, false);
-        unknown.start(0);
-        assert_eq!(text(unknown), "Downloading guest image...\n");
     }
 
     #[test]
     fn live_output_redraws_one_line_throttles_and_ends_with_a_newline() {
-        let mut progress = Progress::new(Vec::new(), "Downloading guest image", Some(1000), true);
+        let mut progress = Progress::new(Vec::new(), "Downloading guest image", 1000, true);
         progress.start(0);
         progress.update(10); // within the redraw interval: suppressed
         progress.finish(1000, true);
@@ -216,7 +209,7 @@ mod tests {
 
     #[test]
     fn failed_live_transfer_keeps_last_state_and_notes_start_on_a_new_line() {
-        let mut progress = Progress::new(Vec::new(), "Downloading guest image", Some(1000), true);
+        let mut progress = Progress::new(Vec::new(), "Downloading guest image", 1000, true);
         progress.start(250);
         progress.note("Connection interrupted; resuming (1 of 3)...");
         progress.finish(250, false);
@@ -228,7 +221,7 @@ mod tests {
 
     #[test]
     fn percentage_never_exceeds_one_hundred_for_inconsistent_counts() {
-        let mut progress = Progress::new(Vec::new(), "x", Some(10), true);
+        let mut progress = Progress::new(Vec::new(), "x", 10, true);
         progress.start(20);
         assert!(text(progress).contains("100%"));
     }

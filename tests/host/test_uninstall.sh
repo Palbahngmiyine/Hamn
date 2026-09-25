@@ -84,4 +84,20 @@ grep -Fq 'refusing unsafe Hamn runtime path' "$WORK/unsafe.out"
 grep -qx 'keep' "$VICTIM/keep"
 [ -L "$UNSAFE_HOME/.hamn" ] && [ -L "$UNSAFE_BIN/hamn" ] && [ -d "$UNSAFE_DATA" ]
 
+# An empty (pre-release) data marker is not ownership evidence: uninstall
+# refuses the root and removes nothing.
+prepare_install empty-marker
+: >"$TEST_DATADIR/.hamn-managed"
+if HOME="$TEST_HOME" "$TEST_BINDIR/hamn" --headless system uninstall --yes \
+    >"$WORK/empty-marker.out" 2>"$WORK/empty-marker.err"; then
+    echo "FAIL: uninstall accepted an empty data marker" >&2
+    exit 1
+fi
+grep -Fq 'refusing unmanaged or unsafe installation root' "$WORK/empty-marker.out"
+[ -d "$TEST_HOME/.hamn" ] && [ -L "$TEST_BINDIR/hamn" ] && [ -d "$TEST_DATADIR" ] &&
+    [ ! -s "$TEST_DATADIR/.hamn-managed" ] || {
+    echo "FAIL: refused uninstall changed the installation" >&2
+    exit 1
+}
+
 echo "PASS: uninstall confirmation and managed-path safety"

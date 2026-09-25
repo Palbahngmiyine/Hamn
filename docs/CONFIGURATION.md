@@ -203,4 +203,4 @@ Private metadata lives in `~/.hamn/cache/update-check-v1.json` and
 `update-notice-v1.json`. Verified downloads use SHA-256-addressed files under
 `~/.hamn/cache/downloads`; only validated sizes/digests can be reused or published.
 See [installation](INSTALLATION.md) for manual `upgrade --check`, `--force`, repair
-and compatibility with `--headless system update --yes`.
+and `--headless system upgrade --yes`.

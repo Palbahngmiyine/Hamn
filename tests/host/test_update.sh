@@ -69,12 +69,15 @@ build_release() {
     host_hash=$(sha256 "$archive")
     guest_hash=$(sha256 "$guest")
     printf '%s' \
-        '{"schemaVersion":2,"channel":"stable","version":"v'"$version"'",' \
+        '{"schemaVersion":3,"channel":"stable","version":"v'"$version"'",' \
         '"commit":"0123456789abcdef0123456789abcdef01234567",' \
         '"validationMode":"github-hosted-no-vm",' \
         '"compatibility":{"os":"darwin","architecture":"arm64","minimumMacOS":"13.0"},' \
-        '"artifacts":{"host":{"url":"file://'"$archive"'","sha256":"'"$host_hash"'"},' \
-        '"guestImage":{"url":"file://'"$guest"'","sha256":"'"$guest_hash"'"}}}' \
+        '"artifacts":{"host":{"url":"file://'"$archive"'","sha256":"'"$host_hash"'",' \
+        '"size":'"$(stat -f %z "$archive")"'},' \
+        '"guestImage":{"url":"file://'"$guest"'","sha256":"'"$guest_hash"'",' \
+        '"size":'"$(stat -f %z "$guest")"',"format":"qcow2","compression":"zlib",' \
+        '"virtualSize":8589934592}}}' \
         >"$manifest"
     printf '%s\n' "$manifest"
 }
@@ -136,6 +139,17 @@ if run_update "$WORK/bad-manifest.json" \
     exit 1
 fi
 assert_active_state "$new_target" "$selection_2" 'manifest rejection'
+
+# A retired schema v2 manifest is refused by its schema, with the reinstall
+# advice, before any download or state change.
+sed 's/"schemaVersion":3/"schemaVersion":2/' "$MANIFEST_2" >"$WORK/v2-manifest.json"
+if run_update "$WORK/v2-manifest.json" >"$WORK/v2.out" 2>"$WORK/v2.err"; then
+    echo "FAIL: a schema v2 manifest was accepted" >&2
+    exit 1
+fi
+grep -Fq 'manifest schema v2 is not supported; this Hamn reads only schema v3' "$WORK/v2.out"
+grep -Fq 'Reinstall with the official installer' "$WORK/v2.out"
+assert_active_state "$new_target" "$selection_2" 'schema v2 rejection'
 
 # An installer failure occurs after both payloads are staged but before either
 # public pointer may change.
@@ -228,5 +242,61 @@ HOME="$HOME_DIR" "$BINDIR/hamn" --version | grep -Fxq 'hamn 0.0.3'
 }
 [ ! -e "$HOME_DIR/.hamn/cache/.hamn-update-transaction" ] &&
     [ ! -L "$HOME_DIR/.hamn/cache/.hamn-update-transaction" ]
+
+# Journals from Hamn 0.1.2 and earlier (v1) and pre-release builds (v2) record
+# no attempted generation. They are refused loudly and preserved unchanged,
+# with no binary or selection change, whether pending or already retired.
+selection_3=$(selection_hash)
+CACHE_DIR=$HOME_DIR/.hamn/cache
+write_legacy_journal() {
+    local journal=$1 state=$2
+    mkdir -m 0700 "$journal"
+    printf '%s\n' "$state" >"$journal/state"
+    printf '%s\n' Abc123 >"$journal/attempt"
+    printf '%s\n' "$target_3" >"$journal/old-target"
+    cp "$CACHE_DIR/guest-image.json" "$journal/previous-selection"
+    printf '{}\n' >"$journal/new-selection"
+    chmod 0600 "$journal"/*
+}
+journal_digest() {
+    (cd "$1" && shasum -a 256 attempt new-selection old-target previous-selection state)
+}
+for legacy_state in $'version=1\nbootstrap=0\nselection=present' \
+    $'version=2\nbootstrap=0\nselection=present\nhostMutation=1'; do
+    legacy_version=${legacy_state%%$'\n'*}
+    legacy_version=${legacy_version#version=}
+    for legacy_journal in "$CACHE_DIR/.hamn-update-transaction" \
+        "$CACHE_DIR/.hamn-update-completed.Abc123"; do
+        write_legacy_journal "$legacy_journal" "$legacy_state"
+        before=$(journal_digest "$legacy_journal")
+        if run_update "$MANIFEST_3" >"$WORK/legacy.out" 2>"$WORK/legacy.err"; then
+            echo "FAIL: a v$legacy_version journal was accepted: $legacy_journal" >&2
+            exit 1
+        fi
+        case "$legacy_journal" in
+        */.hamn-update-transaction)
+            expected="an interrupted update from Hamn 0.1.2 or earlier left a v$legacy_version journal at $legacy_journal, which this Hamn cannot recover" ;;
+        *)
+            expected="a finished v$legacy_version update journal from Hamn 0.1.2 or earlier remains at $legacy_journal; move it aside" ;;
+        esac
+        grep -Fq "$expected" "$WORK/legacy.out" || {
+            echo "FAIL: v$legacy_version journal refusal is not explained: $(cat "$WORK/legacy.out")" >&2
+            exit 1
+        }
+        [ "$(journal_digest "$legacy_journal")" = "$before" ] || {
+            echo "FAIL: refusing a v$legacy_version journal changed it" >&2
+            exit 1
+        }
+        [ "$(readlink "$BINDIR/hamn")" = "$target_3" ] &&
+            [ "$(selection_hash)" = "$selection_3" ] || {
+            echo "FAIL: refusing a v$legacy_version journal changed the installation" >&2
+            exit 1
+        }
+        mv "$legacy_journal" "$WORK/moved-aside-journal"
+        rm -rf "$WORK/moved-aside-journal"
+    done
+done
+run_update "$MANIFEST_3" >"$WORK/after-legacy.out" 2>"$WORK/after-legacy.err"
+grep -Fxq 'Hamn 0.0.3 is up to date.' "$WORK/after-legacy.err"
 
 echo "PASS: immutable update rolls back installer failure and interruption safely"

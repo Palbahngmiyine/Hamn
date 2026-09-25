@@ -3,6 +3,7 @@
 //! contain a filter (all cases without filters).
 use std::process::ExitCode;
 
+mod bootstrap_acquire;
 mod control_signed_bootstrap;
 mod core_quality;
 mod core_worker;
@@ -11,9 +12,12 @@ mod docker_api;
 mod docker_context;
 mod docker_readiness;
 mod exec_auth;
+mod generation_cleanup;
 mod guest_image_live;
 mod hosted_validation;
+mod install_system_tools;
 mod kubernetes_api;
+mod measure_upgrade_download;
 mod native_flag_inventory;
 mod native_query_lifetime;
 mod observer_requests;
@@ -58,6 +62,13 @@ mod tui_ssh_timeout;
 mod tui_tls_target;
 mod tui_workspaces;
 mod udp_proxy;
+mod update_check;
+mod update_ux;
+mod upgrade_cli;
+mod upgrade_concurrency;
+mod upgrade_native;
+mod upgrade_properties;
+mod upgrade_recovery_ownership;
 mod workspace_live;
 
 type Suite = (&'static str, fn(&[String]) -> ExitCode);
@@ -122,6 +133,17 @@ const SUITES: &[Suite] = &[
     ("workspace-live", workspace_live::main),
     ("workspace-live-management", workspace_live::management_main),
     ("guest-image-live", guest_image_live::main),
+    ("bootstrap-acquire", bootstrap_acquire::main),
+    ("generation-cleanup", generation_cleanup::main),
+    ("install-system-tools", install_system_tools::main),
+    ("upgrade-cli", upgrade_cli::main),
+    ("upgrade-concurrency", upgrade_concurrency::main),
+    ("upgrade-native", upgrade_native::main),
+    ("upgrade-properties", upgrade_properties::main),
+    ("upgrade-recovery-ownership", upgrade_recovery_ownership::main),
+    ("update-check", update_check::main),
+    ("update-ux", update_ux::main),
+    ("measure-upgrade-download", measure_upgrade_download::main),
 ];
 
 const FIXTURES: &[(&str, Fixture)] = &[
@@ -156,6 +178,9 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("workspace-live-argv", workspace_live::checks::argv_recorder),
     ("workspace-live-exec-witness", workspace_live::exec_witness),
     ("workspace-management-kubectl", workspace_live::checks::management_kubectl),
+    ("generation-wait", generation_cleanup::waiting_executable),
+    ("bootstrap-curl", bootstrap_acquire::curl_fixture),
+    ("update-check-cli", update_check::cli_fixture),
 ];
 
 pub fn run(args: &[String]) -> ExitCode {

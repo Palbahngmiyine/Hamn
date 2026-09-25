@@ -205,14 +205,19 @@ if grep -Fq 'export PATH=' "$WORK/alias.err"; then
     echo "FAIL: bootstrap rejected a PATH symlink to the installed command" >&2
     exit 1
 fi
-# Preserve bootstrap migration of the original empty ownership marker, even
-# when the release receipt matches; a no-op would leave later updates unusable.
+# The empty ownership marker of a pre-release install is no longer migrated:
+# bootstrap refuses it with advice, even when the release receipt matches, and
+# changes neither the marker nor the command link.
 : >"$HOME_DIR/.local/share/hamn/src/.hamn-managed"
-HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
-    bash "$WORK/candidate/install.sh" >"$WORK/migrate.out" 2>"$WORK/migrate.err"
-[ "$(cat "$HOME_DIR/.local/share/hamn/src/.hamn-managed")" = version=1 ]
-[ "$(readlink "$HOME_DIR/.local/bin/hamn")" != "$installed_target" ]
-installed_target=$(readlink "$HOME_DIR/.local/bin/hamn")
+if HOME="$HOME_DIR" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
+    bash "$WORK/candidate/install.sh" >"$WORK/migrate.out" 2>"$WORK/migrate.err"; then
+    echo "FAIL: bootstrap migrated an empty pre-release data marker" >&2
+    exit 1
+fi
+grep -Fq 'is a pre-release Hamn install (empty data marker), which is no longer migrated' "$WORK/migrate.err"
+[ ! -s "$HOME_DIR/.local/share/hamn/src/.hamn-managed" ]
+[ "$(readlink "$HOME_DIR/.local/bin/hamn")" = "$installed_target" ]
+printf 'version=1\n' >"$HOME_DIR/.local/share/hamn/src/.hamn-managed"
 # Refuse a regular legacy/foreign executable before making an unjournaled cutover.
 mkdir -p "$WORK/legacy-home/.local/bin"
 cp "$HOME_DIR/.local/bin/hamn" "$WORK/legacy-home/.local/bin/hamn"
@@ -222,7 +227,7 @@ if HOME="$WORK/legacy-home" HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS=1 \
     echo "FAIL: bootstrap replaced a regular executable without rollback evidence" >&2
     exit 1
 fi
-grep -Fq 'run make install from the current source first' "$WORK/legacy.err"
+grep -Fq 'Move it aside and run this installer again' "$WORK/legacy.err"
 [ "$(sha256 "$WORK/legacy-home/.local/bin/hamn")" = "$legacy_hash" ]
 [ ! -L "$WORK/legacy-home/.local/bin/hamn" ]
 [ ! -e "$WORK/legacy-home/.hamn" ]

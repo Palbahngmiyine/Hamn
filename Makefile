@@ -288,25 +288,20 @@ test-control_PARTS := test-control-native test-control-tui test-control-rust
 test-install_PARTS := test-install-script test-install-cleanup \
 	test-install-system-tools test-install-bootstrap
 test-update_PARTS := test-update-properties test-update-native \
-	test-update-concurrency test-update-recovery-legacy test-update-recovery-current \
+	test-update-concurrency test-update-recovery \
 	test-update-check test-update-cli test-update-ux-redirected test-update-ux-pty \
 	test-update-script
 LOCAL_MACOS_LEAVES := $(foreach gate,$(LOCAL_MACOS_GATES),$(or $($(gate)_PARTS),$(gate)))
 
 # PR CI runs the same leaves on independent macOS machines (GitHub runs at
-# most five macOS jobs at once), each shard in its own checkout. Installer
-# and updater gates of one user must not overlap: generation cleanup refuses
-# to prune while any process of that user has scripts/update-host.sh open
-# without the transaction lock, and a non-root lsof sees only its own
-# user's processes. Each shard runs, after building build/hamn once:
+# most five macOS jobs at once), each shard in its own checkout. Every
+# installer/updater gate owns its HOME and install roots, so gates of one
+# user may overlap. Each shard runs, after building build/hamn once:
 # - CI_MACOS_SHARD_<n>: the main lane, serially, except its
-#   CI_MACOS_SIDE_GATES, which run beside it. Side gates never run the
-#   updater, never open scripts/update-host.sh, never rebuild build/hamn and
-#   only read it;
-# - CI_MACOS_SHARD_<n>_USER: a second updater lane of CI_MACOS_USER_GATES,
-#   which only read the checkout. With CI_MACOS_LANE_UID set (CI creates that
-#   user) it runs beside the main lane as that user, without rebuilding
-#   build/hamn; otherwise it runs after the main lane;
+#   CI_MACOS_SIDE_GATES, which run beside it;
+# - CI_MACOS_SHARD_<n>_UPDATER: a second lane of CI_MACOS_UPDATER_GATES,
+#   also beside the main lane.
+#   Side and updater-lane gates never rebuild build/hamn and only read it;
 # - CI_MACOS_ALONE_GATES last, with nothing beside them: they rebuild
 #   build/hamn as other versions, or (test-control-rust) hold cancellation
 #   deadline tests that timed out beside other lanes (run 36140673204).
@@ -316,56 +311,48 @@ CI_MACOS_SHARDS := 1 2 3 4 5
 # Timing-sensitive PTY gates (test-control-native, test-control-tui) run
 # beside at most one heavy updater lane. test-control-rust stays on shard 4,
 # whose Cargo cache carries target/debug.
-CI_MACOS_SHARD_1 := test-update-recovery-current test-port-forwarding \
+CI_MACOS_SHARD_1 := test-update-recovery test-port-forwarding \
 	test-kubernetes-cli test-diagnostics test-release-gate test-workflows \
 	test-guest-deployment test-hosted-validation
-CI_MACOS_SHARD_1_USER := test-update-cli
+CI_MACOS_SHARD_1_UPDATER := test-update-cli
 CI_MACOS_SHARD_2 := test-update-ux-redirected test-update-native test-uninstall \
 	test-update-check
-CI_MACOS_SHARD_2_USER := test-update-ux-pty test-install-bootstrap \
-	test-update-recovery-legacy
+CI_MACOS_SHARD_2_UPDATER := test-update-ux-pty test-install-bootstrap
 CI_MACOS_SHARD_3 := test-install-cleanup test-install-script \
 	test-control-native test-profile-state test-release-artifacts
-CI_MACOS_SHARD_3_USER :=
+CI_MACOS_SHARD_3_UPDATER :=
 CI_MACOS_SHARD_4 := test-core-quality test-portable test-public-export \
 	test-release-version test-release-request test-release-repository-preflight \
 	test-control-tui test-control-rust
-CI_MACOS_SHARD_4_USER := test-install-system-tools test-update-concurrency \
+CI_MACOS_SHARD_4_UPDATER := test-install-system-tools test-update-concurrency \
 	test-update-properties
 CI_MACOS_SHARD_5 := host test-update-script test-release-publish
-CI_MACOS_SHARD_5_USER :=
-CI_MACOS_LEAVES := $(foreach shard,$(CI_MACOS_SHARDS),$(CI_MACOS_SHARD_$(shard)) $(CI_MACOS_SHARD_$(shard)_USER))
+CI_MACOS_SHARD_5_UPDATER :=
+CI_MACOS_LEAVES := $(foreach shard,$(CI_MACOS_SHARDS),$(CI_MACOS_SHARD_$(shard)) $(CI_MACOS_SHARD_$(shard)_UPDATER))
 CI_MACOS_SIDE_GATES := test-control-native test-control-tui \
 	test-profile-state test-guest-deployment test-port-forwarding \
 	test-kubernetes-cli test-diagnostics test-release-gate test-workflows
-# test-update-check stays with the runner: its TUI fixtures start
-# /usr/bin/python3, and under a freshly created user the TUI did not get
-# their output before the test's deadline (run 36135535709).
-CI_MACOS_USER_GATES := test-install-script test-install-cleanup \
+CI_MACOS_UPDATER_GATES := test-install-script test-install-cleanup \
 	test-install-system-tools test-install-bootstrap test-uninstall \
 	test-update-properties test-update-native test-update-concurrency \
-	test-update-recovery-legacy test-update-recovery-current test-update-cli \
+	test-update-recovery test-update-cli \
 	test-update-ux-redirected test-update-ux-pty
 CI_MACOS_ALONE_GATES := test-update-script test-release-artifacts \
 	test-release-publish test-hosted-validation test-control-rust
 ci_macos_side = $(filter $(CI_MACOS_SIDE_GATES),$(CI_MACOS_SHARD_$(1)))
 ci_macos_alone = $(filter $(CI_MACOS_ALONE_GATES),$(CI_MACOS_SHARD_$(1)))
 ci_macos_main = $(filter-out $(CI_MACOS_SIDE_GATES) $(CI_MACOS_ALONE_GATES),$(CI_MACOS_SHARD_$(1)))
-ci_macos_user = $(CI_MACOS_SHARD_$(1)_USER)
-ci_macos_parallel = $(or $(call ci_macos_side,$(1)),$(and $(CI_MACOS_LANE_UID),$(call ci_macos_user,$(1))))
-# The second user (CI only): a numeric uid and its home directory.
-CI_MACOS_LANE_UID ?=
-CI_MACOS_LANE_HOME ?=
+ci_macos_updater = $(CI_MACOS_SHARD_$(1)_UPDATER)
+ci_macos_parallel = $(or $(call ci_macos_side,$(1)),$(call ci_macos_updater,$(1)))
 # One recipe line per gate, so a failure stops its lane and, with GNU Make
 # 4's --output-sync=line, each gate's output appears when it finishes.
 define ci-macos-gate
 $(MAKE) $(1)
 
 endef
-# The second user gets a clean environment with this shell's PATH and runs
-# the gate against the build/hamn already built (-o host).
-define ci-macos-user-gate
-$(if $(CI_MACOS_LANE_UID),sudo -u '#$(CI_MACOS_LANE_UID)' /usr/bin/env -i HOME=$(CI_MACOS_LANE_HOME) TMPDIR=/tmp PATH="$$PATH" LANG="$$LANG" $(MAKE) -o host $(1),$(MAKE) $(1))
+# Lanes beside the main lane use the build/hamn already built (-o host).
+define ci-macos-beside-gate
+$(MAKE) -o host $(1)
 
 endef
 CI_MACOS_OUTPUT_SYNC := $(if $(filter output-sync,$(.FEATURES)),--output-sync=line)
@@ -382,7 +369,7 @@ test-control test-install test-update:
 ci-macos-shard-%: check-ci-macos-shards
 	@test -n "$(CI_MACOS_SHARD_$*)" || { echo "FAIL: unknown CI macOS shard: $*" >&2; exit 2; }
 	$(MAKE) host
-	$(MAKE) $(if $(call ci_macos_parallel,$*),-j3 $(CI_MACOS_OUTPUT_SYNC)) ci-macos-main-$* ci-macos-side-$* ci-macos-user-$*
+	$(MAKE) $(if $(call ci_macos_parallel,$*),-j3 $(CI_MACOS_OUTPUT_SYNC)) ci-macos-main-$* ci-macos-side-$* ci-macos-updater-$*
 	$(foreach gate,$(call ci_macos_alone,$*),$(call ci-macos-gate,$(gate)))
 
 ci-macos-main-%:
@@ -391,18 +378,19 @@ ci-macos-main-%:
 ci-macos-side-%:
 	$(foreach gate,$(call ci_macos_side,$*),$(call ci-macos-gate,$(gate)))
 
-# Without a second user, the user lane must wait for the main lane.
-ci-macos-user-%: $(if $(CI_MACOS_LANE_UID),,ci-macos-main-%)
-	$(foreach gate,$(call ci_macos_user,$*),$(call ci-macos-user-gate,$(gate)))
+ci-macos-updater-%:
+	$(foreach gate,$(call ci_macos_updater,$*),$(call ci-macos-beside-gate,$(gate)))
 
 check-ci-macos-shards:
 	@test "$(sort $(CI_MACOS_LEAVES))" = "$(sort $(LOCAL_MACOS_LEAVES))" && \
 		test "$(words $(CI_MACOS_LEAVES))" = "$(words $(LOCAL_MACOS_LEAVES))" || { \
 		echo "FAIL: CI macOS shards must run every local macOS gate exactly once" >&2; exit 1; }
-	@test -z "$(filter-out $(LOCAL_MACOS_LEAVES),$(CI_MACOS_SIDE_GATES) $(CI_MACOS_USER_GATES) $(CI_MACOS_ALONE_GATES))" || { \
+	@test -z "$(filter-out $(LOCAL_MACOS_LEAVES),$(CI_MACOS_SIDE_GATES) $(CI_MACOS_UPDATER_GATES) $(CI_MACOS_ALONE_GATES))" || { \
 		echo "FAIL: CI macOS lane classes name unknown gates" >&2; exit 1; }
-	@test -z "$(filter-out $(CI_MACOS_USER_GATES),$(foreach shard,$(CI_MACOS_SHARDS),$(call ci_macos_user,$(shard))))" || { \
-		echo "FAIL: a second-user lane holds a gate outside CI_MACOS_USER_GATES" >&2; exit 1; }
+	@test -z "$(filter-out $(CI_MACOS_UPDATER_GATES),$(foreach shard,$(CI_MACOS_SHARDS),$(call ci_macos_updater,$(shard))))" || { \
+		echo "FAIL: an updater lane holds a gate outside CI_MACOS_UPDATER_GATES" >&2; exit 1; }
+	@test -z "$(filter $(CI_MACOS_ALONE_GATES),$(CI_MACOS_SIDE_GATES) $(CI_MACOS_UPDATER_GATES))" || { \
+		echo "FAIL: a gate that rebuilds build/hamn is listed beside the main lane" >&2; exit 1; }
 
 print-ci-macos-shards:
 	@echo $(CI_MACOS_SHARDS)
@@ -455,43 +443,40 @@ test-install-script: host
 	HAMN=$(HOST_BIN) bash tests/host/test_install.sh
 
 test-install-cleanup: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_generation_cleanup.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test generation-cleanup
 
 test-install-system-tools: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_install_system_tools.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test install-system-tools
 
 test-install-bootstrap: host
-	python3 tests/host/test_bootstrap_acquire.py
+	$(HAMN_DEV) test bootstrap-acquire
 
 test-uninstall: host
 	HAMN=$(HOST_BIN) bash tests/host/test_uninstall.sh
 
 test-update-properties: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_properties.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-properties
 
 test-update-native: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_native.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-native
 
 test-update-concurrency: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_concurrency.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-concurrency
 
-test-update-recovery-legacy: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_recovery_ownership.py legacy
-
-test-update-recovery-current: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_recovery_ownership.py current
+test-update-recovery: host
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-recovery-ownership
 
 test-update-check: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_update_check.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test update-check
 
 test-update-cli: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_cli.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test upgrade-cli
 
 test-update-ux-redirected: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_update_ux.py redirected
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test update-ux redirected
 
 test-update-ux-pty: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_update_ux.py pty
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test update-ux pty
 
 test-update-script: host
 	HAMN=$(HOST_BIN) bash tests/host/test_update.sh

@@ -42,15 +42,11 @@ pub fn run() -> i32 {
                 .map_err(|_| "installer argument is not UTF-8".into())
         })
         .collect::<Result<Vec<_>>>();
-    let quiet = args.as_ref().is_ok_and(|a| {
-        a.first().map(String::as_str) == Some("receipt")
-            && a.get(1).map(String::as_str) == Some("check")
-    });
     let result = args.and_then(|args| dispatch(&args));
     match result {
         Ok(()) => 0,
         Err(error) => {
-            if !quiet && !error.is::<ReportedError>() {
+            if !error.is::<ReportedError>() {
                 eprintln!("hamn: {error}");
             }
             1
@@ -71,19 +67,6 @@ fn dispatch(args: &[String]) -> Result<()> {
             "{}",
             archive::extract(Path::new(source), Path::new(destination))?
         ),
-        ["manifest", file, os, architecture] => manifest::fields(file, os, architecture)?,
-        [
-            "bootstrap-manifest",
-            path,
-            version,
-            commit,
-            host,
-            host_hash,
-            guest,
-            guest_hash,
-        ] => {
-            manifest::bootstrap(path, version, commit, host, host_hash, guest, guest_hash)?;
-        }
         [
             "bootstrap-manifest",
             path,
@@ -121,17 +104,6 @@ fn dispatch(args: &[String]) -> Result<()> {
         ["fd-lock", fd] => files::flock(fd.parse()?, false)?,
         ["recovery-root", target, cache] => {
             files::recovery_root(Path::new(target), Path::new(cache))?
-        }
-        [
-            "receipt",
-            mode,
-            target,
-            version,
-            host_hash,
-            guest_hash,
-            cache,
-        ] => {
-            receipt::run(mode, target, version, host_hash, guest_hash, cache)?;
         }
         ["prune", bin, data, previous, source] => {
             retention::collect(Path::new(bin), Path::new(data), previous, source)?;

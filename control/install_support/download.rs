@@ -1,8 +1,9 @@
 //! Bounded HTTPS acquisition and private content-addressed release storage.
 //!
-//! Sizes and counters are bytes. Only verified SHA-256 content is published;
-//! per-digest advisory locks cover lookup, transfer and atomic publication.
-//! Network interruption retains a v3 partial; integrity failures discard it.
+//! Sizes and counters are bytes. Only content with the exact declared size
+//! and SHA-256 is published; per-digest advisory locks cover lookup, transfer
+//! and atomic publication. Network interruption retains the partial for a
+//! resumed transfer; integrity failures discard it.
 //! No generation, profile, VM or guest-selection mutations belong here.
 use super::{
     Result,
@@ -32,7 +33,8 @@ pub(super) const GUEST_LIMIT: u64 = 2 * 1024 * 1024 * 1024 - 1;
 pub(super) struct Artifact {
     pub url: String,
     pub sha256: String,
-    pub size: Option<u64>,
+    /// Exact byte size; acquisition rejects 0 and sizes above the kind's limit.
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -288,7 +290,7 @@ pub(super) fn verified(path: &Path, artifact: &Artifact, limit: u64) -> Result<b
         return Ok(false);
     }
     let info = safe_file(path, false, Some(limit))?;
-    Ok(artifact.size.is_none_or(|size| size == info.len()) && digest(path)? == artifact.sha256)
+    Ok(artifact.size == info.len() && digest(path)? == artifact.sha256)
 }
 
 fn local_source(url: &str) -> Option<PathBuf> {
@@ -725,9 +727,9 @@ fn save_partial_metadata(path: &Path, value: &PartialMetadata) -> Result<()> {
     atomic_bytes(path, bytes.as_bytes())
 }
 
-/// Resumptions after the first attempt when a sized (v3) transfer is
-/// interrupted after persisting new bytes. A transfer that makes no progress
-/// fails immediately; integrity failures discard the partial and never retry.
+/// Resumptions after the first attempt when a transfer is interrupted after
+/// persisting new bytes. A transfer that makes no progress fails
+/// immediately; integrity failures discard the partial and never retry.
 const RESUME_ATTEMPTS: u32 = 3;
 
 /// Explicit install/upgrade acquisition. Progress goes to stderr (see
@@ -808,7 +810,7 @@ fn acquire_resuming<W: Write>(
                 resumed = resumed
                     .checked_add(stats.resumed)
                     .ok_or("transfer counter overflow")?;
-                if artifact.size.is_none() || stats.retained == 0 || attempt >= attempts {
+                if stats.retained == 0 || attempt >= attempts {
                     return Err(error);
                 }
                 retained = retained
@@ -898,7 +900,7 @@ fn acquire_observed<W: Write>(
         "artifact SHA-256 is invalid",
     )?;
     require(
-        artifact.size.is_none_or(|size| size > 0 && size <= limit),
+        artifact.size > 0 && artifact.size <= limit,
         "artifact size outside permitted range",
     )?;
     let downloads = cache.join("downloads");
@@ -934,7 +936,7 @@ fn acquire_observed<W: Write>(
     let mut saved_validator = None;
     if exists(&partial)? {
         let info = safe_file(&partial, true, Some(limit))?;
-        if artifact.size == Some(info.len()) && verified(&partial, artifact, limit)? {
+        if artifact.size == info.len() && verified(&partial, artifact, limit)? {
             if exists(&metadata)? {
                 safe_file(&metadata, true, Some(4096))?;
             }
@@ -949,7 +951,7 @@ fn acquire_observed<W: Write>(
             .and_then(|bytes| partial_metadata(&bytes));
         if let Some(saved) = saved {
             if saved.sha256 == *key
-                && artifact.size == Some(saved.size)
+                && artifact.size == saved.size
                 && info.len() > 0
                 && info.len() < saved.size
                 && saved
@@ -966,17 +968,14 @@ fn acquire_observed<W: Write>(
         }
     }
     let save_metadata = |validator: Option<String>| -> Result<()> {
-        if let Some(size) = artifact.size {
-            save_partial_metadata(
-                &metadata,
-                &PartialMetadata {
-                    sha256: key.clone(),
-                    size,
-                    validator,
-                },
-            )?;
-        }
-        Ok(())
+        save_partial_metadata(
+            &metadata,
+            &PartialMetadata {
+                sha256: key.clone(),
+                size: artifact.size,
+                validator,
+            },
+        )
     };
     save_metadata(saved_validator.clone())?;
     let on_headers = |headers: &Headers| -> Result<()> {
@@ -985,7 +984,7 @@ fn acquire_observed<W: Write>(
         }
         Ok(())
     };
-    let expected = artifact.size.unwrap_or(limit);
+    let expected = artifact.size;
     let mut discarded = 0;
     // Local test artifacts are copied, not transferred; they get no progress.
     let network = local_source(&artifact.url).is_none();
@@ -1041,11 +1040,7 @@ fn acquire_observed<W: Write>(
             return Err(error);
         }
         Err(TransferFailure::Interrupted(error)) => {
-            if artifact.size.is_none() {
-                remove_optional(&partial)?;
-            } else {
-                stats.retained = written;
-            }
+            stats.retained = written;
             return Err(error);
         }
         Err(TransferFailure::RangeRejected(_)) => {

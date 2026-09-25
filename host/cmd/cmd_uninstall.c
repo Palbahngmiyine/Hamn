@@ -120,7 +120,7 @@ static int data_marker_valid(const char *install_root)
          !safe_owned_regular(marker, 0644)) ||
         read_small_regular(marker, content, sizeof(content)) != 0)
         return 0;
-    return strcmp(content, "version=1\n") == 0 || content[0] == '\0';
+    return strcmp(content, "version=1\n") == 0;
 }
 
 static int generation_name_valid(const char *name)

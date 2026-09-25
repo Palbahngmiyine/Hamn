@@ -192,5 +192,5 @@ Docker CLI·Compose·buildx·SDK는 같은 Docker 소켓을 사용합니다.
 CI, `HAMN_NO_UPDATE_CHECK=1`에서는 실행하지 않습니다. 자동 설치나 telemetry는 없습니다.
 전용 메타데이터는 `~/.hamn/cache/update-check-v1.json`, `update-notice-v1.json`에
 저장합니다. `~/.hamn/cache/downloads`의 파일은 SHA-256 기준으로 관리하며 크기·digest를
-검증한 뒤에만 재사용·게시합니다. 수동 `upgrade --check`·`--force`, 복구와 기존
-`--headless system update --yes` 호환성은 [설치](INSTALLATION.ko.md)를 참고하세요.
+검증한 뒤에만 재사용·게시합니다. 수동 `upgrade --check`·`--force`, 복구와
+`--headless system upgrade --yes`는 [설치](INSTALLATION.ko.md)를 참고하세요.

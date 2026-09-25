@@ -60,7 +60,7 @@ home_mode=$(stat -f '%Lp' "$HOME")
 # Reject foreign commands before creating cache state or downloading anything.
 # The verified updater performs the complete generation ownership check again.
 if [ -e "$HOME/.local/bin/hamn" ] && [ ! -L "$HOME/.local/bin/hamn" ]; then
-    fail "existing hamn is not a managed generation: ~/.local/bin/hamn is a standalone executable. If you built it from source, run make install from the current source first; otherwise move it aside and run this installer again"
+    fail "existing hamn is not a managed generation: ~/.local/bin/hamn is a standalone executable (an older Hamn install or another program). Move it aside and run this installer again"
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/hamn-install.XXXXXX") ||

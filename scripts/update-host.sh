@@ -167,7 +167,7 @@ prune_generations() {
     # Removed generations are routine; only a deferral (stderr) is reported.
     install_support prune "$bindir" "$datadir" \
         "$old_target" "$source_root" >/dev/null ||
-        echo "hamn update: obsolete generation cleanup deferred" >&2
+        echo "$fail_prefix: obsolete generation cleanup deferred" >&2
 }
 
 hamn_link=$bindir/hamn
@@ -180,7 +180,7 @@ refresh_installation() {
     # It then has the same validation and rollback obligations as an update.
     if [ "$bootstrap" = 1 ] && ! path_absent "$hamn_link"; then
         [ -L "$hamn_link" ] ||
-            fail "existing hamn is not a managed generation; migrate it with make install before using the release installer"
+            fail "$hamn_link is not a managed Hamn generation link (an older standalone Hamn or another program); move it aside and run the installer again"
         bootstrap=0
     fi
     [ "$bootstrap" = 0 ] || return 0
@@ -189,12 +189,9 @@ refresh_installation() {
     safe_regular "$datadir/.hamn-managed" ||
         fail "managed data marker is missing or unsafe"
     managed_marker=$(cat "$datadir/.hamn-managed")
-    if [ "$managed_marker" != version=1 ]; then
-        # The installer can upgrade the original empty ownership marker after
-        # validating the existing generation. Preserve that bootstrap migration.
-        [ "$bootstrap_entry" = 1 ] && [ -z "$managed_marker" ] ||
-            fail "managed data marker is invalid"
-    fi
+    [ -n "$managed_marker" ] ||
+        fail "$datadir is a pre-release Hamn install (empty data marker), which is no longer migrated; move it aside and run the installer again"
+    [ "$managed_marker" = version=1 ] || fail "managed data marker is invalid"
     # install-host publishes canonical absolute targets. Resolve parent aliases
     # only after rejecting unsafe leaf directories (for example /tmp on macOS).
     bindir=$(cd "$bindir" && pwd -P)
@@ -240,8 +237,9 @@ journal_attempt=
 journal_stage=
 host_mutation=1
 journal_host_mutation=1
-journal_version=1
 journal_new_target=
+journal_legacy=
+journal_legacy_path=
 
 managed_generation_target() {
     local target=$1 relative generation_root
@@ -265,68 +263,49 @@ journal_entry_count() {
         wc -l | tr -d ' '
 }
 
+# A journal records: state (version=3, bootstrap, selection, hostMutation),
+# attempt, new-selection, new-target (empty until install-host publishes the
+# attempted generation), old-target (updates only) and previous-selection
+# (when a selection existed). Journals of other versions are refused, and
+# journal_legacy names a v1/v2 journal from Hamn 0.1.2 or earlier, which has
+# no attempted-target identity and so cannot be recovered automatically.
+journal_state_pattern=$'^version=3\nbootstrap=([01])\nselection=(present|absent)\nhostMutation=([01])$'
 load_update_journal() {
     local state attempt expected_count
+    journal_legacy=
     safe_private_directory "$journal_directory" || return 1
     safe_private_regular "$journal_directory/state" || return 1
+    state=$(cat "$journal_directory/state") || return 1
+    case "$state" in
+    version=1$'\n'*|version=2$'\n'*)
+        journal_legacy=${state%%$'\n'*}
+        journal_legacy=${journal_legacy#version=}
+        journal_legacy_path=$journal_directory
+        return 1
+        ;;
+    esac
+    [[ "$state" =~ $journal_state_pattern ]] || return 1
+    journal_bootstrap=${BASH_REMATCH[1]}
+    journal_selection_state=${BASH_REMATCH[2]}
+    journal_host_mutation=${BASH_REMATCH[3]}
     safe_private_regular "$journal_directory/attempt" || return 1
     safe_private_regular "$journal_directory/new-selection" || return 1
-    state=$(cat "$journal_directory/state") || return 1
+    safe_private_regular "$journal_directory/new-target" || return 1
     attempt=$(cat "$journal_directory/attempt") || return 1
     [[ "$attempt" =~ ^[A-Za-z0-9]{6}$ ]] || return 1
-    journal_host_mutation=1
-    journal_version=1
-    journal_new_target=
-    if [[ "$state" = $'version=3\n'* ]]; then
-        journal_version=3
-        safe_private_regular "$journal_directory/new-target" || return 1
-        journal_new_target=$(cat "$journal_directory/new-target") || return 1
-        if [ -n "$journal_new_target" ]; then
-            managed_generation_target "$journal_new_target" || return 1
-            [ "$(stat -f '%z' "$journal_directory/new-target")" = "$((${#journal_new_target} + 1))" ] || return 1
-        else
-            [ ! -s "$journal_directory/new-target" ] || return 1
-        fi
-        state=${state/#version=3/version=2}
+    journal_new_target=$(cat "$journal_directory/new-target") || return 1
+    if [ -n "$journal_new_target" ]; then
+        managed_generation_target "$journal_new_target" || return 1
+        [ "$(stat -f '%z' "$journal_directory/new-target")" = "$((${#journal_new_target} + 1))" ] || return 1
+    else
+        [ ! -s "$journal_directory/new-target" ] || return 1
     fi
-    if [[ "$state" = $'version=2\n'* ]]; then
-        [ "$journal_version" = 3 ] || journal_version=2
-        case "$state" in
-        *$'\nhostMutation=0') journal_host_mutation=0 ;;
-        *$'\nhostMutation=1') journal_host_mutation=1 ;;
-        *) return 1 ;;
-        esac
-        state=${state%$'\nhostMutation='?}
-        state=${state/#version=2/version=1}
-    fi
-    case "$state" in
-    $'version=1\nbootstrap=0\nselection=present')
-        journal_bootstrap=0
-        journal_selection_state=present
-        expected_count=5
-        ;;
-    $'version=1\nbootstrap=0\nselection=absent')
-        journal_bootstrap=0
-        journal_selection_state=absent
-        expected_count=4
-        ;;
-    $'version=1\nbootstrap=1\nselection=present')
-        journal_bootstrap=1
-        journal_selection_state=present
-        expected_count=4
-        ;;
-    $'version=1\nbootstrap=1\nselection=absent')
-        journal_bootstrap=1
-        journal_selection_state=absent
-        expected_count=3
-        ;;
-    *) return 1 ;;
-    esac
+    # A bootstrap always installs a host; a selection-only repair never does.
     [ "$journal_host_mutation" = 1 ] || [ "$journal_bootstrap" = 0 ] || return 1
-    if [ "$journal_version" = 3 ]; then
-        expected_count=$((expected_count + 1))
-        [ "$journal_host_mutation" = 1 ] || [ -z "$journal_new_target" ] || return 1
-    fi
+    [ "$journal_host_mutation" = 1 ] || [ -z "$journal_new_target" ] || return 1
+    expected_count=4
+    [ "$journal_bootstrap" = 1 ] || expected_count=$((expected_count + 1))
+    [ "$journal_selection_state" = absent ] || expected_count=$((expected_count + 1))
     if [ "$journal_selection_state" = present ]; then
         safe_private_regular "$journal_directory/previous-selection" || return 1
     else
@@ -367,7 +346,7 @@ retire_update_journal() {
     mv "$update_journal" "$retired" || return 1
     path_absent "$update_journal" || return 1
     /bin/sync ||
-        echo "hamn update: transaction retirement is pending a filesystem flush" >&2
+        echo "$fail_prefix: transaction retirement is pending a filesystem flush" >&2
 }
 
 cleanup_deferred_journal() {
@@ -419,7 +398,7 @@ cleanup_retired_journal() {
         return 1
     fi
     /bin/sync ||
-        echo "hamn update: retired transaction cleanup is pending a filesystem flush" >&2
+        echo "$fail_prefix: retired transaction cleanup is pending a filesystem flush" >&2
     journal_directory=$previous_directory
     cleanup_deferred_journal "$deferred"
 }
@@ -487,9 +466,9 @@ rollback_update_journal() {
     # Root locks serialize current writers but do not make another HOME's older
     # journal authoritative. Check identity before changing even our selection.
     if ! journal_owns_active_generation; then
-        echo "hamn update: pending transaction does not own the active generation; preserving its journal and both selections" >&2
-        echo "hamn update: the active generation changed or this legacy journal lacks an attempted-target identity; automatic rollback cannot prove ownership" >&2
-        echo "hamn update: manual review of the retained journal and generation history is required; retrying alone will not resolve this ambiguity" >&2
+        echo "$fail_prefix: pending transaction does not own the active generation; preserving its journal and both selections" >&2
+        echo "$fail_prefix: the active generation is neither the journal's previous nor its attempted generation; automatic rollback cannot prove ownership" >&2
+        echo "$fail_prefix: manual review of the retained journal and generation history is required; retrying alone will not resolve this ambiguity" >&2
         return 1
     fi
     restore_guest_selection_from_journal || return 1
@@ -516,20 +495,29 @@ journal_owns_active_generation() {
     if [ "$journal_bootstrap" = 0 ] && [ "$current_target" = "$journal_old_target" ]; then
         return 0
     fi
-    # Legacy v1/v2 journals have no durable attempted-target identity. An
-    # unrelated successful install cannot safely be distinguished from theirs.
-    [ "$journal_version" = 3 ] && [ "$journal_host_mutation" = 1 ] &&
+    # Only the recorded attempted target identifies this transaction's own
+    # install; an unrelated later install (another HOME) must be preserved.
+    [ "$journal_host_mutation" = 1 ] &&
         [ -n "$journal_new_target" ] && [ "$current_target" = "$journal_new_target" ]
+}
+
+# A v1/v2 journal (see load_update_journal) is refused, never guessed at.
+# $1 is pending (an interrupted transaction) or finished (a retired one).
+legacy_journal_failure() {
+    if [ "$1" = pending ]; then
+        fail "an interrupted update from Hamn 0.1.2 or earlier left a v$journal_legacy journal at $journal_legacy_path, which this Hamn cannot recover. Check that $hamn_link and the guest image selection are as you want them (the journal's old-target and previous-selection hold the prior values), then move the journal aside and run the command again"
+    fi
+    fail "a finished v$journal_legacy update journal from Hamn 0.1.2 or earlier remains at $journal_legacy_path; move it aside and run the command again"
 }
 
 recover_pending_update() {
     path_absent "$update_journal" && return 0
     if ! rollback_update_journal; then
-        echo "hamn update: incomplete prior update could not be safely recovered" >&2
+        echo "$fail_prefix: incomplete prior update could not be safely recovered" >&2
         return 1
     fi
     if [ "$journal_bootstrap" = 0 ]; then
-        echo "hamn update: recovered the previous binary and guest image selection after an interrupted update" >&2
+        echo "$fail_prefix: recovered the previous binary and guest image selection after an interrupted update" >&2
     else
         progress "Recovered interrupted bootstrap: $recovery_summary"
     fi
@@ -539,7 +527,7 @@ prepare_update_journal() {
     local new_selection=$1 selection_state expected_attempt
     journal_directory=$update_journal
     path_absent "$update_journal" || {
-        echo "hamn update: another update transaction is already active" >&2
+        echo "$fail_prefix: another update transaction is already active" >&2
         return 1
     }
     journal_stage=$(mktemp -d "$cache/.hamn-update-transaction.XXXXXX") ||
@@ -693,9 +681,9 @@ interrupted_update() {
     local signal=${1:-TERM} status
     trap - HUP INT TERM
     if ! rollback_update_journal; then
-        echo "hamn update: interrupted by $signal; recovery journal remains for a later safe recovery" >&2
+        echo "$fail_prefix: interrupted by $signal; recovery journal remains for a later safe recovery" >&2
     else
-        echo "hamn update: interrupted by $signal; $recovery_summary" >&2
+        echo "$fail_prefix: interrupted by $signal; $recovery_summary" >&2
     fi
     case "$signal" in
     HUP) status=129 ;;
@@ -708,9 +696,14 @@ interrupted_update() {
 
 cleanup_deferred_journals ||
     fail "a deferred update transaction cleanup is unsafe or could not be cleaned"
-cleanup_retired_journals ||
+if ! cleanup_retired_journals; then
+    [ -z "$journal_legacy" ] || legacy_journal_failure finished
     fail "a retired update transaction is unsafe or could not be cleaned"
-recover_pending_update || fail "previous update recovery failed; no new update was installed"
+fi
+if ! recover_pending_update; then
+    [ -z "$journal_legacy" ] || legacy_journal_failure pending
+    fail "previous update recovery failed; no new update was installed"
+fi
 cleanup_retired_journals ||
     fail "the recovered update transaction could not be cleaned"
 cleanup_deferred_journals ||
@@ -796,7 +789,7 @@ release_receipt() {
     fi
 }
 
-if [ -n "$old_target" ] && [ "$managed_marker" = version=1 ]; then
+if [ -n "$old_target" ]; then
     if [ "$force" = 0 ] && [ "$status" = up-to-date ] && release_receipt check "$old_target" &&
         [ "$(readlink "$hamn_link")" = "$old_target" ] && path_absent "$update_journal"; then
         # Installed files and guest image match this release: no downloads.
@@ -805,7 +798,7 @@ if [ -n "$old_target" ] && [ "$managed_marker" = version=1 ]; then
         else
             progress "Hamn ${release_version#v} is up to date."
         fi
-        upgrade_support reuse-counts "$manifest" "$cache" "$counts" both
+        upgrade_support reuse-counts "$manifest" "$counts" both
         finish_result up-to-date
         prune_generations
         exit 0
@@ -817,7 +810,7 @@ previous_version=
 if [ "$force" = 0 ] && [ "$status" = repair-required ] && \
     [ -n "$old_target" ] && release_receipt host-check "$old_target"; then
     host_mutation=0
-    upgrade_support reuse-counts "$manifest" "$cache" "$counts" host
+    upgrade_support reuse-counts "$manifest" "$counts" host
 fi
 if [ -n "$previous_version" ] && [ "$host_mutation" = 0 ]; then
     progress "Repairing the Hamn ${release_version#v} guest image..."
@@ -956,10 +949,10 @@ if ! test_after_journal_retire_barrier; then
     fail "update completion barrier failed; the completed transaction is safely retired"
 fi
 if ! cleanup_retired_journals; then
-    echo "hamn update: completed transaction cleanup is deferred; the committed binary and guest image selection are active" >&2
+    echo "$fail_prefix: completed transaction cleanup is deferred; the committed binary and guest image selection are active" >&2
 fi
 if ! cleanup_deferred_journals; then
-    echo "hamn update: completed transaction cleanup remains deferred; the committed binary and guest image selection are active" >&2
+    echo "$fail_prefix: completed transaction cleanup remains deferred; the committed binary and guest image selection are active" >&2
 fi
 
 prune_generations
