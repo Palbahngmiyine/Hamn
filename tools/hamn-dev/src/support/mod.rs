@@ -1,5 +1,6 @@
 //! Shared test support: PTYs, the screen recorder, temporary directories and
 //! the TUI harness.
+pub mod api_fixtures;
 pub mod bounded_process;
 pub mod c_extract;
 pub mod harness_peers;

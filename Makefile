@@ -190,7 +190,7 @@ test-control-rust: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_tui.py
 
 test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readiness $(BUILD)/tests/test_proc_deadline $(BUILD)/tests/test_ssh_deadline
-	python3 tests/host/test_control_signed_bootstrap.py
+	$(HAMN_DEV) test control-signed-bootstrap
 	python3 tests/host/test_tui_create_plugins.py
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_operation.c host/core/operation.c host/core/log.c host/util/fs.c vendor/cjson/cJSON.c -o $(BUILD)/tests/test_operation
 	$(BUILD)/tests/test_operation
@@ -202,18 +202,18 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	$(BUILD)/tests/test_proc_early_exit
 	$(HAMN_DEV) test remote-cancel-boundaries
 	python3 tests/host/workspace_live_transport.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_start_preflight.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test start-preflight
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_cancellation.c host/util/proc.c -o $(BUILD)/tests/test_proc_cancellation
 	$(BUILD)/tests/test_proc_cancellation
 	$(BUILD)/tests/test_proc_deadline
 	SSH_DEADLINE_TEST=$(BUILD)/tests/test_ssh_deadline $(HAMN_DEV) test ssh-deadline
 	$(HAMN_DEV) test docker-readiness
 	$(PROFILE_READ_TEST)
-	HAMN=$(HOST_BIN) python3 tests/host/test_core_worker.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_docker_api.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_docker_context.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
-	HAMN=$(HOST_BIN) python3 tests/host/test_exec_auth.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test core-worker
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test docker-api
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test docker-context
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test kubernetes-api
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test exec-auth
 
 # The TUI, workspace and packaging regressions of test-control, after test-control-native.
 test-control-tui: host
@@ -405,8 +405,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(MANAGED_GUEST_IMAGE_TEST)
 	$(SSH_OPTIONS_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
-	HAMN=$(HOST_BIN) LIFECYCLE_LOCK_TEST=$(LIFECYCLE_LOCK_TEST) \
-		bash tests/host/test_profile_yaml.sh
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	bash guest/tests/test_guest_deployment_transaction.sh
 
 test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)
@@ -509,7 +508,7 @@ release-gate:
 	bash packaging/release/release-gate.sh
 
 test-kubernetes-cli: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_kubernetes_api.py
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test kubernetes-api
 	bash guest/tests/test_configure_containerd.sh
 
 test-core-quality: host
