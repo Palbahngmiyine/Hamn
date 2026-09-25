@@ -37,7 +37,8 @@ jobs:
         run: nix develop .#ci --command make -j1 test-portable
 
   # Every local macOS gate runs exactly once across these shards (see
-  # `make check-ci-macos-shards`), each serially on its own machine. PRs build
+  # `make check-ci-macos-shards`), each shard on its own machine; the
+  # Makefile decides which gates of a shard may run side by side. PRs build
   # the same source with the faster `ci` Cargo profile; the release workflow
   # still runs `test-local-macos` serially with the release profile.
   macos-shard:
@@ -75,14 +76,10 @@ jobs:
           path: ~/.cache/nix
           key: nix-fetch-macos-${{ hashFiles('flake.nix', 'flake.lock') }}
           restore-keys: nix-fetch-macos-
-      - name: Realize the locked Nix shell
-        run: nix develop .#ci --command true
-      - name: Save Nix fetcher cache
-        if: matrix.shard == 1 && steps.nix-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/nix
-          key: ${{ steps.nix-cache.outputs.cache-primary-key }}
+      # Start downloading the shell while the Cargo cache restores; the
+      # second nix develop below waits for it and decides success.
+      - name: Start realizing the locked Nix shell
+        run: nix develop .#ci --command true >"$RUNNER_TEMP/nix-shell.log" 2>&1 &
       # Cargo still decides freshness; a cache only avoids recompiling. Each
       # shard restores only its own builds, so only the shard that runs
       # `cargo test` carries target/debug.
@@ -98,6 +95,14 @@ jobs:
             target/debug
           key: cargo-macos-shard-${{ matrix.shard }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.lock') }}
           restore-keys: cargo-macos-shard-${{ matrix.shard }}-
+      - name: Realize the locked Nix shell
+        run: nix develop .#ci --command true
+      - name: Save Nix fetcher cache
+        if: matrix.shard == 1 && steps.nix-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/nix
+          key: ${{ steps.nix-cache.outputs.cache-primary-key }}
       # The flake shell selects the system Apple SDK and toolchain itself.
       - name: Run macOS regression gates with the system Apple SDK
         run: nix develop .#ci --command make -j1 ci-macos-shard-${{ matrix.shard }}

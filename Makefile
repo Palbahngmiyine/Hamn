@@ -263,17 +263,17 @@ LOCAL_MACOS_LEAVES := $(foreach gate,$(LOCAL_MACOS_GATES),$(or $($(gate)_PARTS),
 # partition the leaves.
 CI_MACOS_SHARDS := 1 2 3 4 5
 CI_MACOS_SHARD_1 := test-update-ux test-control-native
-CI_MACOS_SHARD_2 := test-update-cli test-update-recovery test-update-check \
-	test-profile-state test-guest-deployment test-port-forwarding \
-	test-kubernetes-cli test-diagnostics test-release-gate test-workflows
+CI_MACOS_SHARD_2 := test-update-cli test-update-recovery test-profile-state \
+	test-guest-deployment test-port-forwarding test-kubernetes-cli \
+	test-diagnostics test-release-gate test-workflows
 CI_MACOS_SHARD_3 := test-install-cleanup test-install-script \
 	test-install-system-tools test-install-bootstrap test-update-native \
-	test-uninstall test-hosted-validation
+	test-uninstall test-update-check test-hosted-validation
 CI_MACOS_SHARD_4 := test-control-rust test-update-concurrency \
 	test-update-properties test-core-quality test-portable test-public-export \
-	test-release-version test-release-request test-release-repository-preflight
-CI_MACOS_SHARD_5 := host test-update-script test-release-artifacts \
-	test-release-publish
+	test-release-version test-release-request test-release-repository-preflight \
+	test-release-artifacts
+CI_MACOS_SHARD_5 := host test-update-script test-release-publish
 CI_MACOS_LEAVES := $(foreach shard,$(CI_MACOS_SHARDS),$(CI_MACOS_SHARD_$(shard)))
 CI_MACOS_SIDE_GATES := test-control-native test-profile-state \
 	test-guest-deployment test-port-forwarding test-kubernetes-cli \
