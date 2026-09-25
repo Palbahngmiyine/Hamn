@@ -287,9 +287,16 @@ int hamn_control_upgrade(const char *manifest, int check_only, int force,
         return 1;
     }
     if (rc != 0 || length < 0) {
-        log_set_error("upgrade did not complete; run the same command again to retry "
-                      "(an interrupted upgrade is recovered automatically%s)",
-                      manifest ? ", keep the same --manifest" : "");
+        /* proc_run reports -1 when the updater could not start or was
+         * terminated by a signal; its own reason is then unavailable. */
+        if (rc < 0)
+            log_set_error("the updater could not run to completion; run the same command again");
+        else if (check_only)
+            log_set_error("could not check for updates; run the same command again");
+        else
+            log_set_error("upgrade did not complete; run the same command again to retry "
+                          "(an interrupted upgrade is recovered automatically%s)",
+                          manifest ? ", keep the same --manifest" : "");
         return 1;
     }
     output[length] = '\0';

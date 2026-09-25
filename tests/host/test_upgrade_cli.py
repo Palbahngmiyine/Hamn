@@ -52,6 +52,17 @@ def main():
         checked=run("upgrade","--check","--output","json")
         assert json.loads(checked.stdout)["status"]=="repair-required",checked.stdout
         assert os.readlink(command)==original and not (home / ".hamn").exists()
+        # An unreachable release server is one actionable line, for the
+        # read-only check and for a mutation, and changes nothing.
+        unreachable="https://127.0.0.1:9/manifest-v3.json"
+        expected="could not check for updates: could not connect to the release server (curl exit 7). Check your connection and try again."
+        for args, heading in ((("upgrade","--check"),""), (("upgrade",),"Checking for updates...\n")):
+            failed=subprocess.run([command,*args,"--manifest",unreachable],env=env,capture_output=True,text=True,timeout=60)
+            assert failed.returncode==1 and failed.stdout=="",(args,failed.stdout,failed.stderr)
+            assert failed.stderr==heading+"hamn upgrade: "+expected+"\n",(args,failed.stderr)
+        failed=subprocess.run([command,"--headless","system","update","--check","--manifest",unreachable],env=env,capture_output=True,text=True,timeout=60)
+        assert json.loads(failed.stdout)["error"]["message"]==expected,failed.stdout
+        assert os.readlink(command)==original and not (home / ".hamn/cache/.hamn-update-transaction").exists()
         installed=json.loads(run("upgrade","--output","json").stdout)
         assert installed["status"]=="updated" and installed["profileDisksChanged"] is False
         active=os.readlink(command)

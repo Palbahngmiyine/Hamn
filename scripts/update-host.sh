@@ -27,6 +27,16 @@ progress() {
     echo "$*" >&2
 }
 
+# Release information could not be used: say why and what to do next.
+manifest_failure() {
+    case "$1" in
+    "download failed: "*)
+        fail "could not check for updates: ${1#download failed: }. Check your connection and try again." ;;
+    *)
+        fail "the latest release information is not usable by this Hamn ($1). Reinstall with the official installer: https://github.com/Palbahngmiyine/Hamn#install" ;;
+    esac
+}
+
 # The last diagnostic line of a native helper, without its internal prefix.
 helper_reason() {
     local line
@@ -142,7 +152,7 @@ if [ "$check_only" = 1 ]; then
     if ! reason=$("${check[@]}" 2>&1 >"$result_file"); then
         reason=${reason##*$'\n'}
         reason=${reason#hamn: }
-        fail "could not check for updates: ${reason:-unknown error}"
+        manifest_failure "${reason:-unknown error}"
     fi
     exit 0
 fi
@@ -744,13 +754,7 @@ mkdir -m 0700 "$counts"
 if ! manifest_bytes=$(upgrade_support manifest --manifest "$manifest_ref" \
     --current-version "$current_version" --macos "$(sw_vers -productVersion)" \
     --architecture "$(uname -m)" --output "$manifest" 2>"$work/manifest.err"); then
-    reason=$(helper_reason "$work/manifest.err")
-    case "$reason" in
-    "download failed: "*)
-        fail "could not check for updates: ${reason#download failed: }. Check your connection and try again." ;;
-    *)
-        fail "the latest release information is not usable by this Hamn ($reason). Reinstall with the official installer: https://github.com/Palbahngmiyine/Hamn#install" ;;
-    esac
+    manifest_failure "$(helper_reason "$work/manifest.err")"
 fi
 printf '{"downloadedBytes":%s,"resumedBytes":0,"reusedBytes":0,"source":"manifest"}\n' \
     "$manifest_bytes" >"$counts/manifest.json"
