@@ -46,6 +46,14 @@ grep -Fq 'make -s --no-print-directory -C "$ROOT/guest" IMAGE_TOOL="$IMAGE_TOOL"
 for gate in 'evidence check' 'verify-raw' 'verify-size' 'evidence publish'; do
     grep -Fq "\"\$IMAGE_TOOL\" $gate" "$BUILDER"
 done
+# Neither the builder nor the image needs an interpreter: none is installed,
+# pinned against autoremove, or required by the offline image check.
+SLIM=$GUEST_ROOT/image/slim-guest.sh
+if grep -Eiq 'python|\.py([^[:alnum:]_]|$)' "$BUILDER" "$SLIM"; then
+    echo "FAIL: guest image build still installs or runs Python" >&2
+    exit 1
+fi
+grep -Fq '/usr/local/libexec/hamn/guest-json' "$SLIM"
 
 # Exercise the archive path in an isolated Git checkout. The injected
 # untracked shared/ file must not become an immutable image input.
