@@ -176,21 +176,9 @@ def main():
             finally:
                 if child is not None and child.poll() is None: child.kill(); child.communicate(timeout=5)
                 os.close(ready_fd); ready.unlink(); release_fifo.unlink()
-        # Recover an old v1 journal before validating a new (invalid) manifest.
+        # A pending journal is not touched by a manifest-only check.
         journal=home / ".hamn/cache/.hamn-update-transaction"; journal.mkdir(mode=0o700)
-        saved_selection=selection.read_bytes()
-        for name, contents in {"state":b"version=1\nbootstrap=0\nselection=present\n",
-                "attempt":b"Abc123\n","old-target":(active+"\n").encode(),
-                "previous-selection":saved_selection,"new-selection":b"{}\n"}.items():
-            path=journal / name; path.write_bytes(contents); path.chmod(0o600)
-        selection.write_bytes(b"{}\n")
-        saved_manifest=manifest.read_bytes(); manifest.write_text("{")
-        run("upgrade","--output","json",success=False)
-        manifest.write_bytes(saved_manifest)
-        assert not journal.exists() and selection.read_bytes()==saved_selection and os.readlink(command)==active
-        # A pending v1 journal is not touched by a manifest-only check.
-        journal=home / ".hamn/cache/.hamn-update-transaction"; journal.mkdir(mode=0o700)
-        sentinel=journal / "state"; sentinel.write_text("version=1\npartial fixture\n"); sentinel.chmod(0o600)
+        sentinel=journal / "state"; sentinel.write_text("version=3\npartial fixture\n"); sentinel.chmod(0o600)
         before=sentinel.read_bytes()
         run("upgrade","--check","--output","json")
         assert sentinel.read_bytes()==before and os.readlink(command)==active and digest(disk)==disk_before

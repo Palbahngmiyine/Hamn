@@ -109,47 +109,6 @@ class RecoveryOwnership(unittest.TestCase):
     def test_later_home_host_update_survives_prior_selection_only_transaction(self):
         self.assert_later_home_survives_old_recovery(False)
 
-    def legacy_recovery(self, version, changed_active):
-        f = self.fixture
-        script, initial = f.release("1.0.1")
-        f.run_update(script, initial, "--bootstrap")
-        original = os.readlink(f.command)
-        selection = f.selection.read_bytes()
-        _, pending = f.release("1.0.2")
-        point = "AFTER_GUEST_SELECTION" if changed_active else "PREPARED"
-        journal = self.interrupt(pending, point)
-        state = (journal / "state").read_text().replace("version=3", f"version={version}")
-        if version == 1:
-            state = state.replace("hostMutation=1\n", "")
-        (journal / "state").write_text(state)
-        (journal / "new-target").unlink()
-        active = os.readlink(f.command)
-        snapshot = self.snapshot(f.selection.parent)
-        result = self.recover()
-        self.assertNotEqual(result.returncode, 0)  # invalid manifest, after recovery
-        if changed_active:
-            self.assertEqual(os.readlink(f.command), active)
-            self.assertEqual(self.snapshot(f.selection.parent), snapshot)
-            self.assertIn("does not own the active generation", result.stderr)
-            self.assertTrue(journal.exists())
-        else:
-            self.assertEqual(os.readlink(f.command), original)
-            self.assertEqual(f.selection.read_bytes(), selection)
-            self.assertIn("recovered the previous binary", result.stderr)
-            self.assertFalse(journal.exists())
-
-    def test_legacy_v1_unchanged_active_remains_recoverable(self):
-        self.legacy_recovery(1, False)
-
-    def test_legacy_v2_unchanged_active_remains_recoverable(self):
-        self.legacy_recovery(2, False)
-
-    def test_legacy_v1_changed_active_is_preserved_as_ambiguous(self):
-        self.legacy_recovery(1, True)
-
-    def test_legacy_v2_changed_active_is_preserved_as_ambiguous(self):
-        self.legacy_recovery(2, True)
-
     def publication_interruption(self, bootstrap):
         f = self.fixture
         original, selected = None, None
@@ -253,11 +212,4 @@ class RecoveryOwnership(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # CI runs the legacy-journal tests and the others as separate gates; every
-    # test is in exactly one part, and no argument runs both.
-    parts = {"legacy": True, "current": False}
-    selected = [parts[part] for part in sys.argv[1:]] or list(parts.values())
-    names = [name for name in unittest.TestLoader().getTestCaseNames(RecoveryOwnership)
-             if ("_legacy_" in name) in selected]
-    result = unittest.TextTestRunner().run(unittest.TestSuite(map(RecoveryOwnership, names)))
-    raise SystemExit(not result.wasSuccessful())
+    unittest.main()

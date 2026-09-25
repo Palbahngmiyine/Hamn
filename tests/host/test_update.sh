@@ -243,4 +243,60 @@ HOME="$HOME_DIR" "$BINDIR/hamn" --version | grep -Fxq 'hamn 0.0.3'
 [ ! -e "$HOME_DIR/.hamn/cache/.hamn-update-transaction" ] &&
     [ ! -L "$HOME_DIR/.hamn/cache/.hamn-update-transaction" ]
 
+# Journals from Hamn 0.1.2 and earlier (v1) and pre-release builds (v2) record
+# no attempted generation. They are refused loudly and preserved unchanged,
+# with no binary or selection change, whether pending or already retired.
+selection_3=$(selection_hash)
+CACHE_DIR=$HOME_DIR/.hamn/cache
+write_legacy_journal() {
+    local journal=$1 state=$2
+    mkdir -m 0700 "$journal"
+    printf '%s\n' "$state" >"$journal/state"
+    printf '%s\n' Abc123 >"$journal/attempt"
+    printf '%s\n' "$target_3" >"$journal/old-target"
+    cp "$CACHE_DIR/guest-image.json" "$journal/previous-selection"
+    printf '{}\n' >"$journal/new-selection"
+    chmod 0600 "$journal"/*
+}
+journal_digest() {
+    (cd "$1" && shasum -a 256 attempt new-selection old-target previous-selection state)
+}
+for legacy_state in $'version=1\nbootstrap=0\nselection=present' \
+    $'version=2\nbootstrap=0\nselection=present\nhostMutation=1'; do
+    legacy_version=${legacy_state%%$'\n'*}
+    legacy_version=${legacy_version#version=}
+    for legacy_journal in "$CACHE_DIR/.hamn-update-transaction" \
+        "$CACHE_DIR/.hamn-update-completed.Abc123"; do
+        write_legacy_journal "$legacy_journal" "$legacy_state"
+        before=$(journal_digest "$legacy_journal")
+        if run_update "$MANIFEST_3" >"$WORK/legacy.out" 2>"$WORK/legacy.err"; then
+            echo "FAIL: a v$legacy_version journal was accepted: $legacy_journal" >&2
+            exit 1
+        fi
+        case "$legacy_journal" in
+        */.hamn-update-transaction)
+            expected="an interrupted update from Hamn 0.1.2 or earlier left a v$legacy_version journal at $legacy_journal, which this Hamn cannot recover" ;;
+        *)
+            expected="a finished v$legacy_version update journal from Hamn 0.1.2 or earlier remains at $legacy_journal; move it aside" ;;
+        esac
+        grep -Fq "$expected" "$WORK/legacy.out" || {
+            echo "FAIL: v$legacy_version journal refusal is not explained: $(cat "$WORK/legacy.out")" >&2
+            exit 1
+        }
+        [ "$(journal_digest "$legacy_journal")" = "$before" ] || {
+            echo "FAIL: refusing a v$legacy_version journal changed it" >&2
+            exit 1
+        }
+        [ "$(readlink "$BINDIR/hamn")" = "$target_3" ] &&
+            [ "$(selection_hash)" = "$selection_3" ] || {
+            echo "FAIL: refusing a v$legacy_version journal changed the installation" >&2
+            exit 1
+        }
+        mv "$legacy_journal" "$WORK/moved-aside-journal"
+        rm -rf "$WORK/moved-aside-journal"
+    done
+done
+run_update "$MANIFEST_3" >"$WORK/after-legacy.out" 2>"$WORK/after-legacy.err"
+grep -Fxq 'Hamn 0.0.3 is up to date.' "$WORK/after-legacy.err"
+
 echo "PASS: immutable update rolls back installer failure and interruption safely"

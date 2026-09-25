@@ -104,16 +104,19 @@ stable installation. `CI` or `HAMN_NO_UPDATE_CHECK=1` disables the automatic pat
 An automatic request has a 2-second connect and 5-second total deadline. Cache
 files are `~/.hamn/cache/update-check-v1.json` and `update-notice-v1.json`.
 
-The updater serializes recovery and publication and uses a durable journal.
-New journal v3 records the exact attempted generation before the installer
+The updater serializes recovery and publication and uses a durable journal
+(version 3), which records the exact attempted generation before the installer
 publishes its command link. Recovery changes state only when the active target
 is the recorded prior or attempted generation; a later installation from another
 HOME is preserved. Selection-only repair never rewrites the binary pointer.
-Readers still accept v1/v2 journals when the active target remains the recorded
-prior generation. If a legacy journal cannot prove ownership of a changed target,
-recovery fails without changing either selection or retiring the journal; explicit
-inspection of the journal and generation history is required; retrying alone
-cannot resolve this ambiguity. Do not delete that
+Journals written by Hamn 0.1.2 and earlier (v1) or by pre-release builds (v2)
+record no attempted generation and are refused, pending or retired, with a
+message naming the journal: check the command link and guest image selection
+against the journal's `old-target` and `previous-selection`, then move the journal
+aside and run the command again. If a journal cannot prove ownership of a changed
+target, recovery fails without changing either selection or retiring the journal;
+explicit inspection of the journal and generation history is required; retrying
+alone cannot resolve this ambiguity. Do not delete that
 evidence or force a binary rollback to bypass the check. Retry an interrupted
 mutation from its original HOME with the same options, including `--manifest`. Recovery can
 itself fail and leaves a pending journal that blocks unsafe VM startup. Updates

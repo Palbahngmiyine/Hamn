@@ -264,7 +264,7 @@ test-control_PARTS := test-control-native test-control-tui test-control-rust
 test-install_PARTS := test-install-script test-install-cleanup \
 	test-install-system-tools test-install-bootstrap
 test-update_PARTS := test-update-properties test-update-native \
-	test-update-concurrency test-update-recovery-legacy test-update-recovery-current \
+	test-update-concurrency test-update-recovery \
 	test-update-check test-update-cli test-update-ux-redirected test-update-ux-pty \
 	test-update-script
 LOCAL_MACOS_LEAVES := $(foreach gate,$(LOCAL_MACOS_GATES),$(or $($(gate)_PARTS),$(gate)))
@@ -292,14 +292,13 @@ CI_MACOS_SHARDS := 1 2 3 4 5
 # Timing-sensitive PTY gates (test-control-native, test-control-tui) run
 # beside at most one heavy updater lane. test-control-rust stays on shard 4,
 # whose Cargo cache carries target/debug.
-CI_MACOS_SHARD_1 := test-update-recovery-current test-port-forwarding \
+CI_MACOS_SHARD_1 := test-update-recovery test-port-forwarding \
 	test-kubernetes-cli test-diagnostics test-release-gate test-workflows \
 	test-guest-deployment test-hosted-validation
 CI_MACOS_SHARD_1_USER := test-update-cli
 CI_MACOS_SHARD_2 := test-update-ux-redirected test-update-native test-uninstall \
 	test-update-check
-CI_MACOS_SHARD_2_USER := test-update-ux-pty test-install-bootstrap \
-	test-update-recovery-legacy
+CI_MACOS_SHARD_2_USER := test-update-ux-pty test-install-bootstrap
 CI_MACOS_SHARD_3 := test-install-cleanup test-install-script \
 	test-control-native test-profile-state test-release-artifacts
 CI_MACOS_SHARD_3_USER :=
@@ -320,7 +319,7 @@ CI_MACOS_SIDE_GATES := test-control-native test-control-tui \
 CI_MACOS_USER_GATES := test-install-script test-install-cleanup \
 	test-install-system-tools test-install-bootstrap test-uninstall \
 	test-update-properties test-update-native test-update-concurrency \
-	test-update-recovery-legacy test-update-recovery-current test-update-cli \
+	test-update-recovery test-update-cli \
 	test-update-ux-redirected test-update-ux-pty
 CI_MACOS_ALONE_GATES := test-update-script test-release-artifacts \
 	test-release-publish test-hosted-validation test-control-rust
@@ -448,11 +447,8 @@ test-update-native: host
 test-update-concurrency: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_concurrency.py
 
-test-update-recovery-legacy: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_recovery_ownership.py legacy
-
-test-update-recovery-current: host
-	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_recovery_ownership.py current
+test-update-recovery: host
+	HAMN=$(HOST_BIN) python3 tests/host/test_upgrade_recovery_ownership.py
 
 test-update-check: host
 	HAMN=$(HOST_BIN) python3 tests/host/test_update_check.py
