@@ -523,6 +523,11 @@ fn run_image(
     live.call(&["vm", "start"], &["--yes"]);
     assert_eq!(state(), before, "stop/start changed Docker state");
     evidence.mark("stop-start-preservation", before.clone());
+    // This boot starts with the deployed guest configuration already in place,
+    // so an image unit that conflicts with it fails here, not on first boot.
+    let failed = live.ssh("systemctl --failed --no-legend --plain");
+    assert!(failed.trim().is_empty(), "failed systemd units after restart:\n{failed}");
+    evidence.mark("no-failed-units-after-restart", json!({"failedUnits": failed}));
 
     *stage = "rosetta";
     live.call(&["vm", "stop"], &["--yes"]);

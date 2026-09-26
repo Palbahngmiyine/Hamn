@@ -17,7 +17,7 @@ installed() {
 # Hamn's guest tools are C and shell and need no interpreter; packages that
 # the base image's own cloud-init depends on stay installed through apt.
 apt-mark manual curl docker.io containerd runc \
-    containernetworking-plugins qemu-user-static binfmt-support dnsmasq nftables
+    containernetworking-plugins qemu-user-static binfmt-support dnsmasq-base nftables
 apt-get -y purge gcc make binutils
 # Ubuntu Minimal's ubuntu-cloud-minimal holds the base system (cloud-init,
 # sshd, sudo, ...) and depends on snapd. Pin everything it holds before it goes
@@ -60,6 +60,13 @@ test "$(echo /usr/lib/binfmt.d/qemu-*.conf)" = /usr/lib/binfmt.d/qemu-x86_64.con
 test "$(echo /usr/lib/cni/*)" = \
     '/usr/lib/cni/bridge /usr/lib/cni/firewall /usr/lib/cni/host-local /usr/lib/cni/loopback /usr/lib/cni/portmap /usr/lib/cni/tuning'
 test ! -e /usr/bin/containerd-stress
+# Only hamn-host-dns.service runs dnsmasq. The dnsmasq package's system service
+# also reads /etc/dnsmasq.d, where Hamn's bind-dynamic and ubuntu-fan's
+# bind-interfaces conflict, so it would fail on every boot after deployment.
+if installed dnsmasq; then
+    echo "slim-guest: the dnsmasq system service package is installed" >&2
+    exit 1
+fi
 for command in curl docker dockerd containerd ctr runc \
     qemu-x86_64-static dnsmasq nft /usr/local/bin/hamnd \
     /usr/local/libexec/hamn/guest-json; do

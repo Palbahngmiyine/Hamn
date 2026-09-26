@@ -19,7 +19,7 @@ if "$BUILDER" >"$WORK/missing.out" 2>"$WORK/missing.err"; then
 fi
 grep -Fq 'HAMN_GUEST_BASE_IMAGE' "$WORK/missing.err"
 grep -Fq 'docker.io,containerd,runc,containernetworking-plugins' "$BUILDER"
-grep -Fq 'qemu-user-static,binfmt-support,dnsmasq' "$BUILDER"
+grep -Fq 'qemu-user-static,binfmt-support,dnsmasq-base,nftables' "$BUILDER"
 grep -Fq '"components":["docker","buildkit","containerd","runc","cni","binfmt","dnsmasq","hamnd"]' "$BUILDER"
 if grep -Eiq 'k3s|HAMN_RELEASE_PUBLIC_KEY' "$BUILDER" "$GUEST_ROOT/Makefile"; then
     echo "FAIL: new guest image still includes managed K3s inputs" >&2
@@ -74,6 +74,7 @@ if grep -Eq '^path-exclude=.*(docker|containerd$|/runc$|dnsmasq|hamn)' "$EXCLUDE
 fi
 grep -Fq 'for name in snapd lxd-installer ubuntu-cloud-minimal; do' "$SLIM"
 grep -Fq 'for command in cloud-init sshd sudo netplan git; do' "$SLIM"
+grep -Fq 'if installed dnsmasq; then' "$SLIM"
 
 # Exercise the archive path in an isolated Git checkout. The injected
 # untracked shared/ file must not become an immutable image input.

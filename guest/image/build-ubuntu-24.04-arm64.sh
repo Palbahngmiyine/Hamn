@@ -108,7 +108,7 @@ git -C "$ROOT" archive --format=tar HEAD -- guest vendor |
 # Buildx remains a host Docker CLI plugin; its docker-container driver runs a
 # dedicated BuildKit container in this guest through the Docker API.
 BUILD_PACKAGES='gcc,make'
-PACKAGES='curl,docker.io,containerd,runc,containernetworking-plugins,qemu-user-static,binfmt-support,dnsmasq,nftables'
+PACKAGES='curl,docker.io,containerd,runc,containernetworking-plugins,qemu-user-static,binfmt-support,dnsmasq-base,nftables'
 PROVISION=$WORK/provision.sh
 cat >"$PROVISION" <<'EOF'
 #!/bin/bash
