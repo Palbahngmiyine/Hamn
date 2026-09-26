@@ -150,7 +150,10 @@ pub fn ready(commands: &dyn Commands, repository: &str, manifest: &Value) -> Res
         &words(&["api", "--include", &format!("repos/{repository}/releases/tags/{tag}")]),
         Duration::from_secs(30),
     )?;
-    let text = result.stdout_text()?;
+    // gh ends the status line with LF but each header and the blank line
+    // after them with CRLF. Read the output as text, like the Python original
+    // did: universal newlines turn CRLF and a lone CR into LF.
+    let text = result.stdout_text()?.replace("\r\n", "\n").replace('\r', "\n");
     let (headers, body) = text.split_once("\n\n").ok_or("release API returned an invalid HTTP response")?;
     let status = http_status(headers).ok_or("release API returned an invalid HTTP response")?;
     if status == "404" && result.code() == Some(1) {
