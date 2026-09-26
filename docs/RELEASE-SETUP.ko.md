@@ -171,7 +171,10 @@ budget이 바뀌면 최종 commit에서 배포 산출물을 다시 빌드하고 
 구조 검사를 강제하지만 `reviewOnly: true` report로는 게시할 수 없습니다.
 실제 footprint와 런타임 증거를 검토한 후 승인한 proposal을 budget으로 commit하고
 일반 후보를 빌드합니다. budget 상향에는 새 footprint 검토가 필요하며, budget이
-없으면 실패합니다. 게시 단계는 `make -C guest image-tool`로 빌드한 C 도구
+없으면 실패합니다. 커밋된 budget은 288,358,400바이트(275 MiB)를 허용합니다.
+`8d7f893`에서 빌드한 Ubuntu Minimal 이미지(272,564,224바이트)를 검토해 정했고,
+최대값에는 패키지 업데이트를 위해 사람이 승인한 여유분이 포함되며, 두 digest는
+검토한 이미지와 report를 가리킵니다. 게시 단계는 `make -C guest image-tool`로 빌드한 C 도구
 `guest/build/hamn-image-tool verify-release-size IMAGE SIZE_REPORT REVIEWED_BUDGET COMMIT`으로
 정확한 이미지와 report, report의 소스 revision을 다시 검증합니다.
 

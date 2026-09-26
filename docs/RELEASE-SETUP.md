@@ -191,6 +191,10 @@ savings and all structural checks, but its `reviewOnly: true` report cannot be
 published. After reviewing the actual footprint and runtime evidence, commit
 the approved proposal as the budget and build a normal candidate. Budget
 increases require a new footprint review; missing budgets fail closed.
+The committed budget allows 288,358,400 bytes (275 MiB). It was reviewed for
+the Ubuntu Minimal image built from `8d7f893` (272,564,224 bytes); the maximum
+includes human-approved headroom for package updates, and its two digests name
+that reviewed image and report.
 Publication independently verifies the exact image/report and the report's
 source revision with
 `guest/build/hamn-image-tool verify-release-size IMAGE SIZE_REPORT REVIEWED_BUDGET COMMIT`,
