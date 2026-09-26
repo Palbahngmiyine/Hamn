@@ -24,9 +24,9 @@ static const int forwarded_signals[] = { SIGINT, SIGTERM, SIGHUP };
 static volatile sig_atomic_t supervised_process_group = -1;
 static volatile sig_atomic_t cancellation_requested;
 static volatile sig_atomic_t cancellation_enabled;
-/* Set only in a run_supervised() supervisor child, whose process group
- * receives the owner's forwarded SIGINT/SIGTERM/SIGHUP. */
-static volatile sig_atomic_t supervisor_signalled;
+/* The last SIGINT/SIGTERM/SIGHUP a run_supervised() supervisor child
+ * received from its owner's forwarding, or 0. Only that child sets it. */
+static volatile sig_atomic_t supervisor_signal;
 static int cleanup_depth;
 static void request_cancellation(int number)
 {
@@ -185,8 +185,7 @@ static pid_t terminal_wait(pid_t supervisor, int *status,
 
 static void note_supervisor_signal(int signal_number)
 {
-    (void)signal_number;
-    supervisor_signalled = 1;
+    supervisor_signal = signal_number;
 }
 
 static void forward_supervised_signal(int signal_number)
@@ -354,6 +353,14 @@ static int run_guarded(const char *const argv[], char *out, size_t cap,
         }
         return -1;
     }
+    /* A forwarded signal that arrived before the exact child existed reached
+     * only this supervisor, and a new process inherits no pending signal.
+     * Deliver it now, so a cancellation racing the command's start still
+     * stops the command. Later signals reach the child through the group.
+     * The child is not reaped yet, so its PID cannot have been reused. */
+    int early_signal = (int)supervisor_signal;
+    if (early_signal)
+        (void)kill(command, early_signal);
     if (spawn_ack_fd >= 0) {
         char byte = '1';
         while (write(spawn_ack_fd, &byte, 1) < 0 && errno == EINTR)
@@ -482,7 +489,7 @@ static int run_guarded(const char *const argv[], char *out, size_t cap,
          * the capture writer (and the inherited operation flock) until its
          * remote command ends. Bytes still buffered in the pipe are discarded.
          */
-        if ((owner_dead || supervisor_signalled) && command_exited &&
+        if ((owner_dead || supervisor_signal) && command_exited &&
             !output_eof)
             output_eof = 1;
         if (!command_exited && owner_dead) {
@@ -617,6 +624,18 @@ static int run_supervised(const char *const argv[], char *out, size_t cap,
         close(result_pipe[0]);
         close(result_pipe[1]);
         return -1;
+    }
+    /* A cancellation after the first check only set the flag: nothing was
+     * running to forward it to. From here signals stay pending until the
+     * forwarding handler is installed, which delivers them to the group. */
+    if (proc_cancelled()) {
+        (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+        close(owner_pipe[0]);
+        close(owner_pipe[1]);
+        close(result_pipe[0]);
+        close(result_pipe[1]);
+        errno = ECANCELED;
+        return 130;
     }
     pid_t supervisor = fork();
     if (supervisor < 0) {

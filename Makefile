@@ -228,6 +228,8 @@ test-control-native: host $(PROFILE_READ_TEST) $(BUILD)/tests/test_docker_readin
 	$(BUILD)/tests/test_remote_mutation
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_early_exit.c -o $(BUILD)/tests/test_proc_early_exit
 	$(BUILD)/tests/test_proc_early_exit
+	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_cancel_race.c -o $(BUILD)/tests/test_proc_cancel_race
+	$(BUILD)/tests/test_proc_cancel_race
 	$(HAMN_DEV) test remote-cancel-boundaries
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test start-preflight
 	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_proc_cancellation.c host/util/proc.c -o $(BUILD)/tests/test_proc_cancellation
