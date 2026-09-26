@@ -8,6 +8,11 @@
 typedef int (*proc_completion_fn)(int rc, void *context);
 
 #define PROC_RUN_TIMEOUT 124
+/* SIGINT/SIGTERM/SIGHUP request cancellation. Outside proc_cleanup_begin/end,
+ * a supervised run that has not started its command returns 130 (ECANCELED)
+ * without starting it. A signal received while a run is in progress is
+ * forwarded to its command, including when the command starts after the
+ * signal arrived. */
 int proc_cancel_install(void);
 int proc_cancelled(void);
 void proc_request_cancel(void);
