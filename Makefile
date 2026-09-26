@@ -348,13 +348,17 @@ ci_macos_updater = $(CI_MACOS_SHARD_$(1)_UPDATER)
 ci_macos_parallel = $(or $(call ci_macos_side,$(1)),$(call ci_macos_updater,$(1)))
 # One recipe line per gate, so a failure stops its lane and, with GNU Make
 # 4's --output-sync=line, each gate's output appears when it finishes.
+# Every gate uses the hamn-dev that `make host` built before the lanes
+# (-o hamn-dev). Even with nothing to rebuild, Cargo on macOS replaces
+# $(HAMN_DEV) with a new copy, so a lane that ran it while another lane's
+# Cargo did so failed with "No such file or directory" (run 36248017013).
 define ci-macos-gate
-$(MAKE) $(1)
+$(MAKE) -o hamn-dev $(1)
 
 endef
-# Lanes beside the main lane use the build/hamn already built (-o host).
+# Lanes beside the main lane also use the build/hamn already built (-o host).
 define ci-macos-beside-gate
-$(MAKE) -o host $(1)
+$(MAKE) -o hamn-dev -o host $(1)
 
 endef
 CI_MACOS_OUTPUT_SYNC := $(if $(filter output-sync,$(.FEATURES)),--output-sync=line)
