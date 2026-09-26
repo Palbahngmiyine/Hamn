@@ -129,7 +129,8 @@ Forward 생성/제거는 transactionally reconcile합니다. Network attachment�
 
 ## 호환성 경계
 
-Guest는 amd64 Linux image에 기본으로 `binfmt`를 사용합니다. Rosetta는 host가 지원할 때
+Guest는 amd64 Linux image에 기본으로 `binfmt`를 사용하며, 그 밖의 외부 아키텍처는
+emulation하지 않습니다. Rosetta는 host가 지원할 때
 Virtualization framework의 Linux Rosetta directory share를 이용하는 opt-in 기능입니다.
 Nested virtualization도 opt-in입니다. macOS 15 이상에서 Hamn은 Apple의
 [nested virtualization capability check](https://developer.apple.com/documentation/virtualization/vzgenericplatformconfiguration/isnestedvirtualizationsupported)를

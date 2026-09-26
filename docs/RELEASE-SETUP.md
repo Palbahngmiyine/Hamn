@@ -108,7 +108,8 @@ equivalent `--host-network` option.
 
 ## Inputs and release authority
 
-`guest/image/release-inputs.json` pins the Ubuntu base HTTPS URL and SHA-256.
+`guest/image/release-inputs.json` pins the Ubuntu 24.04 Minimal cloud image
+HTTPS URL and SHA-256.
 There are no K3s download inputs or compatibility signing keys for new images.
 GitHub artifact attestations bind built artifacts to repository, workflow,
 source commit, and run. Automated release provenance comes from hosted runners.
@@ -155,8 +156,14 @@ raw SHA-256 with `qemu-img`. `guest/image/build-ubuntu-24.04-arm64.sh` captures
 a compressed baseline from the provisioned filesystem before removing build
 packages and regenerable content. Both measurements therefore start from one
 provisioned package set; this does not pin repository packages across separate
-builds. Cleanup protects runtime packages, purges gcc/make and unused build
-dependencies, resets first-boot state, and discards free filesystem blocks.
+builds. Before any package installs, `guest/image/dpkg-excludes` becomes
+`/etc/dpkg/dpkg.cfg.d/hamn-excludes`, so neither the build nor later
+unattended upgrades unpack qemu emulators other than x86_64, the CNI plugins
+Hamn does not link, upstream test helpers, or kernel device trees. Cleanup
+protects runtime packages; purges gcc/make, binutils and unused build
+dependencies, and snapd with lxd-installer; resets first-boot state; hard-links
+identical files under `/usr`; recreates the filesystem journal; and discards
+free filesystem blocks.
 The compact image uses zlib and retains an 8 GiB virtual disk. Byte equivalence
 applies between the cleaned stage and its compact representation; deleting
 packages intentionally changes bytes relative to the pre-cleanup baseline.

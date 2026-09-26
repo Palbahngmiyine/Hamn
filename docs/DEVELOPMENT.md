@@ -92,7 +92,8 @@ profile, the one that builds published artifacts.
 
 ## Guest images
 
-`guest/image/release-inputs.json` pins the Ubuntu base URL and SHA-256.
+`guest/image/release-inputs.json` pins the Ubuntu 24.04 Minimal cloud image URL
+and SHA-256.
 `guest/image/build-ubuntu-24.04-arm64.sh` runs on Linux arm64 with libguestfs.
 Supply `HAMN_GUEST_BASE_IMAGE`, `HAMN_GUEST_BASE_SHA256`, and
 `HAMN_GUEST_OUTPUT`; the builder verifies the base digest and archives only

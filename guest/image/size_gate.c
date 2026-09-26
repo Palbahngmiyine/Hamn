@@ -276,9 +276,11 @@ int size_gate_run(const struct size_gate_options *options,
                   struct image_error *error)
 {
     static const char *const cleanup[] = {
-        "build dependencies", "apt archives and lists", "temporary sources",
-        "logs and journals", "cloud-init state", "machine-id", "SSH host keys",
-        "systemd random seed", "free filesystem blocks",
+        "build dependencies", "snapd and lxd-installer", "kernel device trees",
+        "apt archives and lists", "temporary sources", "logs and journals",
+        "cloud-init state", "machine-id", "SSH host keys", "systemd random seed",
+        "duplicate files as hard links", "filesystem journal",
+        "free filesystem blocks",
     };
     if (!image_lower_hex(options->base_sha256, strlen(options->base_sha256), 64) ||
         !image_lower_hex(options->source_revision,

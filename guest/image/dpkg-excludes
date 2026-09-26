@@ -1,0 +1,36 @@
+# dpkg path filters for the Hamn guest image, installed as
+# /etc/dpkg/dpkg.cfg.d/hamn-excludes before any package is installed, so the
+# same files also stay out when unattended upgrades replace these packages.
+# Later lines override earlier ones. dpkg still records the excluded files as
+# owned by their packages.
+
+# Only linux/amd64 is emulated: keep qemu-user-static's x86_64 emulator, its
+# binfmt.d registration and that registration's interpreter link.
+path-exclude=/usr/bin/qemu-*-static
+path-include=/usr/bin/qemu-x86_64-static
+path-exclude=/usr/lib/binfmt.d/qemu-*.conf
+path-include=/usr/lib/binfmt.d/qemu-x86_64.conf
+path-exclude=/usr/libexec/qemu-binfmt/*
+path-include=/usr/libexec/qemu-binfmt/x86_64-binfmt-P
+
+# containerd reads CNI plugins only from /opt/cni/bin, where
+# configure-containerd links exactly these six.
+path-exclude=/usr/lib/cni/*
+path-include=/usr/lib/cni/bridge
+path-include=/usr/lib/cni/host-local
+path-include=/usr/lib/cni/loopback
+path-include=/usr/lib/cni/portmap
+path-include=/usr/lib/cni/firewall
+path-include=/usr/lib/cni/tuning
+path-exclude=/lib/systemd/system/cni-dhcp.*
+
+# Upstream load-test and test-helper programs that nothing in the image runs.
+path-exclude=/usr/bin/containerd-stress
+path-exclude=/usr/bin/fs-idmap
+path-exclude=/usr/bin/memfd-bind
+path-exclude=/usr/bin/pidfd-kill
+path-exclude=/usr/bin/remap-rootfs
+
+# Virtualization.framework boots the kernel through EFI firmware, which
+# supplies the hardware description; the kernel's device-tree blobs are unused.
+path-exclude=/lib/firmware/*/device-tree/*

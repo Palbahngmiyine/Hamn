@@ -158,9 +158,12 @@ GUESTFISH_RESIZE_COMMANDS
 then
     fail "cannot check and force-expand the resized guest root filesystem"
 fi
+# The dpkg path filters must be in place before the first package unpacks.
 "$VIRT_CUSTOMIZE" -a "$STAGE" \
     --run-command "date -u -s '@$COMMIT_EPOCH'" \
     --run-command 'timeout 30 getent ahostsv4 ports.ubuntu.com' \
+    --upload "$ROOT/guest/image/dpkg-excludes:/etc/dpkg/dpkg.cfg.d/hamn-excludes" \
+    --chmod '0644:/etc/dpkg/dpkg.cfg.d/hamn-excludes' \
     --install "$BUILD_PACKAGES,$PACKAGES" \
     --upload "$GUEST_MANIFEST:/tmp/hamn-guest-image.json" \
     --upload "$SOURCE_ARCHIVE:/tmp/hamn-guest-sources.tar.gz" \
@@ -188,8 +191,13 @@ fi
     >"$OUTPUT.packages-after.tsv"
 # fstrim is an offline libguestfs filesystem operation; unavailable discard is
 # a build failure, not an excuse to claim a sparse image without evidence.
+# Recreating the journal first leaves only zeroed journal blocks, instead of
+# the provisioning writes that fstrim cannot discard from an allocated journal.
 "$GUESTFISH" --rw add-drive "$STAGE" format:qcow2 discard:enable \
-    : run : mount /dev/sda3 / : fstrim / : umount-all : shutdown
+    : run \
+    : debug sh "tune2fs -O ^has_journal /dev/sda3 && tune2fs -j /dev/sda3" \
+    : e2fsck-f /dev/sda3 \
+    : mount /dev/sda3 / : fstrim / : umount-all : shutdown
 
 "$QEMU_IMG" convert -q -f qcow2 -O qcow2 \
     -o compression_type=zlib -c "$STAGE" "$COMPACT"

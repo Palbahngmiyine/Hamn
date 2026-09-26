@@ -87,7 +87,8 @@ main lane과 동시에 실행하고, 다른 버전을 빌드하는 검증(`CI_MA
 
 ## 게스트 이미지
 
-`guest/image/release-inputs.json`은 Ubuntu 기반 이미지 URL과 SHA-256을 고정합니다.
+`guest/image/release-inputs.json`은 Ubuntu 24.04 Minimal cloud image의 URL과 SHA-256을
+고정합니다.
 `guest/image/build-ubuntu-24.04-arm64.sh`는 libguestfs가 있는 Linux arm64에서
 실행합니다. `HAMN_GUEST_BASE_IMAGE`, `HAMN_GUEST_BASE_SHA256`,
 `HAMN_GUEST_OUTPUT`을 지정하면 기반 이미지 digest를 검증하고 커밋된 `guest/`와

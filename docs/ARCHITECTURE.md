@@ -142,7 +142,8 @@ network-selection CLI option.
 
 ## Compatibility boundaries
 
-The guest defaults to `binfmt` for amd64 Linux images. Rosetta is opt-in, using
+The guest defaults to `binfmt` for amd64 Linux images; other foreign
+architectures are not emulated. Rosetta is opt-in, using
 the Virtualization framework's Linux Rosetta directory share when the host
 supports it. Nested virtualization is opt-in. On macOS 15 or later, Hamn uses
 Apple's [nested-virtualization capability check](https://developer.apple.com/documentation/virtualization/vzgenericplatformconfiguration/isnestedvirtualizationsupported)

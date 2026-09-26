@@ -97,8 +97,8 @@ CNI가 동작하지 않는 API 검증 클러스터에서는 `HAMN_E2E_K8S_HOST_N
 
 ## 입력과 배포 권한
 
-`guest/image/release-inputs.json`은 Ubuntu 기반 이미지 HTTPS URL과 SHA-256을
-고정합니다. 신규 이미지에는 K3s 다운로드 입력이나 호환성 서명 키가 없습니다.
+`guest/image/release-inputs.json`은 Ubuntu 24.04 Minimal cloud image의 HTTPS
+URL과 SHA-256을 고정합니다. 신규 이미지에는 K3s 다운로드 입력이나 호환성 서명 키가 없습니다.
 GitHub artifact attestation은 산출물을 저장소·workflow·소스 commit·실행과
 연결합니다. 자동 배포 증명은 hosted runner에서 생성합니다. Manifest에는
 `validationMode: github-hosted-no-vm`, hosted 증거에는 `physicalE2E: false`를
@@ -142,8 +142,13 @@ DNS를 검사하며 runner 이미지의 네트워크 변경으로 발생한 실�
 package와 재생성 가능한 내용을 제거하기 전, 동일하게 준비된 파일시스템에서 압축
 baseline을 생성합니다. 따라서 전후 측정은 한 번 provision한 package 집합에서
 시작하며, 별도 빌드 사이의 저장소 package 버전까지 고정한다는 뜻은 아닙니다.
-runtime package를 보호한 상태에서 gcc/make와 불필요한 build 의존성, apt·로그·임시
-파일을 제거하고 최초 부팅 상태를 초기화한 뒤 free block을 discard합니다. 압축에는
+package를 설치하기 전에 `guest/image/dpkg-excludes`를
+`/etc/dpkg/dpkg.cfg.d/hamn-excludes`로 넣습니다. 그래서 빌드와 이후 자동 보안
+업데이트 모두 x86_64 외 qemu emulator, Hamn이 연결하지 않는 CNI plugin, upstream
+테스트 도구, 커널 device tree를 풀지 않습니다. 정리 단계는 runtime package를 보호한
+상태에서 gcc/make·binutils와 불필요한 build 의존성, snapd·lxd-installer, apt·로그·임시
+파일을 제거하고 최초 부팅 상태를 초기화합니다. 이어서 `/usr`의 동일한 파일을 hard
+link로 묶고 파일시스템 journal을 새로 만든 뒤 free block을 discard합니다. 압축에는
 zlib를 사용하고 가상 디스크는 8 GiB로 유지합니다. 바이트 동등성은 정리한 stage와
 그 압축 결과 사이에서 확인합니다. package를 제거하기 전 baseline과는 내용이 다릅니다.
 

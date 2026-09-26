@@ -26,6 +26,8 @@
 #define TERMINATION_GRACE_MS 5000
 #define POLL_INTERVAL_MS 50
 #define PAYLOAD_DIRECTORY "hamn-generated"
+/* Must match build-ubuntu-24.04-arm64.sh; guest/tests checks both. */
+#define JOURNAL_RESET "tune2fs -O ^has_journal /dev/sda3 && tune2fs -j /dev/sda3"
 
 /*
  * Fixed guest-side installer: generated input is data copied in beside it,
@@ -671,10 +673,12 @@ static int run_case(struct run_state *state,
         image_fail_errno(error, "cannot remove payload directory", payload);
         goto done;
     }
+    /* The builder's sequence: a fresh journal holds only zeroed blocks. */
     char *trim[] = { "guestfish", "--rw", "add-drive", stage, "format:qcow2",
-                     "discard:enable", ":", "run", ":", "mount", "/dev/sda3",
-                     "/", ":", "fstrim", "/", ":", "umount-all", ":",
-                     "shutdown", NULL };
+                     "discard:enable", ":", "run", ":", "debug", "sh",
+                     (char *)JOURNAL_RESET, ":", "e2fsck-f", "/dev/sda3", ":",
+                     "mount", "/dev/sda3", "/", ":", "fstrim", "/", ":",
+                     "umount-all", ":", "shutdown", NULL };
     if (run_command(trim, log, COMMAND_TIMEOUT_SECONDS, NULL, error) != 0)
         goto done;
     char *query[] = { "guestfish", "--ro", "--format=qcow2", "-a", stage, "-i",
