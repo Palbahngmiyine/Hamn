@@ -24,6 +24,9 @@ static const int forwarded_signals[] = { SIGINT, SIGTERM, SIGHUP };
 static volatile sig_atomic_t supervised_process_group = -1;
 static volatile sig_atomic_t cancellation_requested;
 static volatile sig_atomic_t cancellation_enabled;
+/* Set only in a run_supervised() supervisor child, whose process group
+ * receives the owner's forwarded SIGINT/SIGTERM/SIGHUP. */
+static volatile sig_atomic_t supervisor_signalled;
 static int cleanup_depth;
 static void request_cancellation(int number)
 {
@@ -178,6 +181,12 @@ static pid_t terminal_wait(pid_t supervisor, int *status,
             return -1;
         }
     }
+}
+
+static void note_supervisor_signal(int signal_number)
+{
+    (void)signal_number;
+    supervisor_signalled = 1;
 }
 
 static void forward_supervised_signal(int signal_number)
@@ -467,12 +476,14 @@ static int run_guarded(const char *const argv[], char *out, size_t cap,
             }
         }
         /*
-         * Only the exact child is part of this synchronous operation. If it
-         * has exited and no captured bytes are currently readable, do not let
-         * an unrelated descendant retain the capture writer and inherited
-         * operation flock forever.
+         * Only the exact child is part of this synchronous operation. Once it
+         * has exited after its owner died or forwarded a cancellation signal,
+         * stop capturing: a descendant such as an ssh ControlMaster can keep
+         * the capture writer (and the inherited operation flock) until its
+         * remote command ends. Bytes still buffered in the pipe are discarded.
          */
-        if (owner_dead && command_exited && !output_eof)
+        if ((owner_dead || supervisor_signalled) && command_exited &&
+            !output_eof)
             output_eof = 1;
         if (!command_exited && owner_dead) {
             uint64_t now = 0;
@@ -617,13 +628,21 @@ static int run_supervised(const char *const argv[], char *out, size_t cap,
         return -1;
     }
     if (supervisor == 0) {
-        struct sigaction action = { .sa_handler = SIG_IGN };
-        sigemptyset(&action.sa_mask);
+        /* The supervisor survives forwarded signals so it can reap the exact
+         * child and report; it only records them for run_guarded(). The
+         * command child restores default dispositions before exec. */
+        struct sigaction noted = {
+            .sa_handler = note_supervisor_signal,
+            .sa_flags = SA_RESTART,
+        };
+        struct sigaction ignored = { .sa_handler = SIG_IGN };
+        sigemptyset(&noted.sa_mask);
+        sigemptyset(&ignored.sa_mask);
         if (setpgid(0, 0) != 0 ||
-            sigaction(SIGINT, &action, NULL) != 0 ||
-            sigaction(SIGTERM, &action, NULL) != 0 ||
-            sigaction(SIGHUP, &action, NULL) != 0 ||
-            sigaction(SIGPIPE, &action, NULL) != 0 ||
+            sigaction(SIGINT, &noted, NULL) != 0 ||
+            sigaction(SIGTERM, &noted, NULL) != 0 ||
+            sigaction(SIGHUP, &noted, NULL) != 0 ||
+            sigaction(SIGPIPE, &ignored, NULL) != 0 ||
             sigprocmask(SIG_SETMASK, &previous_mask, NULL) != 0)
             _exit(1);
         close(owner_pipe[1]);
