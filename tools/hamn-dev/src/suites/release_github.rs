@@ -33,6 +33,7 @@ pub fn main(filters: &[String]) -> ExitCode {
                 "manifest_merge_defers_until_exact_release_is_published",
                 manifest_merge_defers_until_exact_release_is_published,
             ),
+            case("gh_crlf_headers_and_plain_lf_both_parse", gh_crlf_headers_and_plain_lf_both_parse),
             case(
                 "api_and_network_failures_do_not_look_like_pending_publication",
                 api_and_network_failures_do_not_look_like_pending_publication,
@@ -212,7 +213,16 @@ fn api_response(status: u16, code: i32, fields: &[(&str, Value)]) -> Reply {
     for (key, value) in fields {
         release[*key] = value.clone();
     }
-    Ok(exited(code, &format!("HTTP/2.0 {status} Status\nContent-Type: application/json\n\n{release}"), ""))
+    Ok(exited(code, &gh_include(status, &release.to_string()), ""))
+}
+
+/// `gh api --include` output as gh 2.x writes it: the status line ends with
+/// LF, each header and the blank line after them with CRLF.
+fn gh_include(status: u16, body: &str) -> String {
+    format!(
+        "HTTP/2.0 {status} Status\nContent-Type: application/json; charset=utf-8\r\n\
+         X-Github-Api-Version-Selected: 2022-11-28\r\n\r\n{body}"
+    )
 }
 
 /// Readiness with one recorded API reply; asserts the exact request.
@@ -230,6 +240,21 @@ fn manifest_merge_defers_until_exact_release_is_published() {
     assert!(!readiness(api_response(404, 1, &[])).unwrap());
     assert!(!readiness(api_response(200, 0, &[("draft", json!(true)), ("immutable", json!(false))])).unwrap());
     assert!(readiness(api_response(200, 0, &[])).unwrap());
+}
+
+/// Real gh output has no LF LF: headers and the separating blank line end
+/// with CRLF (Release Please run 36234002500 failed on it). Plain LF, which
+/// the Python original also accepted, keeps working.
+fn gh_crlf_headers_and_plain_lf_both_parse() {
+    let release = json!({"tag_name": "v0.1.0", "draft": false, "prerelease": false, "immutable": true});
+    let crlf = gh_include(200, &release.to_string());
+    assert!(!crlf.contains("\n\n") && crlf.contains("\r\n\r\n"), "{crlf:?}");
+    assert!(readiness(Ok(exited(0, &crlf, ""))).unwrap());
+    assert!(!readiness(Ok(exited(1, &gh_include(404, "{\"message\":\"Not Found\"}"), ""))).unwrap());
+    let lf = format!("HTTP/2.0 200 OK\nContent-Type: application/json\n\n{release}");
+    assert!(readiness(Ok(exited(0, &lf, ""))).unwrap());
+    // A header block with no blank line after it is still not a response.
+    assert!(readiness(Ok(exited(0, "HTTP/2.0 200 OK\nContent-Type: application/json\r\n", ""))).is_err());
 }
 
 fn api_and_network_failures_do_not_look_like_pending_publication() {
