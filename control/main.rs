@@ -1,30 +1,33 @@
 use clap::Parser;
 use std::{ffi::CString, io::IsTerminal, os::unix::ffi::OsStrExt};
 mod capabilities;
-mod install_support;
+mod command_input;
 mod core;
 mod docker;
+mod docker_context;
+mod environments;
 mod exec_auth;
+mod guarded_action;
 mod headless;
+mod install_support;
 mod kubeconfig;
 mod kubernetes;
-mod migration;
 mod model;
+mod native;
+mod native_actions;
+mod native_flags;
+mod preferences;
+mod query_process;
+mod resource_table;
 mod service;
 mod stream;
-mod preferences;
-mod native;
-mod query_process;
-mod native_flags;
-mod resource_table;
-mod native_actions;
 mod terminal_io;
 mod terminal_session;
-mod command_input;
-mod guarded_action;
-mod environments;
+#[cfg(test)]
+mod test_fixture;
 mod tui;
 mod tui_state;
+mod upgrade;
 
 unsafe extern "C" {
     fn hamn_core_main(argc: libc::c_int, argv: *mut *mut libc::c_char) -> libc::c_int;
@@ -44,7 +47,11 @@ fn main() {
     ) {
         std::process::exit(internal());
     }
-    if let Some(help) = model::update_help(&std::env::args_os().collect::<Vec<_>>()) {
+    let args: Vec<_> = std::env::args_os().collect();
+    if upgrade::is_command(&args) {
+        std::process::exit(upgrade::run_cli(&args));
+    }
+    if let Some(help) = model::upgrade_help(&std::env::args_os().collect::<Vec<_>>()) {
         print!("{help}");
         return;
     }
@@ -97,6 +104,7 @@ fn main() {
                 eprintln!("hamn: {error}");
                 std::process::exit(1);
             }
+            upgrade::after_tui();
             return;
         }
         let message = if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {

@@ -33,7 +33,8 @@ jobs:
         id: publication
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 packaging/release/release-pr-ready.py
+        # rust-toolchain.toml selects the pinned toolchain through rustup.
+        run: cargo run --locked -p hamn-dev -- release pr-ready
       - name: Require dedicated Release Please token
         if: steps.publication.outputs.ready == 'true'
         shell: bash

@@ -6,7 +6,9 @@
 ## 프로필 선택 및 위치
 
 프로필 상태는 `~/.hamn/<profile>/`에 저장하며 디렉터리 권한은 `0700`입니다.
-헤드리스 VM·Docker 작업에는 명시적 `--profile`이 필요하고 `vm list`만 예외입니다.
+헤드리스 VM 작업에는 명시적 `--profile`이 필요하고 `vm list`만 예외입니다.
+Docker는 `--profile` 또는 외부 `--context` 중 정확히 하나를 지정합니다.
+`--docker-config`는 context를 사용하는 Docker 요청에만 적용합니다.
 TUI는 초기값 `default`인 자체 선택을 유지합니다. 공개 API에는 위치 인자 프로필이나
 `HAMN_PROFILE` 대체 선택이 없습니다.
 
@@ -125,9 +127,8 @@ YAML schema는 `network`를 거부하고 `configure`에는 `--network` 또는
 `--network-interface` option이 없습니다. Hamn은 0.0.1에서 LAN-reachable guest
 address를 제공하지 않습니다.
 
-Guest Docker network는 host.docker.internal을 resolve합니다.
-host.hamn.internal은 0.0.1 compatibility alias입니다. Guest Docker configuration이
-성공하면 다음 release에서 제거된다는 warning을 출력합니다. Hamn은 host
+Guest Docker network는 host.docker.internal을 resolve합니다. 0.0.1의
+host.hamn.internal alias는 제거되었으므로 host.docker.internal을 사용합니다. Hamn은 host
 /var/run/docker.sock을 건드리지 않습니다.
 
 ## Kubernetes
@@ -141,9 +142,9 @@ hamn --headless k8s pods list --context dev --namespace default
 
 `--kubeconfig`, `KUBECONFIG`, 기본 `~/.kube/config` 순서로 설정을 선택하며 원본 파일을
 바꾸지 않습니다. 인증과 변경 대상 지정은 [API](API.ko.md)를 참고하세요.
-구형 YAML의 `kubernetes` 항목은 K3s 전환을 위해서만 읽고 정리 성공 후 제거합니다.
-신규 프로필 설정이 아닙니다. K3s 클러스터 데이터·전용 볼륨은 삭제하고
-Docker 데이터·원본 kubeconfig는 보존합니다.
+매니지드 K3s용 `kubernetes` 항목은 제거되었습니다. 이 항목이 남은 프로필은 알 수
+없는 설정 키로 거부합니다. 프로필을 사용하려면 `config.yaml`에서 해당 항목을
+삭제하세요. 제거된 릴리스의 K3s 데이터는 이전하지 않습니다.
 
 ## Provisioning hook
 
@@ -181,3 +182,15 @@ export TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal
 
 Docker CLI·Compose·buildx·SDK는 같은 Docker 소켓을 사용합니다.
 공개 containerd 소켓은 제공하지 않습니다.
+
+
+## 업그레이드 확인과 파일 캐시
+
+대화형 TUI가 성공적으로 종료되면 캐시된 새 버전 정보를 보여주고 백그라운드에서
+메타데이터 확인 하나를 예약할 수 있습니다. 성공 캐시는 24시간, 실패 재시도 간격은
+6시간이며 동일 버전 안내는 24시간에 한 번입니다. headless·내부 모드, 비터미널 출력,
+CI, `HAMN_NO_UPDATE_CHECK=1`에서는 실행하지 않습니다. 자동 설치나 telemetry는 없습니다.
+전용 메타데이터는 `~/.hamn/cache/update-check-v1.json`, `update-notice-v1.json`에
+저장합니다. `~/.hamn/cache/downloads`의 파일은 SHA-256 기준으로 관리하며 크기·digest를
+검증한 뒤에만 재사용·게시합니다. 수동 `upgrade --check`·`--force`, 복구와
+`--headless system upgrade --yes`는 [설치](INSTALLATION.ko.md)를 참고하세요.

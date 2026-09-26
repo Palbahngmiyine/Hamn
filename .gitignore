@@ -1,13 +1,15 @@
 # 빌드 산출물
 build/
 target/
-__pycache__/
 dist/
 *.o
 *.dSYM/
 
 # Claude Code 하니스 로컬 상태 (세션 lock 등)
 .claude/
+
+# Private planning specifications; never stage or publish these files.
+.kiro/
 
 # OS/에디터 잡파일
 .DS_Store

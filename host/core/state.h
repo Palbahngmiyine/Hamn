@@ -12,8 +12,6 @@ struct vm_state {
     char state[16];   /* "starting" | "running" | "stopped" */
     char ip[64];
     long long started_at;
-    char prev_docker_context[128]; /* M2: stop 시 복원할 docker context */
-    char prev_kube_context[128];   /* K3s start가 바꾼 current-context */
 };
 
 /* 파일 없으면 state="stopped"로 채우고 0 반환 */

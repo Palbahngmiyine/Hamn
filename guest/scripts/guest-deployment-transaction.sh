@@ -199,47 +199,16 @@ begin_transaction() {
             "$TRANSACTION/meta/$service.active" ||
             fail "cannot secure service metadata"
     done
-    python3 - "$ROOT" "$TRANSACTION" <<'PY' || fail "cannot record deployment provenance"
-import hashlib, json, os, pathlib, stat, sys
-root, transaction = pathlib.Path(sys.argv[1] or '/'), pathlib.Path(sys.argv[2])
-journal = root / 'var/lib/hamn/k3s-retirement-v1.json'
-helpers = transaction / 'data/libexec_hamn'
-names = ('verify-image-contract', 'guest-deployment-transaction', 'configure-docker')
-value = {'version': 1, 'retirement': json.loads(journal.read_bytes()) if journal.exists() else None,
-         'helpers': {name: hashlib.sha256((helpers / name).read_bytes()).hexdigest()
-                     for name in names if (helpers / name).is_file()}}
-with (transaction / 'provenance.json').open('x') as output:
-    json.dump(value, output, sort_keys=True)
-    output.flush()
-    os.fsync(output.fileno())
-# Publish ready only after every regular backup file and directory is durable.
-# Do not follow CNI symlinks into the live runtime while syncing the backup.
-for directory, _, files in os.walk(transaction, topdown=False, followlinks=False):
-    for name in files:
-        path = pathlib.Path(directory) / name
-        if stat.S_ISREG(path.lstat().st_mode):
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-with (transaction / '.phase').open('x') as output:
-    output.write('ready\n')
-    output.flush()
-    os.fsync(output.fileno())
-os.replace(transaction / '.phase', transaction / 'phase')
-for directory in (transaction, transaction.parent):
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-PY
+    # Publish ready only after every regular backup file and directory is
+    # durable. find(1) does not follow CNI symlinks into the live runtime, and
+    # sync(1) fsyncs each operand.
+    find "$TRANSACTION" \( -type f -o -type d \) -print0 | xargs -0 sync -- ||
+        fail "cannot make the deployment backup durable"
+    (set -C; printf 'ready\n' >"$TRANSACTION/.phase") &&
+        sync -- "$TRANSACTION/.phase" &&
+        mv -f -- "$TRANSACTION/.phase" "$TRANSACTION/phase" &&
+        sync -- "$TRANSACTION" "$TRANSACTION_ROOT" ||
+        fail "cannot publish the deployment backup"
     cleanup_incomplete=0
     trap - EXIT
 }

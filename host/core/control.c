@@ -33,12 +33,17 @@ static cJSON *profile_snapshot(const char *name)
     cJSON *value = cJSON_CreateObject();
     if (!value || !cJSON_AddStringToObject(value, "name", profile.name) ||
         !cJSON_AddStringToObject(value, "state", live) ||
-        !cJSON_AddStringToObject(value, "migration", profile.legacy_k3s ? "pending" : "current") ||
         !cJSON_AddStringToObject(value, "directory", profile.dir) ||
         !cJSON_AddStringToObject(value, "dockerSocket", socket) ||
         !cJSON_AddNumberToObject(value, "cpus", profile.cpus) ||
         !cJSON_AddNumberToObject(value, "memoryMiB", profile.mem_mib) ||
         !cJSON_AddNumberToObject(value, "diskGiB", profile.disk_gib) ||
+        !cJSON_AddBoolToObject(value, "mountHome", profile.mount_home) ||
+        !cJSON_AddBoolToObject(value, "homeReadOnly", profile.home_read_only) ||
+        !cJSON_AddBoolToObject(value, "mountInotify", profile.mount_inotify) ||
+        !cJSON_AddBoolToObject(value, "rosetta", profile.rosetta) ||
+        !cJSON_AddStringToObject(value, "fileEvents", profile.mount_inotify ?
+            "best-effort-existing-files" : "disabled") ||
         !cJSON_AddStringToObject(value, "ip", state.ip)) {
         cJSON_Delete(value);
         return NULL;
@@ -147,6 +152,15 @@ int hamn_control_query(const char *profile, char **result)
 void hamn_control_free(char *result)
 {
     cJSON_free(result);
+}
+
+#ifndef HAMN_VERSION
+#error "the build must define HAMN_VERSION"
+#endif
+
+const char *hamn_version(void)
+{
+    return HAMN_VERSION;
 }
 
 int hamn_control_configure(const char *name, unsigned cpus,

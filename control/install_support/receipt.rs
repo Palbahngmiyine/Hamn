@@ -1,10 +1,18 @@
-//! Version-1 receipts remain byte-compatible with the original Python tree hash.
+//! Version-2 receipts hash a generation's installed payload as compact
+//! canonical JSON: depth-first `[path, mode, sha256-or-null]` entries for its
+//! `bin` and `share` trees (children sorted), with non-ASCII characters
+//! escaped as UTF-16 `\uXXXX` units, so receipts written by every release
+//! compare byte for byte. Version-1 receipts (the earlier layout's
+//! `scripts`/`packaging` trees) never match.
 //! A failed check is advisory (normal verified install); write failures abort the
 //! transaction. The caller owns the install locks and generation lifetime.
-use super::{Result, files, require};
+use super::{Result, download, files, require};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
+
+/// Receipts of the generation payload layout (`bin` and `share`).
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -36,6 +44,7 @@ fn canonical_json(value: &Value) -> Result<String> {
 fn visit(path: &Path, name: &str, entries: &mut Vec<Value>) -> Result<()> {
     let m = fs::symlink_metadata(path)?;
     files::owned(path, m.is_dir(), None)?;
+    require(m.mode() & 0o022 == 0, "unsafe installed permissions")?;
     if m.is_dir() {
         entries.push(json!([name, m.mode() & 0o7777, null]));
         let mut children = fs::read_dir(path)?
@@ -50,20 +59,19 @@ fn visit(path: &Path, name: &str, entries: &mut Vec<Value>) -> Result<()> {
             visit(&child, &format!("{name}/{leaf}"), entries)?;
         }
     } else {
-        entries.push(json!([name, m.mode() & 0o7777, files::digest(path)?]));
+        entries.push(json!([name, m.mode() & 0o7777, download::digest(path)?]));
     }
     Ok(())
 }
 fn installed_digest(generation: &Path) -> Result<String> {
-    files::owned(generation, true, None)?;
+    let metadata = files::owned(generation, true, None)?;
+    require(
+        metadata.mode() & 0o022 == 0,
+        "unsafe generation permissions",
+    )?;
     let mut entries = Vec::new();
-    visit(&generation.join("bin"), "bin", &mut entries)?;
-    for name in ["scripts", "packaging"] {
-        visit(
-            &generation.join("share/hamn/src").join(name),
-            name,
-            &mut entries,
-        )?;
+    for name in ["bin", "share"] {
+        visit(&generation.join(name), name, &mut entries)?;
     }
     Ok(files::hash(
         canonical_json(&Value::Array(entries))?.as_bytes(),
@@ -76,16 +84,13 @@ pub(super) fn run(
     version: &str,
     host_hash: &str,
     guest_hash: &str,
-    cache: &str,
 ) -> Result<()> {
     let generation = files::parent(files::parent(Path::new(target))?)?;
     let path = generation.join(".hamn-release.json");
-    if mode == "check" {
-        let info = files::owned(&path, false, Some(0o600))?;
-        require(info.len() <= 4096, "invalid receipt size")?;
-        let r: Receipt = serde_json::from_slice(&fs::read(&path)?)?;
+    if mode == "host-check" {
+        let r: Receipt = serde_json::from_slice(&download::read_file(&path, 4096, true)?)?;
         require(
-            r.schema_version == 1
+            r.schema_version == SCHEMA_VERSION
                 && r.version == version
                 && r.host == host_hash
                 && r.guest == guest_hash,
@@ -95,32 +100,9 @@ pub(super) fn run(
             r.installed == installed_digest(generation)?,
             "installed files changed",
         )?;
-        let cache = Path::new(cache);
-        let selection = cache.join("guest-image.json");
-        require(
-            files::owned(&selection, false, None)?.len() <= 4096,
-            "invalid selection size",
-        )?;
-        let name = format!("hamn-guest-{guest_hash}.img");
-        let selection: Value = serde_json::from_slice(&fs::read(selection)?)?;
-        require(
-            selection == json!({"schemaVersion":1,"file":name,"sha256":guest_hash}),
-            "different image selection",
-        )?;
-        let marker = cache.join(format!("{name}.verified"));
-        require(
-            files::owned(&marker, false, None)?.len() <= 128
-                && files::text(&marker)?.trim() == guest_hash,
-            "invalid image verification marker",
-        )?;
-        files::owned(&cache.join(&name), false, None)?;
-        require(
-            files::digest(&cache.join(name))? == guest_hash,
-            "cached image changed",
-        )?;
     } else if mode == "write" {
         let r = Receipt {
-            schema_version: 1,
+            schema_version: SCHEMA_VERSION,
             version: version.into(),
             host: host_hash.into(),
             guest: guest_hash.into(),
@@ -139,8 +121,53 @@ pub(super) fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
     #[test]
-    fn python_compatible_unicode_and_surrogate_encoding() {
+    fn host_check_rejects_changed_or_writable_host_and_unknown_modes() {
+        let temp = super::super::test_support::Temp::new();
+        let generation = temp.0.join("generation");
+        for directory in ["bin", "share/hamn"] {
+            fs::create_dir_all(generation.join(directory)).unwrap();
+        }
+        let pointer = generation.join("share/hamn/update-manifest-url");
+        fs::write(&pointer, b"https://example.test/manifest\n").unwrap();
+        let target = generation.join("bin/hamn");
+        fs::write(&target, b"host bytes").unwrap();
+        let target = target.to_str().unwrap();
+        run("write", target, "v1.2.3", "host", "guest").unwrap();
+        run("host-check", target, "v1.2.3", "host", "guest").unwrap();
+        // The manifest pointer is part of the installed payload.
+        fs::write(&pointer, b"https://example.test/other\n").unwrap();
+        assert!(run("host-check", target, "v1.2.3", "host", "guest").is_err());
+        fs::write(&pointer, b"https://example.test/manifest\n").unwrap();
+        run("host-check", target, "v1.2.3", "host", "guest").unwrap();
+        // An earlier (version 1) receipt with the same identities is stale.
+        let path = generation.join(".hamn-release.json");
+        let current = fs::read_to_string(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(
+            &path,
+            current.replace("\"schemaVersion\":2", "\"schemaVersion\":1"),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(run("host-check", target, "v1.2.3", "host", "guest").is_err());
+        fs::remove_file(&path).unwrap();
+        run("write", target, "v1.2.3", "host", "guest").unwrap();
+        assert!(run("host-check", target, "v1.2.4", "host", "guest").is_err());
+        assert!(run("host-check", target, "v1.2.3", "host", "other").is_err());
+        // The retired guest-checking `check` mode is not an alias.
+        assert!(run("check", target, "v1.2.3", "host", "guest").is_err());
+        fs::set_permissions(target, fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(run("host-check", target, "v1.2.3", "host", "guest").is_err());
+        fs::set_permissions(target, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(target, b"changed host bytes").unwrap();
+        assert!(run("host-check", target, "v1.2.3", "host", "guest").is_err());
+    }
+
+    #[test]
+    fn non_ascii_names_are_escaped_as_utf16_units() {
         assert_eq!(
             canonical_json(&json!(["한😀\n", 493, null])).unwrap(),
             r#"["\ud55c\ud83d\ude00\n",493,null]"#

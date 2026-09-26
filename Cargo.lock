@@ -870,6 +870,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hamn-dev"
+version = "0.0.0"
+dependencies = [
+ "flate2",
+ "libc",
+ "regex",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tar",
+ "unicode-width",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

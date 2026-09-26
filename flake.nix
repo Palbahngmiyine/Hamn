@@ -1,9 +1,16 @@
 {
   description = "Apple Virtualization container runtime for macOS";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/25.05";
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/25.05";
+    # Supplies the exact Rust release pinned by rust-toolchain.toml.
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
 
-  outputs = { nixpkgs, ... }:
+  outputs = { nixpkgs, rust-overlay, ... }:
     let
       systems = [
         "aarch64-darwin"
@@ -53,50 +60,101 @@
             install -m 0755 actionlint $out/bin/actionlint
           '';
         };
+      # The channel, profile and components declared in rust-toolchain.toml.
+      # On Darwin, Rust links through Apple's /usr/bin/cc with the system SDK,
+      # so the toolchain neither propagates nixpkgs' clang wrapper (whose
+      # setup hook exported NIX_CC and CC) nor records a Nix Apple SDK for
+      # rust-lld. The shell's stdenvNoCC still brings nixpkgs' Apple SDK and
+      # its cctools/LLVM closure; darwinShellHook keeps them out of builds.
+      rustToolchainFor = pkgs:
+        let
+          inherit (pkgs.stdenv) isDarwin;
+          rustPkgs = pkgs // pkgs.lib.optionalAttrs isDarwin {
+            callPackage = pkgs.newScope { apple-sdk = null; };
+          };
+          toolchain = (rust-overlay.lib.mkRustBin { } rustPkgs).fromRustupToolchainFile ./rust-toolchain.toml;
+        in
+        if isDarwin then
+          toolchain.overrideAttrs (_: {
+            depsHostHostPropagated = [ ];
+            propagatedBuildInputs = [ ];
+          })
+        else
+          toolchain;
+      # Hamn links against the macOS SDK and is signed with Apple's codesign.
+      # These names resolve to Apple's /usr/bin tools, never a Nix compiler.
+      appleToolchainFor = pkgs: pkgs.linkFarm "hamn-apple-toolchain" (map
+        (tool: { name = "bin/${tool}"; path = "/usr/bin/${tool}"; })
+        [ "ar" "c++" "cc" "clang" "clang++" "codesign" "ld" "otool" "ranlib" "xcrun" ]);
+      # Darwin shells: the pinned Nix tools come first, then the macOS (BSD)
+      # userland Hamn's scripts target, ahead of the GNU tools stdenv adds to
+      # the caller's PATH. Every build uses the system SDK, never a Nix one.
+      darwinShellHook = pkgs: packages:
+        ''
+          export PATH=${pkgs.lib.makeBinPath packages}:/usr/bin:/bin:/usr/sbin:/sbin:$PATH
+          case "''${DEVELOPER_DIR:-}" in /nix/store/*) unset DEVELOPER_DIR ;; esac
+          HAMN_SYSTEM_SDKROOT=$(/usr/bin/env -u SDKROOT -u DEVELOPER_DIR \
+            /usr/bin/xcrun --sdk macosx --show-sdk-path) || HAMN_SYSTEM_SDKROOT=
+          case "$HAMN_SYSTEM_SDKROOT" in
+          /nix/store/*)
+            echo "FAIL: Hamn must not compile against the Nix Apple SDK" >&2
+            exit 1
+            ;;
+          /*) [ -d "$HAMN_SYSTEM_SDKROOT" ] ;;
+          *) false ;;
+          esac || {
+            echo "FAIL: the system macOS SDK is unavailable; run xcode-select --install" >&2
+            exit 1
+          }
+          export SDKROOT=$HAMN_SYSTEM_SDKROOT HAMN_SYSTEM_SDKROOT
+        '';
       commonPackages = pkgs: with pkgs; [
         (actionlintFor pkgs)
         bash
         curl
+        docker-client # includes the Compose and buildx CLI plugins
         git
         gnumake
         jq
         openssh
-        python3
-        ripgrep
-        ruby
-        rustup
+        (rustToolchainFor pkgs)
       ];
     in
     {
       devShells = forAllSystems (system:
         let
           pkgs = pkgsFor system;
-          ciPackages = commonPackages pkgs
-            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
-              pkgs.coreutils
-              pkgs.gcc
-            ];
+          inherit (pkgs) lib stdenv;
+          shellWith = extraPackages:
+            let
+              packages = lib.optionals stdenv.isDarwin [ (appleToolchainFor pkgs) ]
+                ++ commonPackages pkgs
+                ++ lib.optionals stdenv.isLinux [ pkgs.coreutils pkgs.gcc ]
+                ++ extraPackages;
+            in
+            pkgs.mkShellNoCC {
+              inherit packages;
+              HAMN_VERSION = hamnVersion;
+              shellHook = lib.optionalString stdenv.isDarwin (darwinShellHook pkgs packages);
+            };
         in
         {
-          default = pkgs.mkShellNoCC {
-            packages = ciPackages;
-            HAMN_VERSION = hamnVersion;
-          };
+          default = shellWith [ ];
 
-          ci = pkgs.mkShellNoCC {
-            packages = ciPackages;
-            HAMN_VERSION = hamnVersion;
-          };
+          ci = shellWith [ ];
 
-          release = pkgs.mkShellNoCC {
-            packages = ciPackages ++ (with pkgs; [
-              go_1_23
-              kubectl
-              maven
-              nodejs_22
-            ]);
-            HAMN_VERSION = hamnVersion;
-          };
+          # Real VM, Docker, Compose, buildx and disposable kind validation.
+          live = shellWith (with pkgs; [
+            kind
+            kubectl
+          ]);
+
+          release = shellWith (with pkgs; [
+            go_1_23
+            kubectl
+            maven
+            nodejs_22
+          ]);
         });
 
       checks = forAllSystems (system:

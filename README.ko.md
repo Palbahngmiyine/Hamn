@@ -11,7 +11,8 @@ Hamn은 하나의 macOS 실행 파일로 Linux VM, VM의 Docker Engine, 외부 K
 - Kubernetes에는 kubeconfig가 필요하며 Hamn VM과 독립적으로 사용할 수 있습니다.
 
 TUI 컨테이너 탐색에는 Docker CLI, Kubernetes 탐색에는 kubectl이 필요합니다.
-헤드리스 SDK 작업은 이 CLI들을 요구하지 않습니다. Compose·buildx·플러그인은
+프로필 Docker·Kubernetes 헤드리스 SDK 작업은 이 CLI들을 요구하지 않지만,
+외부 Docker `--context` 요청에는 Docker CLI가 필요합니다. Compose·buildx·플러그인은
 외부 설치 의존성이며 Docker Desktop은 필요하지 않습니다.
 
 ## 설치
@@ -22,12 +23,23 @@ curl -fsSL --proto '=https' --tlsv1.2 \
   | /bin/bash
 ```
 
-```sh
-hamn
+설치기는 Hamn과 Linux 게스트 이미지를 내려받아 둘 다 검증한 뒤 `hamn` 명령을
+`~/.local/bin`에 설치합니다. 출력 예시는 다음과 같습니다.
+
+```text
+Installing Hamn 0.1.2 for Apple Silicon macOS...
+Downloading Hamn 0.1.2 (4.4 MiB)...
+Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
+Installing...
+Installed Hamn 0.1.2.
+Run hamn to get started. Update later with hamn upgrade.
 ```
 
-릴리스 설치와 업데이트는 macOS 기본 도구와 내려받은 Hamn 실행 파일만 사용합니다.
-Python, Homebrew, Rust, Xcode Command Line Tools를 따로 설치할 필요가 없습니다.
+`~/.local/bin`이 PATH에 없으면 사용 중인 shell에 추가할 한 줄을 알려 줍니다.
+macOS 기본 도구만 사용하므로 Python, Homebrew, Rust, Xcode Command Line Tools를
+따로 설치할 필요가 없습니다. Hamn 0.1.2 이하는 스스로 이 릴리스로 업데이트할 수
+없으므로 위 설치기를 한 번 실행합니다. 설치기가 기존 설치를 제자리에서 이전합니다
+([설치 문서](docs/INSTALLATION.ko.md#설치-배치와-이전-설치) 참고).
 
 소스 빌드는 [개발 문서](docs/DEVELOPMENT.ko.md)를 참고하세요.
 서명된 릴리스 설치는 [릴리스 설정](docs/RELEASE-SETUP.ko.md)을 참고하세요.
@@ -48,6 +60,7 @@ hamn --headless capabilities
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
 hamn --headless vm start --profile work --yes
 hamn --headless docker containers list --profile work
+hamn --headless docker containers list --context remote
 hamn --headless docker containers logs api --profile work --follow
 hamn --headless k8s contexts list
 hamn --headless k8s pods list --context dev --namespace default
@@ -71,16 +84,11 @@ UI 선택은 Docker의 현재 context나 kubeconfig의 `current-context`를 바�
 명시적 `docker context use`·`kubectl config`는 원래 설정 변경 의미를 유지합니다.
 헤드리스 인증은 비대화형이며, 네이티브 CLI 인증은 내부 터미널에서 해당 CLI 규칙을 따릅니다.
 
-## 기존 설치 전환과 데이터
+## 데이터
 
-이번 변경은 기존 CLI·JSON 형식을 대체하고 매니지드 K3s를 제거합니다.
-TUI 진입은 정리를 실행하지 않습니다. 구형 프로필은 다음 VM·Docker 변경 작업에서
-정리하며, 정지된 프로필은 다음 시작 때 정리할 수 있습니다. 조회는 대기 상태만 표시합니다.
-
-**K3s 클러스터 데이터와 전용 로컬 볼륨은 영구 삭제됩니다.** 실행 파일을 이전 버전으로
-되돌려도 복구되지 않습니다. Docker의 `moby` 네임스페이스, Docker 볼륨, 공용
-containerd content 저장소, 사용자 마운트, 원본 kubeconfig는 보존합니다.
-중단된 전환은 기록된 단계부터 재개하고 실패를 완료로 표시하지 않습니다.
+Hamn은 더 이상 K3s를 관리하지 않습니다. 제거된 `kubernetes` 설정이 남은 프로필은
+`config.yaml`에서 해당 항목을 삭제할 때까지 거부하며, 이전 K3s 데이터는 이전하지
+않습니다.
 
 `vm delete`는 VM을 멈추고 목록에서 숨기며 디스크·Docker 데이터를 보존합니다.
 `system uninstall --yes`는 모든 Hamn 프로필과 관리 설치 파일을 영구 삭제합니다.
@@ -88,3 +96,34 @@ containerd content 저장소, 사용자 마운트, 원본 kubeconfig는 보존�
 
 컨테이너 생성·Compose·exec·Kubernetes apply·port-forward는 TUI에서 외부 CLI로
 실행하며 헤드리스 SDK 작업 집합에는 추가하지 않습니다. MCP 서버는 제공하지 않습니다.
+
+
+## 업그레이드
+
+```sh
+hamn upgrade           # 최신 릴리스 설치
+hamn upgrade --check   # 새 버전이 있는지만 확인
+```
+
+```text
+$ hamn upgrade
+Checking for updates...
+Updating Hamn 0.1.1 → 0.1.2...
+Downloading Hamn 0.1.2  100%  4.4 MiB / 4.4 MiB
+Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
+Installing...
+Updated Hamn 0.1.1 → 0.1.2. Existing VMs were not restarted.
+
+$ hamn upgrade
+Checking for updates...
+Hamn 0.1.2 is up to date.
+```
+
+실행 중인 VM은 재시작하지 않고 기존 VM 디스크도 바꾸지 않습니다. 새 게스트
+이미지는 이후에 만드는 VM에 사용합니다. 중단된 다운로드는 자동으로 이어받거나
+다음 `hamn upgrade`에서 이어받습니다. 실패하면 원인과 다음 조치를 한 줄로
+표시합니다. 자동화에는 `hamn upgrade --output json`이나
+`hamn --headless system upgrade --yes`를 사용합니다. TUI를 정상 종료한 뒤 새
+릴리스를 안내할 수 있지만 스스로 설치하지는 않습니다. 이 확인은
+`HAMN_NO_UPDATE_CHECK=1`로 끌 수 있습니다. 무결성, 복구, `--force`는
+[설치](docs/INSTALLATION.ko.md)를 참고하세요.

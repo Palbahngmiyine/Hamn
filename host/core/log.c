@@ -92,6 +92,14 @@ void logerr(const char *fmt, ...)
     fputc('\n', stderr);
 }
 
+void log_set_error(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(last_error, sizeof(last_error), fmt, ap);
+    va_end(ap);
+}
+
 void die(const char *fmt, ...)
 {
     va_list ap;

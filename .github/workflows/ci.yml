@@ -36,14 +36,28 @@ jobs:
       - name: Run portable source gates
         run: nix develop .#ci --command make -j1 test-portable
 
-  macos:
-    name: macOS build and regression gates
+  # Every local macOS gate runs exactly once across these shards (see
+  # `make check-ci-macos-shards`), each shard on its own machine; the
+  # Makefile decides which gates of a shard may run side by side. PRs build
+  # the same source with the faster `ci` Cargo profile; the release workflow
+  # still runs `test-local-macos` serially with the release profile.
+  macos-shard:
+    name: macOS shard ${{ matrix.shard }}
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    env:
+      CARGO_PROFILE: ci
     steps:
+      # Full history: the installer migration tests install Hamn 0.1.2 with
+      # the 0.1.2 installer read from its release commit.
       - name: Check out source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Assert Apple Silicon runner
         shell: bash
@@ -52,17 +66,77 @@ jobs:
           [ "$RUNNER_OS" = macOS ]
           [ "$RUNNER_ARCH" = ARM64 ]
           [ "$(uname -m)" = arm64 ]
+      # The Nix installer runs `{ ...; cat /etc/zshrc; } | tee /etc/zshrc`.
+      # Reading the APFS-compressed original while tee truncates it can fail
+      # with "Attribute not found" (run 36128173174, attempt 2), so store it
+      # uncompressed first.
+      - name: Store /etc/zshrc uncompressed for the Nix installer
+        run: sudo sh -c 'cat /etc/zshrc >/etc/zshrc.hamn-ci && mv /etc/zshrc.hamn-ci /etc/zshrc'
       - name: Install Nix
         uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      # Nix verifies every locked input against flake.lock; this cache of
+      # fetched inputs and evaluations only avoids unpacking them again.
+      - name: Restore Nix fetcher cache
+        id: nix-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/nix
+          key: nix-fetch-macos-${{ hashFiles('flake.nix', 'flake.lock') }}
+          restore-keys: nix-fetch-macos-
+      # Start downloading the shell while the Cargo cache restores; the
+      # second nix develop below waits for it and decides success.
+      - name: Start realizing the locked Nix shell
+        run: nix develop .#ci --command true >"$RUNNER_TEMP/nix-shell.log" 2>&1 &
+      # Cargo still decides freshness; a cache only avoids recompiling. Each
+      # shard restores only its own builds, so only the shard that runs
+      # `cargo test` carries target/debug. flake.nix defines the shell
+      # environment that build scripts read; changing it rebuilt ring.
+      - name: Restore Cargo build cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/ci
+            target/debug
+          key: cargo-macos-shard-${{ matrix.shard }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}
+          restore-keys: cargo-macos-shard-${{ matrix.shard }}-
+      - name: Realize the locked Nix shell
+        run: nix develop .#ci --command true
+      - name: Save Nix fetcher cache
+        if: matrix.shard == 1 && steps.nix-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/nix
+          key: ${{ steps.nix-cache.outputs.cache-primary-key }}
+      # The flake shell selects the system Apple SDK and toolchain itself.
       - name: Run macOS regression gates with the system Apple SDK
-        shell: bash
-        run: |
-          system_sdk=$(env -u SDKROOT -u DEVELOPER_DIR \
-            /usr/bin/xcrun --sdk macosx --show-sdk-path)
-          HAMN_SYSTEM_SDKROOT="$system_sdk" \
-          nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
-          source scripts/ci/use-system-macos-sdk.sh
-          make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos
-          NIX_SHELL
+        run: nix develop .#ci --command make -j1 ci-macos-shard-${{ matrix.shard }}
+      - name: Save Cargo build cache
+        if: success() && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target/ci
+            target/debug
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
+  # The required check: every shard must succeed (cancelled or skipped fails).
+  macos:
+    name: macOS build and regression gates
+    needs: macos-shard
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every macOS shard to pass
+        env:
+          SHARDS: ${{ needs.macos-shard.result }}
+        run: test "$SHARDS" = success

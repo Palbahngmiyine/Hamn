@@ -11,7 +11,8 @@ use `hamn --headless` for JSON and NDJSON automation.
 - A kubeconfig for Kubernetes operations. These work independently of the VM.
 
 TUI container browsing requires Docker CLI; Kubernetes browsing requires kubectl.
-Headless SDK operations do not require these CLIs. Compose, buildx, and plugins
+Headless profile Docker and Kubernetes SDK operations do not require these CLIs;
+external Docker `--context` operations require Docker CLI. Compose, buildx, and plugins
 remain external installations. Docker Desktop is not required.
 
 ## Install
@@ -22,13 +23,24 @@ curl -fsSL --proto '=https' --tlsv1.2 \
   | /bin/bash
 ```
 
-```sh
-hamn
+It downloads Hamn and its Linux guest image, verifies both, and installs the
+`hamn` command in `~/.local/bin`. Example output:
+
+```text
+Installing Hamn 0.1.2 for Apple Silicon macOS...
+Downloading Hamn 0.1.2 (4.4 MiB)...
+Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
+Installing...
+Installed Hamn 0.1.2.
+Run hamn to get started. Update later with hamn upgrade.
 ```
 
-The release installer needs only macOS system tools and the downloaded Hamn
-executable. Python, Homebrew, Rust, and Xcode Command Line Tools are not required
-for installation or updates.
+If `~/.local/bin` is not on your PATH, the installer prints the one line to add
+for your shell. It needs only macOS system tools; Python, Homebrew, Rust, and
+Xcode Command Line Tools are not required for installation or updates.
+Hamn 0.1.2 and earlier cannot update themselves to this release: run the
+installer above once, which migrates the existing installation in place (see
+[installation](docs/INSTALLATION.md#installed-layout-and-earlier-installations)).
 
 For source builds, see [Development](docs/DEVELOPMENT.md).
 Signed release installation is described in [release setup](docs/RELEASE-SETUP.md).
@@ -49,6 +61,7 @@ hamn --headless capabilities
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
 hamn --headless vm start --profile work --yes
 hamn --headless docker containers list --profile work
+hamn --headless docker containers list --context remote
 hamn --headless docker containers logs api --profile work --follow
 hamn --headless k8s contexts list
 hamn --headless k8s pods list --context dev --namespace default
@@ -73,18 +86,11 @@ Explicit `docker context use` and `kubectl config` commands retain their normal
 write semantics. Headless authentication remains noninteractive; native CLI
 authentication runs according to the installed CLI in the embedded terminal.
 
-## Migration and data
+## Data
 
-This revision replaces the old CLI and JSON format. Managed K3s is removed.
-TUI entry performs no retirement. Legacy profiles retire on their next VM/Docker
-mutation; stopped profiles can retire during their next start.
-Read-only commands report pending migration without running it.
-
-**K3s cluster data and its dedicated local volumes are permanently deleted.**
-Rolling back the Hamn executable cannot recover them. Retirement preserves
-Docker's `moby` namespace, Docker volumes, shared containerd content storage,
-user mounts, and the original kubeconfig. Interrupted retirement resumes from
-its durable journal and does not mark a failed migration complete.
+Hamn no longer manages K3s. A profile that still has the removed `kubernetes`
+setting is refused until that mapping is deleted from its `config.yaml`; its
+old K3s data is not migrated.
 
 `vm delete` stops and hides a profile while preserving its disk and Docker data.
 `system uninstall --yes` permanently removes all Hamn profiles and managed
@@ -93,3 +99,34 @@ installation files. [Configuration](docs/CONFIGURATION.md) describes persistence
 Container creation, Compose, exec, Kubernetes apply, and port-forward use the
 installed native CLIs in the TUI. They are not added to the headless SDK operation
 set. Hamn does not provide an MCP server.
+
+
+## Upgrade
+
+```sh
+hamn upgrade           # install the latest release
+hamn upgrade --check   # only report whether an update is available
+```
+
+```text
+$ hamn upgrade
+Checking for updates...
+Updating Hamn 0.1.1 → 0.1.2...
+Downloading Hamn 0.1.2  100%  4.4 MiB / 4.4 MiB
+Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
+Installing...
+Updated Hamn 0.1.1 → 0.1.2. Existing VMs were not restarted.
+
+$ hamn upgrade
+Checking for updates...
+Hamn 0.1.2 is up to date.
+```
+
+Running VMs are not restarted and existing VM disks are not changed; the new guest
+image is used for VMs created afterwards. An interrupted download resumes
+automatically, or on the next `hamn upgrade`. Failures print one line with the
+reason and what to do next. Automation can use `hamn upgrade --output json` or
+`hamn --headless system upgrade --yes`. After a successful TUI session Hamn may
+mention a newer release; it never installs one by itself. Set
+`HAMN_NO_UPDATE_CHECK=1` to disable that check. See
+[installation](docs/INSTALLATION.md) for integrity, recovery and `--force`.

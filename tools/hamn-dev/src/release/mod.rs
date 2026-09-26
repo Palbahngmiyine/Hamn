@@ -1,0 +1,86 @@
+//! `hamn-dev release SUBCOMMAND ...`: release candidate assembly, evidence
+//! contracts, keyless promotion, Release Please coordination, repository
+//! preflight and the physical validation gate and harness. The Makefile's
+//! release targets and the release workflows call these subcommands; none
+//! of them is shipped.
+//!
+//! Drivers marked `(env)` below take their inputs (or those beyond their
+//! arguments) from environment variables, documented on each, and run in
+//! the checkout of the working directory; see [`checkout`].
+pub mod archive;
+pub mod candidate;
+pub mod checkout;
+pub mod contract;
+pub mod export;
+pub mod files;
+pub mod github;
+pub mod hosted;
+pub mod kubernetes;
+pub mod physical;
+pub mod preflight;
+pub mod process;
+pub mod publish;
+pub mod runtime;
+pub mod syntax;
+pub mod version;
+
+use std::path::Path;
+
+type Command = fn(&[String]) -> Result<(), String>;
+
+const COMMANDS: &[(&str, &str, Command)] = &[
+    ("build-candidate", "(env)", candidate::build_candidate),
+    ("hosted-validation", "(env)", hosted::hosted_validation),
+    ("gate", "(env)", physical::gate),
+    ("validate-candidate", "DIR TAG COMMIT TREE", validate_candidate),
+    ("publish", "STABLE_TAG RC_TAG COMMIT INPUT_DIR OUTPUT_DIR (env)", publish::publish),
+    ("verify-draft-release", "RELEASE_JSON TAG COMMIT", hosted::verify_draft_release),
+    ("physical-e2e", "[--help]", physical::main),
+    ("validate-physical-evidence", "CANDIDATE_JSON SHA256SUMS EVIDENCE RUN ATTEMPT", validate_physical_evidence),
+    (
+        "external-kubernetes-e2e",
+        "--hamn HAMN --context CONTEXT [--kubeconfig PATH] --output PATH [--host-network]",
+        kubernetes::main,
+    ),
+    ("resolve-release", "PREVIOUS_REF (env)", version::resolve_release),
+    ("recover-release", "(env)", version::recover_release),
+    ("check-version-state", "ROOT", version::check_version_state),
+    ("preflight-repository", "(env)", preflight::repository),
+    ("export-public-source", "OUTPUT_DIRECTORY", export::main),
+    ("complete-pr", "TAG COMMIT", github::complete_command),
+    ("pr-ready", "", github::ready_command),
+];
+
+pub fn run(args: &[String]) -> Result<(), String> {
+    let Some((name, rest)) = args.split_first() else {
+        return Err(usage());
+    };
+    match COMMANDS.iter().find(|(command, _, _)| command == name) {
+        Some((_, _, command)) => command(rest),
+        None => Err(format!("unknown release command {name:?}\n{}", usage())),
+    }
+}
+
+pub fn usage() -> String {
+    let lines: Vec<String> =
+        COMMANDS.iter().map(|(name, arguments, _)| format!("  hamn-dev release {name} {arguments}")).collect();
+    format!("release commands:\n{}", lines.join("\n"))
+}
+
+/// `validate-candidate DIR TAG COMMIT TREE`
+fn validate_candidate(args: &[String]) -> Result<(), String> {
+    let [directory, tag, commit, tree] = args else {
+        return Err("usage: hamn-dev release validate-candidate DIR TAG COMMIT TREE".into());
+    };
+    contract::validate_candidate(Path::new(directory), tag, commit, tree).map(drop)
+}
+
+/// `validate-physical-evidence CANDIDATE_JSON SHA256SUMS EVIDENCE RUN ATTEMPT`
+fn validate_physical_evidence(args: &[String]) -> Result<(), String> {
+    let [candidate, checksums, evidence, run, attempt] = args else {
+        return Err(
+            "usage: hamn-dev release validate-physical-evidence CANDIDATE_JSON SHA256SUMS EVIDENCE RUN ATTEMPT".into(),
+        );
+    };
+    contract::validate_physical(Path::new(candidate), Path::new(checksums), Path::new(evidence), run, attempt).map(drop)
+}

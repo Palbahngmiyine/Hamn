@@ -245,11 +245,11 @@ int vm_process_wait_spawn_transition(const struct profile *p,
     return -1;
 }
 
+/* One vmrun process: its PID, OS start token and executable LC_UUID. */
 struct process_identity {
     int pid;
     uint64_t start_sec;
     uint64_t start_usec;
-    int has_executable_identity;
     unsigned char executable_uuid[16];
 };
 
@@ -317,6 +317,15 @@ static int pid_file_write(const struct profile *p, int pid)
     return fs_write_file_atomic(path, text, (size_t)n, 0600);
 }
 
+/*
+ * vmrun.identity is one line, "pid start_sec start_usec executable_uuid\n"
+ * (the UUID as 32 lowercase hex digits), written by vmrun
+ * (cmd_vmrun.c identity_files_write) or by stored_identity_write() when a
+ * verified control socket is adopted; v0.0.1 already writes this form. Any
+ * other content, including the pre-release form without the UUID, is not an
+ * identity: callers treat it like a missing or corrupt file and never adopt,
+ * signal or clean up a process on its basis.
+ */
 static int stored_identity_read(const struct profile *p,
                                 struct process_identity *identity)
 {
@@ -327,17 +336,11 @@ static int stored_identity_read(const struct profile *p,
     unsigned long long sec = 0, usec = 0;
     char executable_uuid[40] = "";
     memset(identity, 0, sizeof(*identity));
-    int fields = sscanf(buf, "%d %llu %llu %39s %c", &identity->pid,
-                        &sec, &usec, executable_uuid, &extra);
-    if (fields == 4) {
-        if (executable_uuid_parse(executable_uuid,
-                                  identity->executable_uuid) != 0)
-            return -1;
-        identity->has_executable_identity = 1;
-    } else if (sscanf(buf, "%d %llu %llu %c", &identity->pid, &sec, &usec,
-                      &extra) != 3) {
+    if (sscanf(buf, "%d %llu %llu %39s %c", &identity->pid, &sec, &usec,
+               executable_uuid, &extra) != 4 ||
+        executable_uuid_parse(executable_uuid,
+                              identity->executable_uuid) != 0)
         return -1;
-    }
     if (identity->pid <= 1 || sec == 0 || usec >= 1000000)
         return -1;
     identity->start_sec = (uint64_t)sec;
@@ -348,22 +351,13 @@ static int stored_identity_read(const struct profile *p,
 static int stored_identity_write(const struct profile *p,
                                  const struct process_identity *identity)
 {
-    char path[1024], text[192];
+    char path[1024], text[192], executable_uuid[33];
     profile_path(p, "vmrun.identity", path, sizeof(path));
-    int n;
-    if (identity->has_executable_identity) {
-        char executable_uuid[33];
-        proc_executable_uuid_format(identity->executable_uuid,
-                                    executable_uuid);
-        n = snprintf(text, sizeof(text), "%d %llu %llu %s\n", identity->pid,
+    proc_executable_uuid_format(identity->executable_uuid, executable_uuid);
+    int n = snprintf(text, sizeof(text), "%d %llu %llu %s\n", identity->pid,
                      (unsigned long long)identity->start_sec,
                      (unsigned long long)identity->start_usec,
                      executable_uuid);
-    } else {
-        n = snprintf(text, sizeof(text), "%d %llu %llu\n", identity->pid,
-                     (unsigned long long)identity->start_sec,
-                     (unsigned long long)identity->start_usec);
-    }
     if (n <= 0 || n >= (int)sizeof(text))
         return -1;
     return fs_write_file_atomic(path, text, (size_t)n, 0600);
@@ -399,8 +393,7 @@ static int process_executable_identity_matches(
     const struct process_identity *identity)
 {
     unsigned char uuid[16];
-    return identity->has_executable_identity &&
-           proc_executable_identity(identity->pid, uuid) == 0 &&
+    return proc_executable_identity(identity->pid, uuid) == 0 &&
            memcmp(identity->executable_uuid, uuid, sizeof(uuid)) == 0;
 }
 
@@ -428,7 +421,6 @@ static void spawned_identity(const struct vm_spawned_process *spawned,
     identity->pid = spawned->pid;
     identity->start_sec = spawned->start_sec;
     identity->start_usec = spawned->start_usec;
-    identity->has_executable_identity = 1;
     memcpy(identity->executable_uuid, spawned->executable_uuid,
            sizeof(identity->executable_uuid));
 }
@@ -504,7 +496,6 @@ enum vm_spawn_process_result vm_process_wait_spawned(
             identity.pid == expected.pid &&
             identity.start_sec == expected.start_sec &&
             identity.start_usec == expected.start_usec &&
-            identity.has_executable_identity &&
             memcmp(identity.executable_uuid, expected.executable_uuid,
                    sizeof(identity.executable_uuid)) == 0 &&
             process_identity_exact(&identity) &&
@@ -567,9 +558,15 @@ int vm_process_abort_spawned(struct vm_spawned_process *spawned,
     return wait_spawned_gone(spawned, 30);
 }
 
+/*
+ * A vmrun control socket's status reply:
+ *   {"state":"running","pid":123,"start_sec":1,"start_usec":2}
+ * start_sec/start_usec are vmrun's own OS start token (v0.0.1 and later always
+ * report them). A reply without them cannot tell the owned supervisor from a
+ * process that reused its PID, so it is uncertain, never a match.
+ */
 struct ctl_status {
     int pid;
-    int has_start_identity;
     uint64_t start_sec;
     uint64_t start_usec;
 };
@@ -603,24 +600,17 @@ static enum ctl_status_result ctl_status_read(
     int valid = cJSON_IsString(state) && state->valuestring[0] &&
                 cJSON_IsNumber(pid) && pid->valuedouble >= 2 &&
                 pid->valuedouble <= INT_MAX &&
-                pid->valuedouble == (double)(int)pid->valuedouble;
-    int has_sec = cJSON_IsNumber(sec);
-    int has_usec = cJSON_IsNumber(usec);
-    if (has_sec != has_usec)
-        valid = 0;
-    if (has_sec &&
-        (sec->valuedouble < 0 ||
-         sec->valuedouble > 9007199254740991.0 ||
-         usec->valuedouble < 0 ||
-         usec->valuedouble >= 1000000 ||
-         sec->valuedouble != (double)(uint64_t)sec->valuedouble ||
-         usec->valuedouble != (double)(uint64_t)usec->valuedouble))
-        valid = 0;
+                pid->valuedouble == (double)(int)pid->valuedouble &&
+                cJSON_IsNumber(sec) && cJSON_IsNumber(usec) &&
+                sec->valuedouble >= 1 &&
+                sec->valuedouble <= 9007199254740991.0 &&
+                usec->valuedouble >= 0 && usec->valuedouble < 1000000 &&
+                sec->valuedouble == (double)(uint64_t)sec->valuedouble &&
+                usec->valuedouble == (double)(uint64_t)usec->valuedouble;
     if (valid) {
         status->pid = (int)pid->valuedouble;
-        status->has_start_identity = has_sec;
-        status->start_sec = has_sec ? (uint64_t)sec->valuedouble : 0;
-        status->start_usec = has_usec ? (uint64_t)usec->valuedouble : 0;
+        status->start_sec = (uint64_t)sec->valuedouble;
+        status->start_usec = (uint64_t)usec->valuedouble;
     }
     cJSON_Delete(j);
     return valid ? CTL_STATUS_VALID : CTL_STATUS_UNCERTAIN;
@@ -629,11 +619,8 @@ static enum ctl_status_result ctl_status_read(
 static int ctl_status_matches(const struct ctl_status *status,
                               const struct process_identity *identity)
 {
-    if (status->pid != identity->pid)
-        return 0;
-    if (!status->has_start_identity)
-        return 1; /* legacy vmrun: active ctl + persisted OS start identity */
-    return status->start_sec == identity->start_sec &&
+    return status->pid == identity->pid &&
+           status->start_sec == identity->start_sec &&
            status->start_usec == identity->start_usec;
 }
 
@@ -642,10 +629,8 @@ static int process_identity_same(const struct process_identity *a,
 {
     return a->pid == b->pid && a->start_sec == b->start_sec &&
            a->start_usec == b->start_usec &&
-           a->has_executable_identity == b->has_executable_identity &&
-           (!a->has_executable_identity ||
-            memcmp(a->executable_uuid, b->executable_uuid,
-                   sizeof(a->executable_uuid)) == 0);
+           memcmp(a->executable_uuid, b->executable_uuid,
+                  sizeof(a->executable_uuid)) == 0;
 }
 
 static enum vm_process_state ctl_identity_adopt(
@@ -658,10 +643,7 @@ static enum vm_process_state ctl_identity_adopt(
     if (proc_executable_identity(status->pid,
                                  identity.executable_uuid) != 0)
         return VM_PROCESS_UNVERIFIED;
-    identity.has_executable_identity = 1;
-    if (status->has_start_identity &&
-        (status->start_sec != identity.start_sec ||
-         status->start_usec != identity.start_usec))
+    if (!ctl_status_matches(status, &identity))
         return VM_PROCESS_UNVERIFIED;
 
     int stored_pid = -1;
@@ -771,8 +753,7 @@ static int verified_identity_is(const struct profile *p,
                                 const struct process_identity *identity)
 {
     if (!process_identity_alive(identity) ||
-        (identity->has_executable_identity &&
-         !process_executable_identity_matches(identity)))
+        !process_executable_identity_matches(identity))
         return 0;
     struct ctl_status status;
     enum ctl_status_result result = ctl_status_read(p, &status);
@@ -817,9 +798,6 @@ static int cleanup_stopped_state(const struct profile *p)
         unlink(path);
     }
 
-    /* Preserve user-selected external Docker and Kubernetes contexts. */
-    st.prev_docker_context[0] = '\0';
-    st.prev_kube_context[0] = '\0';
     snprintf(st.state, sizeof(st.state), "stopped");
     if (state_save(p, &st) != 0) {
         logerr("cannot persist stopped state");

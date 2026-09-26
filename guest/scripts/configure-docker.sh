@@ -16,7 +16,7 @@ DNSMASQ=${HAMN_DNSMASQ:-dnsmasq}
 HOST_DNS_SERVICE=${HAMN_HOST_DNS_SERVICE:-hamn-host-dns.service}
 HOST_DNS_CONFIG=${HAMN_HOST_DNS_CONFIG:-/etc/dnsmasq.d/hamn-host-dns.conf}
 HOST_DNS_UNIT=${HAMN_HOST_DNS_UNIT:-/etc/systemd/system/$HOST_DNS_SERVICE}
-PYTHON3=${HAMN_PYTHON3:-python3}
+GUEST_JSON=${HAMN_GUEST_JSON:-/usr/local/libexec/hamn/guest-json}
 EXTRA_JSON=${HAMN_DOCKER_EXTRA_JSON:-}
 
 atomic_replace() {
@@ -61,10 +61,10 @@ command -v "$DOCKER" >/dev/null 2>&1 || {
     echo "hamn: Docker client is missing from the guest image" >&2
     exit 1
 }
-command -v "$PYTHON3" >/dev/null 2>&1 || {
-    echo "hamn: Python 3 is missing from the guest image; it is required to validate Docker daemon settings" >&2
+if [ ! -f "$GUEST_JSON" ] || [ ! -x "$GUEST_JSON" ]; then
+    echo "hamn: guest-json is missing from the guest image; it validates Docker daemon settings" >&2
     exit 1
-}
+fi
 DNSMASQ_BIN=$(command -v "$DNSMASQ" 2>/dev/null || true)
 if [ -z "$DNSMASQ_BIN" ] || [ ! -x "$DNSMASQ_BIN" ]; then
     echo "hamn: dnsmasq is missing from the guest image; it provides host.docker.internal" >&2
@@ -82,7 +82,6 @@ install -d -m 0755 "$(dirname "$CONFIG")" "$DROPIN_DIR" \
 
 # Docker Engine does not create host.docker.internal on a generic Linux host.
 # The guest DNS service owns the conventional name for every Docker network.
-# host.hamn.internal stays as a one-release compatibility alias.
 host_dns_config_tmp=$(mktemp "${HOST_DNS_CONFIG}.XXXXXX")
 trap 'rm -f "$host_dns_config_tmp"' EXIT
 cat >"$host_dns_config_tmp" <<EOF
@@ -90,7 +89,6 @@ bind-dynamic
 listen-address=172.17.0.1
 no-hosts
 address=/host.docker.internal/$gateway
-address=/host.hamn.internal/$gateway
 EOF
 host_dns_config_changed=0
 if replace_if_changed "$host_dns_config_tmp" "$HOST_DNS_CONFIG"; then
@@ -128,63 +126,10 @@ trap - EXIT
 
 config_tmp=$(mktemp "${CONFIG}.XXXXXX")
 trap 'rm -f "$config_tmp"' EXIT
-if ! "$PYTHON3" - "$CONTAINERD_SOCKET" "$gateway" "$EXTRA_JSON" \
-    >"$config_tmp" <<'PY'
-import json
-import sys
-
-
-def reject_duplicate_keys(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate JSON key: " + key)
-        result[key] = value
-    return result
-
-
-def reject_constant(value):
-    raise ValueError("non-finite JSON value: " + value)
-
-
-containerd_socket, gateway, extra_text = sys.argv[1:]
-try:
-    extra = (json.loads(extra_text, object_pairs_hook=reject_duplicate_keys,
-                        parse_constant=reject_constant)
-             if extra_text else {})
-except (TypeError, ValueError, json.JSONDecodeError) as error:
-    print("hamn: docker.daemonJson must be one strict JSON object: " + str(error),
-          file=sys.stderr)
-    sys.exit(1)
-
-if not isinstance(extra, dict):
-    print("hamn: docker.daemonJson must be one JSON object", file=sys.stderr)
-    sys.exit(1)
-
-for reserved in ("containerd", "host-gateway-ip", "hosts", "data-root", "exec-root",
-                 "dns", "bip", "bridge", "fixed-cidr", "default-address-pools"):
-    if reserved in extra:
-        print("hamn: docker.daemonJson cannot override Hamn-managed key: " + reserved,
-              file=sys.stderr)
-        sys.exit(1)
-
-features = extra.pop("features", {})
-if not isinstance(features, dict):
-    print("hamn: docker.daemonJson.features must be a JSON object", file=sys.stderr)
-    sys.exit(1)
-if "buildkit" in features and features["buildkit"] is not True:
-    print("hamn: docker.daemonJson.features.buildkit must remain true", file=sys.stderr)
-    sys.exit(1)
-features["buildkit"] = True
-
-extra["containerd"] = containerd_socket
-extra["features"] = features
-extra["bip"] = "172.17.0.1/16"
-extra["dns"] = ["172.17.0.1"]
-extra["host-gateway-ip"] = gateway
-json.dump(extra, sys.stdout, indent=2, sort_keys=True)
-print()
-PY
+# guest-json enforces strict daemon.json input, rejects Hamn-managed keys and
+# writes the merged settings as sorted, indented JSON.
+if ! "$GUEST_JSON" docker-daemon "$CONTAINERD_SOCKET" "$gateway" "$EXTRA_JSON" \
+    >"$config_tmp"
 then
     echo "hamn: cannot validate Docker daemon settings" >&2
     exit 1
@@ -240,7 +185,6 @@ fi
 
 for _ in $(seq 1 50); do
     if "$DOCKER" version --format '{{.Server.Version}}' >/dev/null 2>&1; then
-        echo "hamn: warning: host.hamn.internal is a 0.0.1 compatibility alias and will be removed in the next release; use host.docker.internal" >&2
         exit 0
     fi
     sleep 0.1

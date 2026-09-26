@@ -1,11 +1,44 @@
-use crate::{model::{Failure, Result}, preferences::Workspace, tui_state::{State, split_command}};
+use crate::{
+    model::{Failure, Result},
+    preferences::Workspace,
+    tui_state::{State, split_command},
+};
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
 
 // Connection and authentication options must survive both command parsing and
 // selection-derived actions. Keep one vocabulary for those two boundaries.
-pub(crate) const KUBE_CONNECTION_VALUES: &[&str] = &["--context", "--kubeconfig", "--namespace", "-n", "--cluster", "--user", "--server", "-s", "--token", "--certificate-authority", "--client-certificate", "--client-key", "--request-timeout", "--as", "--as-group", "--as-uid", "--as-user-extra", "--cache-dir", "--tls-server-name", "--username", "--password", "--proxy-url", "--kuberc"];
-pub(crate) const KUBE_CONNECTION_FLAGS: &[&str] = &["--insecure-skip-tls-verify", "--disable-compression", "--warnings-as-errors", "--match-server-version"];
+pub(crate) const KUBE_CONNECTION_VALUES: &[&str] = &[
+    "--context",
+    "--kubeconfig",
+    "--namespace",
+    "-n",
+    "--cluster",
+    "--user",
+    "--server",
+    "-s",
+    "--token",
+    "--certificate-authority",
+    "--client-certificate",
+    "--client-key",
+    "--request-timeout",
+    "--as",
+    "--as-group",
+    "--as-uid",
+    "--as-user-extra",
+    "--cache-dir",
+    "--tls-server-name",
+    "--username",
+    "--password",
+    "--proxy-url",
+    "--kuberc",
+];
+pub(crate) const KUBE_CONNECTION_FLAGS: &[&str] = &[
+    "--insecure-skip-tls-verify",
+    "--disable-compression",
+    "--warnings-as-errors",
+    "--match-server-version",
+];
 
 #[derive(Clone, Debug)]
 pub struct Invocation {
@@ -18,30 +51,68 @@ pub struct Invocation {
     pub body: Option<Vec<u8>>,
 }
 impl Invocation {
-    pub fn program(&self) -> &'static str { if self.workspace == Workspace::Containers { "docker" } else { "kubectl" } }
+    pub fn program(&self) -> &'static str {
+        if self.workspace == Workspace::Containers {
+            "docker"
+        } else {
+            "kubectl"
+        }
+    }
     pub fn command(&self, structured: bool) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(self.program());
         command.args(&self.args);
         if structured && self.resource.is_some() {
-            if self.workspace == Workspace::Containers { command.args(["--format", "{{json .}}"]); }
-            else { command.args(["-o", "json"]); }
+            if self.workspace == Workspace::Containers {
+                command.args([
+                    "--format",
+                    if self.resource.as_deref() == Some("projects") {
+                        "json"
+                    } else {
+                        "{{json .}}"
+                    },
+                ]);
+                if matches!(
+                    self.resource.as_deref(),
+                    Some("containers" | "images" | "networks")
+                ) {
+                    command.arg("--no-trunc");
+                }
+            } else {
+                command.args(["-o", "json"]);
+            }
         }
         command
     }
 }
 fn has(args: &[String], names: &[&str], workspace: Workspace) -> bool {
-    crate::native_flags::options(args, workspace).iter().any(|s| names.iter().any(|n|
-        s == n || s.starts_with(&format!("{n}=")) || (n.len() == 2 && s.starts_with(n) && s.len() > 2)))
+    crate::native_flags::options(args, workspace)
+        .iter()
+        .any(|s| {
+            names.iter().any(|n| {
+                s == n
+                    || s.starts_with(&format!("{n}="))
+                    || (n.len() == 2 && s.starts_with(n) && s.len() > 2)
+            })
+        })
 }
 fn kube_all_namespaces(inspected: &[String]) -> bool {
     let root = crate::native_flags::command(inspected, Workspace::Kubernetes);
     let mut enabled = false;
     let mut args = inspected.iter();
     while let Some(arg) = args.next() {
-        if arg == "--" { break; }
-        if crate::native_flags::takes_value_in(arg, Workspace::Kubernetes, root) { args.next(); continue; }
-        if ["--all-namespaces", "-A"].contains(&arg.as_str()) { enabled = true; }
-        else if let Some(value) = arg.strip_prefix("--all-namespaces=").or_else(|| arg.strip_prefix("-A=")) {
+        if arg == "--" {
+            break;
+        }
+        if crate::native_flags::takes_value_in(arg, Workspace::Kubernetes, root) {
+            args.next();
+            continue;
+        }
+        if ["--all-namespaces", "-A"].contains(&arg.as_str()) {
+            enabled = true;
+        } else if let Some(value) = arg
+            .strip_prefix("--all-namespaces=")
+            .or_else(|| arg.strip_prefix("-A="))
+        {
             enabled = docker_bool(value);
         }
     }
@@ -56,33 +127,102 @@ pub(crate) fn command_index(args: &[String], workspace: Workspace) -> Option<usi
     let mut i = 0;
     while i < args.len() {
         let word = &args[i];
-        if !word.starts_with('-') { return Some(i); }
-        if values.contains(&word.as_str()) || (workspace == Workspace::Kubernetes && crate::native_flags::KUBE_GLOBAL_VALUES.contains(&word.as_str())) { i += 2; }
-        else if word.contains('=') || values.iter().any(|n| n.len() == 2 && word.starts_with(n) && word.len() > 2) ||
-            ["--debug", "-D", "--tls", "--tlsverify"].contains(&word.as_str()) || KUBE_CONNECTION_FLAGS.contains(&word.as_str()) { i += 1; }
-        else if let Some(parts) = crate::native_flags::short_group(word, workspace) {
-            i += if parts.last().is_some_and(|last| crate::native_flags::takes_value(last, workspace)) { 2 } else { 1 };
-        } else { return None; }
+        if !word.starts_with('-') {
+            return Some(i);
+        }
+        if values.contains(&word.as_str())
+            || (workspace == Workspace::Kubernetes
+                && crate::native_flags::KUBE_GLOBAL_VALUES.contains(&word.as_str()))
+        {
+            i += 2;
+        } else if word.contains('=')
+            || values
+                .iter()
+                .any(|n| n.len() == 2 && word.starts_with(n) && word.len() > 2)
+            || ["--debug", "-D", "--tls", "--tlsverify"].contains(&word.as_str())
+            || KUBE_CONNECTION_FLAGS.contains(&word.as_str())
+        {
+            i += 1;
+        } else if let Some(parts) = crate::native_flags::short_group(word, workspace) {
+            i += if parts
+                .last()
+                .is_some_and(|last| crate::native_flags::takes_value(last, workspace))
+            {
+                2
+            } else {
+                1
+            };
+        } else {
+            return None;
+        }
     }
     None
 }
 fn resource(args: &[String], workspace: Workspace) -> Option<String> {
-    if has(args, &["--help", "-h"], workspace) || crate::native_flags::options(args, workspace).iter().any(|s| s == "--") { return None; }
+    if has(args, &["--help", "-h"], workspace)
+        || crate::native_flags::options(args, workspace)
+            .iter()
+            .any(|s| s == "--")
+    {
+        return None;
+    }
     let i = command_index(args, workspace)?;
     let words: Vec<_> = args[i..].iter().map(String::as_str).collect();
     if workspace == Workspace::Containers {
-        if has(&args[i..], &["--format", "--quiet", "-q", "--digests", "--no-trunc", "--tree"], workspace) { return None; }
+        if has(
+            &args[i..],
+            &[
+                "--format",
+                "--quiet",
+                "-q",
+                "--digests",
+                "--no-trunc",
+                "--tree",
+            ],
+            workspace,
+        ) {
+            return None;
+        }
         match words.as_slice() {
             ["ps", ..] | ["container", "ls" | "ps" | "list", ..] => Some("containers".into()),
             ["images", ..] | ["image", "ls" | "list", ..] => Some("images".into()),
+            ["compose", "ls" | "list", ..] => Some("projects".into()),
             ["volume", "ls" | "list", ..] => Some("volumes".into()),
             ["network", "ls" | "list", ..] => Some("networks".into()),
             _ => None,
         }
     } else {
-        if has(args, &["--output", "-o", "--watch", "-w", "--watch-only", "--raw", "--output-watch-events", "--no-headers", "--show-labels", "--label-columns", "-L", "--show-kind"], workspace) || kube_short_output(args) { return None; }
+        if has(
+            args,
+            &[
+                "--output",
+                "-o",
+                "--watch",
+                "-w",
+                "--watch-only",
+                "--raw",
+                "--output-watch-events",
+                "--no-headers",
+                "--show-labels",
+                "--label-columns",
+                "-L",
+                "--show-kind",
+            ],
+            workspace,
+        ) || kube_short_output(args)
+        {
+            return None;
+        }
         match words.as_slice() {
-            ["get", resource, ..] if ["pods", "po", "pod", "deployments", "deploy", "deployment", "services", "svc", "service", "namespaces", "ns", "nodes", "no", "statefulsets", "sts", "daemonsets", "ds", "events", "jobs", "cronjobs", "ingresses", "pvcs"].contains(resource) => Some((*resource).into()),
+            ["get", resource, ..]
+                if !resource.is_empty()
+                    && resource
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b".-".contains(&c))
+                    && !resource.starts_with('-') =>
+            {
+                Some((*resource).into())
+            }
             _ => None,
         }
     }
@@ -92,21 +232,49 @@ fn resource(args: &[String], workspace: Workspace) -> Option<String> {
 fn kube_short_output(args: &[String]) -> bool {
     let mut skip_value = false;
     for arg in args {
-        if skip_value { skip_value = false; continue; }
-        if arg == "--" { break; }
-        if KUBE_CONNECTION_VALUES.contains(&arg.as_str()) || ["--selector", "--field-selector", "--filename", "--kustomize", "--sort-by", "--template", "--chunk-size", "--subresource", "--v", "--vmodule", "--profile", "--profile-output"].contains(&arg.as_str()) {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if arg == "--" {
+            break;
+        }
+        if KUBE_CONNECTION_VALUES.contains(&arg.as_str())
+            || [
+                "--selector",
+                "--field-selector",
+                "--filename",
+                "--kustomize",
+                "--sort-by",
+                "--template",
+                "--chunk-size",
+                "--subresource",
+                "--v",
+                "--vmodule",
+                "--profile",
+                "--profile-output",
+            ]
+            .contains(&arg.as_str())
+        {
             skip_value = true;
         } else if arg.starts_with('-') && !arg.starts_with("--") {
             for (offset, flag) in arg[1..].char_indices() {
                 let rest = &arg[offset + 1 + flag.len_utf8()..];
-                if ['o', 'w', 'L', 'h'].contains(&flag) { return true; }
-                if ['n', 's', 'l', 'f', 'k', 'v'].contains(&flag) {
-                    skip_value = rest.is_empty(); break;
+                if ['o', 'w', 'L', 'h'].contains(&flag) {
+                    return true;
                 }
-                if rest.starts_with('=') { break; }
+                if ['n', 's', 'l', 'f', 'k', 'v'].contains(&flag) {
+                    skip_value = rest.is_empty();
+                    break;
+                }
+                if rest.starts_with('=') {
+                    break;
+                }
                 // Unknown option groups are passed through without injecting
                 // output flags whose interaction cannot be established here.
-                if flag != 'A' { return true; }
+                if flag != 'A' {
+                    return true;
+                }
             }
         }
     }
@@ -114,32 +282,129 @@ fn kube_short_output(args: &[String]) -> bool {
 }
 pub(crate) fn installed_kubectl_plugin(args: &[String], index: Option<usize>) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    let Some(index) = index else { return false; };
-    let create_extension = args[index] == "create" && args.get(index + 1).is_some_and(|name|
-        !name.starts_with('-') && !["clusterrole", "clusterrolebinding", "configmap", "cm",
-            "cronjob", "cj", "deployment", "deploy", "ingress", "ing", "job", "namespace", "ns",
-            "poddisruptionbudget", "pdb", "priorityclass", "pc", "quota", "resourcequota",
-            "role", "rolebinding", "secret", "service", "svc", "serviceaccount", "sa", "token"]
-            .contains(&name.as_str()));
+    let Some(index) = index else {
+        return false;
+    };
+    let create_extension = args[index] == "create"
+        && args.get(index + 1).is_some_and(|name| {
+            !name.starts_with('-')
+                && ![
+                    "clusterrole",
+                    "clusterrolebinding",
+                    "configmap",
+                    "cm",
+                    "cronjob",
+                    "cj",
+                    "deployment",
+                    "deploy",
+                    "ingress",
+                    "ing",
+                    "job",
+                    "namespace",
+                    "ns",
+                    "poddisruptionbudget",
+                    "pdb",
+                    "priorityclass",
+                    "pc",
+                    "quota",
+                    "resourcequota",
+                    "role",
+                    "rolebinding",
+                    "secret",
+                    "service",
+                    "svc",
+                    "serviceaccount",
+                    "sa",
+                    "token",
+                ]
+                .contains(&name.as_str())
+        });
     // These are kubectl's built-in command roots, not an implementation of their flags.
-    if !create_extension && ["annotate", "api-resources", "api-versions", "apply", "attach", "auth", "autoscale", "certificate", "cluster-info", "completion", "config", "cordon", "cp", "create", "debug", "delete", "describe", "diff", "drain", "edit", "events", "exec", "explain", "expose", "get", "help", "kuberc", "kustomize", "label", "logs", "options", "patch", "plugin", "port-forward", "proxy", "replace", "rollout", "run", "scale", "set", "taint", "top", "uncordon", "version", "wait"].contains(&args[index].as_str()) { return false; }
-    let Some(path) = std::env::var_os("PATH") else { return false; };
+    if !create_extension
+        && [
+            "annotate",
+            "api-resources",
+            "api-versions",
+            "apply",
+            "attach",
+            "auth",
+            "autoscale",
+            "certificate",
+            "cluster-info",
+            "completion",
+            "config",
+            "cordon",
+            "cp",
+            "create",
+            "debug",
+            "delete",
+            "describe",
+            "diff",
+            "drain",
+            "edit",
+            "events",
+            "exec",
+            "explain",
+            "expose",
+            "get",
+            "help",
+            "kuberc",
+            "kustomize",
+            "label",
+            "logs",
+            "options",
+            "patch",
+            "plugin",
+            "port-forward",
+            "proxy",
+            "replace",
+            "rollout",
+            "run",
+            "scale",
+            "set",
+            "taint",
+            "top",
+            "uncordon",
+            "version",
+            "wait",
+        ]
+        .contains(&args[index].as_str())
+    {
+        return false;
+    }
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
     let mut candidate = String::from("kubectl");
     for part in &args[index..] {
-        if part.starts_with('-') || part.contains('/') { break; }
-        candidate.push('-'); candidate.push_str(&part.replace('-', "_"));
+        if part.starts_with('-') || part.contains('/') {
+            break;
+        }
+        candidate.push('-');
+        candidate.push_str(&part.replace('-', "_"));
         // create is the only built-in root that permits new plugin subcommands.
         // A kubectl-create executable cannot replace the built-in root itself.
-        if create_extension && candidate == "kubectl-create" { continue; }
+        if create_extension && candidate == "kubectl-create" {
+            continue;
+        }
         // kubectl also accepts literal hyphens for plugin subcommands.
         for name in [candidate.clone(), candidate.replace('_', "-")] {
-            if std::env::split_paths(&path).any(|dir| std::fs::metadata(dir.join(&name)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)) { return true; }
+            if std::env::split_paths(&path).any(|dir| {
+                std::fs::metadata(dir.join(&name))
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            }) {
+                return true;
+            }
         }
     }
     false
 }
 pub fn command_workspace(text: &str, fallback: Workspace) -> Workspace {
-    match split_command(text).ok().and_then(|words| words.first().cloned()).as_deref() {
+    match split_command(text)
+        .ok()
+        .and_then(|words| words.first().cloned())
+        .as_deref()
+    {
         Some("docker" | "vm") => Workspace::Containers,
         Some("kubectl" | "k8s" | "contexts" | "ctx") => Workspace::Kubernetes,
         _ => fallback,
@@ -147,56 +412,144 @@ pub fn command_workspace(text: &str, fallback: Workspace) -> Workspace {
 }
 pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     let mut args = split_command(text)?;
-    let explicit_program = args.first().is_some_and(|s| s == "docker" || s == "kubectl");
+    let explicit_program = args
+        .first()
+        .is_some_and(|s| s == "docker" || s == "kubectl");
     let workspace = match args.first().map(String::as_str) {
-        Some("docker") => { args.remove(0); Workspace::Containers },
-        Some("kubectl") => { args.remove(0); Workspace::Kubernetes },
+        Some("docker") => {
+            args.remove(0);
+            Workspace::Containers
+        }
+        Some("kubectl") => {
+            args.remove(0);
+            Workspace::Kubernetes
+        }
         _ => state.workspace,
     };
-    if args.is_empty() && !explicit_program { args.push(if workspace == Workspace::Containers { "ps" } else { "get" }.into());
-        if workspace == Workspace::Kubernetes { args.push("pods".into()); } }
+    if args.is_empty() && !explicit_program {
+        args.push(
+            if workspace == Workspace::Containers {
+                "ps"
+            } else {
+                "get"
+            }
+            .into(),
+        );
+        if workspace == Workspace::Kubernetes {
+            args.push("pods".into());
+        }
+    }
     // Installed plugins own their original argv before convenience aliases are
     // considered; an alias must never turn a plugin into a different operation.
-    let plugin = workspace == Workspace::Kubernetes && installed_kubectl_plugin(&args, command_index(&args, workspace));
+    let plugin = workspace == Workspace::Kubernetes
+        && installed_kubectl_plugin(&args, command_index(&args, workspace));
     if workspace == Workspace::Containers {
         match args.first().map(String::as_str).unwrap_or("") {
             "containers" => args[0] = "ps".into(),
-            "volumes" => args.splice(0..1, ["volume".into(), "ls".into()]).for_each(drop),
-            "networks" => args.splice(0..1, ["network".into(), "ls".into()]).for_each(drop),
-            _ => {},
+            "volumes" => args
+                .splice(0..1, ["volume".into(), "ls".into()])
+                .for_each(drop),
+            "networks" => args
+                .splice(0..1, ["network".into(), "ls".into()])
+                .for_each(drop),
+            _ => {}
         }
-    } else if !plugin && ["pods", "po", "deployments", "deploy", "services", "svc", "nodes", "namespaces", "ns", "statefulsets", "sts", "daemonsets", "ds", "jobs", "cronjobs", "ingresses", "pvcs"].contains(&args.first().map(String::as_str).unwrap_or("")) {
+    } else if !plugin
+        && [
+            "pods",
+            "po",
+            "deployments",
+            "deploy",
+            "services",
+            "svc",
+            "nodes",
+            "namespaces",
+            "ns",
+            "statefulsets",
+            "sts",
+            "daemonsets",
+            "ds",
+            "jobs",
+            "cronjobs",
+            "ingresses",
+            "pvcs",
+        ]
+        .contains(&args.first().map(String::as_str).unwrap_or(""))
+    {
         args.insert(0, "get".into());
     }
     let index = command_index(&args, workspace);
     let inspected = crate::native_flags::inspect(&args, workspace);
     let all_namespaces = workspace == Workspace::Kubernetes && kube_all_namespaces(&inspected);
     let inspected_index = command_index(&inspected, workspace);
-    let config_command = index.is_some_and(|i| args[i] == if workspace == Workspace::Containers { "context" } else { "config" });
-    let explicit = if workspace == Workspace::Containers { has(&inspected[..inspected_index.unwrap_or(inspected.len())], &["--context", "-c", "--host", "-H", "--config"], workspace) }
-        else { has(&inspected, &["--context", "--kubeconfig"], workspace) };
+    let config_command = index.is_some_and(|i| {
+        args[i]
+            == if workspace == Workspace::Containers {
+                "context"
+            } else {
+                "config"
+            }
+    });
+    let explicit = if workspace == Workspace::Containers {
+        has(
+            &inspected[..inspected_index.unwrap_or(inspected.len())],
+            &["--context", "-c", "--host", "-H", "--config"],
+            workspace,
+        )
+    } else {
+        has(&inspected, &["--context", "--kubeconfig"], workspace)
+    };
     let mut defaults = Vec::new();
     let mut hamn_profile = None;
     if !config_command && !explicit && !plugin {
         if workspace == Workspace::Containers {
-            if let Some(context) = &state.docker_context { defaults.extend(["--context".into(), context.clone()]); }
-            else {
-                let home = std::env::var("HOME").map_err(|e| Failure::new("configurationInvalid", e))?;
-                hamn_profile = Some(state.request.profile.clone().unwrap_or_else(|| "default".into()));
-                defaults.extend(["--host".into(), format!("unix://{home}/.hamn/{}/docker.sock", state.request.profile.as_deref().unwrap_or("default"))]);
+            if let Some(context) = &state.docker_context {
+                defaults.extend(["--context".into(), context.clone()]);
+            } else {
+                let home =
+                    std::env::var("HOME").map_err(|e| Failure::new("configurationInvalid", e))?;
+                hamn_profile = Some(
+                    state
+                        .request
+                        .profile
+                        .clone()
+                        .unwrap_or_else(|| "default".into()),
+                );
+                defaults.extend([
+                    "--host".into(),
+                    format!(
+                        "unix://{home}/.hamn/{}/docker.sock",
+                        state.request.profile.as_deref().unwrap_or("default")
+                    ),
+                ]);
             }
         } else {
-            if let Some(context) = &state.request.context { defaults.extend(["--context".into(), context.clone()]); }
+            if let Some(context) = &state.request.context {
+                defaults.extend(["--context".into(), context.clone()]);
+            }
             if !has(&inspected, &["--namespace", "-n"], workspace) && !all_namespaces {
-                if let Some(namespace) = &state.request.namespace { defaults.extend(["--namespace".into(), namespace.clone()]); }
+                if let Some(namespace) = &state.request.namespace {
+                    defaults.extend(["--namespace".into(), namespace.clone()]);
+                }
             }
         }
     }
     if workspace == Workspace::Kubernetes && !plugin && !has(&args, &["--kubeconfig"], workspace) {
-        if let Some(config) = &state.request.kubeconfig { defaults.extend(["--kubeconfig".into(), config.clone()]); }
+        if let Some(config) = &state.request.kubeconfig {
+            defaults.extend(["--kubeconfig".into(), config.clone()]);
+        }
     }
-    if workspace == Workspace::Containers && !config_command && !has(&args[..index.unwrap_or(args.len())], &["--config"], workspace) {
-        if let Some(config) = &state.docker_config { defaults.splice(0..0, ["--config".into(), config.clone()]); }
+    if workspace == Workspace::Containers
+        && !config_command
+        && !has(
+            &args[..index.unwrap_or(args.len())],
+            &["--config"],
+            workspace,
+        )
+    {
+        if let Some(config) = &state.docker_config {
+            defaults.splice(0..0, ["--config".into(), config.clone()]);
+        }
     }
     defaults.extend(args);
     let resource = resource(&defaults, workspace);
@@ -205,15 +558,58 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     let connections = crate::native_actions::connections(&defaults, workspace, None);
     let mut skip_value = false;
     for (i, arg) in connections.iter().enumerate() {
-        if skip_value { skip_value = false; continue; }
-        for name in ["--context", "-c", "--host", "-H", "--config", "--namespace", "-n", "--kubeconfig", "--cluster", "--server", "-s", "--tls-server-name"] {
-            if arg == name { target.push(format!("{name} {}", connections.get(i + 1).map(String::as_str).unwrap_or(""))); }
-            else if arg.starts_with(&format!("{name}=")) || (name.len() == 2 && arg.starts_with(name) && arg.len() > 2) { target.push(arg.clone()); }
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        for name in [
+            "--context",
+            "-c",
+            "--host",
+            "-H",
+            "--config",
+            "--namespace",
+            "-n",
+            "--kubeconfig",
+            "--cluster",
+            "--server",
+            "-s",
+            "--tls-server-name",
+        ] {
+            if arg == name {
+                target.push(format!(
+                    "{name} {}",
+                    connections.get(i + 1).map(String::as_str).unwrap_or("")
+                ));
+            } else if arg.starts_with(&format!("{name}="))
+                || (name.len() == 2 && arg.starts_with(name) && arg.len() > 2)
+            {
+                target.push(arg.clone());
+            }
         }
         skip_value = crate::native_flags::takes_value(arg, workspace);
     }
-    if all_namespaces { target.push("all namespaces".into()); }
-    Ok(Invocation { workspace, hamn_profile, body: None, args: defaults, target: if plugin { format!("Plugin-defined target / inherited CLI configuration {}", target.join("  ")) } else if target.is_empty() { "CLI environment / configuration".into() } else { target.join("  ") }, resource, reset_selection: config_command })
+    if all_namespaces {
+        target.push("all namespaces".into());
+    }
+    Ok(Invocation {
+        workspace,
+        hamn_profile,
+        body: None,
+        args: defaults,
+        target: if plugin {
+            format!(
+                "Plugin-defined target / inherited CLI configuration {}",
+                target.join("  ")
+            )
+        } else if target.is_empty() {
+            "CLI environment / configuration".into()
+        } else {
+            target.join("  ")
+        },
+        resource,
+        reset_selection: config_command,
+    })
 }
 fn docker_list_bool(invocation: &Invocation, name: &str, short: char) -> (bool, Option<usize>) {
     // Docker/pflag accepts grouped short flags and repeated booleans (last wins).
@@ -222,56 +618,134 @@ fn docker_list_bool(invocation: &Invocation, name: &str, short: char) -> (bool, 
     let mut showing_all = false;
     let mut skip_value = false;
     let mut override_at = None;
-    let index = command_index(&invocation.args, invocation.workspace).unwrap_or(invocation.args.len());
+    let index =
+        command_index(&invocation.args, invocation.workspace).unwrap_or(invocation.args.len());
     for (position, arg) in invocation.args.iter().enumerate().skip(index) {
-        if skip_value { skip_value = false; continue; }
-        if arg == "--" { break; }
-        if arg == name { showing_all = true; }
-        else if let Some(value) = arg.strip_prefix(&format!("{name}=")) { showing_all = docker_bool(value); override_at = Some(position); }
-        else if ["--filter", "--last", "--format", "--context", "--host", "--config", "--log-level", "--tlscacert", "--tlscert", "--tlskey"].contains(&arg.as_str()) {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if arg == "--" {
+            break;
+        }
+        if arg == name {
+            showing_all = true;
+        } else if let Some(value) = arg.strip_prefix(&format!("{name}=")) {
+            showing_all = docker_bool(value);
+            override_at = Some(position);
+        } else if [
+            "--filter",
+            "--last",
+            "--format",
+            "--context",
+            "--host",
+            "--config",
+            "--log-level",
+            "--tlscacert",
+            "--tlscert",
+            "--tlskey",
+        ]
+        .contains(&arg.as_str())
+        {
             skip_value = true;
         } else if arg.starts_with('-') && !arg.starts_with("--") {
             for (offset, flag) in arg[1..].char_indices() {
                 let rest = &arg[offset + 1 + flag.len_utf8()..];
                 if ['f', 'n', 'c', 'H'].contains(&flag) {
-                    skip_value = rest.is_empty(); break;
+                    skip_value = rest.is_empty();
+                    break;
                 }
-                if flag == short { showing_all = rest.strip_prefix('=').map(docker_bool).unwrap_or(true); }
-                if rest.starts_with('=') { break; }
+                if flag == short {
+                    showing_all = rest.strip_prefix('=').map(docker_bool).unwrap_or(true);
+                }
+                if rest.starts_with('=') {
+                    break;
+                }
                 // Unknown shorthands remain the CLI's responsibility, including
                 // their value consumption. Never interpret their suffix as -a.
-                if !['a', 's', 'l', 'q', 'D'].contains(&flag) { break; }
+                if !['a', 's', 'l', 'q', 'D'].contains(&flag) {
+                    break;
+                }
             }
         }
     }
     (showing_all, override_at)
 }
-pub fn show_size(invocation: &Invocation) -> bool { docker_list_bool(invocation, "--size", 's').0 }
+pub fn show_size(invocation: &Invocation) -> bool {
+    docker_list_bool(invocation, "--size", 's').0
+}
 pub fn toggle_all(invocation: &mut Invocation) {
     let (showing_all, override_at) = docker_list_bool(invocation, "--all", 'a');
     let value = format!("--all={}", !showing_all);
     if override_at.is_some_and(|position| position + 1 == invocation.args.len()) {
         *invocation.args.last_mut().unwrap() = value;
-    } else { invocation.args.push(value); }
+    } else {
+        invocation.args.push(value);
+    }
 }
-fn docker_bool(value: &str) -> bool { ["1", "t", "T", "true", "TRUE", "True"].contains(&value) }
+fn docker_bool(value: &str) -> bool {
+    ["1", "t", "T", "true", "TRUE", "True"].contains(&value)
+}
 pub async fn query(invocation: &Invocation) -> Result<Value> {
-    let (mut child, stdout, stderr) = crate::query_process::QueryProcess::spawn(invocation.command(true))
-        .map_err(|e| Failure::new("cliUnavailable", format!("{}: {e}", invocation.program())))?;
+    let (mut child, stdout, stderr) =
+        crate::query_process::QueryProcess::spawn(invocation.command(true)).map_err(|e| {
+            Failure::new("cliUnavailable", format!("{}: {e}", invocation.program()))
+        })?;
     async fn read(reader: impl tokio::io::AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
-        let mut bytes = Vec::new(); reader.take(16 * 1024 * 1024 + 1).read_to_end(&mut bytes).await?;
-        if bytes.len() > 16 * 1024 * 1024 { return Err(std::io::Error::other("CLI output exceeds 16 MiB")); }
+        let mut bytes = Vec::new();
+        reader
+            .take(16 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() > 16 * 1024 * 1024 {
+            return Err(std::io::Error::other(
+                "CLI output exceeds 16 MiB; / filters fetched rows only. Narrow with --namespace, --selector or --field-selector.",
+            ));
+        }
         Ok(bytes)
     }
-    let (status, out, err) = tokio::try_join!(child.wait(), read(stdout), read(stderr)).map_err(|e| Failure::new("cliError", e))?;
-    if !status.success() { return Err(Failure::new("cliError", format!("{} exited {}: {}", invocation.program(), status, String::from_utf8_lossy(&err)))); }
-    if out.len() > 16 * 1024 * 1024 { return Err(Failure::new("responseTooLarge", "CLI output exceeds 16 MiB")); }
+    let (status, out, err) = tokio::try_join!(child.wait(), read(stdout), read(stderr))
+        .map_err(|e| Failure::new("cliError", e))?;
+    if !status.success() {
+        return Err(Failure::new(
+            "cliError",
+            format!(
+                "{} exited {}: {}",
+                invocation.program(),
+                status,
+                String::from_utf8_lossy(&err)
+            ),
+        ));
+    }
+    if out.len() > 16 * 1024 * 1024 {
+        return Err(Failure::new(
+            "responseTooLarge",
+            "CLI output exceeds 16 MiB; / filters fetched rows only. Narrow with --namespace, --selector or --field-selector.",
+        ));
+    }
     if invocation.workspace == Workspace::Containers {
-        let rows: std::result::Result<Vec<Value>, _> = out.split(|b| *b == b'\n').filter(|line| !line.is_empty()).map(serde_json::from_slice).collect();
-        rows.map(Value::Array).map_err(|e| Failure::new("cliProtocol", e))
+        let rows: std::result::Result<Vec<Value>, _> = out
+            .split(|b| *b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice)
+            .collect();
+        let rows = rows.map_err(|e| Failure::new("cliProtocol", e))?;
+        if invocation.resource.as_deref() == Some("projects")
+            && rows.len() == 1
+            && rows[0].is_array()
+        {
+            Ok(rows.into_iter().next().unwrap())
+        } else {
+            Ok(Value::Array(rows))
+        }
     } else {
-        let value: Value = serde_json::from_slice(&out).map_err(|e| Failure::new("cliProtocol", e))?;
-        Ok(if value["items"].is_array() { value["items"].clone() } else { Value::Array(vec![value]) })
+        let mut value: Value =
+            serde_json::from_slice(&out).map_err(|e| Failure::new("cliProtocol", e))?;
+        Ok(if value["items"].is_array() {
+            value["items"].take()
+        } else {
+            Value::Array(vec![value])
+        })
     }
 }
 
@@ -279,43 +753,158 @@ pub async fn query(invocation: &Invocation) -> Result<Value> {
 mod tests {
     use super::*;
     #[test]
+    fn structured_queries_keep_full_ids_and_generic_resources_readable() {
+        let mut state = State::new(Default::default());
+        state.workspace = Workspace::Containers;
+        for input in ["ps", "images", "network ls"] {
+            let query = parse(input, &state).unwrap();
+            let command = query.command(true);
+            assert!(command.as_std().get_args().any(|arg| arg == "--no-trunc"));
+            assert!(
+                !query
+                    .command(false)
+                    .as_std()
+                    .get_args()
+                    .any(|arg| arg == "--no-trunc")
+            );
+        }
+        let projects = parse("compose ls", &state).unwrap();
+        assert_eq!(projects.resource.as_deref(), Some("projects"));
+        assert!(
+            projects
+                .command(true)
+                .as_std()
+                .get_args()
+                .any(|arg| arg == "json")
+        );
+        for input in ["volume ls", "context ls"] {
+            assert!(
+                !parse(input, &state)
+                    .unwrap()
+                    .command(true)
+                    .as_std()
+                    .get_args()
+                    .any(|arg| arg == "--no-trunc")
+            );
+        }
+        state.workspace = Workspace::Kubernetes;
+        assert_eq!(
+            parse("get certificates.cert-manager.io -l app=test", &state)
+                .unwrap()
+                .resource
+                .as_deref(),
+            Some("certificates.cert-manager.io")
+        );
+        assert!(
+            parse("get certificates.cert-manager.io -o yaml", &state)
+                .unwrap()
+                .resource
+                .is_none()
+        );
+        assert!(
+            parse("get pods,services", &state)
+                .unwrap()
+                .resource
+                .is_none()
+        );
+    }
+    #[test]
     fn consumed_values_cannot_override_ui_scope_or_select_output_mode() {
         let mut state = State::new(Default::default());
         state.workspace = Workspace::Kubernetes;
         state.request.context = Some("ui-cluster".into());
         state.request.namespace = Some("ui-ns".into());
         state.request.kubeconfig = Some("/fixture/config".into());
-        assert_eq!(parse("--log-flush-frequency 10s get pods", &state).unwrap().resource.as_deref(), Some("pods"));
-        for value in ["-nteam", "--namespace=team", "--context=other", "--kubeconfig=other",
-            "-oyaml", "--watch", "--help", "-A", "--"] {
+        assert_eq!(
+            parse("--log-flush-frequency 10s get pods", &state)
+                .unwrap()
+                .resource
+                .as_deref(),
+            Some("pods")
+        );
+        for value in [
+            "-nteam",
+            "--namespace=team",
+            "--context=other",
+            "--kubeconfig=other",
+            "-oyaml",
+            "--watch",
+            "--help",
+            "-A",
+            "--",
+        ] {
             for separator in [" ", "="] {
                 let input = format!("get pods --as reviewer --as-group{separator}{value}");
                 let invocation = parse(&input, &state).unwrap();
-                assert_eq!(&invocation.args[..6], ["--context", "ui-cluster", "--namespace", "ui-ns", "--kubeconfig", "/fixture/config"], "{input}");
+                assert_eq!(
+                    &invocation.args[..6],
+                    [
+                        "--context",
+                        "ui-cluster",
+                        "--namespace",
+                        "ui-ns",
+                        "--kubeconfig",
+                        "/fixture/config"
+                    ],
+                    "{input}"
+                );
                 assert!(invocation.args.ends_with(&split_command(&input).unwrap()));
                 // A literal -- value must not disable structured queries either.
                 assert_eq!(invocation.resource.as_deref(), Some("pods"), "{input}");
-                assert_eq!(invocation.target, "--context ui-cluster  --namespace ui-ns  --kubeconfig /fixture/config", "{input}");
+                assert_eq!(
+                    invocation.target,
+                    "--context ui-cluster  --namespace ui-ns  --kubeconfig /fixture/config",
+                    "{input}"
+                );
             }
         }
         state.workspace = Workspace::Containers;
         state.docker_context = Some("ui-docker".into());
         state.docker_config = Some("/fixture/docker".into());
-        for input in ["--tlscert -Hliteral ps", "--tlskey --config=literal ps",
-            "ps -af label=q", "ps -aflabel=q", "ps --filter -q", "ps -l"] {
+        for input in [
+            "--tlscert -Hliteral ps",
+            "--tlskey --config=literal ps",
+            "ps -af label=q",
+            "ps -aflabel=q",
+            "ps --filter -q",
+            "ps -l",
+        ] {
             let invocation = parse(input, &state).unwrap();
-            assert_eq!(&invocation.args[..4], ["--config", "/fixture/docker", "--context", "ui-docker"], "{input}");
-            assert_eq!(invocation.resource.as_deref(), Some("containers"), "{input}");
+            assert_eq!(
+                &invocation.args[..4],
+                ["--config", "/fixture/docker", "--context", "ui-docker"],
+                "{input}"
+            );
+            assert_eq!(
+                invocation.resource.as_deref(),
+                Some("containers"),
+                "{input}"
+            );
             assert!(invocation.args.ends_with(&split_command(input).unwrap()));
         }
-        for input in ["ps -aq", "ps -l --format '{{.Names}}'", "-l debug ps -q",
-            "images --digests", "image ls --digests=false", "image list --tree",
-            "images --digests=true --digests=false", "images --no-trunc", "ps --no-trunc", "network ls --no-trunc"] {
+        for input in [
+            "ps -aq",
+            "ps -l --format '{{.Names}}'",
+            "-l debug ps -q",
+            "images --digests",
+            "image ls --digests=false",
+            "image list --tree",
+            "images --digests=true --digests=false",
+            "images --no-trunc",
+            "ps --no-trunc",
+            "network ls --no-trunc",
+        ] {
             let invocation = parse(input, &state).unwrap();
             assert!(invocation.resource.is_none(), "{input}");
             assert!(invocation.args.ends_with(&split_command(input).unwrap()));
         }
-        assert_eq!(parse("images --filter --digests", &state).unwrap().resource.as_deref(), Some("images"));
+        assert_eq!(
+            parse("images --filter --digests", &state)
+                .unwrap()
+                .resource
+                .as_deref(),
+            Some("images")
+        );
         let child = parse("compose --config child.yml version", &state).unwrap();
         assert_eq!(&child.args[..2], ["--config", "/fixture/docker"]);
     }
@@ -326,29 +915,67 @@ mod tests {
         state.request.context = Some("ui-cluster".into());
         state.request.namespace = Some("ui-ns".into());
         state.request.kubeconfig = Some("/fixture/config".into());
-        for option in ["--from-literal", "--from-file", "--from-env-file", "--field-manager"] {
+        for option in [
+            "--from-literal",
+            "--from-file",
+            "--from-env-file",
+            "--field-manager",
+        ] {
             for value in ["--namespace=value", "--context=value", "--kubeconfig=value"] {
                 for separator in [" ", "="] {
-                    let text = format!("create configmap example {option}{separator}{value} --dry-run=client --validate=false -o yaml");
+                    let text = format!(
+                        "create configmap example {option}{separator}{value} --dry-run=client --validate=false -o yaml"
+                    );
                     let invocation = parse(&text, &state).unwrap();
-                    assert_eq!(&invocation.args[..6], ["--context", "ui-cluster", "--namespace", "ui-ns", "--kubeconfig", "/fixture/config"], "{text}");
-                    assert_eq!(invocation.target, "--context ui-cluster  --namespace ui-ns  --kubeconfig /fixture/config", "{text}");
+                    assert_eq!(
+                        &invocation.args[..6],
+                        [
+                            "--context",
+                            "ui-cluster",
+                            "--namespace",
+                            "ui-ns",
+                            "--kubeconfig",
+                            "/fixture/config"
+                        ],
+                        "{text}"
+                    );
+                    assert_eq!(
+                        invocation.target,
+                        "--context ui-cluster  --namespace ui-ns  --kubeconfig /fixture/config",
+                        "{text}"
+                    );
                     assert!(invocation.resource.is_none());
                     assert!(invocation.args.ends_with(&split_command(&text).unwrap()));
                 }
             }
         }
-        for text in ["logs pod -fp --namespace explicit", "logs pod --prefix --namespace explicit",
-            "run pod --command --namespace explicit", "top pod --containers --namespace explicit",
+        for text in [
+            "logs pod -fp --namespace explicit",
+            "logs pod --prefix --namespace explicit",
+            "run pod --command --namespace explicit",
+            "top pod --containers --namespace explicit",
             "create configmap example --dry-run --validate --namespace explicit",
-            "delete pod example --cascade --namespace explicit"] {
+            "delete pod example --cascade --namespace explicit",
+        ] {
             let invocation = parse(text, &state).unwrap();
             assert!(!invocation.args.contains(&"ui-ns".into()), "{text}");
-            assert!(invocation.target.contains("--namespace explicit"), "{text}: {}", invocation.target);
+            assert!(
+                invocation.target.contains("--namespace explicit"),
+                "{text}: {}",
+                invocation.target
+            );
         }
-        for text in ["proxy -w --context=literal", "proxy -p --namespace=literal", "patch pod example -p --namespace=literal"] {
+        for text in [
+            "proxy -w --context=literal",
+            "proxy -p --namespace=literal",
+            "patch pod example -p --namespace=literal",
+        ] {
             let invocation = parse(text, &state).unwrap();
-            assert_eq!(&invocation.args[..4], ["--context", "ui-cluster", "--namespace", "ui-ns"], "{text}");
+            assert_eq!(
+                &invocation.args[..4],
+                ["--context", "ui-cluster", "--namespace", "ui-ns"],
+                "{text}"
+            );
             assert!(!invocation.target.contains("literal"), "{text}");
         }
     }
@@ -359,20 +986,37 @@ mod tests {
         state.request.context = Some("ui-cluster".into());
         state.request.namespace = Some("ui-ns".into());
         for (flags, all) in [
-            ("--all-namespaces=false", false), ("-A=false", false),
-            ("-A --all-namespaces=false", false), ("--all-namespaces=false -A", true),
-            ("-AA=false", false), ("-A=false -A", true),
-            ("--selector --all-namespaces=true", false), ("-l -A", false),
+            ("--all-namespaces=false", false),
+            ("-A=false", false),
+            ("-A --all-namespaces=false", false),
+            ("--all-namespaces=false -A", true),
+            ("-AA=false", false),
+            ("-A=false -A", true),
+            ("--selector --all-namespaces=true", false),
+            ("-l -A", false),
         ] {
             let command = format!("get pods {flags}");
             let invocation = parse(&command, &state).unwrap();
-            assert_eq!(invocation.target.contains("all namespaces"), all, "{command}");
-            assert_eq!(invocation.args.contains(&"--namespace".into()), !all, "{command}");
+            assert_eq!(
+                invocation.target.contains("all namespaces"),
+                all,
+                "{command}"
+            );
+            assert_eq!(
+                invocation.args.contains(&"--namespace".into()),
+                !all,
+                "{command}"
+            );
             assert!(invocation.args.ends_with(&split_command(&command).unwrap()));
         }
-        for value in ["1", "t", "T", "true", "TRUE", "True", "0", "f", "F", "false", "FALSE", "False"] {
+        for value in [
+            "1", "t", "T", "true", "TRUE", "True", "0", "f", "F", "false", "FALSE", "False",
+        ] {
             let invocation = parse(&format!("get pods -A={value}"), &state).unwrap();
-            assert_eq!(invocation.target.contains("all namespaces"), docker_bool(value));
+            assert_eq!(
+                invocation.target.contains("all namespaces"),
+                docker_bool(value)
+            );
         }
     }
     #[test]
@@ -380,44 +1024,83 @@ mod tests {
         let mut state = State::new(Default::default());
         state.docker_context = Some("--all=true".into());
         for (text, initial) in [
-            ("ps -as", true), ("ps -sa=false", false), ("ps -a=true", true),
-            ("ps --all=true --all=false", false), ("ps --all=false -as", true),
-            ("container list -asf label=a", true), ("ps -sf label=a", false),
-            ("ps -sn5", false), ("ps -san5", true), ("ps --filter --all=true", false),
-            ("ps -éa", false), ("ps", false),
+            ("ps -as", true),
+            ("ps -sa=false", false),
+            ("ps -a=true", true),
+            ("ps --all=true --all=false", false),
+            ("ps --all=false -as", true),
+            ("container list -asf label=a", true),
+            ("ps -sf label=a", false),
+            ("ps -sn5", false),
+            ("ps -san5", true),
+            ("ps --filter --all=true", false),
+            ("ps -éa", false),
+            ("ps", false),
         ] {
             let mut invocation = parse(text, &state).unwrap();
             let original = invocation.args.clone();
             for (round, value) in [!initial, initial, !initial].into_iter().enumerate() {
                 toggle_all(&mut invocation);
-                assert_eq!(invocation.args.last().unwrap(), &format!("--all={value}"), "{text}, round {round}");
-                let retained = if text.ends_with("--all=false") { original.len() - 1 } else { original.len() };
+                assert_eq!(
+                    invocation.args.last().unwrap(),
+                    &format!("--all={value}"),
+                    "{text}, round {round}"
+                );
+                let retained = if text.ends_with("--all=false") {
+                    original.len() - 1
+                } else {
+                    original.len()
+                };
                 assert_eq!(invocation.args[..retained], original[..retained], "{text}");
                 assert!(invocation.args.len() <= original.len() + 1, "{text}");
             }
         }
-        for value in ["1", "t", "T", "true", "TRUE", "True", "0", "f", "F", "false", "FALSE", "False"] {
+        for value in [
+            "1", "t", "T", "true", "TRUE", "True", "0", "f", "F", "false", "FALSE", "False",
+        ] {
             for spelling in ["--all", "-a", "-sa"] {
                 let mut invocation = parse(&format!("ps {spelling}={value}"), &state).unwrap();
                 toggle_all(&mut invocation);
-                assert_eq!(invocation.args.last().unwrap(), &format!("--all={}", !docker_bool(value)));
+                assert_eq!(
+                    invocation.args.last().unwrap(),
+                    &format!("--all={}", !docker_bool(value))
+                );
             }
         }
     }
     #[test]
     fn native_arguments_preserve_scope_output_and_plugin_semantics() {
         let mut state = State::new(Default::default());
-        assert_eq!(command_workspace("  kubectl\tget pods", Workspace::Containers), Workspace::Kubernetes);
-        assert_eq!(command_workspace("docker", Workspace::Kubernetes), Workspace::Containers);
+        assert_eq!(
+            command_workspace("  kubectl\tget pods", Workspace::Containers),
+            Workspace::Kubernetes
+        );
+        assert_eq!(
+            command_workspace("docker", Workspace::Kubernetes),
+            Workspace::Containers
+        );
         assert!(parse("docker", &state).unwrap().resource.is_none());
         assert!(parse("kubectl", &state).unwrap().resource.is_none());
         state.docker_context = Some("ui-selected".into());
-        for command in ["ps", "docker ps -a --filter 'label=app=api'", "images", "volume ls", "network ls"] {
+        for command in [
+            "ps",
+            "docker ps -a --filter 'label=app=api'",
+            "images",
+            "volume ls",
+            "network ls",
+        ] {
             let invocation = parse(command, &state).unwrap();
             assert_eq!(&invocation.args[..2], ["--context", "ui-selected"]);
             assert!(invocation.resource.is_some());
         }
-        for command in ["ps -aq", "ps --format '{{.Names}}'", "compose up", "buildx build .", "exec -it app sh -c 'echo done'", "logs -f app"] {
+        for command in [
+            "ps -aq",
+            "ps --format '{{.Names}}'",
+            "compose up",
+            "buildx build .",
+            "exec -it app sh -c 'echo done'",
+            "logs -f app",
+        ] {
             let invocation = parse(command, &state).unwrap();
             assert_eq!(&invocation.args[..2], ["--context", "ui-selected"]);
             assert!(invocation.resource.is_none());
@@ -430,24 +1113,82 @@ mod tests {
         assert_eq!(filtered.args.last().unwrap(), "--all=true");
         let invocation = parse("docker --host unix:///explicit ps -a", &state).unwrap();
         assert_eq!(invocation.args, ["--host", "unix:///explicit", "ps", "-a"]);
-        assert_eq!(parse("docker context use external", &state).unwrap().args, ["context", "use", "external"]);
+        assert_eq!(
+            parse("docker context use external", &state).unwrap().args,
+            ["context", "use", "external"]
+        );
         state.workspace = Workspace::Kubernetes;
-        state.request.context = Some("ui-cluster".into()); state.request.namespace = Some("ui-ns".into());
-        assert_eq!(parse("get pods -A", &state).unwrap().args, ["--context", "ui-cluster", "get", "pods", "-A"]);
-        assert_eq!(parse("kubectl get pods --context explicit", &state).unwrap().args, ["get", "pods", "--context", "explicit"]);
-        assert_eq!(parse("--kubeconfig '/tmp/my config' get pods", &state).unwrap().args, ["--kubeconfig", "/tmp/my config", "get", "pods"]);
+        state.request.context = Some("ui-cluster".into());
+        state.request.namespace = Some("ui-ns".into());
+        assert_eq!(
+            parse("get pods -A", &state).unwrap().args,
+            ["--context", "ui-cluster", "get", "pods", "-A"]
+        );
+        assert_eq!(
+            parse("kubectl get pods --context explicit", &state)
+                .unwrap()
+                .args,
+            ["get", "pods", "--context", "explicit"]
+        );
+        assert_eq!(
+            parse("--kubeconfig '/tmp/my config' get pods", &state)
+                .unwrap()
+                .args,
+            ["--kubeconfig", "/tmp/my config", "get", "pods"]
+        );
         assert!(parse("get pods -oyaml", &state).unwrap().resource.is_none());
-        assert!(parse("get pods --watch", &state).unwrap().resource.is_none());
-        for flags in ["-Aoyaml", "-Ao yaml", "-Aw", "-Aw=false", "-ALapp", "-Ah", "-lapp=web -Aw"] {
+        assert!(
+            parse("get pods --watch", &state)
+                .unwrap()
+                .resource
+                .is_none()
+        );
+        for flags in [
+            "-Aoyaml",
+            "-Ao yaml",
+            "-Aw",
+            "-Aw=false",
+            "-ALapp",
+            "-Ah",
+            "-lapp=web -Aw",
+        ] {
             let command = format!("get pods {flags}");
             let invocation = parse(&command, &state).unwrap();
             assert!(invocation.resource.is_none(), "{command}");
-            assert!(!invocation.command(true).as_std().get_args().any(|arg| arg == "json"));
+            assert!(
+                !invocation
+                    .command(true)
+                    .as_std()
+                    .get_args()
+                    .any(|arg| arg == "json")
+            );
         }
-        for flags in ["-A", "-Alapp=web", "-Al app=web", "-nwork", "--selector app=web"] {
-            assert!(parse(&format!("get pods {flags}"), &state).unwrap().resource.is_some(), "{flags}");
+        for flags in [
+            "-A",
+            "-Alapp=web",
+            "-Al app=web",
+            "-nwork",
+            "--selector app=web",
+        ] {
+            assert!(
+                parse(&format!("get pods {flags}"), &state)
+                    .unwrap()
+                    .resource
+                    .is_some(),
+                "{flags}"
+            );
         }
-        assert!(parse("custom-plugin --custom-option", &state).unwrap().resource.is_none());
-        assert_eq!(parse("kubectl config current-context", &state).unwrap().args, ["config", "current-context"]);
+        assert!(
+            parse("custom-plugin --custom-option", &state)
+                .unwrap()
+                .resource
+                .is_none()
+        );
+        assert_eq!(
+            parse("kubectl config current-context", &state)
+                .unwrap()
+                .args,
+            ["config", "current-context"]
+        );
     }
 }

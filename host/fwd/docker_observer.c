@@ -394,6 +394,109 @@ static int container_id_valid(const char *id)
     return 1;
 }
 
+/* /containers/json includes the complete published-port mapping. Validate a
+ * whole response before publishing it; per-container inspect would both cost
+ * N+1 requests and mix different points in time. */
+static int json_port(const cJSON *value, unsigned *port)
+{
+    if (!cJSON_IsNumber(value) || value->valuedouble < 1 ||
+        value->valuedouble > 65535 ||
+        value->valuedouble != (double)value->valueint)
+        return -1;
+    *port = (unsigned)value->valueint;
+    return 0;
+}
+
+static int append_summary_port(const cJSON *entry, struct port_spec specs[],
+                                int *count, size_t capacity)
+{
+    const cJSON *ip = NULL, *private_port = NULL, *public_port = NULL;
+    const cJSON *type = NULL;
+    struct port_spec candidate = {0};
+    if (object_unique_item(entry, "IP", &ip) != 0 ||
+        object_unique_item(entry, "PrivatePort", &private_port) != 0 ||
+        object_unique_item(entry, "PublicPort", &public_port) != 0 ||
+        object_unique_item(entry, "Type", &type) != 0 ||
+        json_port(private_port, &candidate.container_port) != 0 ||
+        !cJSON_IsString(type))
+        goto invalid;
+    if (strcmp(type->valuestring, "tcp") == 0)
+        candidate.protocol = PORT_TCP;
+    else if (strcmp(type->valuestring, "udp") == 0)
+        candidate.protocol = PORT_UDP;
+    else if (strcmp(type->valuestring, "sctp") != 0)
+        goto invalid;
+    /* An exposed container port without PublicPort is not published. */
+    if (!public_port)
+        return 0;
+    if (json_port(public_port, &candidate.host_port) != 0 ||
+        !cJSON_IsString(ip))
+        goto invalid;
+    const char *address = ip->valuestring[0] ? ip->valuestring : "0.0.0.0";
+    struct in_addr ipv4;
+    struct in6_addr ipv6;
+    if (inet_pton(AF_INET, address, &ipv4) != 1) {
+        if (inet_pton(AF_INET6, address, &ipv6) == 1)
+            return 0; /* Existing relays own IPv4 bindings only. */
+        goto invalid;
+    }
+    if (strcmp(type->valuestring, "sctp") == 0)
+        return 0;
+    snprintf(candidate.host_ip, sizeof(candidate.host_ip), "%s", address);
+    return append_spec(specs, count, capacity, &candidate);
+invalid:
+    errno = EPROTO;
+    return -1;
+}
+
+int docker_observer_parse_list(const char *json, struct port_spec specs[],
+                               int *count, size_t capacity)
+{
+    if (!json || !specs || !count || capacity == 0 ||
+        capacity > DOCKER_OBSERVER_MAX_PORTS) {
+        errno = EINVAL;
+        return -1;
+    }
+    const char *end = NULL;
+    cJSON *containers = cJSON_ParseWithOpts(json, &end, 1);
+    int result = -1;
+    if (!containers || !end || *end != '\0' || !cJSON_IsArray(containers) ||
+        cJSON_GetArraySize(containers) > DOCKER_SNAPSHOT_MAX_CONTAINERS) {
+        errno = EPROTO;
+        goto out;
+    }
+    struct port_spec staged[DOCKER_OBSERVER_MAX_PORTS];
+    int staged_count = 0;
+    for (const cJSON *container = containers->child; container;
+         container = container->next) {
+        const cJSON *id = NULL, *ports = NULL;
+        if (object_unique_item(container, "Id", &id) != 0 ||
+            !cJSON_IsString(id) || !container_id_valid(id->valuestring) ||
+            object_unique_item(container, "Ports", &ports) != 0 ||
+            !cJSON_IsArray(ports)) {
+            errno = EPROTO;
+            goto out;
+        }
+        for (const cJSON *previous = containers->child; previous != container;
+             previous = previous->next) {
+            const cJSON *previous_id = cJSON_GetObjectItemCaseSensitive(previous, "Id");
+            if (strcmp(previous_id->valuestring, id->valuestring) == 0) {
+                errno = EPROTO;
+                goto out;
+            }
+        }
+        for (const cJSON *port = ports->child; port; port = port->next)
+            if (append_summary_port(port, staged, &staged_count, capacity) != 0)
+                goto out;
+    }
+    memcpy(specs, staged, (size_t)staged_count * sizeof(specs[0]));
+    *count = staged_count;
+    result = 0;
+out:
+    cJSON_Delete(containers);
+    return result;
+}
+
 int docker_observer_read_snapshot(const struct profile *profile,
                                   struct port_spec specs[], int *count,
                                   size_t capacity)
@@ -404,44 +507,10 @@ int docker_observer_read_snapshot(const struct profile *profile,
         return -1;
     }
     char socket_path[PATH_MAX], list[DOCKER_HTTP_BODY_CAP];
-    if (!profile_path(profile, "docker.sock", socket_path,
-                      sizeof(socket_path)) ||
+    if (!profile_path(profile, "docker.sock", socket_path, sizeof(socket_path)) ||
         docker_http_get(socket_path, "/containers/json", list, 3) != 0)
         return -1;
-    const char *end = NULL;
-    cJSON *containers = cJSON_ParseWithOpts(list, &end, 1);
-    if (!containers || !end || *end != '\0' || !cJSON_IsArray(containers) ||
-        cJSON_GetArraySize(containers) > DOCKER_SNAPSHOT_MAX_CONTAINERS) {
-        cJSON_Delete(containers);
-        errno = EPROTO;
-        return -1;
-    }
-    struct port_spec staged[DOCKER_OBSERVER_MAX_PORTS];
-    int staged_count = 0;
-    for (const cJSON *container = containers->child; container;
-         container = container->next) {
-        const cJSON *id = NULL;
-        if (object_unique_item(container, "Id", &id) != 0 ||
-            !cJSON_IsString(id) || !container_id_valid(id->valuestring)) {
-            cJSON_Delete(containers);
-            errno = EPROTO;
-            return -1;
-        }
-        char target[96], inspect[DOCKER_HTTP_BODY_CAP];
-        int target_length = snprintf(target, sizeof(target),
-                                     "/containers/%s/json", id->valuestring);
-        if (target_length < 0 || target_length >= (int)sizeof(target) ||
-            docker_http_get(socket_path, target, inspect, 3) != 0 ||
-            docker_observer_parse_inspect(inspect, staged, &staged_count,
-                                          capacity) != 0) {
-            cJSON_Delete(containers);
-            return -1;
-        }
-    }
-    cJSON_Delete(containers);
-    memcpy(specs, staged, (size_t)staged_count * sizeof(specs[0]));
-    *count = staged_count;
-    return 0;
+    return docker_observer_parse_list(list, specs, count, capacity);
 }
 
 static int lease_token_valid(const char *token)

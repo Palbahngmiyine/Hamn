@@ -13,6 +13,8 @@ readonly HAMN_HOST_URL=__HAMN_HOST_URL__
 readonly HAMN_HOST_SHA256=__HAMN_HOST_SHA256__
 readonly HAMN_GUEST_URL=__HAMN_GUEST_URL__
 readonly HAMN_GUEST_SHA256=__HAMN_GUEST_SHA256__
+readonly HAMN_HOST_SIZE=__HAMN_HOST_SIZE__
+readonly HAMN_GUEST_SIZE=__HAMN_GUEST_SIZE__
 
 fail() {
     echo "hamn install: $*" >&2
@@ -23,39 +25,19 @@ sha256_file() {
     /usr/bin/openssl dgst -sha256 -r "$1" | awk '{print $1}'
 }
 
-safe_regular() {
-    local path=$1
-    [ -f "$path" ] && [ ! -L "$path" ] || return 1
-    [ "$(stat -f '%u:%l' "$path")" = "$(id -u):1" ]
+mebibytes() {
+    awk -v bytes="$1" 'BEGIN { printf "%.1f MiB", bytes / 1048576 }'
 }
 
-fetch() {
-    local source=$1 destination=$2
-    local curl_output=(--silent)
-    if [ -t 2 ]; then curl_output=(--progress-bar); fi
-    case "$source" in
-    https://*)
-        curl --fail --show-error --location "${curl_output[@]}" --proto '=https' --tlsv1.2 --retry 3 --retry-delay 1 \
-            -o "$destination" "$source"
-        ;;
-    file://*|/*)
-        [ "${HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS:-0}" = 1 ] ||
-            fail "local artifacts are disabled"
-        local path=${source#file://}
-        safe_regular "$path" || fail "unsafe local artifact: $path"
-        cp "$path" "$destination"
-        ;;
-    *) fail "artifact URL must use HTTPS" ;;
-    esac
-}
 
 if [ "$#" -gt 0 ]; then
     if [ "$#" = 1 ] && { [ "$1" = --help ] || [ "$1" = -h ]; }; then
         echo "Install Hamn ${HAMN_VERSION#v} for Apple Silicon macOS."
-        echo "Usage: bash install.sh"
-        echo "Downloads and verifies the host archive and guest image, then installs to ~/.local/bin."
-        echo "Existing VMs are not restarted; existing profile disks keep their guest root."
-        echo "For updates: hamn --headless system update --yes"
+        echo "Usage: curl -fsSL https://github.com/Palbahngmiyine/Hamn/releases/latest/download/install.sh | /bin/bash"
+        echo "   or: bash install.sh"
+        echo "Downloads Hamn and its Linux guest image, verifies both, and installs"
+        echo "the hamn command to ~/.local/bin. Running VMs are not restarted."
+        echo "Update later with: hamn upgrade"
         exit 0
     fi
     fail "unknown arguments; use bash install.sh --help"
@@ -67,6 +49,19 @@ fi
 [[ "$HAMN_COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "embedded release commit is invalid"
 [[ "$HAMN_HOST_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "embedded host digest is invalid"
 [[ "$HAMN_GUEST_SHA256" =~ ^[0-9a-f]{64}$ ]] || fail "embedded guest digest is invalid"
+[[ "$HAMN_HOST_SIZE" =~ ^[1-9][0-9]{0,8}$ ]] && [ "$HAMN_HOST_SIZE" -le 134217728 ] ||
+    fail "embedded host size is invalid"
+[[ "$HAMN_GUEST_SIZE" =~ ^[1-9][0-9]{0,9}$ ]] && [ "$HAMN_GUEST_SIZE" -le 2147483647 ] ||
+    fail "embedded guest size is invalid"
+[ -d "$HOME" ] && [ ! -L "$HOME" ] || fail "unsafe HOME directory"
+[ "$(stat -f '%u' "$HOME")" = "$(id -u)" ] || fail "unsafe HOME owner"
+home_mode=$(stat -f '%Lp' "$HOME")
+(( (8#$home_mode & 8#022) == 0 )) || fail "unsafe HOME permissions"
+# Reject foreign commands before creating cache state or downloading anything.
+# The verified updater performs the complete generation ownership check again.
+if [ -e "$HOME/.local/bin/hamn" ] && [ ! -L "$HOME/.local/bin/hamn" ]; then
+    fail "existing hamn is not a managed generation: ~/.local/bin/hamn is a standalone executable (an older Hamn install or another program). Move it aside and run this installer again"
+fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/hamn-install.XXXXXX") ||
     fail "cannot create installer workspace"
@@ -75,11 +70,209 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "hamn install: Preparing Hamn ${HAMN_VERSION#v}" >&2
-echo "hamn install: Downloading host archive..." >&2
-host_archive=$work/host.tar.gz
-fetch "$HAMN_HOST_URL" "$host_archive" || fail "host download failed; check your connection and rerun this installer"
-echo "hamn install: Verifying host archive SHA-256..." >&2
+echo "Installing Hamn ${HAMN_VERSION#v} for Apple Silicon macOS..." >&2
+# The cold bootstrap cannot use the authenticated helper until its host archive
+# arrives. macOS ships zsh/system: its fcntl lock interoperates with native flock
+# on Darwin. One process owns both this lock and all partial writes; killing it
+# closes the curl pipe and releases the lock without a PID/stale-lock protocol.
+cat >"$work/acquire-host.zsh" <<'HAMN_BOOTSTRAP_ACQUIRE'
+emulate -LR zsh
+setopt ERR_EXIT NO_UNSET PIPE_FAIL
+umask 077
+zmodload zsh/system
+zmodload zsh/stat
+home_dir=$1 url=$2 key=$3 expected=$4 scratch=$5 allow_local=$6 label=${7:-}
+curl_pid=
+TRAPEXIT() {
+    if [[ -n "$curl_pid" ]]; then
+        kill -TERM "$curl_pid" 2>/dev/null || :
+        wait "$curl_pid" 2>/dev/null || :
+    fi
+}
+fail() { print -ru2 -- "hamn install: $*"; exit 1; }
+exists() { [[ -e "$1" || -L "$1" ]]; }
+safe_file() {
+    [[ -f "$1" && ! -L "$1" ]] &&
+        [[ $(/usr/bin/stat -f '%u:%l:%Lp' "$1") == "$EUID:1:600" ]]
+}
+size_of() { /usr/bin/stat -f '%z' "$1"; }
+digest() { /usr/bin/openssl dgst -sha256 -r "$1" | /usr/bin/awk '{print $1}'; }
+directory() {
+    local directory_path=$1 required_mode=$2
+    if ! exists "$directory_path"; then
+        /bin/mkdir -m "$required_mode" "$directory_path" 2>/dev/null || :
+    fi
+    [[ -d "$directory_path" && ! -L "$directory_path" ]] || fail "unsafe cache directory"
+    local owner mode
+    owner=$(/usr/bin/stat -f '%u' "$directory_path")
+    mode=$(/usr/bin/stat -f '%Lp' "$directory_path")
+    [[ "$owner" == "$EUID" ]] && (( (8#$mode & 8#022) == 0 )) || fail "unsafe cache permissions"
+    [[ "$required_mode" != 700 || "$mode" == 700 ]] || fail "cache directory must be private"
+}
+case "$url" in
+    https://*) ;;
+    file:///*) [[ "$allow_local" == 1 ]] || fail "local artifacts are disabled" ;;
+    *) fail "artifact URL must use HTTPS" ;;
+esac
+directory "$home_dir/.hamn" 700
+directory "$home_dir/.hamn/cache" 755
+directory "$home_dir/.hamn/cache/downloads" 700
+store_dir=$home_dir/.hamn/cache/downloads
+final=$store_dir/$key.artifact
+partial=$store_dir/.$key.partial
+metadata=$store_dir/.$key.validator
+lock_file=$store_dir/.$key.lock
+if ! exists "$lock_file"; then
+    (setopt NO_CLOBBER; : >"$lock_file") 2>/dev/null || :
+fi
+safe_file "$lock_file" || fail "unsafe download lock"
+lock_identity=$(/usr/bin/stat -f '%d:%i' "$lock_file")
+zsystem flock -t 600 -f lock_fd "$lock_file" || fail "timed out acquiring download lock"
+# Compare the held inode, not only the pathname after a blocking acquisition.
+zstat -H held_lock -f "$lock_fd"
+[[ "$held_lock[device]:$held_lock[inode]" == "$lock_identity" &&
+   $(/usr/bin/stat -f '%d:%i' "$lock_file") == "$lock_identity" ]] || fail "download lock changed"
+safe_file "$lock_file" || fail "unsafe download lock"
+for entry in "$final" "$partial" "$metadata"; do
+    if exists "$entry"; then safe_file "$entry" || fail "unsafe download cache file"; fi
+done
+verified() { [[ $(size_of "$1") == "$expected" && $(digest "$1") == "$key" ]]; }
+if exists "$final"; then
+    if verified "$final"; then print -r -- "$final"; exit 0; fi
+    /bin/rm "$final"
+fi
+publish() {
+    verified "$partial" || {
+        /bin/rm -f "$partial" "$metadata"
+        fail "artifact size or SHA-256 mismatch"
+    }
+    /bin/sync
+    /bin/mv "$partial" "$final"
+    /bin/rm -f "$metadata"
+    /bin/sync
+    print -r -- "$final"
+}
+if exists "$partial" && verified "$partial"; then publish; exit 0; fi
+validator= offset=0
+if exists "$partial" && exists "$metadata" && (( $(size_of "$metadata") <= 2048 )); then
+    meta_schema= meta_key= meta_size= meta_validator= extra=
+    if { IFS= read -r meta_schema && IFS= read -r meta_key && IFS= read -r meta_size && IFS= read -r meta_validator &&
+         ! IFS= read -r extra && [[ -z "$extra" ]]; } <"$metadata" &&
+       [[ "$meta_schema" == 'hamn-download 1' && "$meta_key" == "$key" && "$meta_size" == "$expected" &&
+          ${#meta_validator} -le 1024 && "$meta_validator" != *[^\ -~]* ]]; then
+        offset=$(size_of "$partial")
+        if (( offset > 0 && offset < expected )); then validator=$meta_validator; else offset=0; fi
+    fi
+fi
+if (( offset == 0 )); then /bin/rm -f "$partial" "$metadata"; fi
+[[ -z "$label" ]] || print -ru2 -- "$label"
+save_metadata() {
+    local temporary
+    temporary=$(/usr/bin/mktemp "$store_dir/.bootstrap.XXXXXX")
+    print -rl -- 'hamn-download 1' "$key" "$expected" "$validator" >"$temporary"
+    /bin/mv "$temporary" "$metadata"
+}
+case "$url" in
+    https://*) ;;
+    file:///*)
+        [[ "$allow_local" == 1 ]] || fail "local artifacts are disabled"
+        source_file=${url#file://}
+        [[ -f "$source_file" && ! -L "$source_file" &&
+           $(/usr/bin/stat -f '%u:%l' "$source_file") == "$EUID:1" ]] || fail "unsafe local artifact"
+        source_mode=$(/usr/bin/stat -f '%Lp' "$source_file")
+        (( (8#$source_mode & 8#022) == 0 )) || fail "unsafe local artifact mode"
+        [[ $(size_of "$source_file") == "$expected" ]] || fail "artifact size or SHA-256 mismatch"
+        /bin/cp "$source_file" "$partial"
+        /bin/chmod 0600 "$partial"
+        publish; exit 0 ;;
+    *) fail "artifact URL must use HTTPS" ;;
+esac
+for attempt in 1 2; do
+    save_metadata
+    if ! exists "$partial"; then (setopt NO_CLOBBER; : >"$partial"); fi
+    safe_file "$partial" || fail "unsafe download partial"
+    headers=$scratch/headers
+    : >"$headers"
+    curl_options=(--disable --fail --show-error --silent --location --proto '=https'
+        --proto-redir '=https' --tlsv1.2 --connect-timeout 15 --max-time 600
+        --max-filesize "$expected" --dump-header "$headers")
+    if (( offset > 0 )); then
+        curl_options+=(--range "$offset-")
+        [[ -z "$validator" ]] || curl_options+=(--header "If-Range: $validator")
+    fi
+    # Only headers reach a curl-owned file (bounded to 128 KiB). The lock owner
+    # streams binary payload bytes to the partial with an exact byte bound.
+    coproc (ulimit -f 256; exec /usr/bin/curl "${curl_options[@]}" -- "$url")
+    curl_pid=$!
+    exec {stream_fd}<&p
+    sysopen -a -w -o nofollow -u partial_fd "$partial"
+    received=$offset read_result=0 curl_result=0 overflow=0
+    while true; do
+        amount=0 data=
+        if sysread -i "$stream_fd" -s 65536 -c amount data; then
+            if (( received + amount > expected )); then
+                overflow=1 read_result=5
+                kill -TERM "$curl_pid" 2>/dev/null || :
+                break
+            fi
+            syswrite -o "$partial_fd" "$data" || fail "cannot persist download partial"
+            (( received += amount ))
+        else
+            read_result=$?
+            break
+        fi
+    done
+    exec {stream_fd}<&-
+    exec {partial_fd}>&-
+    wait "$curl_pid" || curl_result=$?
+    curl_pid=
+    [[ "$read_result" == 5 ]] || fail "cannot read download stream"
+    # Reset fields at each response so redirects cannot supply a final validator.
+    /usr/bin/awk '
+        /^HTTP\// {status=$2; range=""; etag=""; modified=""}
+        {sub(/\r$/, "")}
+        tolower($0) ~ /^content-range: */ {range=$0; sub(/^[^:]*: */, "", range)}
+        tolower($0) ~ /^etag: */ {etag=$0; sub(/^[^:]*: */, "", etag)}
+        tolower($0) ~ /^last-modified: */ {modified=$0; sub(/^[^:]*: */, "", modified)}
+        END {print status; print range; print (etag != "" ? etag : modified)}
+    ' "$headers" >"$scratch/response"
+    http_status= content_range= next_validator=
+    { IFS= read -r http_status; IFS= read -r content_range; IFS= read -r next_validator; } <"$scratch/response"
+    # A connection/TLS failure before payload is not a rejected Range. Keep
+    # the previously persisted prefix instead of discarding it for a full retry.
+    if (( curl_result != 0 && curl_result != 22 && curl_result != 63 && received == offset )); then
+        fail "host download interrupted; rerun to resume"
+    fi
+    if (( offset > 0 )) && [[ "$http_status" != 206 ||
+        "$content_range" != "bytes $offset-$((expected - 1))/$expected" ]]; then
+        /bin/rm -f "$partial" "$metadata"
+        offset=0 validator=
+        continue
+    fi
+    if (( overflow || curl_result == 63 )); then
+        /bin/rm -f "$partial" "$metadata"
+        fail "artifact exceeds size limit"
+    fi
+    if (( offset == 0 )) && [[ "$http_status" != 200 ]]; then
+        /bin/rm -f "$partial" "$metadata"
+        fail "host download returned invalid HTTP response"
+    fi
+    if [[ ${#next_validator} -le 1024 && "$next_validator" != *[^\ -~]* ]]; then
+        validator=$next_validator
+        save_metadata
+    fi
+    if (( curl_result != 0 )); then fail "host download interrupted; rerun to resume"; fi
+    publish
+    exit 0
+done
+fail "host server rejected resumed transfer"
+HAMN_BOOTSTRAP_ACQUIRE
+chmod 0600 "$work/acquire-host.zsh"
+host_archive=$(env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
+    /bin/zsh -f "$work/acquire-host.zsh" "$HOME" "$HAMN_HOST_URL" "$HAMN_HOST_SHA256" \
+    "$HAMN_HOST_SIZE" "$work" "${HAMN_INSTALL_ALLOW_LOCAL_ARTIFACTS:-0}" \
+    "Downloading Hamn ${HAMN_VERSION#v} ($(mebibytes "$HAMN_HOST_SIZE"))...") ||
+    fail "Hamn download failed; check your connection and run the installer again to resume"
 [ "$(sha256_file "$host_archive")" = "$HAMN_HOST_SHA256" ] ||
     fail "host artifact SHA-256 mismatch"
 
@@ -103,16 +296,20 @@ artifact_root=$("$work/hamn-support" __install-support extract "$host_archive" "
     fail "host artifact validation or extraction failed"
 
 artifact=$work/extract/$artifact_root
-[ -x "$artifact/bin/hamn" ] && [ -x "$artifact/scripts/update-host.sh" ] ||
+[ -x "$artifact/bin/hamn" ] && [ -f "$artifact/share/hamn/update-manifest-url" ] ||
     fail "verified host artifact is incomplete"
 
 manifest=$work/manifest.json
 "$work/hamn-support" __install-support bootstrap-manifest "$manifest" "$HAMN_VERSION" \
-    "$HAMN_COMMIT" "$host_archive" "$HAMN_HOST_SHA256" "$HAMN_GUEST_URL" "$HAMN_GUEST_SHA256"
+    "$HAMN_COMMIT" "$host_archive" "$HAMN_HOST_SHA256" "$HAMN_GUEST_URL" "$HAMN_GUEST_SHA256" \
+    "$HAMN_HOST_SIZE" "$HAMN_GUEST_SIZE"
 
+# The verified release executable installs itself: it re-verifies the host
+# archive against the manifest written above, acquires the guest image, and
+# publishes a journaled generation with rollback on any failure.
 env -i HOME="$HOME" TMPDIR="$work" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     HAMN_UPDATE_ALLOW_LOCAL_ARTIFACTS=1 \
-    /bin/bash "$artifact/scripts/update-host.sh" --bootstrap \
+    "$artifact/bin/hamn" __install-support update --bootstrap \
     --bindir "$HOME/.local/bin" --datadir "$HOME/.local/share/hamn/src" \
     --manifest "file://$manifest"
 
@@ -122,14 +319,23 @@ resolved_command=$(PATH="$caller_path" command -v hamn || :)
 if [ -n "$resolved_command" ] && "$work/hamn-support" __install-support same-file \
     "$resolved_command" "$HOME/.local/bin/hamn" 2>/dev/null
 then
-    echo "hamn install: Ready. Run hamn to open the terminal interface." >&2
-else
-    if [ -n "$resolved_command" ]; then
-        printf 'hamn install: PATH currently selects another hamn: %s\n' "$resolved_command" >&2
-    else
-        echo "hamn install: hamn is not on your current PATH." >&2
-    fi
-    printf 'hamn install: Installed command: %s\n' "$HOME/.local/bin/hamn" >&2
-    echo "hamn install: Add this to your shell configuration, then open a new terminal:" >&2
-    echo '  export PATH="$HOME/.local/bin:$PATH"' >&2
+    echo "Run hamn to get started. Update later with hamn upgrade." >&2
+    exit 0
 fi
+# Advise for the caller's login shell; nothing is written on their behalf.
+path_line='export PATH="$HOME/.local/bin:$PATH"'
+login_shell=${SHELL:-}
+case "${login_shell##*/}" in
+zsh) setup="echo '$path_line' >> ~/.zshrc && source ~/.zshrc" ;;
+bash) setup="echo '$path_line' >> ~/.bash_profile && source ~/.bash_profile" ;;
+fish) setup="fish_add_path ~/.local/bin" ;;
+*) setup="$path_line   # add to your shell configuration" ;;
+esac
+if [ -n "$resolved_command" ]; then
+    printf 'Another hamn comes first on your PATH: %s\n' "$resolved_command" >&2
+    echo "Put ~/.local/bin before it (or remove it), then open a new terminal:" >&2
+else
+    echo "~/.local/bin is not on your PATH yet. Add it with:" >&2
+fi
+printf '  %s\n' "$setup" >&2
+echo "Then run hamn to get started." >&2

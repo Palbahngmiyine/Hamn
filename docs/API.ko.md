@@ -8,7 +8,7 @@
 ## 응답 계약
 
 ```json
-{"schemaVersion":1,"requestId":"example","ok":true,"target":{"profile":"work","context":null,"namespace":null,"name":null},"data":[],"error":null}
+{"schemaVersion":1,"requestId":"example","ok":true,"target":{"profile":"work","context":null,"namespace":null,"name":null,"dockerConfig":null},"data":[],"error":null}
 ```
 
 실패는 `ok:false`, `data:null`, `error:{"code":"...","message":"..."}`를 반환합니다.
@@ -30,6 +30,9 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 
 기존 VM 상태 필드를 유지하며 `dockerStatus`(`ready`, `preparing`, `unavailable`,
 `recoveryRequired`)와 `lastOperation`(기록이 없으면 null)을 추가합니다.
+`mountHome`, `homeReadOnly`, `mountInotify`, `rosetta`, `fileEvents`는 공유·번역 설정을
+표시합니다. `fileEvents`는 `disabled` 또는 `best-effort-existing-files`이며 모든 파일
+변경에 대한 hot reload 보장이 아닙니다.
 `state:running`은 VM 프로세스 상태이며 `ready`에는 Docker `/_ping` 확인이 필요합니다.
 `lastOperation`에는 `schemaVersion`, `operationId`, `operation`, `status`, `phase`,
 `startedVm`, `exitCode`, `error`가 포함됩니다. 실행 중에는 종료·오류 필드가 없을 수 있습니다.
@@ -43,16 +46,11 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 이 전달은 VM 준비 완료를 뜻하거나 이전 `recoveryRequired` 상태를 해제하지 않습니다.
 이후 시작이 실제로 성공해야 완료로 확정합니다.
 
-사전 retirement가 실패한 뒤에도 `vm stop`은 성공할 수 있습니다. 이때 중지 응답은
-성공을 유지하고 `data.migrationError`에 앞선 `{code,message}`를 남깁니다.
-이 필드는 중지 결과와 별도로 확인해야 합니다. 최신 작업 기록은 이미 완료된
-중지 작업을 나타낼 수 있습니다.
-
 ## 지원 작업
 
 | 영역 | 작업 |
 | --- | --- |
-| VM | `vm list`, `status`, `create`, `configure`, `start`, `stop`, `delete`, `migrate`, `diagnostics`, `env` |
+| VM | `vm list`, `status`, `create`, `configure`, `start`, `stop`, `delete`, `diagnostics`, `env` |
 | Docker 컨테이너 | `docker containers list`, `inspect`, `logs`, `stats`, `start`, `stop`, `restart`, `delete` |
 | Docker 목록 | `docker images list`, `docker volumes list`, `docker networks list` |
 | Kubernetes 선택 | `k8s contexts list`, `k8s namespaces list` |
@@ -60,13 +58,18 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 | Kubernetes 상세 | 위 목록의 모든 리소스와 namespaces에 `k8s <resource> inspect <name>` 지원; 객체 JSON과 YAML |
 | Kubernetes 로그 | `k8s pods logs` |
 | Kubernetes 변경 | `k8s deployments scale/restart`, `statefulsets scale/restart`, `daemonsets restart`, `pods delete` |
-| 유지관리 | `system update`, `system uninstall` |
+| 유지관리 | `system upgrade`, `system uninstall` |
 
-VM·Docker 작업은 `vm list`를 제외하고 `--profile`이 필요합니다. 생성·설정은
+VM 작업은 `vm list`를 제외하고 `--profile`이 필요합니다. Docker는 `--profile`과
+`--context` 중 정확히 하나를 지정합니다. 외부 context는 Docker CLI의 인증·전송을
+사용하며 `--docker-config`로 설정 디렉터리를 지정할 수 있습니다. 이 경로는 Hamn
+프로필 조회·변경을 수행하지 않습니다. 생성·설정은
 `--cpu`, `--memory`(GiB), `--disk`(GiB)를 받습니다. `vm diagnostics`의 `--path`는
-아카이브 경로이며 `system update`는 `--manifest`를 지원합니다.
-`hamn --headless system update --help`로 작업별 사용법과 복구 방법을 확인합니다.
-진행 안내와 호환성은 [설치와 업데이트 경험](INSTALLATION.ko.md)을 참고하세요.
+아카이브 경로입니다. `system upgrade`는 `--manifest`,
+`--check`(조회 전용, `--yes` 불필요), `--force`(동일 버전 재설치, `--yes` 필요)를
+지원하며 `--check`와 `--force`는 함께 쓸 수 없습니다.
+`hamn --headless system upgrade --help`로 작업별 사용법과 복구 방법을 확인합니다.
+진행 안내와 호환성은 [설치와 업그레이드 경험](INSTALLATION.ko.md)을 참고하세요.
 `vm env`는 셸 코드 대신 Docker 접속 정보를 반환합니다.
 
 Kubernetes는 context 목록을 제외하고 `--context`가 필요합니다. 네임스페이스 변경
@@ -81,7 +84,7 @@ Pod 로그에는 `--container`·`--previous`를 사용할 수 있습니다.
 
 ## 연결과 소유권
 
-Docker 요청은 API 버전 협상 후 `~/.hamn/<profile>/docker.sock`으로 직접 전달합니다.
+프로필 Docker API 요청은 API 버전 협상 후 `~/.hamn/<profile>/docker.sock`으로 직접 전달합니다.
 변경 전 컨테이너 이름을 고정 ID로 해석하고, 컨테이너 삭제 시 볼륨은 보존합니다.
 Docker 공개 포트의 포워딩은 기존 C 관찰기가 소유하며 외부 도구도 같은 소켓을 사용합니다.
 
@@ -105,3 +108,10 @@ MCP 서버는 제공하지 않습니다.
 구현에 적용한 상위 계약은 [Cargo 정적 링크](https://doc.rust-lang.org/cargo/reference/build-script-examples.html#building-a-native-library),
 [Ratatui 백엔드](https://ratatui.rs/concepts/backends/),
 [kubeconfig 규칙](https://kubernetes.io/docs/concepts/configuration/organize-cluster-access-kubeconfig/)을 참고하세요.
+
+
+외부 Docker `--context`는 전용 임시 Unix 소켓에서 기존 Engine API 클라이언트를
+`docker --context <name> system dial-stdio`로 연결합니다. TLS·SSH·context 설정은
+Docker CLI가 소유하며 응답 형식·불변 ID 확인·변경 오류 계약은 유지합니다.
+제한 시간·취소 시 소유한 CLI 프로세스 그룹을 정리하고 임시 소켓을 제거합니다.
+연결 실패 시 프로필이나 기본 context로 대체하지 않습니다.

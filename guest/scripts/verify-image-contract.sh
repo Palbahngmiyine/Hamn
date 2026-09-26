@@ -10,6 +10,7 @@ CNI_DIR=${HAMN_CNI_SOURCE_DIR:-/usr/lib/cni}
 HAMND_BIN=${HAMN_HAMND_BIN:-/usr/local/bin/hamnd}
 GETENT=${HAMN_GETENT:-getent}
 SYSTEMCTL=${HAMN_SYSTEMCTL:-systemctl}
+GUEST_JSON=${HAMN_GUEST_JSON:-/usr/local/libexec/hamn/guest-json}
 BINFMT_MODE=${HAMN_BINFMT_MODE:-qemu}
 case "$BINFMT_MODE" in
     qemu) DEFAULT_BINFMT_ENTRY=/proc/sys/fs/binfmt_misc/qemu-x86_64 ;;
@@ -31,44 +32,11 @@ safe_regular() {
 [ "$ARCH" = aarch64 ] || fail "guest architecture is not arm64"
 safe_regular "$IMAGE_MANIFEST" || fail "guest image manifest is unavailable"
 
-python3 - "$IMAGE_MANIFEST" <<'PY'
-import json
-import sys
-
-
-def pairs(items):
-    result = {}
-    for key, value in items:
-        if key in result:
-            raise ValueError("duplicate key: " + key)
-        result[key] = value
-    return result
-
-
-try:
-    with open(sys.argv[1], encoding="utf-8") as source:
-        value = json.load(source, object_pairs_hook=pairs,
-                          parse_constant=lambda text: (_ for _ in ()).throw(ValueError(text)))
-    expected = {
-        "schemaVersion": 1,
-        "distribution": "ubuntu-24.04",
-        "architecture": "arm64",
-    }
-    if not isinstance(value, dict) or set(value) != set(expected) | {"components"}:
-        raise ValueError("schema is invalid")
-    for key, expected_value in expected.items():
-        if value[key] != expected_value:
-            raise ValueError(key + " is invalid")
-    components = value["components"]
-    required = {"docker", "buildkit", "containerd", "runc", "cni", "binfmt", "dnsmasq", "hamnd"}
-    if (not isinstance(components, list) or
-            len(components) != len(required) or
-            any(not isinstance(component, str) for component in components) or
-            set(components) != required):
-        raise ValueError("component set is invalid")
-except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-    raise SystemExit("hamn: guest image contract: invalid guest image manifest: " + str(error))
-PY
+[ -f "$GUEST_JSON" ] && [ -x "$GUEST_JSON" ] ||
+    fail "required image component is unavailable: guest-json"
+# Exact schema, distribution, architecture and component set; duplicate keys
+# and non-JSON input fail with the manifest error guest-json prints.
+"$GUEST_JSON" image-manifest "$IMAGE_MANIFEST" || exit 1
 
 # Docker's default Buildx driver uses BuildKit server components embedded in
 # dockerd. The contract intentionally attests that guest capability without

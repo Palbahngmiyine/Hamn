@@ -22,11 +22,14 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 BASE_IMAGE=${HAMN_GUEST_BASE_IMAGE:-}
 BASE_SHA256=${HAMN_GUEST_BASE_SHA256:-}
 OUTPUT=${HAMN_GUEST_OUTPUT:-}
+BASELINE_OUTPUT=${HAMN_GUEST_BASELINE_OUTPUT:-}
 VIRT_CUSTOMIZE=${HAMN_VIRT_CUSTOMIZE:-virt-customize}
 QEMU_IMG=${HAMN_QEMU_IMG:-qemu-img}
 VIRT_RESIZE=${HAMN_VIRT_RESIZE:-virt-resize}
 GUESTFISH=${HAMN_GUESTFISH:-guestfish}
 TARGET_SIZE=8G
+REVIEW_ONLY=${HAMN_GUEST_SIZE_REVIEW_ONLY:-0}
+[[ "$REVIEW_ONLY" = 0 || "$REVIEW_ONLY" = 1 ]] || fail "invalid size review mode"
 MAX_RELEASE_ASSET_SIZE=2147483648
 
 [ -n "$BASE_IMAGE" ] && [ -n "$BASE_SHA256" ] && [ -n "$OUTPUT" ] ||
@@ -48,18 +51,41 @@ command -v "$GUESTFISH" >/dev/null 2>&1 ||
 OUTPUT_DIR=$(dirname "$OUTPUT")
 [ -d "$OUTPUT_DIR" ] && [ ! -L "$OUTPUT_DIR" ] ||
     fail "guest image output directory is unsafe"
-[ ! -e "$OUTPUT" ] && [ ! -L "$OUTPUT" ] ||
-    fail "guest image output already exists"
-
+for artifact in "$OUTPUT" "$OUTPUT.sha256" "$OUTPUT.packages-before.tsv" \
+    "$OUTPUT.packages-after.tsv" "$OUTPUT.size-report.json" "$OUTPUT.size-report.budget-proposal.json"; do
+    [ ! -e "$artifact" ] && [ ! -L "$artifact" ] ||
+        fail "guest image output already exists: $artifact"
+done
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/hamn-guest-image.XXXXXX") ||
     fail "cannot create image build workspace"
-STAGE=$OUTPUT_DIR/.hamn-guest-image.$$.img
-COMPACT=$OUTPUT_DIR/.hamn-guest-image.$$.compressed.img
+STAGE_DIR=
+STAGE=
+COMPACT=
 cleanup() {
     rm -rf "$WORK"
-    rm -f "$STAGE" "$COMPACT"
+    if [ -n "$STAGE_DIR" ]; then
+        rm -f "$STAGE" "$COMPACT"
+        rmdir "$STAGE_DIR"
+    fi
 }
 trap cleanup EXIT
+
+# Evidence and size gates are C programs built here with the builder's own
+# compiler into the private workspace; the builder needs no interpreter or Rust.
+IMAGE_TOOL=$WORK/hamn-image-tool
+make -s --no-print-directory -C "$ROOT/guest" IMAGE_TOOL="$IMAGE_TOOL" image-tool ||
+    fail "cannot build the guest image tools"
+if [ -n "$BASELINE_OUTPUT" ]; then
+    "$IMAGE_TOOL" evidence check "$BASELINE_OUTPUT" \
+        "$OUTPUT" "$OUTPUT.sha256" "$OUTPUT.packages-before.tsv" \
+        "$OUTPUT.packages-after.tsv" "$OUTPUT.size-report.json" \
+        "$OUTPUT.size-report.budget-proposal.json"
+fi
+
+STAGE_DIR=$(mktemp -d "$OUTPUT_DIR/.hamn-guest-image.XXXXXX") ||
+    fail "cannot create private image stage"
+STAGE=$STAGE_DIR/image.img
+COMPACT=$STAGE_DIR/compressed.img
 
 GUEST_MANIFEST=$WORK/guest-image.json
 printf '%s\n' \
@@ -81,7 +107,8 @@ git -C "$ROOT" archive --format=tar HEAD -- guest vendor |
 # default Buildx driver uses BuildKit server components embedded in dockerd.
 # Buildx remains a host Docker CLI plugin; its docker-container driver runs a
 # dedicated BuildKit container in this guest through the Docker API.
-PACKAGES='gcc,make,python3,curl,docker.io,containerd,runc,containernetworking-plugins,qemu-user-static,binfmt-support,dnsmasq,nftables'
+BUILD_PACKAGES='gcc,make'
+PACKAGES='curl,docker.io,containerd,runc,containernetworking-plugins,qemu-user-static,binfmt-support,dnsmasq-base,nftables'
 PROVISION=$WORK/provision.sh
 cat >"$PROVISION" <<'EOF'
 #!/bin/bash
@@ -131,15 +158,46 @@ GUESTFISH_RESIZE_COMMANDS
 then
     fail "cannot check and force-expand the resized guest root filesystem"
 fi
+# The dpkg path filters must be in place before the first package unpacks.
 "$VIRT_CUSTOMIZE" -a "$STAGE" \
     --run-command "date -u -s '@$COMMIT_EPOCH'" \
     --run-command 'timeout 30 getent ahostsv4 ports.ubuntu.com' \
-    --install "$PACKAGES" \
+    --upload "$ROOT/guest/image/dpkg-excludes:/etc/dpkg/dpkg.cfg.d/hamn-excludes" \
+    --chmod '0644:/etc/dpkg/dpkg.cfg.d/hamn-excludes' \
+    --install "$BUILD_PACKAGES,$PACKAGES" \
     --upload "$GUEST_MANIFEST:/tmp/hamn-guest-image.json" \
     --upload "$SOURCE_ARCHIVE:/tmp/hamn-guest-sources.tar.gz" \
     --upload "$PROVISION:/tmp/hamn-image-provision.sh" \
     --run-command 'bash /tmp/hamn-image-provision.sh' \
     --run-command 'rm -f /tmp/hamn-image-provision.sh'
+
+# Capture a compressed baseline before cleanup from this exact provisioned
+# filesystem; separate builds could resolve different apt package versions.
+BASELINE=$WORK/baseline.img
+"$QEMU_IMG" convert -q -f qcow2 -O qcow2 \
+    -o compression_type=zlib -c "$STAGE" "$BASELINE"
+if [ -n "$BASELINE_OUTPUT" ]; then
+    "$QEMU_IMG" compare -q -f qcow2 -F qcow2 "$STAGE" "$BASELINE" ||
+        fail "baseline export changed provisioned guest-visible bytes"
+fi
+"$GUESTFISH" --ro --format=qcow2 -a "$STAGE" -i \
+    command 'dpkg-query -W -f=${Package}\t${Version}\t${Installed-Size}\n' \
+    >"$OUTPUT.packages-before.tsv"
+"$VIRT_CUSTOMIZE" -a "$STAGE" \
+    --upload "$ROOT/guest/image/slim-guest.sh:/root/hamn-image-slim.sh" \
+    --run-command 'bash /root/hamn-image-slim.sh && rm /root/hamn-image-slim.sh'
+"$GUESTFISH" --ro --format=qcow2 -a "$STAGE" -i \
+    command 'dpkg-query -W -f=${Package}\t${Version}\t${Installed-Size}\n' \
+    >"$OUTPUT.packages-after.tsv"
+# fstrim is an offline libguestfs filesystem operation; unavailable discard is
+# a build failure, not an excuse to claim a sparse image without evidence.
+# Recreating the journal first leaves only zeroed journal blocks, instead of
+# the provisioning writes that fstrim cannot discard from an allocated journal.
+"$GUESTFISH" --rw add-drive "$STAGE" format:qcow2 discard:enable \
+    : run \
+    : debug sh "tune2fs -O ^has_journal /dev/sda3 && tune2fs -j /dev/sda3" \
+    : e2fsck-f /dev/sda3 \
+    : mount /dev/sda3 / : fstrim / : umount-all : shutdown
 
 "$QEMU_IMG" convert -q -f qcow2 -O qcow2 \
     -o compression_type=zlib -c "$STAGE" "$COMPACT"
@@ -149,6 +207,23 @@ OUTPUT_SIZE=$(wc -c <"$COMPACT" | tr -d '[:space:]')
 [[ "$OUTPUT_SIZE" =~ ^[0-9]+$ ]] &&
     [ "$OUTPUT_SIZE" -lt "$MAX_RELEASE_ASSET_SIZE" ] ||
     fail "compressed guest image exceeds the GitHub release asset limit"
+# Validate the decoder shipped to hosts independently against qemu-img.
+cc -D_GNU_SOURCE -std=c11 -O2 -Wall -Wextra -Werror=implicit-function-declaration \
+    -I"$ROOT/host" "$ROOT/guest/image/extract-check.c" \
+    "$ROOT/host/image/qcow2.c" -lz -o "$WORK/extract-check"
+"$WORK/extract-check" "$COMPACT" "$WORK/extracted.raw"
+"$QEMU_IMG" convert -q -f qcow2 -O raw "$COMPACT" "$WORK/reference.raw"
+[ "$(sha256_file "$WORK/extracted.raw")" = "$(sha256_file "$WORK/reference.raw")" ] || \
+    fail "custom extractor differs from qemu-img reference bytes"
+"$IMAGE_TOOL" verify-raw "$WORK/extracted.raw"
+SIZE_OPTIONS=()
+[ "$REVIEW_ONLY" = 0 ] || SIZE_OPTIONS+=(--review-only)
+"$IMAGE_TOOL" verify-size \
+    --baseline "$BASELINE" --candidate "$COMPACT" \
+    --packages-before "$OUTPUT.packages-before.tsv" --packages-after "$OUTPUT.packages-after.tsv" \
+    --report "$OUTPUT.size-report.json" --budget "$ROOT/guest/image/release-size-budget.json" \
+    --base-sha256 "$BASE_SHA256" --source-revision "$(git -C "$ROOT" rev-parse HEAD)" \
+    "${SIZE_OPTIONS[@]}"
 rm -f "$STAGE"
 STAGE=
 mv -f "$COMPACT" "$OUTPUT"
@@ -156,4 +231,13 @@ COMPACT=
 printf '%s  %s\n' "$(sha256_file "$OUTPUT")" "$(basename "$OUTPUT")" \
     >"$OUTPUT.sha256"
 chmod 0644 "$OUTPUT" "$OUTPUT.sha256"
-echo "built preconfigured Hamn Ubuntu 24.04 arm64 guest image: $OUTPUT"
+if [ -n "$BASELINE_OUTPUT" ]; then
+    # Preserve the actual pre-cleanup artifact only after every existing gate.
+    "$IMAGE_TOOL" evidence publish \
+        "$BASELINE" "$BASELINE_OUTPUT" "$OUTPUT.size-report.json"
+fi
+if [ "$REVIEW_ONLY" = 1 ]; then
+    echo "built review-only guest image; review size and physical runtime evidence before distribution: $OUTPUT"
+else
+    echo "built preconfigured Hamn Ubuntu 24.04 arm64 guest image: $OUTPUT"
+fi

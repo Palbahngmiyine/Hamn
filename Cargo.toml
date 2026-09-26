@@ -9,6 +9,12 @@ build = "build.rs"
 name = "hamn"
 path = "control/main.rs"
 
+# tools/hamn-dev holds build, test and release tooling. It is never shipped;
+# plain `cargo build` and `cargo test` still act on the product only.
+[workspace]
+members = ["tools/hamn-dev"]
+default-members = ["."]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
@@ -20,7 +26,7 @@ libc = "0.2"
 clap = { version = "4.5", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync", "time", "signal", "net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
 ratatui = "0.30.2"
@@ -38,3 +44,11 @@ tar = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
+
+# PR CI builds and tests the same source faster (CARGO_PROFILE=ci); release
+# candidates and published artifacts always use the release profile above.
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

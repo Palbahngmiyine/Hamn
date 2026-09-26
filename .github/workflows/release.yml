@@ -31,16 +31,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Build release tooling
+        shell: bash
+        # rust-toolchain.toml selects the pinned toolchain through rustup.
+        run: cargo build --locked -p hamn-dev
       - name: Resolve push or recovery request
         id: release
         shell: bash
         env:
+          HAMN_DEV: ${{ github.workspace }}/target/debug/hamn-dev
           PREVIOUS_REF: ${{ github.event.before }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = push ]; then
-            bash packaging/release/resolve-release-version.sh "$PREVIOUS_REF"
+            "$HAMN_DEV" release resolve-release "$PREVIOUS_REF"
           else
-            bash packaging/release/resolve-release-request.sh
+            "$HAMN_DEV" release recover-release
           fi
 
   guest-image:
@@ -64,6 +69,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
+            build-essential zlib1g-dev \
             dhcpcd-base ipxe-qemu jq libguestfs-tools linux-image-virtual
           # libguestfs auto-selects passt when runner images preinstall it.
           # Keep the QEMU SLIRP backend used by the appliance DNS contract.
@@ -148,10 +154,16 @@ jobs:
             "$guest_output" "$RUNNER_TEMP/hamn-guest.img"
           sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 \
             "$guest_output.sha256" "$RUNNER_TEMP/hamn-guest.img.sha256"
+          for suffix in size-report.json packages-before.tsv packages-after.tsv; do
+            sudo install -o "$(id -u)" -g "$(id -g)" -m 0644 \
+              "$guest_output.$suffix" "$RUNNER_TEMP/hamn-guest.img.$suffix"
+          done
       - name: Attest completed guest image
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/hamn-guest.img
+          subject-path: |
+            ${{ runner.temp }}/hamn-guest.img
+            ${{ runner.temp }}/hamn-guest.img.size-report.json
       - name: Upload completed guest image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -159,6 +171,9 @@ jobs:
           path: |
             ${{ runner.temp }}/hamn-guest.img
             ${{ runner.temp }}/hamn-guest.img.sha256
+            ${{ runner.temp }}/hamn-guest.img.size-report.json
+            ${{ runner.temp }}/hamn-guest.img.packages-before.tsv
+            ${{ runner.temp }}/hamn-guest.img.packages-after.tsv
           if-no-files-found: error
           retention-days: 14
 
@@ -214,23 +229,24 @@ jobs:
         run: |
           set -euo pipefail
           (cd "$RUNNER_TEMP/hamn-guest" && shasum -a 256 -c hamn-guest.img.sha256)
-          system_sdk=$(env -u SDKROOT -u DEVELOPER_DIR \
-            /usr/bin/xcrun --sdk macosx --show-sdk-path)
-          HAMN_SYSTEM_SDKROOT="$system_sdk" \
-          nix develop .#ci --command bash -euo pipefail <<'NIX_SHELL'
-          source scripts/ci/use-system-macos-sdk.sh
-          make -j1 SDKROOT="$HAMN_SYSTEM_SDKROOT" test-local-macos
-          make SDKROOT="$HAMN_SYSTEM_SDKROOT" release-candidate \
+          # The flake shell selects the system Apple SDK and toolchain itself.
+          nix develop .#ci --command make -j1 test-local-macos
+          nix develop .#ci --command make release-candidate \
             RELEASE_REF="$GITHUB_SHA" \
             RELEASE_TAG="$RELEASE_TAG" \
             OUTPUT_DIR="$RUNNER_TEMP/hamn-candidate" \
             HAMN_GUEST_IMAGE="$RUNNER_TEMP/hamn-guest/hamn-guest.img"
-          make release-hosted-validation \
+          nix develop .#ci --command make release-hosted-validation \
             RELEASE_REF="$GITHUB_SHA" \
             RELEASE_TAG="$RELEASE_TAG" \
             CANDIDATE_DIR="$RUNNER_TEMP/hamn-candidate" \
             OUTPUT_DIR="$RUNNER_TEMP/hamn-evidence"
-          NIX_SHELL
+          cp "$RUNNER_TEMP/hamn-guest/hamn-guest.img.size-report.json" \
+            "$RUNNER_TEMP/hamn-evidence/guest-image-size-report.json"
+          cp "$RUNNER_TEMP/hamn-guest/hamn-guest.img.packages-before.tsv" \
+            "$RUNNER_TEMP/hamn-evidence/guest-image-packages-before.tsv"
+          cp "$RUNNER_TEMP/hamn-guest/hamn-guest.img.packages-after.tsv" \
+            "$RUNNER_TEMP/hamn-evidence/guest-image-packages-after.tsv"
       - name: Attest exact candidate artifact provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
@@ -238,7 +254,9 @@ jobs:
       - name: Attest hosted validation evidence
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/hamn-evidence/hosted-validation-evidence.json
+          subject-path: |
+            ${{ runner.temp }}/hamn-evidence/hosted-validation-evidence.json
+            ${{ runner.temp }}/hamn-evidence/guest-image-size-report.json
       - name: Upload exact candidate bytes
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -272,6 +290,10 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Build release tooling
+        shell: bash
+        # rust-toolchain.toml selects the pinned toolchain through rustup.
+        run: cargo build --locked -p hamn-dev
       - name: Download exact candidate bytes
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -303,9 +325,16 @@ jobs:
             --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
             --source-digest "$GITHUB_SHA" \
             --deny-self-hosted-runners
+          gh attestation verify \
+            "$RUNNER_TEMP/hamn-release-input/hamn-evidence/guest-image-size-report.json" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$GITHUB_SHA" \
+            --deny-self-hosted-runners
       - name: Verify hosted evidence and generate immutable manifest
         shell: bash
         env:
+          HAMN_DEV: ${{ github.workspace }}/target/debug/hamn-dev
           HAMN_RELEASE_REPOSITORY: ${{ github.repository }}
           STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
           CANDIDATE_TAG: ${{ needs.prepare.outputs.candidate_tag }}
@@ -314,13 +343,13 @@ jobs:
           mkdir "$RUNNER_TEMP/hamn-publish"
           HAMN_EXPECTED_WORKFLOW_RUN="$GITHUB_RUN_ID" \
           HAMN_EXPECTED_WORKFLOW_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
-          bash packaging/release/publish-release.sh \
+          "$HAMN_DEV" release publish \
             "$STABLE_TAG" "$CANDIDATE_TAG" "$GITHUB_SHA" \
             "$RUNNER_TEMP/hamn-release-input" "$RUNNER_TEMP/hamn-publish"
       - name: Attest immutable update manifest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
-          subject-path: ${{ runner.temp }}/hamn-publish/hamn-update-manifest.json
+          subject-path: ${{ runner.temp }}/hamn-publish/hamn-update-manifest-v3.json
       - name: Create and verify draft release
         shell: bash
         env:
@@ -339,37 +368,18 @@ jobs:
             "$candidate/hamn-${STABLE_TAG}-ubuntu-24.04-arm64.img" \
             "$candidate/hamn-${STABLE_TAG}.spdx.json" \
             "$candidate/install.sh" \
-            "$publish/hamn-update-manifest.json" \
+            "$publish/hamn-update-manifest-v3.json" \
             "$publish/hosted-validation-evidence.json" \
             "$publish/candidate.json" \
             "$publish/SHA256SUMS" \
             "$publish/promoted-from-rc" \
             --draft --target "$GITHUB_SHA" --title "Hamn $STABLE_TAG" \
             --generate-notes \
-            --notes "Built and statically validated on GitHub-hosted runners using these exact RC bytes; this release does not claim physical VM end-to-end validation. Legacy managed K3s data and local volumes are permanently deleted; Docker data is preserved. Binary rollback cannot recover K3s data."
+            --notes "Built and statically validated on GitHub-hosted runners using these exact RC bytes; this release does not claim physical VM end-to-end validation."
           gh release view "$STABLE_TAG" --json tagName,targetCommitish,isDraft,isPrerelease,assets \
             > "$RUNNER_TEMP/hamn-draft-release.json"
-          python3 - "$RUNNER_TEMP/hamn-draft-release.json" "$STABLE_TAG" "$GITHUB_SHA" <<'PY'
-          import json
-          import sys
-
-          path, tag, commit = sys.argv[1:]
-          with open(path, encoding="utf-8") as source:
-              release = json.load(source)
-          expected = {
-              "hamn-" + tag + "-darwin-arm64.tar.gz",
-              "hamn-" + tag + "-ubuntu-24.04-arm64.img",
-              "hamn-" + tag + ".spdx.json",
-              "install.sh", "hamn-update-manifest.json",
-              "hosted-validation-evidence.json", "candidate.json",
-              "SHA256SUMS", "promoted-from-rc",
-          }
-          names = {asset.get("name") for asset in release.get("assets", [])}
-          if release.get("tagName") != tag or release.get("targetCommitish") != commit or \
-                  release.get("isDraft") is not True or \
-                  release.get("isPrerelease") is not False or names != expected:
-              raise SystemExit("draft release does not bind every keyless artifact")
-          PY
+          "$GITHUB_WORKSPACE/target/debug/hamn-dev" release verify-draft-release \
+            "$RUNNER_TEMP/hamn-draft-release.json" "$STABLE_TAG" "$GITHUB_SHA"
       - name: Publish immutable release and verify assets
         shell: bash
         env:
@@ -394,4 +404,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           STABLE_TAG: ${{ needs.prepare.outputs.stable_tag }}
-        run: python3 packaging/release/complete-release-pr.py "$STABLE_TAG" "$GITHUB_SHA"
+        run: target/debug/hamn-dev release complete-pr "$STABLE_TAG" "$GITHUB_SHA"

@@ -24,6 +24,10 @@ fn main() {
     });
     let native = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("core");
     let mut make = Command::new("make");
+    // Cargo's job budget; the C core has ~55 independent translation units.
+    if let Ok(jobs) = env::var("NUM_JOBS") {
+        make.arg(format!("-j{jobs}"));
+    }
     make.current_dir(&root).args([
             format!("{}/libhamn_core.a", native.display()),
             format!("BUILD={}", native.display()),
@@ -55,14 +59,13 @@ fn main() {
         runtime.parent().unwrap().display()
     );
     println!("cargo:rustc-link-lib=static=clang_rt.osx");
-    println!("cargo:rustc-env=HAMN_VERSION={version}");
+    // The version reaches Rust only through the C core (hamn_version), so a
+    // version change rebuilds the C core and relinks; Rust code is unchanged.
     for path in [
         "host",
         "vendor",
         "Makefile",
         "version.txt",
-        "scripts/embed-retirement.py",
-        "guest/scripts",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }

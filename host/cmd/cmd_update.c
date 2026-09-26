@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,14 +8,10 @@
 #include <unistd.h>
 
 #include "cli.h"
+#include "cjson/cJSON.h"
 #include "core/control.h"
 #include "core/log.h"
 #include "util/proc.h"
-
-static void update_usage(FILE *stream)
-{
-    fprintf(stream, "usage: hamn update [--manifest URL_OR_PATH]\n");
-}
 
 static int path_parent(const char *path, char output[PATH_MAX])
 {
@@ -77,8 +74,11 @@ static int resolve_invocation(char output[PATH_MAX])
     return lstat(output, &status) == 0 ? 0 : -1;
 }
 
-static int managed_paths(char executable[PATH_MAX], char datadir[PATH_MAX],
-                         char helper[PATH_MAX])
+/* A managed executable is DATADIR/.hamn-generations/<name>/bin/hamn, an
+ * owned single-link executable. The same executable performs the update
+ * (`__install-support update`), which revalidates everything under its
+ * locks; this check only decides whether the command is managed at all. */
+static int managed_paths(char executable[PATH_MAX], char datadir[PATH_MAX])
 {
     if (!proc_self_path(executable, PATH_MAX))
         return -1;
@@ -94,46 +94,83 @@ static int managed_paths(char executable[PATH_MAX], char datadir[PATH_MAX],
         return -1;
     memcpy(datadir, executable, data_length);
     datadir[data_length] = '\0';
-    size_t generation_length = (size_t)(suffix - executable);
-    int written = snprintf(helper, PATH_MAX,
-                           "%.*s/share/hamn/src/scripts/update-host.sh",
-                           (int)generation_length, executable);
-    if (written < 0 || written >= PATH_MAX)
-        return -1;
     struct stat status;
-    return lstat(helper, &status) == 0 && S_ISREG(status.st_mode) &&
+    return lstat(executable, &status) == 0 && S_ISREG(status.st_mode) &&
         status.st_uid == geteuid() && status.st_nlink == 1 &&
         (status.st_mode & 0111) != 0 ? 0 : -1;
 }
 
-int cmd_update(int argc, char **argv)
+static int unsupported_check_result(char **result)
 {
-    const char *manifest = NULL;
-    for (int index = 1; index < argc; index++) {
-        if (strcmp(argv[index], "--manifest") == 0) {
-            if (++index >= argc || manifest || !argv[index][0]) {
-                update_usage(stderr);
-                return 2;
-            }
-            manifest = argv[index];
-        } else if (strcmp(argv[index], "--help") == 0 ||
-                   strcmp(argv[index], "-h") == 0) {
-            update_usage(stdout);
-            return 0;
-        } else {
-            update_usage(stderr);
-            return 2;
+    cJSON *value = cJSON_CreateObject();
+    cJSON *artifacts = NULL;
+    if (!value || !cJSON_AddNumberToObject(value, "schemaVersion", 1) ||
+        !cJSON_AddStringToObject(value, "currentVersion", HAMN_VERSION) ||
+        !cJSON_AddNullToObject(value, "latestVersion") ||
+        !cJSON_AddStringToObject(value, "status", "unsupported-install") ||
+        !cJSON_AddNumberToObject(value, "downloadedBytes", 0) ||
+        !cJSON_AddNumberToObject(value, "resumedBytes", 0) ||
+        !cJSON_AddNumberToObject(value, "reusedBytes", 0) ||
+        !cJSON_AddBoolToObject(value, "completed", 1) ||
+        !cJSON_AddBoolToObject(value, "profileDisksChanged", 0) ||
+        !(artifacts = cJSON_AddObjectToObject(value, "artifacts"))) {
+        cJSON_Delete(value);
+        return 1;
+    }
+    const char *names[] = { "manifest", "host", "guestImage" };
+    for (size_t index = 0; index < sizeof(names) / sizeof(names[0]); index++) {
+        cJSON *artifact = cJSON_AddObjectToObject(artifacts, names[index]);
+        if (!artifact || !cJSON_AddNumberToObject(artifact, "downloadedBytes", 0) ||
+            !cJSON_AddNumberToObject(artifact, "resumedBytes", 0) ||
+            !cJSON_AddNumberToObject(artifact, "reusedBytes", 0) ||
+            !cJSON_AddStringToObject(artifact, "source", "none")) {
+            cJSON_Delete(value);
+            return 1;
         }
     }
-
-    return hamn_control_update(manifest);
+    *result = cJSON_PrintUnformatted(value);
+    cJSON_Delete(value);
+    return *result ? 0 : 1;
 }
 
-int hamn_control_update(const char *manifest)
+/* The updater writes one human failure reason (a single line) into the
+ * private result file when it fails. Accept only bounded printable text. */
+static int failure_reason(int fd, char *reason, size_t capacity)
 {
-    char executable[PATH_MAX], datadir[PATH_MAX], helper[PATH_MAX];
-    if (managed_paths(executable, datadir, helper) != 0) {
-        logerr("update requires a managed Hamn installation; reinstall with the signed installer");
+    struct stat status;
+    if (fstat(fd, &status) != 0 || status.st_size <= 0 ||
+        (size_t)status.st_size >= capacity)
+        return -1;
+    ssize_t length = pread(fd, reason, (size_t)status.st_size, 0);
+    if (length != status.st_size)
+        return -1;
+    while (length > 0 && reason[length - 1] == '\n')
+        length--;
+    if (length == 0)
+        return -1;
+    for (ssize_t index = 0; index < length; index++) {
+        unsigned char byte = (unsigned char)reason[index];
+        if (byte < 0x20 || byte == 0x7f)
+            return -1;
+    }
+    reason[length] = '\0';
+    return 0;
+}
+
+int hamn_control_upgrade(const char *manifest, int check_only, int force,
+                         char **result)
+{
+    if (!result || (check_only != 0 && check_only != 1) ||
+        (force != 0 && force != 1) || (check_only && force))
+        return 2;
+    *result = NULL;
+    char executable[PATH_MAX], datadir[PATH_MAX];
+    if (managed_paths(executable, datadir) != 0) {
+        if (check_only)
+            return unsupported_check_result(result);
+        log_set_error("this hamn is not a managed installation, so it cannot upgrade itself; "
+                      "install Hamn with the official installer: "
+                      "https://github.com/Palbahngmiyine/Hamn#install");
         return 1;
     }
     char invocation[PATH_MAX], resolved[PATH_MAX], binary_dir[PATH_MAX];
@@ -143,25 +180,95 @@ int hamn_control_update(const char *manifest)
         !S_ISLNK(invocation_status.st_mode) || !realpath(invocation, resolved) ||
         strcmp(resolved, executable) != 0 ||
         path_parent(invocation, binary_dir) != 0) {
-        logerr("update requires the managed hamn command symlink, not a direct generation binary");
+        if (check_only)
+            return unsupported_check_result(result);
+        log_set_error("update requires the managed hamn command symlink, not a direct generation binary; run hamn upgrade");
         return 1;
     }
 
-    const char *command[10] = {
-        "bash", helper, "--bindir", binary_dir, "--datadir", datadir,
-        NULL, NULL, NULL,
+    char result_directory[] = "/tmp/hamn-upgrade-result.XXXXXX";
+    if (!mkdtemp(result_directory)) {
+        logerr("cannot create private upgrade result directory");
+        return 1;
+    }
+    char result_path[PATH_MAX];
+    snprintf(result_path, sizeof(result_path), "%s/result.json", result_directory);
+    int result_fd = open(result_path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (result_fd < 0) {
+        rmdir(result_directory);
+        return 1;
+    }
+    struct stat result_identity;
+    if (fstat(result_fd, &result_identity) != 0) {
+        close(result_fd); unlink(result_path); rmdir(result_directory);
+        return 1;
+    }
+    /* This managed generation's own executable runs the transaction in a
+     * fresh process; --generation names it so the updater can refuse a
+     * stale frontend after another update replaced the active generation. */
+    const char *command[20] = {
+        executable, "__install-support", "update", "--bindir", binary_dir,
+        "--datadir", datadir, NULL,
     };
-    size_t count = 6;
+    size_t count = 7;
+    command[count++] = "--current-version";
+    command[count++] = HAMN_VERSION;
+    command[count++] = "--generation";
+    command[count++] = executable;
+    command[count++] = "--output-json";
+    command[count++] = "--result-file";
+    command[count++] = result_path;
+    if (check_only)
+        command[count++] = "--check-only";
+    if (force)
+        command[count++] = "--force";
     if (manifest) {
         command[count++] = "--manifest";
         command[count++] = manifest;
     }
     command[count] = NULL;
+    /* proc_run_capture_checked merges stderr with stdout. Keep human progress
+     * live and the machine result in an owned bounded private file instead. */
     int rc = proc_run(command);
-    if (rc != 0) {
-        logerr("update failed; inspect the diagnostics above and retry the same command with all original options (including --manifest, if supplied); an incomplete transaction is recovered on retry");
+    char output[16384];
+    struct stat final_identity;
+    ssize_t length = -1;
+    if (rc == 0 && fstat(result_fd, &final_identity) == 0 &&
+        final_identity.st_dev == result_identity.st_dev &&
+        final_identity.st_ino == result_identity.st_ino &&
+        final_identity.st_nlink == 1 && final_identity.st_size > 0 &&
+        final_identity.st_size < (off_t)sizeof(output)) {
+        length = pread(result_fd, output, (size_t)final_identity.st_size, 0);
+        if (length != final_identity.st_size)
+            length = -1;
+    }
+    char reason[1024];
+    int reported = rc != 0 && failure_reason(result_fd, reason, sizeof(reason)) == 0;
+    close(result_fd);
+    unlink(result_path);
+    rmdir(result_directory);
+    if (reported) {
+        log_set_error("%s", reason);
         return 1;
     }
-    logmsg("update completed; the selected guest image is used for new profile disks; existing profile disks keep their current guest root");
+    if (rc != 0 || length < 0) {
+        /* proc_run reports -1 when the updater could not start or was
+         * terminated by a signal; its own reason is then unavailable. */
+        if (rc < 0)
+            log_set_error("the updater could not run to completion; run the same command again");
+        else if (check_only)
+            log_set_error("could not check for updates; run the same command again");
+        else
+            log_set_error("upgrade did not complete; run the same command again to retry "
+                          "(an interrupted upgrade is recovered automatically%s)",
+                          manifest ? ", keep the same --manifest" : "");
+        return 1;
+    }
+    output[length] = '\0';
+    *result = strdup(output);
+    if (!*result) {
+        logerr("cannot allocate upgrade result");
+        return 1;
+    }
     return 0;
 }

@@ -5,6 +5,9 @@
 
 void logmsg(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void logerr(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+/* Record the operation's failure reason without printing it. The frontend
+ * reports log_last_error() exactly once (human line or machine JSON). */
+void log_set_error(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 void die(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 void log_set_machine_json(int enabled);
 void log_emit_machine_error(int exit_code);

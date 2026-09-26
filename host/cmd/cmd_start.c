@@ -7,7 +7,6 @@
  */
 
 #include <errno.h>
-#include <getopt.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +24,6 @@
 #include "core/remote_mutation.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
-#include "core/retirement.h"
 #include "core/provision.h"
 #include "core/state.h"
 #include "fwd/docker_observer.h"
@@ -230,136 +228,17 @@ static void start_trace_stage(struct start_trace *trace, const char *stage)
     trace->previous_ms = current_ms;
 }
 
+/* Requested resources; zero keeps the profile's current value. */
 struct start_options {
     unsigned cpus;
     unsigned memory_gib;
     unsigned disk_gib;
-    int provision;
-    int edit;
-    int template_enabled;
-    const char *flag_profile;
-    const char *positional_profile;
 };
-
-static void start_usage(FILE *stream)
-{
-    fprintf(stream,
-            "usage: hamn start [-p PROFILE] [PROFILE] [--cpu N] "
-            "[--memory GiB] [--disk GiB] [--provision] [--edit] "
-            "[--template=false]\n");
-}
-
-static int parse_start_options(int argc, char **argv,
-                               struct start_options *options)
-{
-    memset(options, 0, sizeof(*options));
-    options->template_enabled = 1;
-    static const struct option opts[] = {
-        { "cpu", required_argument, NULL, 'c' },
-        { "memory", required_argument, NULL, 'm' },
-        { "disk", required_argument, NULL, 'd' },
-        { "provision", no_argument, NULL, 'P' },
-        { "edit", no_argument, NULL, 'e' },
-        { "template", required_argument, NULL, 'T' },
-        { "profile", required_argument, NULL, 'p' },
-        { 0 },
-    };
-    optind = 1;
-    optreset = 1;
-    int ch;
-    while ((ch = getopt_long(argc, argv, "c:m:d:PeT:p:", opts, NULL)) != -1) {
-        switch (ch) {
-        case 'c':
-            if (profile_parse_positive(optarg, &options->cpus) != 0) {
-                logerr("invalid CPU count '%s'", optarg);
-                return -1;
-            }
-            break;
-        case 'm':
-            if (profile_parse_positive(optarg, &options->memory_gib) != 0 ||
-                options->memory_gib > UINT_MAX / 1024U) {
-                logerr("invalid memory size '%s'", optarg);
-                return -1;
-            }
-            break;
-        case 'd':
-            if (profile_parse_positive(optarg, &options->disk_gib) != 0) {
-                logerr("invalid disk size '%s'", optarg);
-                return -1;
-            }
-            break;
-        case 'P':
-            options->provision = 1;
-            break;
-        case 'e':
-            options->edit = 1;
-            break;
-        case 'T':
-            if (strcmp(optarg, "true") == 0)
-                options->template_enabled = 1;
-            else if (strcmp(optarg, "false") == 0)
-                options->template_enabled = 0;
-            else {
-                logerr("--template must be true or false");
-                return -1;
-            }
-            break;
-        case 'p':
-            if (options->flag_profile) {
-                logerr("profile was specified more than once");
-                return -1;
-            }
-            options->flag_profile = optarg;
-            break;
-        default:
-            start_usage(stderr);
-            return -1;
-        }
-    }
-    if (optind + 1 < argc) {
-        start_usage(stderr);
-        return -1;
-    }
-    if (optind < argc)
-        options->positional_profile = argv[optind];
-    if (options->edit && !options->template_enabled) {
-        logerr("--edit cannot be combined with --template=false");
-        return -1;
-    }
-    return 0;
-}
-
-static int profile_config_exists(const struct profile *profile)
-{
-    char path[1024];
-    struct stat status;
-    if (!profile_path(profile, "config.yaml", path, sizeof(path)))
-        return -1;
-    if (lstat(path, &status) != 0)
-        return errno == ENOENT ? 0 : -1;
-    return S_ISREG(status.st_mode) ? 1 : -1;
-}
-
-static int edit_profile_template(const struct profile *profile)
-{
-    char config[1024];
-    if (!profile_path(profile, "config.yaml", config, sizeof(config)))
-        return -1;
-    const char *editor = getenv("EDITOR");
-    if (!editor || !editor[0])
-        editor = "vi";
-    if (strpbrk(editor, " \t\r\n")) {
-        logerr("EDITOR must name one executable without arguments");
-        return -1;
-    }
-    const char *command[] = { editor, config, NULL };
-    return proc_run(command);
-}
 
 /* A released installation already selects its signed guest image during
  * installation.  This recovery path covers a missing local selection (for
  * example, after an interrupted cache cleanup) without ever accepting a
- * stock or unsigned image.  The managed `hamn update` command verifies the
+ * stock or unsigned image.  The managed `hamn upgrade` command verifies the
  * release manifest, both artifacts, and installs the selection atomically.
  */
 static int ensure_signed_guest_image(char *image, size_t capacity,
@@ -382,9 +261,9 @@ static int ensure_signed_guest_image(char *image, size_t capacity,
     }
 
     logmsg("preparing the signed Hamn guest image (first start only) ...");
-    const char *command[] = { invocation, "--headless", "system", "update", "--yes", NULL };
+    const char *command[] = { invocation, "--headless", "system", "upgrade", "--yes", NULL };
     if (proc_run(command) != 0) {
-        logerr("cannot prepare the signed guest image; run 'hamn --headless system update --yes' to see the verification error");
+        logerr("cannot prepare the signed guest image; run 'hamn upgrade' to see the verification error");
         return -1;
     }
     if (fetch_image_ensure(image, capacity) != 0) {
@@ -411,26 +290,8 @@ static int cmd_start_execute(const struct start_options *options,
     struct start_trace trace;
     start_trace_init(&trace);
     struct profile p;
-    if (profile_load(&p, profile_name) != 0) {
-        if (errno == EPROTONOSUPPORT) {
-            logerr("profile %s has a removed runtime setting; Hamn will not "
-                   "convert it. Recreate it with: hamn delete --data "
-                   "--profile %s (confirm y), then hamn start --profile %s",
-                   profile_name, profile_name, profile_name);
-            return 1;
-        }
+    if (profile_load(&p, profile_name) != 0)
         die("cannot initialize profile directory");
-    }
-    int config_exists = profile_config_exists(&p);
-    if (config_exists < 0)
-        die("cannot inspect profile configuration");
-    if (options->edit) {
-        if (profile_save(&p) != 0 || edit_profile_template(&p) != 0)
-            die("cannot edit the profile template");
-        if (profile_load(&p, profile_name) != 0)
-            die("edited profile configuration is invalid");
-        config_exists = 1;
-    }
     char deleted_marker[1024];
     if (!profile_path(&p, "deleted", deleted_marker, sizeof(deleted_marker)) ||
         fs_unlink_if_exists(deleted_marker) != 0)
@@ -467,8 +328,7 @@ static int cmd_start_execute(const struct start_options *options,
         p.mem_mib = options->memory_gib * 1024;
     if (options->disk_gib)
         p.disk_gib = options->disk_gib;
-    int deployment_current = options->provision ? 0 :
-        guest_deployment_is_current(&p);
+    int deployment_current = guest_deployment_is_current(&p);
     if (deployment_current < 0) {
         logerr("cannot validate guest deployment marker: %s",
                strerror(errno));
@@ -494,11 +354,7 @@ static int cmd_start_execute(const struct start_options *options,
             if (ssh_master_start(&p, running_state.ip, 15) != 0)
                 goto out;
             start_trace_stage(&trace, "recovering-deployment");
-            if (retirement_recover(&p, running_state.ip) != 0)
-                goto out;
-            if (p.legacy_k3s &&
-                (ssh_master_start(&p, running_state.ip, 15) != 0 ||
-                 retirement_run(&p, running_state.ip) != 0))
+            if (guest_deployment_recover(&p, running_state.ip) != 0)
                 goto out;
             if (deployment_current == 0 &&
                 guest_deployment_refresh_locked(&p, &running_state) != 0) {
@@ -533,8 +389,7 @@ static int cmd_start_execute(const struct start_options *options,
         logerr("cannot clean stale VM state before start");
         goto out;
     }
-    if ((config_exists || options->template_enabled || options->cpus ||
-         options->memory_gib || options->disk_gib) && profile_save(&p) != 0)
+    if (profile_save(&p) != 0)
         die("cannot save profile config");
 
     /* 1. 이미지 + 디스크 */
@@ -599,7 +454,7 @@ static int cmd_start_execute(const struct start_options *options,
             goto out;
         }
     }
-    if (cloudinit_seed_ensure(&p, options->provision) != 0)
+    if (cloudinit_seed_ensure(&p, 0) != 0)
         goto out;
     start_trace_stage(&trace, deployment_current == 1 ?
                       "guest-image-configuration-reused" :
@@ -789,8 +644,6 @@ static int cmd_start_execute(const struct start_options *options,
         goto rollback;
     }
     start_trace_stage(&trace, "ssh-ready");
-    if (retirement_run(&p, ip) != 0)
-        goto rollback;
 
     if (provision_run_stage(&p, ip, "system") != 0 ||
         provision_run_stage(&p, ip, "user") != 0)
@@ -812,8 +665,7 @@ static int cmd_start_execute(const struct start_options *options,
             if (guest_deployment_repair_locked(&p, &st) != 0)
                 goto rollback;
         }
-    } else if ((options->provision ? guest_deployment_repair_locked(&p, &st) :
-                 guest_deployment_refresh_locked(&p, &st)) != 0) {
+    } else if (guest_deployment_refresh_locked(&p, &st) != 0) {
         goto rollback;
     }
     start_trace_stage(&trace, "runtime-ready");
@@ -846,7 +698,7 @@ static int cmd_start_execute(const struct start_options *options,
 rollback:
     proc_cleanup_begin();
     if (start_spawned && !guest_deployment_cleanup_pending() &&
-        !retirement_cleanup_pending() && !remote_mutation_cleanup_pending())
+        !remote_mutation_cleanup_pending())
         start_restored = rollback_incomplete_start(&p) == 0;
     proc_cleanup_end();
 out:
@@ -862,7 +714,7 @@ static int cmd_start_locked(const struct start_options *options, const char *pro
     if (start_unchanged) return operation_finish_unchanged(rc);
     return operation_finish(rc, !remote_mutation_cleanup_pending() &&
         (start_restored || (!start_spawned &&
-         (guest_deployment_recovery_complete() || retirement_cancel_recovered()))));
+         guest_deployment_recovery_complete())));
 }
 
 int hamn_control_start(const char *profile, unsigned cpus,
@@ -874,7 +726,6 @@ int hamn_control_start(const char *profile, unsigned cpus,
     }
     struct start_options options = {
         .cpus = cpus, .memory_gib = memory_gib, .disk_gib = disk_gib,
-        .template_enabled = 1,
     };
     struct vm_lifecycle_lock lock;
     if (vm_lifecycle_lock_acquire(profile, &lock) != 0) {
@@ -886,43 +737,3 @@ int hamn_control_start(const char *profile, unsigned cpus,
     return rc;
 }
 
-int cmd_start(int argc, char **argv)
-{
-    struct start_options options;
-    if (parse_start_options(argc, argv, &options) != 0)
-        return 2;
-    char profile_name[PROFILE_NAME_CAP];
-    if (profile_resolve_name(options.flag_profile, options.positional_profile,
-                             profile_name) != 0) {
-        logerr("invalid profile name");
-        return 2;
-    }
-    struct vm_lifecycle_lock lock;
-    if (vm_lifecycle_lock_acquire(profile_name, &lock) != 0) {
-        logerr("cannot lock the %s profile lifecycle", profile_name);
-        return 1;
-    }
-    int rc = cmd_start_locked(&options, profile_name);
-    vm_lifecycle_lock_release(&lock);
-    if (rc == START_REEXEC_AFTER_SIGNED_UPDATE) {
-        const char *invocation = cli_invocation_path();
-        if (!invocation || !invocation[0]) {
-            logerr("signed guest image is ready, but Hamn cannot restart itself");
-            return 1;
-        }
-        char **restart = calloc((size_t)argc + 2, sizeof(*restart));
-        if (!restart) {
-            logerr("signed guest image is ready, but Hamn cannot allocate its restart command");
-            return 1;
-        }
-        restart[0] = (char *)invocation;
-        for (int index = 0; index < argc; index++)
-            restart[index + 1] = argv[index];
-        execvp(restart[0], restart);
-        logerr("signed guest image is ready, but Hamn cannot restart: %s",
-               strerror(errno));
-        free(restart);
-        return 1;
-    }
-    return rc;
-}

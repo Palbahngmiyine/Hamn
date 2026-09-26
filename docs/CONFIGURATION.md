@@ -6,8 +6,9 @@ This is the canonical English configuration reference. See
 ## Profile selection and location
 
 Profile state lives under `~/.hamn/<profile>/`, with mode `0700` directories.
-Headless VM and Docker operations require an explicit `--profile`; `vm list`
-needs no profile. The TUI maintains its own selection, initially `default`.
+Headless VM operations require an explicit `--profile`; `vm list` needs none.
+Docker operations require exactly one `--profile` or external `--context`;
+`--docker-config` applies only to context-based operations. The TUI maintains its own selection, initially `default`.
 There is no positional-profile or `HAMN_PROFILE` fallback in the public API.
 
 Profile names may contain only letters, digits, `_`, and `-`. `cache`, `.` and
@@ -132,10 +133,9 @@ schema rejects `network`, and `configure` has no `--network` or
 `--network-interface` option. Hamn does not provide a LAN-reachable guest
 address in 0.0.1.
 
-Guest Docker networks resolve `host.docker.internal`. `host.hamn.internal` is a
-0.0.1 compatibility alias; successful guest Docker configuration warns that it
-will be removed in the next release. Hamn does not touch host
-`/var/run/docker.sock`.
+Guest Docker networks resolve `host.docker.internal`. The 0.0.1
+`host.hamn.internal` alias has been removed; use `host.docker.internal`.
+Hamn does not touch host `/var/run/docker.sock`.
 
 ## Kubernetes
 
@@ -148,10 +148,10 @@ hamn --headless k8s pods list --context dev --namespace default
 
 `--kubeconfig` takes precedence over `KUBECONFIG` and the default `~/.kube/config`.
 Selection does not modify the source files. See [API](API.md) for authentication
-and explicit mutation targets. The legacy `kubernetes` YAML mapping is read
-only for K3s retirement and is removed after successful cleanup. It is not a
-new-profile setting. K3s cluster data and dedicated volumes are deleted;
-Docker data and the original kubeconfig are preserved.
+and explicit mutation targets. The managed K3s `kubernetes` mapping was
+removed: a profile that still contains it is refused as an unknown
+configuration key. Delete the mapping from `config.yaml` to use the profile;
+the removed releases' K3s data is not migrated.
 
 ## Provisioning hooks
 
@@ -190,3 +190,17 @@ export TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal
 
 Docker CLI, Compose, buildx, and SDK clients share the public Docker socket.
 There is no public containerd socket.
+
+
+## Upgrade checks and artifact caches
+
+Successful interactive TUI exit may show cached update information and schedule
+one background metadata check. Successful checks are fresh for 24 hours; failures
+back off for 6 hours and the same-version notice is limited to once per 24 hours.
+Headless/internal modes, nonterminal output, CI and `HAMN_NO_UPDATE_CHECK=1` disable
+this behavior. It never installs automatically and sends no telemetry.
+Private metadata lives in `~/.hamn/cache/update-check-v1.json` and
+`update-notice-v1.json`. Verified downloads use SHA-256-addressed files under
+`~/.hamn/cache/downloads`; only validated sizes/digests can be reused or published.
+See [installation](INSTALLATION.md) for manual `upgrade --check`, `--force`, repair
+and `--headless system upgrade --yes`.

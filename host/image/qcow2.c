@@ -110,21 +110,21 @@ static int inflate_cluster(const uint8_t *in, size_t in_len, uint8_t *out,
     return 0;
 }
 
-int qcow2_extract(const char *in_path, const char *out_path, char **err)
+int qcow2_extract_fd(int source_fd, const char *out_path, char **err)
 {
     int rc = -1;
     int in_fd = -1, out_fd = -1;
     uint8_t *l1 = NULL, *l2 = NULL, *data = NULL, *zero = NULL, *cbuf = NULL;
     *err = NULL;
 
-    in_fd = open(in_path, O_RDONLY);
+    in_fd = dup(source_fd);
     if (in_fd < 0) {
-        set_err(err, "open %s: %s", in_path, strerror(errno));
+        set_err(err, "dup input: %s", strerror(errno));
         goto out;
     }
     struct stat st;
     if (fstat(in_fd, &st) != 0) {
-        set_err(err, "fstat %s: %s", in_path, strerror(errno));
+        set_err(err, "fstat input: %s", strerror(errno));
         goto out;
     }
     uint64_t fsize = (uint64_t)st.st_size;
@@ -268,9 +268,9 @@ int qcow2_extract(const char *in_path, const char *out_path, char **err)
         goto out;
     }
     fprintf(stderr,
-            "qcow2: extracted %s -> %s (virtual %" PRIu64 " MiB, "
+            "qcow2: extracted to %s (virtual %" PRIu64 " MiB, "
             "written %" PRIu64 " MiB)\n",
-            in_path, out_path, size >> 20, written >> 20);
+            out_path, size >> 20, written >> 20);
     rc = 0;
 
 out:
@@ -285,5 +285,17 @@ out:
         close(out_fd);
     if (rc != 0)
         unlink(out_path);
+    return rc;
+}
+
+int qcow2_extract(const char *in_path, const char *out_path, char **err)
+{
+    int fd = open(in_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        *err = NULL;
+        return set_err(err, "open %s: %s", in_path, strerror(errno));
+    }
+    int rc = qcow2_extract_fd(fd, out_path, err);
+    close(fd);
     return rc;
 }

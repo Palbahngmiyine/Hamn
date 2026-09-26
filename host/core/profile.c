@@ -17,7 +17,6 @@
 #include "util/fs.h"
 
 #define PROFILE_CONFIG_FILE "config.yaml"
-#define PROFILE_LEGACY_CONFIG_FILE "hamn.conf"
 #define PROFILE_YAML_CAP (64 * 1024)
 #define PROFILE_SEEN_KEY_CAP 16
 
@@ -38,8 +37,6 @@ static void profile_defaults(struct profile *profile)
     profile->mem_mib = 4096;
     profile->disk_gib = 60;
     profile->mount_home = 1;
-    snprintf(profile->legacy_k3s_version, sizeof(profile->legacy_k3s_version),
-             "v1.36.2+k3s1");
 }
 
 int profile_name_valid(const char *name)
@@ -114,22 +111,6 @@ int profile_docker_daemon_json_valid(const char *text)
           cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(features, "buildkit"))));
     cJSON_Delete(json);
     return valid;
-}
-
-int profile_resolve_name(const char *flag_name, const char *positional_name,
-                         char out[PROFILE_NAME_CAP])
-{
-    const char *selected = flag_name && flag_name[0] ? flag_name :
-        positional_name && positional_name[0] ? positional_name :
-        getenv("HAMN_PROFILE");
-    if (!selected || !selected[0])
-        selected = "default";
-    if (!profile_name_valid(selected)) {
-        errno = EINVAL;
-        return -1;
-    }
-    snprintf(out, PROFILE_NAME_CAP, "%s", selected);
-    return 0;
 }
 
 const char *hamn_home(char *buf, size_t cap)
@@ -418,47 +399,6 @@ static int parse_docker(struct yaml_parse *parse, yaml_event_t *event,
     }
 }
 
-static int parse_legacy_kubernetes(struct yaml_parse *parse, yaml_event_t *event,
-                            struct profile *profile)
-{
-    profile->legacy_k3s = 1;
-    if (yaml_mapping_start(parse, event) != 0)
-        return -1;
-    char seen[PROFILE_SEEN_KEY_CAP][64] = {{0}};
-    size_t count = 0;
-    for (;;) {
-        yaml_event_t key_event;
-        if (yaml_next(parse, &key_event) != 0)
-            return -1;
-        if (key_event.type == YAML_MAPPING_END_EVENT) {
-            yaml_event_delete(&key_event);
-            return 0;
-        }
-        char key[64];
-        if (yaml_string(parse, &key_event, key, sizeof(key)) != 0 ||
-            seen_key(seen, &count, key) != 0) {
-            yaml_fail(parse, "duplicate or invalid kubernetes key");
-            return -1;
-        }
-        yaml_event_t value;
-        if (yaml_next(parse, &value) != 0)
-            return -1;
-        int rc;
-        if (strcmp(key, "enabled") == 0)
-            rc = yaml_bool(parse, &value, &profile->legacy_k3s_enabled);
-        else if (strcmp(key, "version") == 0)
-            rc = yaml_string(parse, &value, profile->legacy_k3s_version,
-                             sizeof(profile->legacy_k3s_version));
-        else {
-            yaml_event_delete(&value);
-            yaml_fail(parse, "unknown kubernetes key: %s", key);
-            return -1;
-        }
-        if (rc != 0)
-            return -1;
-    }
-}
-
 static int parse_mount(struct yaml_parse *parse, yaml_event_t *event,
                        struct profile_mount *mount)
 {
@@ -661,8 +601,6 @@ static int parse_root(struct yaml_parse *parse, yaml_event_t *event,
             rc = yaml_bool(parse, &value, &profile->mount_inotify);
         else if (strcmp(key, "docker") == 0)
             rc = parse_docker(parse, &value, profile);
-        else if (strcmp(key, "kubernetes") == 0)
-            rc = parse_legacy_kubernetes(parse, &value, profile);
         else if (strcmp(key, "rosetta") == 0)
             rc = yaml_bool(parse, &value, &profile->rosetta);
         else if (strcmp(key, "nestedVirtualization") == 0)
@@ -730,46 +668,6 @@ out:
     return rc;
 }
 
-static int profile_legacy_config_state(const struct profile *profile)
-{
-    char path[PROFILE_PATH_CAP];
-    if (!profile_path(profile, PROFILE_LEGACY_CONFIG_FILE, path, sizeof(path)))
-        return -1;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    if (fd < 0)
-        return errno == ENOENT ? 0 : -1;
-    struct stat status;
-    if (fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
-        status.st_size > 16384) {
-        int saved = errno ? errno : EINVAL;
-        close(fd);
-        errno = saved;
-        return -1;
-    }
-    char text[16385];
-    ssize_t count = read(fd, text, sizeof(text) - 1);
-    int saved = errno;
-    if (close(fd) != 0 && count >= 0)
-        return -1;
-    if (count < 0) {
-        errno = saved;
-        return -1;
-    }
-    text[count] = '\0';
-    char *line = text;
-    while (line && *line) {
-        char *end = strchr(line, '\n');
-        if (end)
-            *end = '\0';
-        if (strcmp(line, "runtime=containerd") == 0 ||
-            strcmp(line, "runtime=hamn") == 0)
-            return 1;
-        line = end ? end + 1 : NULL;
-    }
-    errno = EINVAL;
-    return -1;
-}
-
 static int profile_open_config(const struct profile *profile, FILE **file_out)
 {
     char path[PROFILE_PATH_CAP];
@@ -826,13 +724,6 @@ static int profile_read(struct profile *profile, const char *name, int create)
             return -1;
         }
     }
-    int legacy = profile_legacy_config_state(profile);
-    if (legacy == 1) {
-        errno = EPROTONOSUPPORT;
-        return -1;
-    }
-    if (legacy < 0 && errno != ENOENT)
-        return -1;
     FILE *file = NULL;
     int opened = profile_open_config(profile, &file);
     if (opened == 0) {
@@ -913,12 +804,6 @@ static int profile_serialize(const struct profile *profile,
     if (text_append(text, "docker:\n  daemonJson: ") != 0 ||
         text_quote(text, profile->docker_daemon_json) != 0)
         return -1;
-    /* Preserve migration evidence until guest cleanup and Docker readiness pass. */
-    if (profile->legacy_k3s &&
-        (text_append(text, "\nkubernetes:\n  enabled: %s\n  version: ",
-                    profile->legacy_k3s_enabled ? "true" : "false") != 0 ||
-        text_quote(text, profile->legacy_k3s_version) != 0))
-        return -1;
     if (text_append(text,
                     "\nrosetta: %s\nnestedVirtualization: %s\nsshAgent: %s\n",
                     profile->rosetta ? "true" : "false",
@@ -966,13 +851,6 @@ int profile_save(const struct profile *profile)
         errno = EINVAL;
         return -1;
     }
-    int legacy = profile_legacy_config_state(profile);
-    if (legacy == 1) {
-        errno = EPROTONOSUPPORT;
-        return -1;
-    }
-    if (legacy < 0 && errno != ENOENT)
-        return -1;
     struct yaml_text text;
     if (profile_serialize(profile, &text) != 0) {
         errno = EOVERFLOW;
@@ -984,19 +862,4 @@ int profile_save(const struct profile *profile)
         return -1;
     }
     return fs_write_file_atomic(path, text.data, text.length, 0600);
-}
-
-int profile_template_print(FILE *out)
-{
-    if (!out) {
-        errno = EINVAL;
-        return -1;
-    }
-    struct profile profile;
-    profile_defaults(&profile);
-    struct yaml_text text;
-    if (profile_serialize(&profile, &text) != 0 ||
-        fwrite(text.data, 1, text.length, out) != text.length || fflush(out) != 0)
-        return -1;
-    return 0;
 }

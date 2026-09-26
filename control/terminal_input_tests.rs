@@ -38,31 +38,62 @@ async fn failed_write_reports_all_pending_bytes_without_replaying_input() {
     assert_eq!(input.iter().copied().collect::<Vec<_>>(), b"not-delivered");
 }
 
+/// A raw-mode PTY program that never reads its input. It blocks SIGTERM,
+/// SIGINT and SIGWINCH before announcing READY, so no signal can interrupt that
+/// write; sigwait then reports each resize and exits 128+N on SIGTERM/SIGINT.
+/// No-op handlers keep the default-ignored SIGWINCH pending while blocked.
+const BLOCKED_INPUT_SOURCE: &str = r#"
+#include <signal.h>
+#include <string.h>
+#include <termios.h>
+#include <unistd.h>
+
+static void put(const char *text) {
+    size_t length = strlen(text);
+    while (length) {
+        ssize_t written = write(1, text, length);
+        if (written <= 0) _exit(90);
+        text += written; length -= (size_t)written;
+    }
+}
+static void ignore(int number) { (void)number; }
+
+int main(void) {
+    struct termios mode;
+    if (tcgetattr(0, &mode) != 0) return 91;
+    cfmakeraw(&mode);
+    if (tcsetattr(0, TCSAFLUSH, &mode) != 0) return 92;
+    sigset_t signals;
+    sigemptyset(&signals);
+    const int numbers[] = { SIGTERM, SIGINT, SIGWINCH };
+    for (size_t index = 0; index < sizeof(numbers) / sizeof(numbers[0]); index++) {
+        struct sigaction action = {0};
+        action.sa_handler = ignore;
+        if (sigaction(numbers[index], &action, NULL) != 0) return 93;
+        sigaddset(&signals, numbers[index]);
+    }
+    if (sigprocmask(SIG_BLOCK, &signals, NULL) != 0) return 94;
+    put("READY\n");
+    for (;;) {
+        int number;
+        if (sigwait(&signals, &number) != 0) return 95;
+        if (number == SIGWINCH) {
+            put("RESIZED\n");
+        } else {
+            put("STOPPED\n");
+            _exit(128 + number);
+        }
+    }
+}
+"#;
+
 #[tokio::test]
 async fn blocked_input_still_allows_output_resize_termination_and_explicit_interrupt() {
-    let interpreter = std::process::Command::new("python3").args(["-c", "import sys; print(sys.executable)"]).output().unwrap();
-    assert!(interpreter.status.success());
-    let interpreter = String::from_utf8(interpreter.stdout).unwrap();
+    let fixture = crate::test_fixture::CFixture::compile("blocked-input", BLOCKED_INPUT_SOURCE, &[]);
     for explicit_interrupt in [false, true] {
         let invocation = crate::native::parse("version", &crate::tui_state::State::new(Default::default())).unwrap();
-        let mut command = tokio::process::Command::new(interpreter.trim());
-        // Block before publishing readiness: signals stay pending until sigwait
-        // consumes them. No Python handler can re-enter buffered output while
-        // READY/RESIZED is being flushed. The PTY input remains deliberately unread.
-        command.args(["-c", r#"import os,signal,tty
-tty.setraw(0)
-signals = {signal.SIGTERM, signal.SIGINT, signal.SIGWINCH}
-for number in signals: signal.signal(number, lambda *_: None)
-signal.pthread_sigmask(signal.SIG_BLOCK, signals)
-os.write(1, b'READY\n')
-while True:
-    number = signal.sigwait(signals)
-    if number == signal.SIGWINCH:
-        os.write(1, b'RESIZED\n')
-    else:
-        os.write(1, b'STOPPED\n')
-        os._exit(128 + number)
-"#]);
+        // The PTY input remains deliberately unread.
+        let command = tokio::process::Command::new(fixture.program());
         let mut session = Session::spawn(command, invocation, 80, 24).unwrap();
         let mut phase = "ready";
         let completed = tokio::time::timeout(std::time::Duration::from_secs(10), async {

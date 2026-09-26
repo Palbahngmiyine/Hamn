@@ -38,24 +38,30 @@
 
 ## Repository Map
 
-- `control/`: Rust TUI, headless requests, shared service, Docker/Kubernetes clients, streams, and cancellation. `control/main.rs` is the executable entrypoint.
+- `control/`: Rust TUI, headless requests, shared service, Docker/Kubernetes clients, streams, and cancellation. `control/main.rs` is the executable entrypoint. `control/install_support/` is the native installer and updater (the private `__install-support` mode); no shell script installs or updates Hamn.
 - `host/`: C/Objective-C VM core, statically linked into the Rust executable through `build.rs` and `Makefile`.
 - `host/vz/`: the only place for Objective-C Virtualization.framework code.
-- `host/core/`: profile configuration/state, lifecycle, control API, provisioning, and legacy K3s retirement coordination.
+- `host/core/`: profile configuration/state, lifecycle, control API, provisioning, and guest deployment transactions.
 - `host/fwd/`, `host/sshmgr/`, `host/vmrun/`: profile-local forwarding,
   SSH control, and VM ownership. Keep resource ownership explicit and atomic.
 - `host/seed/`, `host/util/`: cloud-init seed generation and shared low-level helpers, respectively.
 - `host/image/`: signed managed guest-image selection and verification. Never add an
   unsigned cloud-image fallback.
-- `host/migration/`: embedded, narrowly scoped legacy K3s retirement payload and service reference; not an active managed Kubernetes runtime.
 - `guest/agent/`: Linux guest management agent `hamnd`; it is not a container engine.
 - `guest/scripts/`: guest configuration for system containerd, Docker, Rosetta, and
   immutable-image validation.
-- `guest/image/`: external Linux builder for the signed Ubuntu 24.04 arm64 guest image.
+- `guest/image/`: external Linux builder for the signed Ubuntu 24.04 arm64 guest image
+  and its C evidence/size tool `hamn-image-tool`.
+- `guest/json/`: strict JSON for guest-side C tools and the in-guest `guest-json`
+  helper that configuration scripts use instead of an interpreter.
 - `guest/systemd/`: the `hamnd.service` unit.
-- `packaging/release/`: candidate assembly, physical validation evidence, and stable
-  promotion. It must not rebuild an already validated RC.
-- `tests/host/`, `guest/tests/`, and inline Rust tests: host, guest, and control-plane regressions. `tests/release/` and `packaging/release/` cover release evidence and runtime validation.
+- `packaging/release/`: the release installer template.
+- `tools/hamn-dev/`: never-shipped build, test, and release tooling: host publication,
+  regression suites (`hamn-dev test`), and the release drivers (`hamn-dev release`)
+  for version resolution, candidate assembly, hosted and physical validation, stable
+  promotion, and repository preflight. Promotion must not rebuild an already
+  validated RC.
+- `tests/host/`, `guest/tests/`, and inline Rust tests: host, guest, and control-plane regressions. `tools/hamn-dev` suites cover release evidence, release drivers, and runtime validation.
 - `docs/`: English source documentation and corresponding Korean Markdown translations.
 - `vendor/`: vendored C dependencies. Avoid replacing these casually.
 
@@ -76,17 +82,29 @@ working on the CLI-only product.
 ## Build Commands
 
 Host builds require Apple Silicon macOS 13+, Apple command-line developer tools,
-the Rust toolchain in `rust-toolchain.toml`, and Python 3. See
-[Development](docs/DEVELOPMENT.md) for setup; `scripts/ci/setup-test-dependencies.sh`
-lists test dependencies. Workflow checks require `actionlint`.
+and the Rust toolchain in `rust-toolchain.toml`. The locked `flake.nix`
+shells provide the test toolchain, including that Rust release and `actionlint`:
+`nix develop .#ci --command make -j1 test-local-macos` runs the local gates, and
+`.#live` adds kubectl and kind. See [Development](docs/DEVELOPMENT.md) for setup.
 
 Run Make test gates serially in the same checkout, for example
 `make -j1 test-local-macos`. Packaging/update fixtures replace the shared
 `build/hamn` with other versions. Do not run separate gates concurrently unless
 their build outputs and fixtures are verified to be isolated.
 
+PR CI runs the same gates as `ci-macos-shard-N` targets on five runners (GitHub's
+macOS concurrency limit). Within a shard, `CI_MACOS_SIDE_GATES` and a second lane
+of `CI_MACOS_SHARD_<n>_UPDATER` gates (listed in `CI_MACOS_UPDATER_GATES`) run
+beside the serial main lane, as the same user; list a gate there only if it never
+rebuilds `build/hamn` and owns its HOME and install roots. `CI_MACOS_ALONE_GATES`
+rebuild `build/hamn` as other versions and run after the other lanes.
+`make check-ci-macos-shards` fails unless the shards together run every
+`test-local-macos` gate exactly once. PR CI builds with `CARGO_PROFILE=ci` (the
+release profile without LTO). Release candidates and `release.yml` always use the
+release profile and run `test-local-macos` serially.
+
 - `make host`: build, ad-hoc codesign, verify, and publish the single Rust + C/Objective-C `build/hamn`. Use `Cargo.lock` and `rust-toolchain.toml`.
-- `make install`: install only `hamn` and its versioned source into `~/.local`.
+- `make install`: publish `build/hamn` as a managed generation in `~/.local` through the executable's native installer (`__install-support install`); no source files are installed.
 - `make test-control`: Rust unit tests plus worker, Docker/Kubernetes API, TUI, SSH deadline, and single-binary regressions.
 - `make test-workflows`: lint GitHub Actions workflows with `actionlint`.
 - `make test-portable`: portable source and guest-script checks; this does not build or run the full guest agent.
@@ -158,7 +176,7 @@ local change does not require unrelated fuzzing or optimization experiments.
 - Bound blocking SSH/process operations at the layer that can terminate and reap them. An outer async timeout alone is insufficient. Preserve independently owned VM supervisors when frontend operations end.
 - A timed-out mutation can have taken effect remotely. Preserve `outcomeUnknown`, re-observe state before retrying, and avoid replaying non-idempotent actions blindly.
 - Validate live behavior with an isolated disposable profile and known resource ownership. Never terminate or delete a resource based only on a reused PID or a matching name.
-- Distinguish binary rollback from state recovery. Verify interrupted migrations and compatibility; legacy K3s data retirement is irreversible and must preserve Docker/user data.
+- Distinguish binary rollback from state recovery. Verify interrupted migrations and compatibility, and preserve Docker/user data.
 
 ## Improvement Workflow
 

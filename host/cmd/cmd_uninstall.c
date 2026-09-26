@@ -120,7 +120,7 @@ static int data_marker_valid(const char *install_root)
          !safe_owned_regular(marker, 0644)) ||
         read_small_regular(marker, content, sizeof(content)) != 0)
         return 0;
-    return strcmp(content, "version=1\n") == 0 || content[0] == '\0';
+    return strcmp(content, "version=1\n") == 0;
 }
 
 static int generation_name_valid(const char *name)
@@ -474,16 +474,6 @@ static int remove_safe_lock(const char *path, int exists)
         return -1;
     }
     return 0;
-}
-
-int cmd_uninstall(int argc, char **argv)
-{
-    (void)argv;
-    if (argc != 1) {
-        fprintf(stderr, "usage: hamn uninstall\n");
-        return 2;
-    }
-    return hamn_control_uninstall(0);
 }
 
 int hamn_control_uninstall(int confirmed)

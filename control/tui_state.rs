@@ -1,5 +1,5 @@
-use crate::preferences::Workspace;
 use crate::model::{Failure, Request, Result};
+use crate::preferences::Workspace;
 use clap::Parser;
 use ratatui::{
     Frame,
@@ -53,10 +53,74 @@ pub fn split_command(command: &str) -> Result<Vec<String>> {
     Ok(words)
 }
 
+/// Refresh scheduling uses monotonic time; failures back off to at most 60s.
+/// Pausing affects automatic reads only. Manual refresh and navigation still work.
+pub struct Refresh {
+    pub interval: std::time::Duration,
+    pub timeout: std::time::Duration,
+    pub paused: bool,
+    pub failures: u32,
+    pub next: std::time::Instant,
+    pub last_success: Option<jiff::Timestamp>,
+}
+impl Default for Refresh {
+    fn default() -> Self {
+        Self {
+            interval: std::time::Duration::from_secs(2),
+            timeout: std::time::Duration::from_secs(30),
+            paused: false,
+            failures: 0,
+            next: std::time::Instant::now(),
+            last_success: None,
+        }
+    }
+}
+impl Refresh {
+    pub fn due(&self, now: std::time::Instant) -> bool {
+        !self.paused && now >= self.next
+    }
+    pub fn complete(&mut self, success: bool, now: std::time::Instant) {
+        if success {
+            self.failures = 0;
+            self.last_success = Some(jiff::Timestamp::now());
+        } else {
+            self.failures = self.failures.saturating_add(1);
+        }
+        self.next = now
+            + self
+                .interval
+                .saturating_mul(1u32 << self.failures.min(5))
+                .min(std::time::Duration::from_secs(60));
+    }
+    pub fn label(&self) -> String {
+        format!(
+            "{} {}s | timeout {}s | last OK {}{}",
+            if self.paused { "Paused" } else { "Refresh" },
+            self.interval.as_secs(),
+            self.timeout.as_secs(),
+            self.last_success
+                .map_or("never".into(), |time| time.to_string()),
+            if self.failures > 0 {
+                format!(" | retry backoff ({})", self.failures)
+            } else {
+                String::new()
+            }
+        )
+    }
+}
+
 struct Browser {
-    native: Option<crate::native::Invocation>, data: Value, selected: usize, filter: String, scroll: u16,
-    request: Request, environment_picker: bool, detail: Option<String>, connection_status: String,
-    stale: bool, show_operation: bool,
+    native: Option<crate::native::Invocation>,
+    data: Value,
+    selected: Option<usize>,
+    filter: String,
+    scroll: u16,
+    request: Request,
+    environment_picker: bool,
+    detail: Option<String>,
+    connection_status: String,
+    stale: bool,
+    show_operation: bool,
 }
 pub struct State {
     browser: Option<Browser>,
@@ -71,9 +135,11 @@ pub struct State {
     pub runtime: Value,
     pub request: Request,
     pub data: Value,
-    pub selected: usize,
+    pub selected: Option<usize>,
     pub filter: String,
     pub input: Option<(char, String)>,
+    pub history: Vec<String>,
+    pub history_index: Option<usize>,
     pub message: String,
     pub detail: Option<String>,
     pub pending: Option<Request>,
@@ -83,6 +149,7 @@ pub struct State {
     pub stale: bool,
     pub uncertain: Vec<Value>,
     pub quit_confirmation: bool,
+    pub refresh: Refresh,
     pub operation_status: String,
     pub operation_log: String,
     pub show_operation: bool,
@@ -106,9 +173,11 @@ impl State {
             runtime: Value::Null,
             request,
             data: Value::Null,
-            selected: 0,
+            selected: Some(0),
             filter: String::new(),
             input: None,
+            history: Vec::new(),
+            history_index: None,
             message: String::new(),
             detail: None,
             pending: None,
@@ -118,6 +187,7 @@ impl State {
             stale: false,
             uncertain: Vec::new(),
             quit_confirmation: false,
+            refresh: Refresh::default(),
             operation_status: String::new(),
             operation_log: String::new(),
             show_operation: false,
@@ -131,9 +201,22 @@ impl State {
             state.request.words = vec!["k8s".into(), "contexts".into(), "list".into()];
             if let Ok(config) = crate::kubeconfig::load(&state.request) {
                 state.request.context = state.request.context.or(config.current_context);
-                if let Some(context) = config.contexts.iter().find(|c| Some(&c.name) == state.request.context.as_ref()).and_then(|c| c.context.as_ref()) {
-                    if config.clusters.iter().any(|entry| entry.name == context.cluster && entry.cluster.as_ref().and_then(|c| c.server.as_ref()).is_some_and(|s| !s.is_empty())) {
-                        state.request.namespace = state.request.namespace.or(context.namespace.clone());
+                if let Some(context) = config
+                    .contexts
+                    .iter()
+                    .find(|c| Some(&c.name) == state.request.context.as_ref())
+                    .and_then(|c| c.context.as_ref())
+                {
+                    if config.clusters.iter().any(|entry| {
+                        entry.name == context.cluster
+                            && entry
+                                .cluster
+                                .as_ref()
+                                .and_then(|c| c.server.as_ref())
+                                .is_some_and(|s| !s.is_empty())
+                    }) {
+                        state.request.namespace =
+                            state.request.namespace.or(context.namespace.clone());
                         state.request.words[1] = "pods".into();
                     }
                 }
@@ -145,11 +228,17 @@ impl State {
         state
     }
     pub fn hamn_environment(&self) -> bool {
-        self.workspace == Workspace::Containers && self.docker_context.is_none() &&
-            self.native.as_ref().is_none_or(|command| command.hamn_profile.is_some())
+        self.workspace == Workspace::Containers
+            && self.docker_context.is_none()
+            && self
+                .native
+                .as_ref()
+                .is_none_or(|command| command.hamn_profile.is_some())
     }
     pub fn vm_panel(&self) -> bool {
-        !self.environment_picker && self.native.is_none() && self.hamn_environment()
+        !self.environment_picker
+            && self.native.is_none()
+            && self.hamn_environment()
             && self.request.operation() == "vm list"
     }
     pub fn save_browser(&mut self) {
@@ -158,62 +247,169 @@ impl State {
         }
     }
     fn snapshot(&self) -> Browser {
-        Browser { native: self.native.clone(), request: self.request.clone(), data: self.data.clone(),
-            selected: self.selected, filter: self.filter.clone(), scroll: self.scroll,
-            environment_picker: self.environment_picker, detail: self.detail.clone(),
-            connection_status: self.connection_status.clone(), stale: self.stale, show_operation: self.show_operation }
+        Browser {
+            native: self.native.clone(),
+            request: self.request.clone(),
+            data: self.data.clone(),
+            selected: self.selected,
+            filter: self.filter.clone(),
+            scroll: self.scroll,
+            environment_picker: self.environment_picker,
+            detail: self.detail.clone(),
+            connection_status: self.connection_status.clone(),
+            stale: self.stale,
+            show_operation: self.show_operation,
+        }
     }
     fn restore(&mut self, browser: Browser) {
-        self.native = browser.native; self.request = browser.request; self.data = browser.data;
-        self.selected = browser.selected; self.filter = browser.filter; self.scroll = browser.scroll;
-        self.environment_picker = browser.environment_picker; self.detail = browser.detail;
-        self.connection_status = browser.connection_status; self.stale = browser.stale;
+        self.native = browser.native;
+        self.request = browser.request;
+        self.data = browser.data;
+        self.selected = browser.selected;
+        self.filter = browser.filter;
+        self.scroll = browser.scroll;
+        self.environment_picker = browser.environment_picker;
+        self.detail = browser.detail;
+        self.connection_status = browser.connection_status;
+        self.stale = browser.stale;
         self.show_operation = browser.show_operation;
     }
     pub fn open_picker(&mut self) {
-        if self.picker_return.is_none() { self.picker_return = Some(self.snapshot()); }
-        self.native = None; self.environment_picker = false; self.detail = None; self.show_operation = false;
-        self.data = Value::Null; self.selected = 0; self.filter.clear(); self.scroll = 0;
-        self.stale = true; self.connection_status = "Connecting".into();
+        if self.picker_return.is_none() {
+            self.picker_return = Some(self.snapshot());
+        }
+        self.native = None;
+        self.environment_picker = false;
+        self.detail = None;
+        self.show_operation = false;
+        self.data = Value::Null;
+        self.selected = Some(0);
+        self.filter.clear();
+        self.scroll = 0;
+        self.stale = true;
+        self.connection_status = "Connecting".into();
     }
-    pub fn discard_picker(&mut self) { self.picker_return = None; }
+    pub fn discard_picker(&mut self) {
+        self.picker_return = None;
+    }
     pub fn cancel_picker(&mut self) -> bool {
-        if let Some(browser) = self.picker_return.take() { self.restore(browser); true } else { false }
+        if let Some(browser) = self.picker_return.take() {
+            self.restore(browser);
+            true
+        } else {
+            false
+        }
     }
     pub fn return_to_browser(&mut self) {
-        self.environment_picker = false; self.detail = None;
+        self.environment_picker = false;
+        self.detail = None;
         self.request.words = vec!["docker".into(), "containers".into(), "list".into()];
-        if let Some(browser) = self.browser.take().filter(|b| b.request.profile == self.request.profile) {
+        if let Some(browser) = self
+            .browser
+            .take()
+            .filter(|b| b.request.profile == self.request.profile)
+        {
             self.restore(browser);
-        } else { self.native = crate::native::parse("", self).ok(); self.selected = 0; self.filter.clear(); self.scroll = 0; }
+        } else {
+            self.native = crate::native::parse("", self).ok();
+            self.selected = Some(0);
+            self.filter.clear();
+            self.scroll = 0;
+        }
     }
     pub fn invalidate_results(&mut self) {
-        self.browser = None; self.discard_picker();
+        self.browser = None;
+        self.discard_picker();
         self.data = Value::Null;
         self.stale = true;
-        self.selected = 0;
-        self.filter.clear(); self.scroll = 0; self.detail = None;
+        self.selected = Some(0);
+        self.filter.clear();
+        self.scroll = 0;
+        self.detail = None;
         self.pending_native = None;
         self.connection_status = "Connecting".into();
     }
     pub fn rows(&self) -> Vec<&Value> {
+        let filter = self.filter.to_lowercase();
         self.data
             .as_array()
             .map(|rows| {
                 rows.iter()
                     .filter(|row| {
-                        (self.native.is_some() || self.environment_picker || self.workspace != Workspace::Containers || self.show_all ||
-                         self.request.operation() != "docker containers list" || row["State"] == "running") &&
-                        label(row)
-                            .to_lowercase()
-                            .contains(&self.filter.to_lowercase())
+                        (self.native.is_some()
+                            || self.environment_picker
+                            || self.workspace != Workspace::Containers
+                            || self.show_all
+                            || self.request.operation() != "docker containers list"
+                            || row["State"] == "running")
+                            && (filter.is_empty() || label(row).to_lowercase().contains(&filter))
                     })
                     .collect()
             })
             .unwrap_or_default()
     }
     pub fn selected(&self) -> Option<Value> {
-        self.rows().get(self.selected).map(|v| (*v).clone())
+        self.selected
+            .and_then(|index| self.rows().get(index).map(|v| (*v).clone()))
+    }
+    fn find_identity(&self, key: &[String]) -> Option<usize> {
+        let rows = self.rows();
+        let mut matches = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| identity(row).as_deref() == Some(key));
+        let index = matches.next()?.0;
+        matches.next().is_none().then_some(index)
+    }
+    // Filtering preserves the selected identity when it remains uniquely
+    // visible. Hiding it must never transfer an action to a different row.
+    pub fn edit_input(&mut self, text: &str, backspace: bool) {
+        let key = self.selected().and_then(|row| identity(&row));
+        if let Some((prefix, input)) = &mut self.input {
+            if backspace {
+                input.pop();
+            } else {
+                input.push_str(text);
+            }
+            if *prefix == '/' {
+                self.filter = input.clone();
+                self.selected = key.and_then(|key| self.find_identity(&key));
+            }
+        }
+    }
+    // Command history stays in memory: arbitrary CLI arguments may contain secrets.
+    pub fn remember_command(&mut self, command: &str) {
+        self.history_index = None;
+        if command.is_empty() || self.history.last().is_some_and(|last| last == command) {
+            return;
+        }
+        if self.history.len() == 100 {
+            self.history.remove(0);
+        }
+        self.history.push(command.into());
+    }
+    pub fn recall_command(&mut self, previous: bool) {
+        if !self
+            .input
+            .as_ref()
+            .is_some_and(|(prefix, _)| *prefix == ':')
+            || self.history.is_empty()
+        {
+            return;
+        }
+        let index = match self.history_index {
+            None if previous => self.history.len() - 1,
+            Some(index) if previous => index.saturating_sub(1),
+            Some(index) => (index + 1).min(self.history.len()),
+            None => return,
+        };
+        self.history_index = (index < self.history.len()).then_some(index);
+        self.input = Some((':', self.history.get(index).cloned().unwrap_or_default()));
+    }
+    pub fn clear_filter(&mut self) {
+        let key = self.selected().and_then(|row| identity(&row));
+        self.filter.clear();
+        self.selected = key.and_then(|key| self.find_identity(&key));
     }
     pub fn move_by(&mut self, delta: isize) {
         if self.detail.is_some() || self.show_operation {
@@ -222,10 +418,16 @@ impl State {
                 .saturating_add_signed(delta.clamp(-32768, 32767) as i16);
             return;
         }
-        self.selected = self
-            .selected
-            .saturating_add_signed(delta)
-            .min(self.rows().len().saturating_sub(1));
+        let count = self.rows().len();
+        self.selected = if count == 0 {
+            None
+        } else {
+            Some(match self.selected {
+                Some(index) => index.saturating_add_signed(delta).min(count - 1),
+                None if delta < 0 => count - 1,
+                None => 0,
+            })
+        };
     }
     pub fn view(&mut self, command: &str) -> Result<Request> {
         let words = match command {
@@ -262,8 +464,23 @@ impl State {
                 .kubeconfig
                 .as_ref()
                 .is_some_and(|value| Some(value) != self.request.kubeconfig.as_ref());
-        request.profile = request.profile.or_else(|| self.request.profile.clone());
-        request.context = request.context.or_else(|| self.request.context.clone());
+        if request.words.first().is_some_and(|word| word == "docker") {
+            // Docker and Kubernetes context names are independent namespaces.
+            // Preserve explicit targets; inherit exactly one Docker UI target.
+            if request.profile.is_none() && request.context.is_none() {
+                request.context = self.docker_context.clone();
+                if request.context.is_none() {
+                    request.profile = self.request.profile.clone();
+                }
+            }
+            if request.context.is_some() {
+                request.docker_config =
+                    request.docker_config.or_else(|| self.docker_config.clone());
+            }
+        } else {
+            request.profile = request.profile.or_else(|| self.request.profile.clone());
+            request.context = request.context.or_else(|| self.request.context.clone());
+        }
         if !context_changed {
             request.namespace = request.namespace.or_else(|| self.request.namespace.clone());
         }
@@ -293,7 +510,15 @@ impl State {
         request.yes = true; // UI confirmation is mandatory before dispatch.
         request.validate()?;
         if !request.mutates() {
-            self.native = None; self.environment_picker = false;
+            if request.words.first().is_some_and(|word| word == "docker") {
+                // Structured reads establish the displayed Docker environment.
+                // Commit its UI target only after validation, so headers, VM
+                // controls and subsequent commands cannot refer to another one.
+                self.docker_context = request.context.clone();
+                self.docker_config = request.docker_config.clone();
+            }
+            self.native = None;
+            self.environment_picker = false;
             self.request = request.clone();
             // Detail commands dispatch once; Esc and periodic refresh must
             // return to the resource list, just like keyboard detail actions.
@@ -309,7 +534,7 @@ impl State {
             self.data = Value::Null;
             self.stale = false;
         }
-        self.selected = 0;
+        self.selected = Some(0);
         self.filter.clear();
         self.detail = None;
         self.scroll = 0;
@@ -317,7 +542,10 @@ impl State {
     }
     pub fn action(&self, action: &str) -> Result<Request> {
         if self.environment_picker {
-            return Err(Failure::new("selectEnvironment", "Select an environment with Enter before using resource actions"));
+            return Err(Failure::new(
+                "selectEnvironment",
+                "Select an environment with Enter before using resource actions",
+            ));
         }
         if self.stale {
             return Err(Failure::new(
@@ -351,7 +579,10 @@ impl State {
     }
     pub fn accept(&mut self, result: Result<Value>) {
         if let Ok(value) = &result {
-            if value["type"] == "runtimeStatus" { self.runtime = value["data"].clone(); return; }
+            if value["type"] == "runtimeStatus" {
+                self.runtime = value["data"].clone();
+                return;
+            }
             if value["type"] == "log" {
                 let text = self.detail.get_or_insert_with(String::new);
                 text.push_str(value["text"].as_str().unwrap_or_default());
@@ -373,9 +604,15 @@ impl State {
         self.loading = false;
         match result {
             Ok(value) if value.is_array() => {
+                let initial = self.data.is_null();
+                let identity = self.selected().and_then(|row| identity(&row));
                 self.stale = false;
                 self.data = value;
-                self.move_by(0);
+                self.selected = if initial {
+                    (!self.rows().is_empty()).then_some(0)
+                } else {
+                    identity.and_then(|key| self.find_identity(&key))
+                };
                 self.message.clear();
             }
             Ok(value) => {
@@ -402,12 +639,6 @@ impl State {
         };
         match self.request.operation().as_str() {
             "k8s contexts list" => {
-                if row["available"] == false {
-                    return Err(Failure::new(
-                        "managedK3sRemoved",
-                        "legacy Hamn context is unavailable",
-                    ));
-                }
                 self.invalidate_results();
                 self.request.context = row["name"].as_str().map(String::from);
                 self.request.namespace = row["namespace"].as_str().map(String::from);
@@ -421,7 +652,15 @@ impl State {
             "vm list" => {
                 self.discard_picker();
                 self.request.profile = row["name"].as_str().map(String::from);
-                self.detail = Some(format!("Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers", row["name"], row["state"], row["dockerStatus"], row["cpus"], row["memoryMiB"], row["diskGiB"]));
+                self.detail = Some(format!(
+                    "Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers",
+                    row["name"],
+                    row["state"],
+                    row["dockerStatus"],
+                    row["cpus"],
+                    row["memoryMiB"],
+                    row["diskGiB"]
+                ));
                 Ok(None)
             }
             "docker images list" | "docker volumes list" | "docker networks list" => {
@@ -431,6 +670,33 @@ impl State {
             _ => self.action("inspect").map(Some),
         }
     }
+}
+
+// Identity is independent of row order and mutable status/resourceVersion.
+// Missing or ambiguous identities cannot preserve a selection across refresh.
+fn identity(row: &Value) -> Option<Vec<String>> {
+    let value = |key: &Value| key.as_str().filter(|s| !s.is_empty()).map(String::from);
+    if row.get("metadata").is_some() {
+        return Some(vec![
+            "kubernetes".into(),
+            value(&row["metadata"]["uid"])?,
+            value(&row["metadata"]["namespace"]).unwrap_or_default(),
+            value(&row["metadata"]["name"])?,
+        ]);
+    }
+    if let Some(id) = value(&row["ID"]).or_else(|| value(&row["Id"])) {
+        return Some(vec![
+            "docker".into(),
+            id,
+            value(&row["Repository"]).unwrap_or_default(),
+            value(&row["Tag"]).unwrap_or_default(),
+        ]);
+    }
+    let name = value(&row["name"]).or_else(|| value(&row["Name"]))?;
+    Some(vec![
+        value(&row["environmentKind"]).unwrap_or_default(),
+        name,
+    ])
 }
 
 pub fn clean(text: &str) -> String {
@@ -464,7 +730,10 @@ fn label(value: &Value) -> String {
     let docker = value["dockerStatus"].as_str().unwrap_or("");
     if let Some(kind) = value["environmentKind"].as_str() {
         return clean(&match kind {
-            "docker" => format!("{name}  Docker context  {}  {status}", value["endpoint"].as_str().unwrap_or("")),
+            "docker" => format!(
+                "{name}  Docker context  {}  {status}",
+                value["endpoint"].as_str().unwrap_or("")
+            ),
             "hamn" => format!("{name}  Hamn profile  {status}  {docker}"),
             _ => format!("{name}  {status}"),
         });
@@ -501,15 +770,6 @@ fn confirmation(request: &Request, width: u16) -> Vec<String> {
         "\nImpact: {}\n\ny = execute; Esc / n = cancel",
         request.impact()
     ));
-    if request.mutates()
-        && matches!(
-            request.words.first().map(String::as_str),
-            Some("vm" | "docker")
-        )
-        && request.operation() != "vm create"
-    {
-        text.push_str("\nPending legacy K3s retirement permanently deletes its cluster data and local volumes before this operation. Docker data is preserved.");
-    }
     wrap_lines(&text, width)
 }
 
@@ -539,16 +799,33 @@ pub fn confirmation_visible(request: &Request, area: ratatui::layout::Rect) -> b
 }
 
 fn native_confirmation(action: &crate::native_actions::Action) -> String {
-    format!("Confirm {}\n\nThis changes the selected resource through the installed CLI.\nCancellation does not undo an applied change.\n\ny = execute; n / Esc = cancel", action.description)
+    format!(
+        "Confirm {}\n\nThis changes the selected resource through the installed CLI.\nCancellation does not undo an applied change.\n\ny = execute; n / Esc = cancel",
+        action.description
+    )
 }
-pub fn native_confirmation_visible(action: &crate::native_actions::Action, area: ratatui::layout::Rect) -> bool {
-    area.width >= 20 && area.height >= 8 && wrap_lines(&native_confirmation(action), area.width - 2).len() <= usize::from(area.height - 2)
+pub fn native_confirmation_visible(
+    action: &crate::native_actions::Action,
+    area: ratatui::layout::Rect,
+) -> bool {
+    area.width >= 20
+        && area.height >= 8
+        && wrap_lines(&native_confirmation(action), area.width - 2).len()
+            <= usize::from(area.height - 2)
 }
 pub fn draw(frame: &mut Frame, state: &State) {
     if let Some(action) = &state.pending_native {
-        let text = if native_confirmation_visible(action, frame.area()) { native_confirmation(action) }
-            else { "Resize terminal to review the full target. Execution disabled. Esc cancels.".into() };
-        frame.render_widget(Paragraph::new(clean(&text)).wrap(Wrap { trim: false }).block(Block::bordered().title("Hamn confirmation")), frame.area());
+        let text = if native_confirmation_visible(action, frame.area()) {
+            native_confirmation(action)
+        } else {
+            "Resize terminal to review the full target. Execution disabled. Esc cancels.".into()
+        };
+        frame.render_widget(
+            Paragraph::new(clean(&text))
+                .wrap(Wrap { trim: false })
+                .block(Block::bordered().title("Hamn confirmation")),
+            frame.area(),
+        );
         return;
     }
     if state.quit_confirmation {
@@ -581,13 +858,34 @@ pub fn draw(frame: &mut Frame, state: &State) {
             state.request.context.as_deref().unwrap_or("choose a context"),
             if state.request.all_namespaces { "all namespaces" } else { state.request.namespace.as_deref().unwrap_or("default") }),
     };
-    let header = if state.workspace == Workspace::Containers && state.native.as_ref().is_some_and(|i| i.hamn_profile.is_some()) && !state.runtime.is_null() {
-        let ready = match state.runtime["dockerStatus"].as_str().unwrap_or("unavailable") {
-            "ready" => "Available", "preparing" => "Docker connection preparing", "recoveryRequired" => "Recovery required", _ => "Connection unavailable",
+    let header = if state.workspace == Workspace::Containers
+        && state
+            .native
+            .as_ref()
+            .is_some_and(|i| i.hamn_profile.is_some())
+        && !state.runtime.is_null()
+    {
+        let ready = match state.runtime["dockerStatus"]
+            .as_str()
+            .unwrap_or("unavailable")
+        {
+            "ready" => "Available",
+            "preparing" => "Docker connection preparing",
+            "recoveryRequired" => "Recovery required",
+            _ => "Connection unavailable",
         };
-        format!("{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment", state.runtime["state"].as_str().unwrap_or("not created"))
-    } else { header };
-    let header = if let Some(command) = &state.native { format!("{header}\n{}: {}", command.target, state.connection_status) } else { header };
+        format!(
+            "{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment",
+            state.runtime["state"].as_str().unwrap_or("not created")
+        )
+    } else {
+        header
+    };
+    let header = if let Some(command) = &state.native {
+        format!("{header}\n{}: {}", command.target, state.connection_status)
+    } else {
+        header
+    };
     let header = if state.uncertain.is_empty() {
         header
     } else {
@@ -599,8 +897,16 @@ pub fn draw(frame: &mut Frame, state: &State) {
     // Full diagnostics belong in the scrollable log, not the fixed header.
     let width = frame.area().width.saturating_sub(2);
     let summary = if wrap_lines(&state.operation_status, width).len() > 1 {
-        format!("{} … (! log)", wrap_lines(&state.operation_status, width.saturating_sub(10)).first().cloned().unwrap_or_default())
-    } else { state.operation_status.clone() };
+        format!(
+            "{} … (! log)",
+            wrap_lines(&state.operation_status, width.saturating_sub(10))
+                .first()
+                .cloned()
+                .unwrap_or_default()
+        )
+    } else {
+        state.operation_status.clone()
+    };
     let header = format!("{header}\n{summary}");
     let header = wrap_lines(&header, frame.area().width.saturating_sub(2));
     let header_height = header.len().saturating_add(2).min(u16::MAX as usize) as u16;
@@ -624,12 +930,34 @@ pub fn draw(frame: &mut Frame, state: &State) {
         areas[0],
     );
     let title = format!(
-        "{} {}",
-        state.native.as_ref().map(|c| format!("{} {}", c.program(), c.resource.as_deref().unwrap_or("command"))).unwrap_or_else(|| if state.environment_picker { "Container environments".into() } else { state.request.operation() }),
-        if state.loading { "[loading]" } else { "" }
+        "{} {} | {}",
+        state
+            .native
+            .as_ref()
+            .map(|c| format!(
+                "{} {}",
+                c.program(),
+                c.resource.as_deref().unwrap_or("command")
+            ))
+            .unwrap_or_else(|| if state.environment_picker {
+                "Container environments".into()
+            } else {
+                state.request.operation()
+            }),
+        if state.loading { "[loading]" } else { "" },
+        state.refresh.label()
     );
-    let operation_detail = format!("{}\n{}\n{}", state.operation_status, state.operation_log, serde_json::to_string_pretty(&state.uncertain).unwrap());
-    if let Some(detail) = if state.show_operation { Some(&operation_detail) } else { state.detail.as_ref() } {
+    let operation_detail = format!(
+        "{}\n{}\n{}",
+        state.operation_status,
+        state.operation_log,
+        serde_json::to_string_pretty(&state.uncertain).unwrap()
+    );
+    if let Some(detail) = if state.show_operation {
+        Some(&operation_detail)
+    } else {
+        state.detail.as_ref()
+    } {
         frame.render_widget(
             Paragraph::new(clean(detail))
                 .scroll((state.scroll, 0))
@@ -651,7 +979,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
                 .highlight_style(Style::default().fg(Color::Cyan))
                 .highlight_symbol("> "),
             areas[1],
-            &mut ListState::default().with_selected(Some(state.selected)),
+            &mut ListState::default().with_selected(state.selected),
         );
     }
     let message = if let Some((prefix, input)) = &state.input {
@@ -665,79 +993,373 @@ pub fn draw(frame: &mut Frame, state: &State) {
             .block(Block::bordered()),
         areas[2],
     );
-    let keys = if state.environment_picker { ": command  / filter  Enter select  Esc cancel  Tab workspace  q quit" }
-        else if state.workspace == Workspace::Kubernetes { ": command  / filter  Enter detail  l logs  g metrics  r rollout  d delete  m actions  ? help  q quit" }
-        else { ": command  / filter  Enter detail  s start  t stop  r restart  d delete  l logs  g stats  m actions  ? help  q quit" };
+    let keys = if state.environment_picker {
+        ": command  / filter  Enter select  Esc cancel  Tab workspace  q quit"
+    } else if state.workspace == Workspace::Kubernetes {
+        ": command  / filter  Enter detail  l logs  g metrics  r rollout  d delete  m actions  ? help  q quit"
+    } else {
+        ": command  / filter  Enter detail  s start  t stop  r restart  d delete  l logs  g stats  m actions  ? help  q quit"
+    };
     frame.render_widget(Paragraph::new(keys), areas[3]);
 }
 
 pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &str) {
-    let text = format!("{}\n\n{} Containers — Docker containers, images, volumes and networks\n{} Kubernetes — resources in your kubeconfig context\n\n1 / 2 or arrows to select, Enter to save\n{}\n\n{}",
-        if settings { "Choose the workspace to open by default" } else { "Choose your default workspace" },
-        if selected == 0 { ">" } else { " " }, if selected == 1 { ">" } else { " " },
-        if settings { "Esc returns without changing the default" } else { "q exits" }, clean(error));
-    frame.render_widget(Paragraph::new(text).wrap(Wrap { trim: false })
-        .block(Block::bordered().title("Hamn settings")), frame.area());
+    let text = format!(
+        "{}\n\n{} Containers — Docker containers, images, volumes and networks\n{} Kubernetes — resources in your kubeconfig context\n\n1 / 2 or arrows to select, Enter to save\n{}\n\n{}",
+        if settings {
+            "Choose the workspace to open by default"
+        } else {
+            "Choose your default workspace"
+        },
+        if selected == 0 { ">" } else { " " },
+        if selected == 1 { ">" } else { " " },
+        if settings {
+            "Esc returns without changing the default"
+        } else {
+            "q exits"
+        },
+        clean(error)
+    );
+    let dependency = |name: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| {
+                std::fs::metadata(directory.join(name)).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+            })
+        })
+    };
+    let text = format!(
+        "{text}\n\nDocker CLI: {} | kubectl: {}\nContainers: install Docker CLI, then e selects a Docker context or Hamn profile.\nKubernetes: install kubectl and configure kubeconfig; e selects an external cluster.\nConnection and credentials are checked by the first resource query.",
+        if dependency("docker") {
+            "found"
+        } else {
+            "missing"
+        },
+        if dependency("kubectl") {
+            "found"
+        } else {
+            "missing"
+        }
+    );
+    frame.render_widget(
+        Paragraph::new(text)
+            .wrap(Wrap { trim: false })
+            .block(Block::bordered().title("Hamn settings")),
+        frame.area(),
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
+    fn structured_target_switches_keep_header_scope_and_followup_requests_consistent() {
+        let mut state = State::new(Request::default());
+        let remote = state
+            .view("docker containers list --context remote --docker-config /fixture/config")
+            .unwrap();
+        assert!(remote.profile.is_none());
+        assert_eq!(state.docker_context.as_deref(), Some("remote"));
+        assert_eq!(state.docker_config.as_deref(), Some("/fixture/config"));
+        assert!(!state.hamn_environment());
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 32)).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Docker context remote"));
+        assert!(!rendered.contains("v VM settings"));
+        let inherited = state.view("docker containers list").unwrap();
+        assert_eq!(inherited.context, remote.context);
+        assert_eq!(inherited.docker_config, remote.docker_config);
+        let native = crate::native::parse("ps", &state).unwrap();
+        assert!(
+            native
+                .args
+                .windows(2)
+                .any(|args| args == ["--context", "remote"])
+        );
+        assert!(
+            native
+                .args
+                .windows(2)
+                .any(|args| args == ["--config", "/fixture/config"])
+        );
+        for command in [
+            "docker containers list --context remote --profile local",
+            "docker containers list --context ''",
+            "docker containers list --profile invalid:name",
+        ] {
+            assert!(state.view(command).is_err());
+            assert_eq!(state.docker_context.as_deref(), Some("remote"));
+            assert_eq!(state.docker_config.as_deref(), Some("/fixture/config"));
+            assert_eq!(state.request.context.as_deref(), Some("remote"));
+        }
+        let local = state
+            .view("docker containers list --profile local")
+            .unwrap();
+        assert_eq!(local.profile.as_deref(), Some("local"));
+        assert!(state.docker_context.is_none() && state.docker_config.is_none());
+        assert!(state.hamn_environment());
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("Hamn profile local"));
+        assert!(rendered.contains("v VM settings"));
+        let inherited = state.view("docker containers list").unwrap();
+        assert_eq!(inherited.profile.as_deref(), Some("local"));
+        assert!(inherited.context.is_none());
+        assert!(
+            state
+                .view("docker containers list --context remote --profile local")
+                .is_err()
+        );
+        assert_eq!(state.request.profile.as_deref(), Some("local"));
+        assert!(state.docker_context.is_none());
+    }
+    #[test]
+    fn structured_docker_views_inherit_only_the_docker_target_and_config() {
+        let mut state = State::new(Request {
+            context: Some("kube-only".into()),
+            ..Default::default()
+        });
+        let request = state.view("docker containers list").unwrap();
+        assert_eq!(request.profile.as_deref(), Some("default"));
+        assert!(request.context.is_none());
+        state.docker_context = Some("docker-context".into());
+        state.docker_config = Some("/fixture/docker-config".into());
+        let request = state.view("docker containers list").unwrap();
+        assert!(request.profile.is_none());
+        assert_eq!(request.context.as_deref(), Some("docker-context"));
+        assert_eq!(
+            request.docker_config.as_deref(),
+            Some("/fixture/docker-config")
+        );
+        let request = state.view("docker containers list --profile own").unwrap();
+        assert_eq!(request.profile.as_deref(), Some("own"));
+        assert!(request.context.is_none());
+        assert!(request.docker_config.is_none());
+    }
+    #[test]
+    fn refresh_keeps_identity_and_never_selects_a_replacement_or_ambiguous_row() {
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        let a = serde_json::json!({"ID":"a", "Names":"alpha"});
+        let b = serde_json::json!({"ID":"b", "Names":"beta"});
+        let c = serde_json::json!({"ID":"c", "Names":"gamma"});
+        state.accept(Ok(serde_json::json!([a, b, c])));
+        state.move_by(1);
+        state.accept(Ok(serde_json::json!([c, a, b])));
+        assert_eq!(state.selected().unwrap()["ID"], "b");
+        state.accept(Ok(serde_json::json!([a, c])));
+        assert!(state.selected().is_none());
+        state.accept(Ok(serde_json::json!([b, a, c])));
+        assert!(
+            state.selected().is_none(),
+            "automatic refresh cannot reselect"
+        );
+        state.move_by(1);
+        assert_eq!(state.selected().unwrap()["ID"], "b");
+        state.accept(Ok(serde_json::json!([b, b])));
+        assert!(
+            state.selected().is_none(),
+            "ambiguous identity must clear selection"
+        );
+    }
+    #[test]
+    fn kubernetes_selection_distinguishes_namespace_uid_and_ignores_resource_version() {
+        let mut state = State::new(Request::default());
+        state.workspace = Workspace::Kubernetes;
+        let pod = |ns: &str, uid: &str, version: &str| serde_json::json!({"metadata":{"name":"same", "namespace":ns,"uid":uid,"resourceVersion":version}});
+        state.accept(Ok(serde_json::json!([
+            pod("a", "a", "1"),
+            pod("b", "b", "1")
+        ])));
+        state.move_by(1);
+        state.accept(Ok(serde_json::json!([
+            pod("b", "b", "2"),
+            pod("a", "a", "1")
+        ])));
+        assert_eq!(state.selected().unwrap()["metadata"]["namespace"], "b");
+        state.accept(Ok(serde_json::json!([
+            pod("b", "replacement", "3"),
+            pod("a", "a", "1")
+        ])));
+        assert!(state.selected().is_none());
+    }
+    #[test]
+    fn paste_and_typing_share_filter_updates_and_command_paste_does_not_filter() {
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        state.accept(Ok(
+            serde_json::json!([{"ID":"a","Names":"alpha"},{"ID":"b","Names":"beta"}]),
+        ));
+        state.move_by(1);
+        state.input = Some(('/', String::new()));
+        state.edit_input("beta", false);
+        assert_eq!(state.rows().len(), 1);
+        assert_eq!(state.selected().unwrap()["ID"], "b");
+        state.clear_filter();
+        assert_eq!(state.selected().unwrap()["ID"], "b");
+        state.input = Some((':', String::new()));
+        state.edit_input("get pods", false);
+        assert!(state.filter.is_empty());
+        state.input = Some(('/', String::new()));
+        state.edit_input("missing", false);
+        assert!(state.selected().is_none());
+    }
+    #[test]
+    fn filtering_preserves_identity_and_clears_hidden_or_ambiguous_selection() {
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        state.accept(Ok(
+            serde_json::json!([{"ID":"a","Names":"alpha"},{"ID":"b","Names":"beta"}]),
+        ));
+        state.move_by(1);
+        state.input = Some(('/', String::new()));
+        state.edit_input("a", false);
+        assert_eq!(state.selected().unwrap()["ID"], "b");
+        state.edit_input("", true);
+        assert_eq!(state.selected().unwrap()["ID"], "b");
+        state.edit_input("alpha", false);
+        assert_eq!(state.rows().len(), 1);
+        assert!(state.selected().is_none());
+        state.clear_filter();
+        assert!(state.selected().is_none());
+        state.move_by(1);
+        state.accept(Ok(
+            serde_json::json!([{"ID":"a","Names":"alpha"},{"ID":"a","Names":"alpha duplicate"}]),
+        ));
+        state.input = Some(('/', String::new()));
+        state.edit_input("alpha", false);
+        assert!(state.selected().is_none());
+    }
+    #[test]
+    fn refresh_backoff_is_bounded_and_success_resets_it() {
+        let mut refresh = Refresh::default();
+        let now = std::time::Instant::now();
+        refresh.complete(false, now);
+        assert_eq!(refresh.next.duration_since(now).as_secs(), 4);
+        for _ in 0..20 {
+            refresh.complete(false, now);
+        }
+        assert_eq!(refresh.next.duration_since(now).as_secs(), 60);
+        refresh.paused = true;
+        assert!(!refresh.due(now + std::time::Duration::from_secs(100)));
+        refresh.complete(true, now);
+        assert_eq!(refresh.failures, 0);
+        assert_eq!(refresh.next.duration_since(now).as_secs(), 2);
+    }
+    #[test]
     fn environment_picker_never_interprets_context_names_as_vm_profiles() {
         let mut state = State::new(Request::default());
         state.view("vm").unwrap();
         assert!(state.vm_panel());
-        state.open_picker(); state.environment_picker = true;
+        state.open_picker();
+        state.environment_picker = true;
         state.accept(Ok(serde_json::json!([
             {"name":"shared", "environmentKind":"hamn", "state":"running", "dockerStatus":"ready"},
             {"name":"shared", "environmentKind":"docker", "endpoint":"unix:///external.sock"}
         ])));
         assert!(!state.vm_panel());
         for selected in [0, 1] {
-            state.selected = selected;
+            state.selected = Some(selected);
             for action in ["start", "stop", "delete", "restart", "logs", "stats"] {
                 assert_eq!(state.action(action).unwrap_err().code, "selectEnvironment");
             }
         }
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();
-        let screen: String = terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
-        for marker in ["shared  Hamn profile", "shared  Docker context", "unix:///external.sock", "Enter select"] {
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        for marker in [
+            "shared  Hamn profile",
+            "shared  Docker context",
+            "unix:///external.sock",
+            "Enter select",
+        ] {
             assert!(screen.contains(marker), "{screen}");
         }
-        assert!(!screen.contains("v VM settings")); assert!(!screen.contains("t stop"));
-        assert!(state.cancel_picker()); assert!(state.vm_panel());
+        assert!(!screen.contains("v VM settings"));
+        assert!(!screen.contains("t stop"));
+        assert!(state.cancel_picker());
+        assert!(state.vm_panel());
         state.data = serde_json::json!([{"name":"shared"}]);
-        assert_eq!(state.action("stop").unwrap().profile.as_deref(), Some("shared"));
+        assert_eq!(
+            state.action("stop").unwrap().profile.as_deref(),
+            Some("shared")
+        );
         state.native = Some(crate::native::parse("docker --context external ps", &state).unwrap());
         assert!(!state.vm_panel()); // A stale vm-list request cannot enable configure in a native view.
     }
     #[test]
     fn long_failure_header_keeps_normal_size_resource_and_scrollable_log_visible() {
-        for diagnostic in ["x".repeat(8192), "긴 작업 진단 ".repeat(400), "first\nsecond\n".repeat(300)] {
+        for diagnostic in [
+            "x".repeat(8192),
+            "긴 작업 진단 ".repeat(400),
+            "first\nsecond\n".repeat(300),
+        ] {
             let mut state = State::new(Request::default());
             state.show_all = true;
             state.data = serde_json::json!([{"name":"still-browsable"}]);
             state.operation_status = format!("outcomeUnknown: {diagnostic}");
             state.operation_log = "full log retained".into();
-            state.uncertain.push(serde_json::json!({"profile":"owned", "error":diagnostic}));
+            state
+                .uncertain
+                .push(serde_json::json!({"profile":"owned", "error":diagnostic}));
             let original = state.operation_status.clone();
-            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
             terminal.draw(|frame| draw(frame, &state)).unwrap();
-            let screen: String = terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
             assert!(screen.contains("still-browsable"), "{screen}");
             assert!(screen.contains("! log"), "{screen}");
             state.show_operation = true;
             let mut found = false;
             for _ in 0..40 {
                 terminal.draw(|frame| draw(frame, &state)).unwrap();
-                let screen: String = terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
+                let screen: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|cell| cell.symbol())
+                    .collect();
                 assert!(!screen.contains("resize terminal"), "{screen}");
-                if screen.contains("full log retained") { found = true; break; }
+                if screen.contains("full log retained") {
+                    found = true;
+                    break;
+                }
                 state.move_by(20);
             }
-            assert!(found, "full operation log must remain reachable by scrolling");
+            assert!(
+                found,
+                "full operation log must remain reachable by scrolling"
+            );
             assert_eq!(state.operation_status, original);
             assert_eq!(state.uncertain[0]["error"], diagnostic);
         }
@@ -747,15 +1369,15 @@ mod tests {
     fn operation_log_navigation_scrolls_text_without_moving_resource_selection() {
         let mut state = State::new(Request::default());
         state.data = serde_json::json!([{"ID":"first", "State":"running"}, {"ID":"second", "State":"running"}]);
-        state.selected = 1;
+        state.selected = Some(1);
         state.show_operation = true;
         state.move_by(20);
-        assert_eq!((state.scroll, state.selected), (20, 1));
+        assert_eq!((state.scroll, state.selected), (20, Some(1)));
         state.move_by(-30);
-        assert_eq!((state.scroll, state.selected), (0, 1));
+        assert_eq!((state.scroll, state.selected), (0, Some(1)));
         state.show_operation = false;
         state.move_by(-1);
-        assert_eq!(state.selected, 0);
+        assert_eq!(state.selected, Some(0));
     }
     #[test]
     fn workspaces_keep_selection_and_do_not_show_vm_controls_in_kubernetes() {
@@ -763,31 +1385,48 @@ mod tests {
         containers.data = serde_json::json!([{"Names":["running"],"State":"running"}, {"Names":["stopped"],"State":"exited"}]);
         assert_eq!(containers.rows().len(), 1);
         containers.show_all = true;
-        containers.selected = 1;
-        let mut kubernetes = State::for_workspace(Request { kubeconfig: Some("/no-such-hamn-test-config".into()), ..Default::default() }, Workspace::Kubernetes);
+        containers.selected = Some(1);
+        let mut kubernetes = State::for_workspace(
+            Request {
+                kubeconfig: Some("/no-such-hamn-test-config".into()),
+                ..Default::default()
+            },
+            Workspace::Kubernetes,
+        );
         assert_eq!(kubernetes.request.operation(), "k8s contexts list");
         assert!(kubernetes.request.profile.is_none());
         std::mem::swap(&mut containers, &mut kubernetes);
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
         terminal.draw(|f| draw(f, &containers)).unwrap();
-        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
         assert!(text.contains("[Kubernetes]"));
         assert!(!text.contains("VM settings") && !text.contains("Hamn profile"));
         std::mem::swap(&mut containers, &mut kubernetes);
-        assert_eq!(containers.selected, 1);
+        assert_eq!(containers.selected, Some(1));
         assert_eq!(containers.rows().len(), 2);
     }
 
     #[test]
     fn direct_details_keep_a_clean_list_request_for_escape_and_refresh() {
         for command in [
-            "vm status", "vm env", "docker containers inspect sample",
-            "docker containers stats sample", "docker containers logs sample --follow",
+            "vm status",
+            "vm env",
+            "docker containers inspect sample",
+            "docker containers stats sample",
+            "docker containers logs sample --follow",
             "k8s pods inspect sample --uid original",
             "k8s pods logs sample --follow --container app --previous",
         ] {
             let mut state = State::new(Request {
-                context: Some("dev".into()), namespace: Some("work".into()),
+                context: Some("dev".into()),
+                namespace: Some("work".into()),
                 ..Default::default()
             });
             let dispatched = state.view(command).unwrap();
@@ -804,7 +1443,15 @@ mod tests {
             state.detail = None; // Esc clears the detail before the next refresh.
             state.accept(Ok(serde_json::json!([{"metadata":{"name":"sample", "uid":"original", "namespace":"work"}, "Id":"sample", "name":"default", "State":"running"}])));
             assert_eq!(state.rows().len(), 1);
-            assert!(state.action(if state.request.words[0] == "vm" {"status"} else {"inspect"}).is_ok());
+            assert!(
+                state
+                    .action(if state.request.words[0] == "vm" {
+                        "status"
+                    } else {
+                        "inspect"
+                    })
+                    .is_ok()
+            );
         }
     }
 
@@ -846,10 +1493,18 @@ mod tests {
         let mut state = State::new(Request::default());
         state.native = Some(crate::native::parse("docker --context external ps", &state).unwrap());
         assert!(!state.hamn_environment());
-        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();
-        let text = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>();
-        assert!(!text.contains("Hamn profile")); assert!(!text.contains("v VM settings"));
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect::<String>();
+        assert!(!text.contains("Hamn profile"));
+        assert!(!text.contains("v VM settings"));
         assert!(text.contains("--context external"));
         state.native = Some(crate::native::parse("ps", &state).unwrap());
         assert!(state.hamn_environment());
@@ -857,10 +1512,22 @@ mod tests {
     #[test]
     fn picker_cancel_restores_exact_query_and_view_without_rewinding_operations() {
         for (workspace, command, picker) in [
-            (Workspace::Containers, "docker --host unix:///external.sock ps --filter label=app=x", ""),
+            (
+                Workspace::Containers,
+                "docker --host unix:///external.sock ps --filter label=app=x",
+                "",
+            ),
             (Workspace::Containers, "docker --context external ps -a", ""),
-            (Workspace::Kubernetes, "get pods --context explicit --namespace chosen -l app=x", "contexts"),
-            (Workspace::Kubernetes, "get deployments -A --field-selector metadata.name=app", "ns"),
+            (
+                Workspace::Kubernetes,
+                "get pods --context explicit --namespace chosen -l app=x",
+                "contexts",
+            ),
+            (
+                Workspace::Kubernetes,
+                "get deployments -A --field-selector metadata.name=app",
+                "ns",
+            ),
         ] {
             let mut state = State::new(Request::default());
             state.workspace = workspace;
@@ -871,32 +1538,47 @@ mod tests {
             let original_request = state.request.clone();
             state.data = serde_json::json!([{"name":"first"}, {"name":"second"}]);
             let original_data = state.data.clone();
-            state.selected = 1; state.filter = "row filter".into(); state.scroll = 9;
-            state.detail = Some("prior detail".into()); state.connection_status = "Available".into();
+            state.selected = Some(1);
+            state.filter = "row filter".into();
+            state.scroll = 9;
+            state.detail = Some("prior detail".into());
+            state.connection_status = "Available".into();
             state.show_operation = true;
             state.open_picker();
-            assert!(state.data.is_null()); assert!(state.selected().is_none());
-            assert!(state.native.is_none()); assert!(state.filter.is_empty());
-            assert_eq!((state.selected, state.scroll), (0, 0));
-            if !picker.is_empty() { state.view(picker).unwrap(); }
+            assert!(state.data.is_null());
+            assert!(state.selected().is_none());
+            assert!(state.native.is_none());
+            assert!(state.filter.is_empty());
+            assert_eq!((state.selected, state.scroll), (Some(0), 0));
+            if !picker.is_empty() {
+                state.view(picker).unwrap();
+            }
             state.data = serde_json::json!([{"name":"picker entry"}]);
             state.open_picker(); // Reopening must retain the original return destination.
             state.accept(Err(Failure::new("fixture", "picker lookup failed")));
             state.runtime = serde_json::json!({"state":"running", "dockerStatus":"ready"});
-            state.operation_status = "completed".into(); state.operation_log = "new log".into();
-            state.uncertain.push(serde_json::json!({"operationId":"unresolved"}));
-            assert!(state.cancel_picker()); assert!(!state.cancel_picker());
+            state.operation_status = "completed".into();
+            state.operation_log = "new log".into();
+            state
+                .uncertain
+                .push(serde_json::json!({"operationId":"unresolved"}));
+            assert!(state.cancel_picker());
+            assert!(!state.cancel_picker());
             assert_eq!(state.native.as_ref().unwrap().args, original_args);
             assert_eq!(state.request.words, original_request.words);
             assert_eq!(state.request.context, original_request.context);
             assert_eq!(state.request.profile, original_request.profile);
             assert_eq!(state.data, original_data);
-            assert_eq!((state.selected, state.scroll), (1, 9));
-            assert_eq!(state.filter, "row filter"); assert_eq!(state.detail.as_deref(), Some("prior detail"));
-            assert_eq!(state.connection_status, "Available"); assert!(!state.stale);
-            assert!(state.show_operation); assert!(!state.environment_picker);
+            assert_eq!((state.selected, state.scroll), (Some(1), 9));
+            assert_eq!(state.filter, "row filter");
+            assert_eq!(state.detail.as_deref(), Some("prior detail"));
+            assert_eq!(state.connection_status, "Available");
+            assert!(!state.stale);
+            assert!(state.show_operation);
+            assert!(!state.environment_picker);
             assert_eq!(state.runtime["dockerStatus"], "ready");
-            assert_eq!(state.operation_status, "completed"); assert_eq!(state.operation_log, "new log");
+            assert_eq!(state.operation_status, "completed");
+            assert_eq!(state.operation_log, "new log");
             assert_eq!(state.uncertain[0]["operationId"], "unresolved");
         }
     }
@@ -906,21 +1588,30 @@ mod tests {
             let mut state = State::new(Request::default());
             state.workspace = Workspace::Kubernetes;
             state.request.context = Some("ui-default".into());
-            state.native = Some(crate::native::parse("get pods --context explicit", &state).unwrap());
-            state.open_picker(); state.view(picker).unwrap();
+            state.native =
+                Some(crate::native::parse("get pods --context explicit", &state).unwrap());
+            state.open_picker();
+            state.view(picker).unwrap();
             state.data = serde_json::json!([{"name":"chosen", "namespace":"chosen-ns",
                 "metadata":{"name":"chosen-ns"}}]);
-            state.filter = "chosen".into(); state.scroll = 8;
+            state.filter = "chosen".into();
+            state.scroll = 8;
             assert_eq!(state.enter().unwrap().unwrap().operation(), "k8s pods list");
             assert!(!state.cancel_picker());
-            assert!(state.filter.is_empty()); assert_eq!(state.scroll, 0);
+            assert!(state.filter.is_empty());
+            assert_eq!(state.scroll, 0);
             assert_eq!(state.request.namespace.as_deref(), Some("chosen-ns"));
-            if picker == "contexts" { assert_eq!(state.request.context.as_deref(), Some("chosen")); }
+            if picker == "contexts" {
+                assert_eq!(state.request.context.as_deref(), Some("chosen"));
+            }
         }
         let mut state = State::new(Request::default());
         state.native = Some(crate::native::parse("ps --filter label=old", &state).unwrap());
-        state.save_browser(); state.open_picker(); state.invalidate_results();
-        assert!(!state.cancel_picker()); assert!(state.browser.is_none());
+        state.save_browser();
+        state.open_picker();
+        state.invalidate_results();
+        assert!(!state.cancel_picker());
+        assert!(state.browser.is_none());
         assert!(state.data.is_null());
     }
     #[test]
@@ -928,21 +1619,42 @@ mod tests {
         let mut state = State::new(Request::default());
         state.workspace = Workspace::Kubernetes;
         state.view("contexts").unwrap();
-        state.open_picker(); assert!(state.view("ns").is_err());
-        assert!(state.cancel_picker()); assert!(state.native.is_none());
+        state.open_picker();
+        assert!(state.view("ns").is_err());
+        assert!(state.cancel_picker());
+        assert!(state.native.is_none());
         assert_eq!(state.request.operation(), "k8s contexts list");
         for profile in [None, Some("default".into())] {
-            let mut state = State::new(Request { profile, ..Default::default() });
+            let mut state = State::new(Request {
+                profile,
+                ..Default::default()
+            });
             state.native = Some(crate::native::parse("ps --filter label=kept", &state).unwrap());
-            state.save_browser(); state.view("vm").unwrap();
-            state.open_picker(); assert!(state.cancel_picker());
-            assert!(state.native.is_none()); assert_eq!(state.request.operation(), "vm list");
+            state.save_browser();
+            state.view("vm").unwrap();
+            state.open_picker();
+            assert!(state.cancel_picker());
+            assert!(state.native.is_none());
+            assert_eq!(state.request.operation(), "vm list");
             state.return_to_browser();
-            assert!(state.native.as_ref().unwrap().args.iter().any(|a| a == "label=kept"));
-            state.save_browser(); state.view("vm").unwrap();
+            assert!(
+                state
+                    .native
+                    .as_ref()
+                    .unwrap()
+                    .args
+                    .iter()
+                    .any(|a| a == "label=kept")
+            );
+            state.save_browser();
+            state.view("vm").unwrap();
             state.data = serde_json::json!([{"name":"different"}]);
-            state.enter().unwrap(); state.return_to_browser();
-            assert_eq!(state.native.unwrap().hamn_profile.as_deref(), Some("different"));
+            state.enter().unwrap();
+            state.return_to_browser();
+            assert_eq!(
+                state.native.unwrap().hamn_profile.as_deref(),
+                Some("different")
+            );
         }
     }
     #[test]
@@ -951,16 +1663,35 @@ mod tests {
         state.request.profile = Some("default".into());
         state.native = Some(crate::native::parse("ps --filter label=app", &state).unwrap());
         state.data = serde_json::json!([{"ID":"a"}, {"ID":"b"}]);
-        state.selected = 1; state.scroll = 4; state.filter = "b".into();
+        state.selected = Some(1);
+        state.scroll = 4;
+        state.filter = "b".into();
         state.save_browser();
-        state.native = None; state.selected = 0; state.filter.clear();
+        state.native = None;
+        state.selected = Some(0);
+        state.filter.clear();
         state.return_to_browser();
-        assert_eq!(state.selected, 1); assert_eq!(state.scroll, 4); assert_eq!(state.filter, "b");
-        assert!(state.native.as_ref().unwrap().args.iter().any(|a| a == "label=app"));
-        state.save_browser(); state.request.profile = Some("different".into());
+        assert_eq!(state.selected, Some(1));
+        assert_eq!(state.scroll, 4);
+        assert_eq!(state.filter, "b");
+        assert!(
+            state
+                .native
+                .as_ref()
+                .unwrap()
+                .args
+                .iter()
+                .any(|a| a == "label=app")
+        );
+        state.save_browser();
+        state.request.profile = Some("different".into());
         state.return_to_browser();
-        assert_eq!(state.selected, 0); assert!(state.filter.is_empty());
-        assert_eq!(state.native.unwrap().hamn_profile.as_deref(), Some("different"));
+        assert_eq!(state.selected, Some(0));
+        assert!(state.filter.is_empty());
+        assert_eq!(
+            state.native.unwrap().hamn_profile.as_deref(),
+            Some("different")
+        );
     }
     #[test]
     fn command_paths_support_quotes_without_shell_expansion() {
@@ -1051,7 +1782,7 @@ mod tests {
         state.filter = "작".into();
         assert_eq!(state.rows().len(), 1);
         state.move_by(100);
-        assert_eq!(state.selected, 0);
+        assert_eq!(state.selected, Some(0));
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(30, 10)).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();

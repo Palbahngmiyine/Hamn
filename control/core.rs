@@ -21,16 +21,36 @@ unsafe extern "C" {
     ) -> i32;
     fn hamn_control_stop(profile: *const libc::c_char) -> i32;
     fn hamn_control_delete(profile: *const libc::c_char) -> i32;
-    fn hamn_control_migrate(profile: *const libc::c_char) -> i32;
     fn hamn_control_diagnostics(
         profile: *const libc::c_char,
         path: *const libc::c_char,
         result: *mut *mut libc::c_char,
     ) -> i32;
-    fn hamn_control_update(manifest: *const libc::c_char) -> i32;
+    // C borrows the optional NUL-terminated manifest for this call. It returns
+    // owned UTF-8 JSON through result; release only with hamn_control_free.
+    fn hamn_control_upgrade(
+        manifest: *const libc::c_char,
+        check_only: i32,
+        force: i32,
+        result: *mut *mut libc::c_char,
+    ) -> i32;
     fn hamn_control_uninstall(confirmed: i32) -> i32;
+    // A static NUL-terminated ASCII string, valid for the whole process.
+    fn hamn_version() -> *const libc::c_char;
     fn log_last_error() -> *const libc::c_char;
     fn cli_set_invocation_path(path: *const libc::c_char);
+}
+
+/// The build's release version, compiled into the C core. Reading it at run
+/// time keeps a version-only rebuild to a relink of this crate.
+pub fn version() -> &'static str {
+    // SAFETY: hamn_version returns a non-null pointer to a static
+    // NUL-terminated string that lives for the whole process.
+    let version = unsafe { CStr::from_ptr(hamn_version()) }
+        .to_str()
+        .expect("the compiled Hamn version is ASCII");
+    assert!(!version.is_empty(), "the compiled Hamn version is empty");
+    version
 }
 
 fn query(profile: Option<&CString>) -> Result<Value> {
@@ -95,15 +115,17 @@ fn execute(request: &Request) -> Result<Value> {
     }
     let rc = unsafe {
         match operation.as_str() {
-            "vm migrate" => hamn_control_migrate(pointer),
             "vm diagnostics" => hamn_control_diagnostics(
                 pointer,
                 path.as_ref().map_or(std::ptr::null(), |p| p.as_ptr()),
                 &mut output,
             ),
-            "system update" => {
-                hamn_control_update(manifest.as_ref().map_or(std::ptr::null(), |m| m.as_ptr()))
-            }
+            "system upgrade" => hamn_control_upgrade(
+                manifest.as_ref().map_or(std::ptr::null(), |m| m.as_ptr()),
+                i32::from(request.check),
+                i32::from(request.force),
+                &mut output,
+            ),
             "system uninstall" => hamn_control_uninstall(i32::from(request.yes)),
             "vm start" => hamn_control_start(pointer, cpu, memory, disk),
             "vm create" | "vm configure" => hamn_control_configure(
@@ -126,8 +148,9 @@ fn execute(request: &Request) -> Result<Value> {
         }
     }
     if rc != 0 {
-        let unknown = operation.starts_with("vm ") && query(profile.as_ref())
-            .is_ok_and(|v| v["lastOperation"]["status"] == "outcomeUnknown");
+        let unknown = operation.starts_with("vm ")
+            && query(profile.as_ref())
+                .is_ok_and(|v| v["lastOperation"]["status"] == "outcomeUnknown");
         let message = unsafe { CStr::from_ptr(log_last_error()) }.to_string_lossy();
         return Err(Failure::new(
             if unknown {
@@ -162,7 +185,9 @@ fn protocol_descriptor(fd: i32) -> i32 {
 }
 
 pub fn worker() -> i32 {
-    if unsafe { proc_cancel_install() } != 0 { return 1; }
+    if unsafe { proc_cancel_install() } != 0 {
+        return 1;
+    }
     let mut input = Vec::new();
     let request = std::io::stdin()
         .take(65537)
@@ -239,7 +264,12 @@ pub async fn call_control(
     cancel: &tokio_util::sync::CancellationToken,
     events: Option<&crate::stream::Events>,
 ) -> Result<Value> {
-    if cancel.is_cancelled() { return Err(Failure::new("cancelled", "operation cancelled before dispatch")); }
+    if cancel.is_cancelled() {
+        return Err(Failure::new(
+            "cancelled",
+            "operation cancelled before dispatch",
+        ));
+    }
     let executable = std::env::current_exe().map_err(|e| Failure::new("coreUnavailable", e))?;
     let result = call_executable(request, executable.as_os_str(), Some(cancel), events).await;
     if request.operation() == "vm start"
@@ -266,7 +296,9 @@ async fn live_error(
     let mut saved = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
-        if remaining == Some(0) { return Ok(saved); }
+        if remaining == Some(0) {
+            return Ok(saved);
+        }
         let capacity = remaining.unwrap_or(buffer.len()).min(buffer.len());
         let n = tokio::select! {
             biased;
@@ -280,23 +312,34 @@ async fn live_error(
             },
             n = reader.read(&mut buffer[..capacity]) => n?,
         };
-        if n == 0 { return Ok(saved); }
-        if let Some(remaining) = &mut remaining { *remaining -= n; }
+        if n == 0 {
+            return Ok(saved);
+        }
+        if let Some(remaining) = &mut remaining {
+            *remaining -= n;
+        }
         // Keep the final diagnostic if the worker exits without a response.
         // Logs already delivered to the UI are retained by its own bounded log.
         saved.extend_from_slice(&buffer[..n]);
-        if saved.len() > 8192 { saved.drain(..saved.len() - 8192); }
-        if headless { let _ = std::io::stderr().write_all(&buffer[..n]); }
+        if saved.len() > 8192 {
+            saved.drain(..saved.len() - 8192);
+        }
+        if headless {
+            let _ = std::io::stderr().write_all(&buffer[..n]);
+        }
         if let Some(events) = events.filter(|_| !headless) {
             // Backpressure preserves a burst when the renderer is temporarily
             // busy. A disconnected renderer must still allow worker reaping.
-            let _ = events.send(json!({"type":"log", "text":String::from_utf8_lossy(&buffer[..n])})).await;
+            let _ = events
+                .send(json!({"type":"log", "text":String::from_utf8_lossy(&buffer[..n])}))
+                .await;
         }
     }
 }
 
 async fn call_executable(
-    request: &Request, executable: &std::ffi::OsStr,
+    request: &Request,
+    executable: &std::ffi::OsStr,
     cancel: Option<&tokio_util::sync::CancellationToken>,
     events: Option<&crate::stream::Events>,
 ) -> Result<Value> {
@@ -304,7 +347,14 @@ async fn call_executable(
     // headless output stay line-oriented; only interactive headless uses bars.
     use std::io::IsTerminal;
     let mut child = tokio::process::Command::new(executable)
-        .env("HAMN_UPDATE_PROGRESS", if request.headless && std::io::stderr().is_terminal() { "1" } else { "0" })
+        .env(
+            "HAMN_UPDATE_PROGRESS",
+            if request.headless && std::io::stderr().is_terminal() {
+                "1"
+            } else {
+                "0"
+            },
+        )
         .arg("__core-worker")
         .arg(std::env::args_os().next().unwrap_or_default())
         .stdin(Stdio::piped())
@@ -322,8 +372,9 @@ async fn call_executable(
     let output = child.stdout.take().unwrap();
     let error = child.stderr.take().unwrap();
     let worker_done = tokio_util::sync::CancellationToken::new();
-    let wait = async {
-        let status = async {
+    let wait =
+        async {
+            let status = async {
             if let Some(cancel) = cancel {
                 tokio::select! {
                     status = child.wait() => return status,
@@ -337,9 +388,9 @@ async fn call_executable(
             }
             child.wait().await
         }.await;
-        worker_done.cancel();
-        status
-    };
+            worker_done.cancel();
+            status
+        };
     let (status, output, error) = tokio::try_join!(
         wait,
         capture(output, 1024 * 1024, false),
@@ -363,27 +414,19 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_waits_for_the_owned_workers_cleanup_result() {
-        use std::os::unix::fs::OpenOptionsExt;
-        let path = std::env::temp_dir().join(format!("hamn-cancel-worker-{}.py", std::process::id()));
-        let mut file = std::fs::OpenOptions::new().create_new(true).write(true).mode(0o700).open(&path).unwrap();
-        file.write_all(format!("#!{}\n", worker_lifetime_tests::python()).as_bytes()).unwrap();
-        file.write_all(br#"import json, signal, sys
-json.load(sys.stdin)
-def cleanup(*_):
-    print(json.dumps({'Ok': {'cleanup': 'completed'}}), flush=True)
-    sys.exit(0)
-signal.signal(signal.SIGTERM, cleanup)
-print('ready', file=sys.stderr, flush=True)
-signal.pause()
-"#).unwrap();
-        drop(file);
+        let fixture = worker_lifetime_tests::Fixture::new("cancel-cleanup", "CANCEL_CLEANUP");
         let cancel = tokio_util::sync::CancellationToken::new();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
-        let request = Request { timeout: 20, ..Default::default() };
+        let request = Request {
+            timeout: 20,
+            ..Default::default()
+        };
         let done = tokio_util::sync::CancellationToken::new();
         let call = async {
-            let result = call_executable(&request, path.as_os_str(), Some(&cancel), Some(&sender)).await;
-            done.cancel(); result
+            let result =
+                call_executable(&request, fixture.worker.as_os_str(), Some(&cancel), Some(&sender)).await;
+            done.cancel();
+            result
         };
         let trigger = async {
             tokio::select! {
@@ -392,8 +435,11 @@ signal.pause()
             }
             cancel.cancel();
         };
-        let (result, _) = tokio::time::timeout(std::time::Duration::from_secs(30), async { tokio::join!(call, trigger) }).await.unwrap();
-        std::fs::remove_file(path).unwrap();
+        let (result, _) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            tokio::join!(call, trigger)
+        })
+        .await
+        .unwrap();
         assert_eq!(result.unwrap()["cleanup"], "completed");
     }
 
@@ -416,11 +462,20 @@ signal.pause()
         // but an unrelated child completing exec must not make this check flaky.
         reader.set_nonblocking(true).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut fd = libc::pollfd { fd: reader.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let mut fd = libc::pollfd {
+            fd: reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             let rc = unsafe { libc::poll(&mut fd, 1, remaining.as_millis() as i32) };
-            if rc >= 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted || remaining.is_zero() { break; }
+            if rc >= 0
+                || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+                || remaining.is_zero()
+            {
+                break;
+            }
         }
         let result = std::io::Read::read(&mut reader, &mut [0]);
         let alive = child.try_wait().unwrap().is_none();
