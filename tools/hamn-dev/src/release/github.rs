@@ -133,6 +133,34 @@ pub fn complete_command(args: &[String]) -> Result<(), String> {
     complete(&System, &repository, tag, commit).map(drop)
 }
 
+/// A release branch Release Please wrote but left without a pull request: one
+/// under its naming prefix that still holds commits `main` does not. A single
+/// repository setting lets the automatic token create pull requests, and with
+/// it off Release Please writes the branch and then fails, so no release can
+/// start until it is on. A merged branch that outlives its PR is not this.
+fn stranded_release_branch(commands: &dyn Commands, repository: &str) -> Result<Option<String>, String> {
+    let prefix = "heads/release-please--branches--main";
+    let listing = output(commands, "gh", &["api", &format!("repos/{repository}/git/matching-refs/{prefix}")])?;
+    let listing = parse(&listing, "release branch listing")?;
+    let listing = listing.as_array().ok_or("release branch listing is invalid")?;
+    for reference in listing {
+        let name = reference.get("ref").and_then(Value::as_str).and_then(|name| name.strip_prefix("refs/heads/"));
+        let Some(branch) = name.filter(|branch| is_branch(branch)) else {
+            return Err("invalid release branch name".into());
+        };
+        let comparison = output(commands, "gh", &["api", &format!("repos/{repository}/compare/main...{branch}")])?;
+        let comparison = parse(&comparison, "release branch comparison")?;
+        let status = comparison.get("status").and_then(Value::as_str);
+        match status.ok_or("release branch comparison is invalid")? {
+            // Merged, or holding nothing of its own left to merge.
+            "identical" | "behind" => continue,
+            "ahead" | "diverged" => return Ok(Some(branch.to_owned())),
+            other => return Err(format!("unexpected comparison status {other}")),
+        }
+    }
+    Ok(None)
+}
+
 /// Starts CI on the open release PR's head branch, and returns that branch,
 /// unless its head commit already has check runs. Branch protection reads the
 /// required checks from the head commit, and the automatic token creates the
@@ -156,12 +184,18 @@ pub fn dispatch_checks(commands: &dyn Commands, repository: &str) -> Result<Opti
     let open = parse(&listing, "open release PR listing")?;
     let open = open.as_array().ok_or("open release PR listing is invalid")?;
     let pr = match open.as_slice() {
-        // Expected only when no commit since the last release is releasable.
-        // Otherwise the PR was never written, and the setting that lets
-        // Actions create pull requests is the first thing to check.
         [] => {
-            println!("No open release PR; Release Please wrote none for these commits.");
-            return Ok(None);
+            return match stranded_release_branch(commands, repository)? {
+                Some(branch) => Err(format!(
+                    "{branch} holds an unreleased version with no release PR: allow Actions to \
+                     create pull requests under Settings > Actions > General > Workflow permissions"
+                )),
+                // No commit since the last release is releasable.
+                None => {
+                    println!("No release PR is due.");
+                    Ok(None)
+                }
+            };
         }
         [pr] => pr,
         // Two release PRs would make "the" head commit ambiguous.

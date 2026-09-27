@@ -43,6 +43,10 @@ pub fn main(filters: &[String]) -> ExitCode {
             case("head_without_checks_is_dispatched_once", head_without_checks_is_dispatched_once),
             case("no_release_pr_dispatches_nothing", no_release_pr_dispatches_nothing),
             case(
+                "stranded_release_branch_names_the_actions_setting",
+                stranded_release_branch_names_the_actions_setting,
+            ),
+            case(
                 "ambiguous_or_invalid_release_pr_cannot_dispatch",
                 ambiguous_or_invalid_release_pr_cannot_dispatch,
             ),
@@ -291,67 +295,122 @@ fn invalid_or_wrong_release_is_rejected() {
 
 const HEAD: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
-/// Dispatches checks against a recorded PR listing and check-run count;
-/// returns the result and the `gh workflow run` calls.
-fn dispatch(open: Value, reported: Value) -> (Result<Option<String>, String>, Vec<Vec<String>>) {
-    let commands = Recorded::new(|program: &str, args: &[String]| {
-        let words: Vec<&str> = args.iter().map(String::as_str).collect();
-        match (program, words.as_slice()) {
-            ("gh", ["pr", "list", ..]) => Ok(exited(0, &open.to_string(), "")),
-            ("gh", ["api", path]) => {
-                assert_eq!(*path, format!("repos/example/hamn/commits/{HEAD}/check-runs"));
-                Ok(exited(0, &json!({"total_count": reported}).to_string(), ""))
+const BRANCH: &str = "release-please--branches--main--components--hamn";
+
+fn release_pr() -> Value {
+    json!({"number": 55, "headRefName": BRANCH, "headRefOid": HEAD})
+}
+
+struct Dispatch {
+    open: Value,
+    reported: Value,
+    /// `git/matching-refs` under the release branch prefix.
+    branches: Value,
+    /// `compare/main...BRANCH`.
+    status: Value,
+}
+
+impl Default for Dispatch {
+    fn default() -> Self {
+        Self { open: json!([release_pr()]), reported: json!(0), branches: json!([]), status: json!("ahead") }
+    }
+}
+
+impl Dispatch {
+    /// Runs the dispatch; returns its result and the `gh workflow run` calls.
+    fn exercise(self) -> (Result<Option<String>, String>, Vec<Vec<String>>) {
+        let commands = Recorded::new(|program: &str, args: &[String]| {
+            let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            match (program, words.as_slice()) {
+                ("gh", ["pr", "list", ..]) => Ok(exited(0, &self.open.to_string(), "")),
+                ("gh", ["api", path]) if path.ends_with("/check-runs") => {
+                    assert_eq!(*path, format!("repos/example/hamn/commits/{HEAD}/check-runs"));
+                    Ok(exited(0, &json!({"total_count": self.reported}).to_string(), ""))
+                }
+                ("gh", ["api", path]) if path.contains("/matching-refs/") => {
+                    assert_eq!(*path, "repos/example/hamn/git/matching-refs/heads/release-please--branches--main");
+                    Ok(exited(0, &self.branches.to_string(), ""))
+                }
+                ("gh", ["api", path]) if path.contains("/compare/") => {
+                    assert_eq!(*path, format!("repos/example/hamn/compare/main...{BRANCH}"));
+                    Ok(exited(0, &json!({"status": self.status}).to_string(), ""))
+                }
+                ("gh", ["workflow", "run", ..]) => Ok(exited(0, "", "")),
+                _ => panic!("unexpected command {program} {args:?}"),
             }
-            ("gh", ["workflow", "run", ..]) => Ok(exited(0, "", "")),
-            _ => panic!("unexpected command {program} {args:?}"),
-        }
-    });
-    let result = dispatch_checks(&commands, "example/hamn");
-    (result, commands.calls_to("gh", &["workflow", "run"]))
+        });
+        let result = dispatch_checks(&commands, "example/hamn");
+        (result, commands.calls_to("gh", &["workflow", "run"]))
+    }
 }
 
 fn head_without_checks_is_dispatched_once() {
-    let open = json!([{"number": 55, "headRefName": "release-please--branches--main", "headRefOid": HEAD}]);
-    let (result, runs) = dispatch(open.clone(), json!(0));
-    assert_eq!(result, Ok(Some("release-please--branches--main".to_owned())));
-    assert_eq!(
-        runs,
-        [["workflow", "run", "ci.yml", "--repo", "example/hamn", "--ref", "release-please--branches--main"]]
-    );
+    let (result, runs) = Dispatch::default().exercise();
+    assert_eq!(result, Ok(Some(BRANCH.to_owned())));
+    assert_eq!(runs, [["workflow", "run", "ci.yml", "--repo", "example/hamn", "--ref", BRANCH]]);
     // A rerun over a head that already reports checks must not dispatch again.
-    let (result, runs) = dispatch(open, json!(6));
+    let (result, runs) = Dispatch { reported: json!(6), ..Default::default() }.exercise();
     assert_eq!(result, Ok(None));
     assert!(runs.is_empty(), "{runs:?}");
 }
 
+/// No release PR and no release branch left behind: nothing was due.
 fn no_release_pr_dispatches_nothing() {
-    let commands = Recorded::new(|program: &str, args: &[String]| {
-        assert!(matches!((program, args[0].as_str()), ("gh", "pr")), "called {program} {args:?}");
-        Ok(exited(0, "[]", ""))
-    });
-    assert_eq!(dispatch_checks(&commands, "example/hamn"), Ok(None));
+    let (result, runs) = Dispatch { open: json!([]), ..Default::default() }.exercise();
+    assert_eq!(result, Ok(None));
+    assert!(runs.is_empty(), "{runs:?}");
+}
+
+/// A release branch with commits `main` lacks, and no PR for it, is the state
+/// the repository is left in when Actions may not create pull requests. Say
+/// which setting that is instead of reporting that nothing was due.
+fn stranded_release_branch_names_the_actions_setting() {
+    let branches = json!([{"ref": format!("refs/heads/{BRANCH}")}]);
+    for status in ["ahead", "diverged"] {
+        let dispatch =
+            Dispatch { open: json!([]), branches: branches.clone(), status: json!(status), ..Default::default() };
+        let (result, runs) = dispatch.exercise();
+        let error = result.unwrap_err();
+        assert!(error.contains(BRANCH) && error.contains("create pull requests"), "{status}: {error}");
+        assert!(runs.is_empty(), "{status}: {runs:?}");
+    }
+    // A merged branch outliving its PR is not a stranded release.
+    for status in ["identical", "behind"] {
+        let dispatch =
+            Dispatch { open: json!([]), branches: branches.clone(), status: json!(status), ..Default::default() };
+        assert_eq!(dispatch.exercise().0, Ok(None), "{status}");
+    }
 }
 
 /// An ambiguous or unusable listing must fail loudly rather than dispatch
 /// checks for the wrong commit, or silently leave the release PR unmergeable.
 fn ambiguous_or_invalid_release_pr_cannot_dispatch() {
-    let one = json!({"number": 55, "headRefName": "release-please--branches--main", "headRefOid": HEAD});
     for open in [
-        json!([one, {"number": 56, "headRefName": "other", "headRefOid": COMMIT}]),
-        json!([{"number": 55, "headRefName": "release-please--branches--main"}]),
+        json!([release_pr(), {"number": 56, "headRefName": "other", "headRefOid": COMMIT}]),
+        json!([{"number": 55, "headRefName": BRANCH}]),
         json!([{"number": 55, "headRefName": "--repo", "headRefOid": HEAD}]),
-        json!([{"number": 55, "headRefName": "release-please--branches--main", "headRefOid": "short"}]),
-        json!([{"number": 0, "headRefName": "release-please--branches--main", "headRefOid": HEAD}]),
+        json!([{"number": 55, "headRefName": BRANCH, "headRefOid": "short"}]),
+        json!([{"number": 0, "headRefName": BRANCH, "headRefOid": HEAD}]),
         json!({}),
     ] {
-        let (result, runs) = dispatch(open.clone(), json!(0));
+        let (result, runs) = Dispatch { open: open.clone(), ..Default::default() }.exercise();
         assert!(result.is_err(), "{open}");
         assert!(runs.is_empty(), "{open}: {runs:?}");
     }
     // A missing count is not "no checks": dispatching would be a guess.
-    let (result, runs) = dispatch(json!([one]), Value::Null);
+    let (result, runs) = Dispatch { reported: Value::Null, ..Default::default() }.exercise();
     assert!(result.is_err());
     assert!(runs.is_empty(), "{runs:?}");
+    // An unreadable branch listing must not be read as "nothing was due".
+    for (branches, status) in [
+        (json!({}), json!("ahead")),
+        (json!([{"ref": "refs/tags/v0.1.0"}]), json!("ahead")),
+        (json!([{"ref": format!("refs/heads/{BRANCH}")}]), json!("unknown")),
+        (json!([{"ref": format!("refs/heads/{BRANCH}")}]), Value::Null),
+    ] {
+        let dispatch = Dispatch { open: json!([]), branches: branches.clone(), status, ..Default::default() };
+        assert!(dispatch.exercise().0.is_err(), "{branches}");
+    }
     let commands = Recorded::new(|program: &str, args: &[String]| panic!("called {program} {args:?}"));
     assert!(dispatch_checks(&commands, "example/hamn/../../other").is_err());
     assert!(commands.calls.borrow().is_empty());

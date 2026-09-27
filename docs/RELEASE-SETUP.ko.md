@@ -15,7 +15,9 @@
 "Allow GitHub Actions to create and approve pull requests"를 켭니다. Release
 Please가 GITHUB_TOKEN으로 릴리스 PR을 작성하므로 이 설정 없이는 PR이 만들어지지
 않습니다. 이 설정 하나가 리뷰 승인 권한도 함께 허용하지만, `main` ruleset이
-승인 리뷰를 요구하지 않으므로 여기서는 아무 게이트도 약화되지 않습니다.
+승인 리뷰를 요구하지 않으므로 여기서는 아무 게이트도 약화되지 않습니다. 설정이
+꺼져 있으면 Release Please는 릴리스 브랜치만 쓰고 실패합니다. Release Please
+실행과 `preflight-repository`가 모두 이 설정 이름을 알려줍니다.
 
 `hamn-promotion` 환경을 만들고 관리자 우회를 끄며 `main`에서만 배포를
 허용합니다. 환경에 secret이나 variable을 두지 않습니다. 저장소에도 secret과
