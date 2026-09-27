@@ -86,6 +86,7 @@ fn each_unsafe_setting_fails_closed() {
         ("HAMN_TEST_WEAK_ACTIONS_POLICY", "Actions must be enabled, selected, and SHA-pinned"),
         ("HAMN_TEST_UNSAFE_ACTION", "only GitHub-owned Actions, Nix, and Release Please may run"),
         ("HAMN_TEST_RELEASE_PLEASE_SECRET", "keyless hosted releases must not depend on repository secrets"),
+        ("HAMN_TEST_NO_ACTIONS_PULL_REQUESTS", "Actions must be allowed to create pull requests for Release Please"),
         ("HAMN_TEST_RUNNER", "keyless hosted releases must not use repository self-hosted runners"),
         ("HAMN_TEST_VARIABLE", "keyless hosted releases must not depend on repository variables"),
         ("HAMN_TEST_SECRET", "hamn-promotion must not contain secrets or variables"),
@@ -209,9 +210,11 @@ pub fn gh(_program: &str, args: &[String]) -> ExitCode {
             r#"{"github_owned_allowed":true,"verified_allowed":true,"patterns_allowed":[]}"#,
             r#"{"github_owned_allowed":true,"verified_allowed":false,"patterns_allowed":["googleapis/release-please-action@*","cachix/install-nix-action@*"]}"#,
         ),
-        "/actions/permissions/workflow" => {
-            r#"{"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}"#
-        }
+        "/actions/permissions/workflow" => choose(
+            "HAMN_TEST_NO_ACTIONS_PULL_REQUESTS",
+            r#"{"default_workflow_permissions":"read","can_approve_pull_request_reviews":false}"#,
+            r#"{"default_workflow_permissions":"read","can_approve_pull_request_reviews":true}"#,
+        ),
         "/actions/permissions/fork-pr-contributor-approval" => r#"{"approval_policy":"all_external_contributors"}"#,
         "/actions/runners" => {
             choose("HAMN_TEST_RUNNER", r#"{"runners":[{"name":"unsafe-runner"}]}"#, r#"{"runners":[]}"#)

@@ -156,8 +156,11 @@ pub fn dispatch_checks(commands: &dyn Commands, repository: &str) -> Result<Opti
     let open = parse(&listing, "open release PR listing")?;
     let open = open.as_array().ok_or("open release PR listing is invalid")?;
     let pr = match open.as_slice() {
+        // Expected only when no commit since the last release is releasable.
+        // Otherwise the PR was never written, and the setting that lets
+        // Actions create pull requests is the first thing to check.
         [] => {
-            println!("No open release PR needs checks.");
+            println!("No open release PR; Release Please wrote none for these commits.");
             return Ok(None);
         }
         [pr] => pr,
