@@ -49,6 +49,7 @@ const COMMANDS: &[(&str, &str, Command)] = &[
     ("export-public-source", "OUTPUT_DIRECTORY", export::main),
     ("complete-pr", "TAG COMMIT", github::complete_command),
     ("pr-ready", "", github::ready_command),
+    ("dispatch-pr-checks", "", github::dispatch_command),
 ];
 
 pub fn run(args: &[String]) -> Result<(), String> {

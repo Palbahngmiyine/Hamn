@@ -75,6 +75,14 @@ pub fn is_repository(text: &str) -> bool {
     text.split_once('/').is_some_and(|(owner, repository)| name(owner) && name(repository))
 }
 
+/// `[A-Za-z0-9._/-]+` that does not begin with `-`: a branch name safe to
+/// pass as an argument value rather than being read as an option.
+pub fn is_branch(text: &str) -> bool {
+    !text.starts_with('-')
+        && !text.is_empty()
+        && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._/-".contains(&byte))
+}
+
 /// `[A-Za-z0-9._-]+`: a plain artifact file name.
 pub fn is_artifact_name(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))

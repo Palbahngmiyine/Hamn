@@ -281,8 +281,8 @@ fn check(repository: &str, responses: &Responses) -> Result<(), String> {
         "keyless hosted releases must not depend on repository variables",
     )?;
     require(
-        names(&responses.entries("repository-secrets", "secrets")?) == strings(&["RELEASE_PLEASE_TOKEN"]),
-        "repository secrets must contain only RELEASE_PLEASE_TOKEN",
+        names(&responses.entries("repository-secrets", "secrets")?).is_empty(),
+        "keyless hosted releases must not depend on repository secrets",
     )?;
 
     require(

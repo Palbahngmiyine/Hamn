@@ -14,8 +14,17 @@ SHAs and keep the default GITHUB_TOKEN read-only. Allow only the Actions
 owners checked by `hamn-dev release preflight-repository`.
 
 Create the `hamn-promotion` environment. Disable admin bypass and allow
-only `main`, without environment secrets or variables. `RELEASE_PLEASE_TOKEN`
-is the only repository secret and is used for Release Please PRs.
+only `main`, without environment secrets or variables. The repository holds
+no secrets or variables at all: every workflow authenticates with the
+automatic per-run GITHUB_TOKEN, which cannot expire, and each job requests
+only the permissions it needs.
+
+Events raised by that token start no workflow run, so Release Please's own PR
+gets no `pull_request` run and its required checks would never report. The
+Release Please workflow therefore dispatches CI on the release PR's head
+branch (`hamn-dev release dispatch-pr-checks`), which is the one event that
+token always starts. Keep `workflow_dispatch` in the CI workflow's triggers,
+and keep the required check names equal to the CI job names.
 
 ## Release Please and version 0.1.0
 
@@ -49,7 +58,8 @@ The release drivers are `hamn-dev release` subcommands (`tools/hamn-dev`,
 never shipped): `build-candidate`, `hosted-validation` and `gate` behind
 `make release-candidate`, `make release-hosted-validation` and
 `make release-gate`; `resolve-release`, `recover-release` and `publish` in the
-release workflow; `preflight-repository`; and `export-public-source`. They
+release workflow; `pr-ready` and `dispatch-pr-checks` in the Release Please
+workflow; `preflight-repository`; and `export-public-source`. They
 read their inputs from the environment variables that the Make targets and
 workflows pass (`publish` also takes the stable and candidate tags, the release
 commit and its input and output directories as arguments), and they run in the

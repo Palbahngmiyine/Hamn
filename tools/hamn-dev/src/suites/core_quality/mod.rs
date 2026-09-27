@@ -60,6 +60,7 @@ pub fn main(filters: &[String]) -> ExitCode {
             case("workflows_leave_sdk_selection_to_the_flake", workflows::workflows_leave_sdk_selection_to_the_flake),
             case("nix_shell_resolves_the_pinned_toolchain", nix::nix_shell_resolves_the_pinned_toolchain),
             case("release_please_workflow_is_complete", workflows::release_please_workflow_is_complete),
+            case("workflows_use_only_the_automatic_token", workflows::workflows_use_only_the_automatic_token),
             case("checkouts_do_not_persist_credentials", workflows::checkouts_do_not_persist_credentials),
             case("release_workflow_is_automated_and_hosted", workflows::release_workflow_is_automated_and_hosted),
             case("guest_image_job_is_complete", workflows::guest_image_job_is_complete),

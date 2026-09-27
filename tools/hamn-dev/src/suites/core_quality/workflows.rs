@@ -247,13 +247,29 @@ pub fn release_please_workflow_is_complete() {
             "        if: steps.publication.outputs.ready == 'true'",
             "  contents: read",
             "        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0",
-            "      - name: Require dedicated Release Please token",
-            r#"        run: test -n "$RELEASE_PLEASE_TOKEN""#,
-            "          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}",
+            "          token: ${{ github.token }}",
             "          skip-github-release: true",
+            // The automatic token raises no pull_request event, so the release
+            // PR's required checks exist only because this step dispatches them.
+            "      actions: write",
+            "        run: cargo run --locked -p hamn-dev -- release dispatch-pr-checks",
         ],
         "Release Please workflow is incomplete",
     );
+}
+
+/// No workflow may depend on a stored credential: only the automatic
+/// per-run token, which cannot expire and is scoped to its own job.
+pub fn workflows_use_only_the_automatic_token() {
+    let secret = Regex::new(r"secrets\.([A-Za-z0-9_]+)").unwrap();
+    for file in workflow_files() {
+        let text = read(&file);
+        for line in lines(&text) {
+            for name in secret.captures_iter(line).map(|captures| captures[1].to_owned()) {
+                assert_eq!(name, "GITHUB_TOKEN", "workflow depends on a stored secret: {file}: {line}");
+            }
+        }
+    }
 }
 
 /// `grep -c`: lines holding `text` across every workflow file.
