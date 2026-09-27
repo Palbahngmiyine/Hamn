@@ -39,8 +39,10 @@ jobs:
         if: steps.publication.outputs.ready == 'true'
         shell: bash
         env:
-          RELEASE_PLEASE_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-        run: test -n "$RELEASE_PLEASE_TOKEN"
+          GH_TOKEN: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+        # A present but expired token reaches release-please as an unattributed
+        # "Bad credentials"; name the secret that has to be rotated instead.
+        run: gh api rate_limit >/dev/null || { echo '::error::RELEASE_PLEASE_TOKEN is missing or expired; rotate the repository secret.'; exit 1; }
       - name: Create or update the release PR
         if: steps.publication.outputs.ready == 'true'
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0

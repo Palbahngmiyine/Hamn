@@ -248,7 +248,7 @@ pub fn release_please_workflow_is_complete() {
             "  contents: read",
             "        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0",
             "      - name: Require dedicated Release Please token",
-            r#"        run: test -n "$RELEASE_PLEASE_TOKEN""#,
+            "        run: gh api rate_limit >/dev/null || { echo '::error::RELEASE_PLEASE_TOKEN is missing or expired; rotate the repository secret.'; exit 1; }",
             "          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}",
             "          skip-github-release: true",
         ],
