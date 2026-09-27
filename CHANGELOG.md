@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 (2026-09-27)
+
+## What's Changed
+* feat: improve container workflows and native upgrades by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/52
+* fix: release pr-ready CRLF parsing and cancellations racing a command's start by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/53
+* ci: run Release Please on the automatic token, with no stored secret by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/55
+* ci: report what the release PR needs instead of dispatching CI for it by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/56
+
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.1.2...v0.2.0
+
 ## 0.1.2 (2026-09-14)
 
 ## What's Changed
