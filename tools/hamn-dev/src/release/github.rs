@@ -5,9 +5,10 @@
 //!   release at this commit.
 //! - `pr-ready` defers new release notes until the manifest's current tag is
 //!   published, so Release Please never compares against a missing tag.
-//! - `dispatch-pr-checks` starts CI on the open release PR's head commit,
-//!   which nothing else reports checks for, because the automatic token
-//!   Release Please writes with raises no `pull_request` event.
+//! - `report-pr` says what the open release PR still needs: the repository's
+//!   approval policy holds the `pull_request` run for a PR the automatic token
+//!   opened, so a maintainer approves it before its checks report. With no
+//!   release PR at all it explains which repository setting withheld it.
 //!
 //! An API, authentication or network failure is always an error, never
 //! "pending": a pending result must be proven by a 404 or a draft release.
@@ -164,15 +165,13 @@ fn stranded_release_branch(commands: &dyn Commands, repository: &str) -> Result<
     Ok(None)
 }
 
-/// Starts CI on the open release PR's head branch, and returns that branch,
-/// unless its head commit already has check runs. Branch protection reads the
-/// required checks from the head commit, and a `pull_request` run for a PR the
-/// automatic token opened waits for manual approval and reports nothing, so
-/// without this dispatch the release PR can never become mergeable.
-/// `workflow_dispatch` is the one event that token always starts, which also
-/// makes this idempotent: a rerun of an unchanged release PR dispatches
-/// nothing.
-pub fn dispatch_checks(commands: &dyn Commands, repository: &str) -> Result<Option<String>, String> {
+/// Reports what the open release PR still needs, and returns its head branch.
+/// Under the repository's `all_external_contributors` approval policy the
+/// `pull_request` run for a PR the automatic token opened waits for a
+/// maintainer's approval, so its required checks stay unreported until someone
+/// approves it. This only says so; approving is a person's decision and stays
+/// one. With no release PR at all, `stranded_release_branch` explains why.
+pub fn report_pr(commands: &dyn Commands, repository: &str) -> Result<Option<String>, String> {
     if !is_repository(repository) {
         return Err("invalid release identity".into());
     }
@@ -229,25 +228,28 @@ pub fn dispatch_checks(commands: &dyn Commands, repository: &str) -> Result<Opti
     let (Some(number), Some(branch), Some(head)) = (number, branch, head) else {
         return Err("invalid release PR identity".into());
     };
-    let checks = output(commands, "gh", &["api", &format!("repos/{repository}/commits/{head}/check-runs")])?;
-    let checks = parse(&checks, "check run listing")?;
-    let reported = checks.get("total_count").and_then(Value::as_u64).ok_or("check run listing is invalid")?;
-    if reported > 0 {
-        println!("Release PR #{number} already reports {reported} checks for {head}.");
-        return Ok(None);
+    let suites = output(commands, "gh", &["api", &format!("repos/{repository}/commits/{head}/check-suites")])?;
+    let suites = parse(&suites, "check suite listing")?;
+    let suites = suites.get("check_suites").and_then(Value::as_array).ok_or("check suite listing is invalid")?;
+    let waiting = suites.iter().any(|suite| suite.get("conclusion") == Some(&json!("action_required")));
+    if waiting {
+        println!(
+            "Release PR #{number} is waiting for a maintainer to approve its workflow run: \
+             open the PR's Checks tab and approve it. Its required checks report only after that."
+        );
+    } else {
+        println!("Release PR #{number} has no run waiting for approval on {head}.");
     }
-    output(commands, "gh", &["workflow", "run", "ci.yml", "--repo", repository, "--ref", branch])?;
-    println!("Dispatched CI for release PR #{number} on {branch}.");
     Ok(Some(branch.to_owned()))
 }
 
-/// `dispatch-pr-checks`, for `$GITHUB_REPOSITORY`.
-pub fn dispatch_command(args: &[String]) -> Result<(), String> {
+/// `report-pr`, for `$GITHUB_REPOSITORY`.
+pub fn report_command(args: &[String]) -> Result<(), String> {
     if !args.is_empty() {
-        return Err("usage: hamn-dev release dispatch-pr-checks".into());
+        return Err("usage: hamn-dev release report-pr".into());
     }
     let repository = std::env::var("GITHUB_REPOSITORY").map_err(|_| "GITHUB_REPOSITORY is required")?;
-    dispatch_checks(&System, &repository).map(drop)
+    report_pr(&System, &repository).map(drop)
 }
 
 /// Whether the manifest's current version is published: `false` while the

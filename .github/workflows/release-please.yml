@@ -24,10 +24,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # The automatic per-run token replaces a stored credential that expires.
-    # Release Please writes the PR, its labels and its branch; `actions` is for
-    # dispatching that PR's checks below.
+    # Release Please writes the PR, its labels and its branch; `actions: read`
+    # is for reporting whether that PR's run awaits approval.
     permissions:
-      actions: write
+      actions: read
       contents: write
       issues: write
       pull-requests: write
@@ -51,12 +51,10 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
           skip-github-release: true
-      # Events this token raises start no workflow run, so nothing would report
-      # the release PR's required checks; workflow_dispatch is the exception.
-      # This also runs after Release Please fails, both to report why no
-      # release PR exists and to give an existing one its missing checks.
-      - name: Dispatch the release PR's required checks
+      # Runs after Release Please fails too, to report either why no release PR
+      # exists or that an existing one is waiting for a maintainer's approval.
+      - name: Report what the release PR still needs
         if: ${{ !cancelled() && steps.publication.outputs.ready == 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: cargo run --locked -p hamn-dev -- release dispatch-pr-checks
+        run: cargo run --locked -p hamn-dev -- release report-pr

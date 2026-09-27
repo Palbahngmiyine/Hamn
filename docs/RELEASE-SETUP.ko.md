@@ -24,12 +24,16 @@ Please가 GITHUB_TOKEN으로 릴리스 PR을 작성하므로 이 설정 없이�
 variable을 전혀 두지 않습니다. 모든 workflow는 만료되지 않는 실행 단위
 GITHUB_TOKEN으로 인증하고, job마다 필요한 권한만 요청합니다.
 
-이 토큰이 만든 이벤트는 새 workflow 실행을 시작하지 않습니다. 따라서 Release
-Please가 만든 PR에는 `pull_request` 실행이 붙지 않고 필수 검증이 보고되지
-않습니다. 그래서 Release Please workflow가 릴리스 PR의 head 브랜치에 CI를
-직접 dispatch합니다(`hamn-dev release dispatch-pr-checks`). `workflow_dispatch`는
-이 토큰이 항상 실행을 시작하는 유일한 이벤트입니다. CI workflow의 트리거에
-`workflow_dispatch`를 유지하고, 필수 검증 이름을 CI job 이름과 같게 둡니다.
+릴리스 PR의 작성자는 `github-actions[bot]`이고, 위의 fork 승인 정책은 이
+저장소의 브랜치라도 이를 외부 기여자로 취급합니다. 그래서 그 PR의
+`pull_request` 실행은 `action_required`로 보류되어 검증을 보고하지 않습니다.
+릴리스 PR의 Checks 탭에서 승인하면 필수 검증이 보고되고 PR을 병합할 수
+있습니다. 이것은 의도한 수동 단계이며 릴리스에서 유일한 수동 단계입니다.
+보류된 실행의 승인은 관리자의 판단이므로 어떤 workflow도 대신 하지 않습니다.
+Release Please 실행마다 승인 대기 여부를 알려줍니다(`hamn-dev release report-pr`).
+
+이 단계를 넘기려고 승인 정책을 완화하지 않습니다. 실행을 승인하는 단계를
+추가하지도 않습니다. 그러면 Release Please가 쓴 내용이 검토 없이 실행됩니다.
 
 ## Release Please와 0.1.0 버전
 
@@ -61,7 +65,7 @@ Manifest의 버전이 아직 게시되지 않았거나 draft 상태라면 Releas
 명령입니다. `make release-candidate`·`make release-hosted-validation`·
 `make release-gate`는 각각 `build-candidate`·`hosted-validation`·`gate`를
 실행하고, 릴리스 workflow는 `resolve-release`·`recover-release`·`publish`를
-실행합니다. Release Please workflow는 `pr-ready`·`dispatch-pr-checks`를
+실행합니다. Release Please workflow는 `pr-ready`·`report-pr`을
 실행합니다. `preflight-repository`와 `export-public-source`도 같은 하위
 명령입니다. 각 하위 명령은 Make target과 workflow가 전달하는 환경 변수로 입력을
 받고(`publish`는 stable 태그·후보 태그·릴리스 commit·입력 디렉터리·출력
