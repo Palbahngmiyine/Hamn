@@ -36,6 +36,9 @@ impl Commands for System {
 /// No `gh` or `git` call here is expected to take longer.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
 const PENDING_LABEL: &str = "autorelease: pending";
+/// Release Please names the branch it writes after the branch it targets, so
+/// every release PR's head branch starts with this.
+const RELEASE_BRANCH: &str = "release-please--branches--main";
 
 fn words(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| item.to_string()).collect()
@@ -139,7 +142,7 @@ pub fn complete_command(args: &[String]) -> Result<(), String> {
 /// it off Release Please writes the branch and then fails, so no release can
 /// start until it is on. A merged branch that outlives its PR is not this.
 fn stranded_release_branch(commands: &dyn Commands, repository: &str) -> Result<Option<String>, String> {
-    let prefix = "heads/release-please--branches--main";
+    let prefix = format!("heads/{RELEASE_BRANCH}");
     let listing = output(commands, "gh", &["api", &format!("repos/{repository}/git/matching-refs/{prefix}")])?;
     let listing = parse(&listing, "release branch listing")?;
     let listing = listing.as_array().ok_or("release branch listing is invalid")?;
@@ -163,26 +166,45 @@ fn stranded_release_branch(commands: &dyn Commands, repository: &str) -> Result<
 
 /// Starts CI on the open release PR's head branch, and returns that branch,
 /// unless its head commit already has check runs. Branch protection reads the
-/// required checks from the head commit, and the automatic token creates the
-/// PR without raising a `pull_request` event, so without this dispatch the
-/// release PR can never become mergeable. `workflow_dispatch` is the one
-/// event that token always starts, which also makes this idempotent: a rerun
-/// of an unchanged release PR dispatches nothing.
+/// required checks from the head commit, and a `pull_request` run for a PR the
+/// automatic token opened waits for manual approval and reports nothing, so
+/// without this dispatch the release PR can never become mergeable.
+/// `workflow_dispatch` is the one event that token always starts, which also
+/// makes this idempotent: a rerun of an unchanged release PR dispatches
+/// nothing.
 pub fn dispatch_checks(commands: &dyn Commands, repository: &str) -> Result<Option<String>, String> {
     if !is_repository(repository) {
         return Err("invalid release identity".into());
     }
-    let fields = "number,headRefName,headRefOid";
+    // Selecting by label would filter through GitHub's search index, which is
+    // not immediately consistent: seconds after Release Please opens the PR,
+    // that query still answers "none". The plain listing is consistent, so
+    // recognize the release PR by the branch Release Please writes.
+    let limit = 100;
     let listing = output(
         commands,
         "gh",
         &[
-            "pr", "list", "--repo", repository, "--state", "open", "--base", "main", "--label", PENDING_LABEL,
-            "--limit", "2", "--json", fields,
+            "pr",
+            "list",
+            "--repo",
+            repository,
+            "--state",
+            "open",
+            "--base",
+            "main",
+            "--limit",
+            &limit.to_string(),
+            "--json",
+            "number,headRefName,headRefOid",
         ],
     )?;
-    let open = parse(&listing, "open release PR listing")?;
-    let open = open.as_array().ok_or("open release PR listing is invalid")?;
+    let listing = parse(&listing, "open pull request listing")?;
+    let listing =
+        listing.as_array().filter(|open| open.len() < limit).ok_or("open pull request listing is incomplete")?;
+    let release_branch =
+        |pr: &&Value| pr.get("headRefName").and_then(Value::as_str).is_some_and(|name| name.starts_with(RELEASE_BRANCH));
+    let open: Vec<&Value> = listing.iter().filter(release_branch).collect();
     let pr = match open.as_slice() {
         [] => {
             return match stranded_release_branch(commands, repository)? {
