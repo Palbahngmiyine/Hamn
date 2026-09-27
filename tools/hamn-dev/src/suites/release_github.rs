@@ -1,7 +1,7 @@
 //! Release Please coordination against recorded `gh` and `git` responses:
 //! release PRs complete only for their exact, published, immutable version,
 //! and new release notes wait until the current version is published.
-use crate::release::github::{Commands, complete, dispatch_checks, ready};
+use crate::release::github::{Commands, complete, ready, report_pr};
 use crate::release::process::Output;
 use crate::runner::{self, case};
 use serde_json::{Value, json};
@@ -40,8 +40,8 @@ pub fn main(filters: &[String]) -> ExitCode {
             ),
             case("invalid_or_wrong_release_is_rejected", invalid_or_wrong_release_is_rejected),
             case("invalid_configuration_cannot_call_the_api", invalid_configuration_cannot_call_the_api),
-            case("head_without_checks_is_dispatched_once", head_without_checks_is_dispatched_once),
-            case("no_release_pr_dispatches_nothing", no_release_pr_dispatches_nothing),
+            case("reporting_the_release_pr_only_reads", reporting_the_release_pr_only_reads),
+            case("no_release_pr_reports_nothing_due", no_release_pr_reports_nothing_due),
             case(
                 "stranded_release_branch_names_the_actions_setting",
                 stranded_release_branch_names_the_actions_setting,
@@ -51,8 +51,8 @@ pub fn main(filters: &[String]) -> ExitCode {
                 release_pr_is_found_by_branch_beside_unrelated_prs,
             ),
             case(
-                "ambiguous_or_invalid_release_pr_cannot_dispatch",
-                ambiguous_or_invalid_release_pr_cannot_dispatch,
+                "ambiguous_or_invalid_release_pr_cannot_be_reported",
+                ambiguous_or_invalid_release_pr_cannot_be_reported,
             ),
         ],
         filters,
@@ -305,31 +305,37 @@ fn release_pr() -> Value {
     json!({"number": 55, "headRefName": BRANCH, "headRefOid": HEAD})
 }
 
-struct Dispatch {
+struct Report {
     open: Value,
-    reported: Value,
+    /// `commits/HEAD/check-suites`.
+    suites: Value,
     /// `git/matching-refs` under the release branch prefix.
     branches: Value,
     /// `compare/main...BRANCH`.
     status: Value,
 }
 
-impl Default for Dispatch {
+impl Default for Report {
     fn default() -> Self {
-        Self { open: json!([release_pr()]), reported: json!(0), branches: json!([]), status: json!("ahead") }
+        Self {
+            open: json!([release_pr()]),
+            suites: json!({"check_suites": [{"conclusion": "action_required"}]}),
+            branches: json!([]),
+            status: json!("ahead"),
+        }
     }
 }
 
-impl Dispatch {
-    /// Runs the dispatch; returns its result and the `gh workflow run` calls.
+impl Report {
+    /// Runs the report; returns its result and every command it ran.
     fn exercise(self) -> (Result<Option<String>, String>, Vec<Vec<String>>) {
         let commands = Recorded::new(|program: &str, args: &[String]| {
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
             match (program, words.as_slice()) {
                 ("gh", ["pr", "list", ..]) => Ok(exited(0, &self.open.to_string(), "")),
-                ("gh", ["api", path]) if path.ends_with("/check-runs") => {
-                    assert_eq!(*path, format!("repos/example/hamn/commits/{HEAD}/check-runs"));
-                    Ok(exited(0, &json!({"total_count": self.reported}).to_string(), ""))
+                ("gh", ["api", path]) if path.ends_with("/check-suites") => {
+                    assert_eq!(*path, format!("repos/example/hamn/commits/{HEAD}/check-suites"));
+                    Ok(exited(0, &self.suites.to_string(), ""))
                 }
                 ("gh", ["api", path]) if path.contains("/matching-refs/") => {
                     assert_eq!(*path, "repos/example/hamn/git/matching-refs/heads/release-please--branches--main");
@@ -339,30 +345,41 @@ impl Dispatch {
                     assert_eq!(*path, format!("repos/example/hamn/compare/main...{BRANCH}"));
                     Ok(exited(0, &json!({"status": self.status}).to_string(), ""))
                 }
-                ("gh", ["workflow", "run", ..]) => Ok(exited(0, "", "")),
                 _ => panic!("unexpected command {program} {args:?}"),
             }
         });
-        let result = dispatch_checks(&commands, "example/hamn");
-        (result, commands.calls_to("gh", &["workflow", "run"]))
+        let result = report_pr(&commands, "example/hamn");
+        let ran = commands.calls.borrow().iter().map(|(_, args, _)| args.clone()).collect();
+        (result, ran)
     }
 }
 
-fn head_without_checks_is_dispatched_once() {
-    let (result, runs) = Dispatch::default().exercise();
-    assert_eq!(result, Ok(Some(BRANCH.to_owned())));
-    assert_eq!(runs, [["workflow", "run", "ci.yml", "--repo", "example/hamn", "--ref", BRANCH]]);
-    // A rerun over a head that already reports checks must not dispatch again.
-    let (result, runs) = Dispatch { reported: json!(6), ..Default::default() }.exercise();
-    assert_eq!(result, Ok(None));
-    assert!(runs.is_empty(), "{runs:?}");
+/// Reporting only reads. Approving a held run, starting a run, or writing
+/// anything is a maintainer's decision and must never happen here.
+fn reporting_the_release_pr_only_reads() {
+    for report in [
+        Report::default(),
+        Report { suites: json!({"check_suites": [{"conclusion": "success"}]}), ..Default::default() },
+    ] {
+        let (result, ran) = report.exercise();
+        assert_eq!(result, Ok(Some(BRANCH.to_owned())));
+        // Without this the loop below would pass on an empty recording.
+        assert_eq!(ran.len(), 2, "{ran:?}");
+        for args in &ran {
+            let words: Vec<&str> = args.iter().map(String::as_str).collect();
+            assert!(
+                matches!(words.as_slice(), ["pr", "list", ..] | ["api", _]),
+                "reporting must only read, but ran {words:?}"
+            );
+            assert!(!args.iter().any(|arg| arg == "-X" || arg.contains("approve")), "{words:?}");
+        }
+    }
 }
 
 /// No release PR and no release branch left behind: nothing was due.
-fn no_release_pr_dispatches_nothing() {
-    let (result, runs) = Dispatch { open: json!([]), ..Default::default() }.exercise();
+fn no_release_pr_reports_nothing_due() {
+    let (result, _) = Report { open: json!([]), ..Default::default() }.exercise();
     assert_eq!(result, Ok(None));
-    assert!(runs.is_empty(), "{runs:?}");
 }
 
 /// A release branch with commits `main` lacks, and no PR for it, is the state
@@ -371,44 +388,40 @@ fn no_release_pr_dispatches_nothing() {
 fn stranded_release_branch_names_the_actions_setting() {
     let branches = json!([{"ref": format!("refs/heads/{BRANCH}")}]);
     for status in ["ahead", "diverged"] {
-        let dispatch =
-            Dispatch { open: json!([]), branches: branches.clone(), status: json!(status), ..Default::default() };
-        let (result, runs) = dispatch.exercise();
-        let error = result.unwrap_err();
+        let report =
+            Report { open: json!([]), branches: branches.clone(), status: json!(status), ..Default::default() };
+        let error = report.exercise().0.unwrap_err();
         assert!(error.contains(BRANCH) && error.contains("create pull requests"), "{status}: {error}");
-        assert!(runs.is_empty(), "{status}: {runs:?}");
     }
     // A merged branch outliving its PR is not a stranded release.
     for status in ["identical", "behind"] {
-        let dispatch =
-            Dispatch { open: json!([]), branches: branches.clone(), status: json!(status), ..Default::default() };
-        assert_eq!(dispatch.exercise().0, Ok(None), "{status}");
+        let report =
+            Report { open: json!([]), branches: branches.clone(), status: json!(status), ..Default::default() };
+        assert_eq!(report.exercise().0, Ok(None), "{status}");
     }
 }
 
 /// The release PR is recognized by its head branch, not by a label: a label
 /// filter answers through GitHub's search index, which still reports no PR
 /// seconds after Release Please opened one. Other open PRs on `main` are not
-/// release PRs and must not be dispatched or counted as ambiguity.
+/// release PRs and must not be reported on or counted as ambiguity.
 fn release_pr_is_found_by_branch_beside_unrelated_prs() {
     let open = json!([
         {"number": 56, "headRefName": "claude/some-fix", "headRefOid": COMMIT},
         release_pr(),
         {"number": 54, "headRefName": "codex/other", "headRefOid": MERGE},
     ]);
-    let (result, runs) = Dispatch { open, ..Default::default() }.exercise();
+    let (result, _) = Report { open, ..Default::default() }.exercise();
     assert_eq!(result, Ok(Some(BRANCH.to_owned())));
-    assert_eq!(runs, [["workflow", "run", "ci.yml", "--repo", "example/hamn", "--ref", BRANCH]]);
     // Unrelated PRs alone mean no release is due, not a stranded release.
     let open = json!([{"number": 56, "headRefName": "claude/some-fix", "headRefOid": COMMIT}]);
-    let (result, runs) = Dispatch { open, ..Default::default() }.exercise();
+    let (result, _) = Report { open, ..Default::default() }.exercise();
     assert_eq!(result, Ok(None));
-    assert!(runs.is_empty(), "{runs:?}");
 }
 
-/// An ambiguous or unusable listing must fail loudly rather than dispatch
-/// checks for the wrong commit, or silently leave the release PR unmergeable.
-fn ambiguous_or_invalid_release_pr_cannot_dispatch() {
+/// An ambiguous or unusable listing must fail loudly rather than report on the
+/// wrong commit, or read a stranded release PR as nothing being due.
+fn ambiguous_or_invalid_release_pr_cannot_be_reported() {
     for open in [
         json!([release_pr(), {"number": 56, "headRefName": format!("{BRANCH}-2"), "headRefOid": COMMIT}]),
         json!([{"number": 55, "headRefName": BRANCH}]),
@@ -417,20 +430,19 @@ fn ambiguous_or_invalid_release_pr_cannot_dispatch() {
         json!([{"number": 0, "headRefName": BRANCH, "headRefOid": HEAD}]),
         json!({}),
     ] {
-        let (result, runs) = Dispatch { open: open.clone(), ..Default::default() }.exercise();
+        let (result, _) = Report { open: open.clone(), ..Default::default() }.exercise();
         assert!(result.is_err(), "{open}");
-        assert!(runs.is_empty(), "{open}: {runs:?}");
     }
-    // A missing count is not "no checks": dispatching would be a guess.
-    let (result, runs) = Dispatch { reported: Value::Null, ..Default::default() }.exercise();
-    assert!(result.is_err());
-    assert!(runs.is_empty(), "{runs:?}");
+    // An unreadable suite listing is not "nothing is waiting".
+    for suites in [json!({}), json!({"check_suites": {}})] {
+        let (result, _) = Report { suites: suites.clone(), ..Default::default() }.exercise();
+        assert!(result.is_err(), "{suites}");
+    }
     // A listing filled to its limit may hide the release PR behind the page.
     let full: Vec<Value> =
         (0..100).map(|number| json!({"number": number + 1, "headRefName": "x", "headRefOid": COMMIT})).collect();
-    let (result, runs) = Dispatch { open: json!(full), ..Default::default() }.exercise();
+    let (result, _) = Report { open: json!(full), ..Default::default() }.exercise();
     assert!(result.unwrap_err().contains("incomplete"));
-    assert!(runs.is_empty(), "{runs:?}");
     // An unreadable branch listing must not be read as "nothing was due".
     for (branches, status) in [
         (json!({}), json!("ahead")),
@@ -438,11 +450,11 @@ fn ambiguous_or_invalid_release_pr_cannot_dispatch() {
         (json!([{"ref": format!("refs/heads/{BRANCH}")}]), json!("unknown")),
         (json!([{"ref": format!("refs/heads/{BRANCH}")}]), Value::Null),
     ] {
-        let dispatch = Dispatch { open: json!([]), branches: branches.clone(), status, ..Default::default() };
-        assert!(dispatch.exercise().0.is_err(), "{branches}");
+        let report = Report { open: json!([]), branches: branches.clone(), status, ..Default::default() };
+        assert!(report.exercise().0.is_err(), "{branches}");
     }
     let commands = Recorded::new(|program: &str, args: &[String]| panic!("called {program} {args:?}"));
-    assert!(dispatch_checks(&commands, "example/hamn/../../other").is_err());
+    assert!(report_pr(&commands, "example/hamn/../../other").is_err());
     assert!(commands.calls.borrow().is_empty());
 }
 

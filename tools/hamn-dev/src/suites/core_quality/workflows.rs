@@ -251,8 +251,9 @@ pub fn release_please_workflow_is_complete() {
             "          skip-github-release: true",
             // The automatic token raises no pull_request event, so the release
             // PR's required checks exist only because this step dispatches them.
-            "      actions: write",
-            "        run: cargo run --locked -p hamn-dev -- release dispatch-pr-checks",
+            // Reading runs is enough: approving one is a maintainer's decision.
+            "      actions: read",
+            "        run: cargo run --locked -p hamn-dev -- release report-pr",
             // Without this the step is skipped exactly when it has something
             // to report: after Release Please could not write the release PR.
             "        if: ${{ !cancelled() && steps.publication.outputs.ready == 'true' }}",

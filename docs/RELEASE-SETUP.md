@@ -26,12 +26,18 @@ no secrets or variables at all: every workflow authenticates with the
 automatic per-run GITHUB_TOKEN, which cannot expire, and each job requests
 only the permissions it needs.
 
-Events raised by that token start no workflow run, so Release Please's own PR
-gets no `pull_request` run and its required checks would never report. The
-Release Please workflow therefore dispatches CI on the release PR's head
-branch (`hamn-dev release dispatch-pr-checks`), which is the one event that
-token always starts. Keep `workflow_dispatch` in the CI workflow's triggers,
-and keep the required check names equal to the CI job names.
+The release PR is authored by `github-actions[bot]`, and the fork approval
+policy above treats that as an external contributor even on a branch of this
+repository, so its `pull_request` run is held with the conclusion
+`action_required` and reports no checks. Approve it on the release PR's Checks
+tab; the required checks then report and the PR becomes mergeable. This is a
+deliberate manual step, and the only one in the release: approving a held
+workflow run is the maintainer's decision, so no workflow does it. Each
+Release Please run says whether one is waiting (`hamn-dev release report-pr`).
+
+Do not relax the approval policy to get past this. Do not add a step that
+approves the run either: that would let anything Release Please writes run
+without review.
 
 ## Release Please and version 0.1.0
 
@@ -65,7 +71,7 @@ The release drivers are `hamn-dev release` subcommands (`tools/hamn-dev`,
 never shipped): `build-candidate`, `hosted-validation` and `gate` behind
 `make release-candidate`, `make release-hosted-validation` and
 `make release-gate`; `resolve-release`, `recover-release` and `publish` in the
-release workflow; `pr-ready` and `dispatch-pr-checks` in the Release Please
+release workflow; `pr-ready` and `report-pr` in the Release Please
 workflow; `preflight-repository`; and `export-public-source`. They
 read their inputs from the environment variables that the Make targets and
 workflows pass (`publish` also takes the stable and candidate tags, the release
