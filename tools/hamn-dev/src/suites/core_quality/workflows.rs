@@ -253,6 +253,9 @@ pub fn release_please_workflow_is_complete() {
             // PR's required checks exist only because this step dispatches them.
             "      actions: write",
             "        run: cargo run --locked -p hamn-dev -- release dispatch-pr-checks",
+            // Without this the step is skipped exactly when it has something
+            // to report: after Release Please could not write the release PR.
+            "        if: ${{ !cancelled() && steps.publication.outputs.ready == 'true' }}",
         ],
         "Release Please workflow is incomplete",
     );
