@@ -85,7 +85,7 @@ fn each_unsafe_setting_fails_closed() {
     for (variable, message) in [
         ("HAMN_TEST_WEAK_ACTIONS_POLICY", "Actions must be enabled, selected, and SHA-pinned"),
         ("HAMN_TEST_UNSAFE_ACTION", "only GitHub-owned Actions, Nix, and Release Please may run"),
-        ("HAMN_TEST_RELEASE_PLEASE_SECRET", "repository secrets must contain only RELEASE_PLEASE_TOKEN"),
+        ("HAMN_TEST_RELEASE_PLEASE_SECRET", "keyless hosted releases must not depend on repository secrets"),
         ("HAMN_TEST_RUNNER", "keyless hosted releases must not use repository self-hosted runners"),
         ("HAMN_TEST_VARIABLE", "keyless hosted releases must not depend on repository variables"),
         ("HAMN_TEST_SECRET", "hamn-promotion must not contain secrets or variables"),
@@ -221,8 +221,8 @@ pub fn gh(_program: &str, args: &[String]) -> ExitCode {
         }
         "/actions/secrets" => choose(
             "HAMN_TEST_RELEASE_PLEASE_SECRET",
-            r#"{"secrets":[]}"#,
             r#"{"secrets":[{"name":"RELEASE_PLEASE_TOKEN"}]}"#,
+            r#"{"secrets":[]}"#,
         ),
         "/environments" => r#"{"environments":[{"name":"hamn-promotion"}]}"#,
         "/environments/hamn-promotion" => {

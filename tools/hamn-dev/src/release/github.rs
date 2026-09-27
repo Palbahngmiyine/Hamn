@@ -5,11 +5,14 @@
 //!   release at this commit.
 //! - `pr-ready` defers new release notes until the manifest's current tag is
 //!   published, so Release Please never compares against a missing tag.
+//! - `dispatch-pr-checks` starts CI on the open release PR's head commit,
+//!   which nothing else reports checks for, because the automatic token
+//!   Release Please writes with raises no `pull_request` event.
 //!
 //! An API, authentication or network failure is always an error, never
 //! "pending": a pending result must be proven by a 404 or a draft release.
 use super::process::{self, Output, Spec};
-use super::syntax::{Version, is_hex, is_repository, is_stable_tag};
+use super::syntax::{Version, is_branch, is_hex, is_repository, is_stable_tag};
 use serde_json::{Value, json};
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
@@ -128,6 +131,64 @@ pub fn complete_command(args: &[String]) -> Result<(), String> {
     };
     let repository = std::env::var("GITHUB_REPOSITORY").map_err(|_| "GITHUB_REPOSITORY is required")?;
     complete(&System, &repository, tag, commit).map(drop)
+}
+
+/// Starts CI on the open release PR's head branch, and returns that branch,
+/// unless its head commit already has check runs. Branch protection reads the
+/// required checks from the head commit, and the automatic token creates the
+/// PR without raising a `pull_request` event, so without this dispatch the
+/// release PR can never become mergeable. `workflow_dispatch` is the one
+/// event that token always starts, which also makes this idempotent: a rerun
+/// of an unchanged release PR dispatches nothing.
+pub fn dispatch_checks(commands: &dyn Commands, repository: &str) -> Result<Option<String>, String> {
+    if !is_repository(repository) {
+        return Err("invalid release identity".into());
+    }
+    let fields = "number,headRefName,headRefOid";
+    let listing = output(
+        commands,
+        "gh",
+        &[
+            "pr", "list", "--repo", repository, "--state", "open", "--base", "main", "--label", PENDING_LABEL,
+            "--limit", "2", "--json", fields,
+        ],
+    )?;
+    let open = parse(&listing, "open release PR listing")?;
+    let open = open.as_array().ok_or("open release PR listing is invalid")?;
+    let pr = match open.as_slice() {
+        [] => {
+            println!("No open release PR needs checks.");
+            return Ok(None);
+        }
+        [pr] => pr,
+        // Two release PRs would make "the" head commit ambiguous.
+        _ => return Err("more than one open release PR".into()),
+    };
+    let number = pr.get("number").and_then(Value::as_u64).filter(|number| *number > 0);
+    let branch = pr.get("headRefName").and_then(Value::as_str).filter(|name| is_branch(name));
+    let head = pr.get("headRefOid").and_then(Value::as_str).filter(|oid| is_hex(oid, 40));
+    let (Some(number), Some(branch), Some(head)) = (number, branch, head) else {
+        return Err("invalid release PR identity".into());
+    };
+    let checks = output(commands, "gh", &["api", &format!("repos/{repository}/commits/{head}/check-runs")])?;
+    let checks = parse(&checks, "check run listing")?;
+    let reported = checks.get("total_count").and_then(Value::as_u64).ok_or("check run listing is invalid")?;
+    if reported > 0 {
+        println!("Release PR #{number} already reports {reported} checks for {head}.");
+        return Ok(None);
+    }
+    output(commands, "gh", &["workflow", "run", "ci.yml", "--repo", repository, "--ref", branch])?;
+    println!("Dispatched CI for release PR #{number} on {branch}.");
+    Ok(Some(branch.to_owned()))
+}
+
+/// `dispatch-pr-checks`, for `$GITHUB_REPOSITORY`.
+pub fn dispatch_command(args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err("usage: hamn-dev release dispatch-pr-checks".into());
+    }
+    let repository = std::env::var("GITHUB_REPOSITORY").map_err(|_| "GITHUB_REPOSITORY is required")?;
+    dispatch_checks(&System, &repository).map(drop)
 }
 
 /// Whether the manifest's current version is published: `false` while the

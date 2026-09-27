@@ -13,8 +13,16 @@
 `hamn-dev release preflight-repository` 검사와 일치해야 합니다.
 
 `hamn-promotion` 환경을 만들고 관리자 우회를 끄며 `main`에서만 배포를
-허용합니다. 환경에 secret이나 variable을 두지 않습니다. 저장소 secret은
-`RELEASE_PLEASE_TOKEN`만 두며 Release Please PR에 사용합니다.
+허용합니다. 환경에 secret이나 variable을 두지 않습니다. 저장소에도 secret과
+variable을 전혀 두지 않습니다. 모든 workflow는 만료되지 않는 실행 단위
+GITHUB_TOKEN으로 인증하고, job마다 필요한 권한만 요청합니다.
+
+이 토큰이 만든 이벤트는 새 workflow 실행을 시작하지 않습니다. 따라서 Release
+Please가 만든 PR에는 `pull_request` 실행이 붙지 않고 필수 검증이 보고되지
+않습니다. 그래서 Release Please workflow가 릴리스 PR의 head 브랜치에 CI를
+직접 dispatch합니다(`hamn-dev release dispatch-pr-checks`). `workflow_dispatch`는
+이 토큰이 항상 실행을 시작하는 유일한 이벤트입니다. CI workflow의 트리거에
+`workflow_dispatch`를 유지하고, 필수 검증 이름을 CI job 이름과 같게 둡니다.
 
 ## Release Please와 0.1.0 버전
 
@@ -46,6 +54,7 @@ Manifest의 버전이 아직 게시되지 않았거나 draft 상태라면 Releas
 명령입니다. `make release-candidate`·`make release-hosted-validation`·
 `make release-gate`는 각각 `build-candidate`·`hosted-validation`·`gate`를
 실행하고, 릴리스 workflow는 `resolve-release`·`recover-release`·`publish`를
+실행합니다. Release Please workflow는 `pr-ready`·`dispatch-pr-checks`를
 실행합니다. `preflight-repository`와 `export-public-source`도 같은 하위
 명령입니다. 각 하위 명령은 Make target과 workflow가 전달하는 환경 변수로 입력을
 받고(`publish`는 stable 태그·후보 태그·릴리스 commit·입력 디렉터리·출력

@@ -1,7 +1,7 @@
 //! Release Please coordination against recorded `gh` and `git` responses:
 //! release PRs complete only for their exact, published, immutable version,
 //! and new release notes wait until the current version is published.
-use crate::release::github::{Commands, complete, ready};
+use crate::release::github::{Commands, complete, dispatch_checks, ready};
 use crate::release::process::Output;
 use crate::runner::{self, case};
 use serde_json::{Value, json};
@@ -40,6 +40,12 @@ pub fn main(filters: &[String]) -> ExitCode {
             ),
             case("invalid_or_wrong_release_is_rejected", invalid_or_wrong_release_is_rejected),
             case("invalid_configuration_cannot_call_the_api", invalid_configuration_cannot_call_the_api),
+            case("head_without_checks_is_dispatched_once", head_without_checks_is_dispatched_once),
+            case("no_release_pr_dispatches_nothing", no_release_pr_dispatches_nothing),
+            case(
+                "ambiguous_or_invalid_release_pr_cannot_dispatch",
+                ambiguous_or_invalid_release_pr_cannot_dispatch,
+            ),
         ],
         filters,
     )
@@ -281,6 +287,74 @@ fn invalid_or_wrong_release_is_rejected() {
     assert!(readiness(api_response(202, 0, &[])).unwrap_err().contains("unexpected status"));
     assert!(readiness(Ok(exited(0, "HTTP/2.0 200 OK\n\n{", ""))).is_err());
     assert!(readiness(Ok(exited(0, "HTTP/2.0 200 OK\n\n[]", ""))).is_err());
+}
+
+const HEAD: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+/// Dispatches checks against a recorded PR listing and check-run count;
+/// returns the result and the `gh workflow run` calls.
+fn dispatch(open: Value, reported: Value) -> (Result<Option<String>, String>, Vec<Vec<String>>) {
+    let commands = Recorded::new(|program: &str, args: &[String]| {
+        let words: Vec<&str> = args.iter().map(String::as_str).collect();
+        match (program, words.as_slice()) {
+            ("gh", ["pr", "list", ..]) => Ok(exited(0, &open.to_string(), "")),
+            ("gh", ["api", path]) => {
+                assert_eq!(*path, format!("repos/example/hamn/commits/{HEAD}/check-runs"));
+                Ok(exited(0, &json!({"total_count": reported}).to_string(), ""))
+            }
+            ("gh", ["workflow", "run", ..]) => Ok(exited(0, "", "")),
+            _ => panic!("unexpected command {program} {args:?}"),
+        }
+    });
+    let result = dispatch_checks(&commands, "example/hamn");
+    (result, commands.calls_to("gh", &["workflow", "run"]))
+}
+
+fn head_without_checks_is_dispatched_once() {
+    let open = json!([{"number": 55, "headRefName": "release-please--branches--main", "headRefOid": HEAD}]);
+    let (result, runs) = dispatch(open.clone(), json!(0));
+    assert_eq!(result, Ok(Some("release-please--branches--main".to_owned())));
+    assert_eq!(
+        runs,
+        [["workflow", "run", "ci.yml", "--repo", "example/hamn", "--ref", "release-please--branches--main"]]
+    );
+    // A rerun over a head that already reports checks must not dispatch again.
+    let (result, runs) = dispatch(open, json!(6));
+    assert_eq!(result, Ok(None));
+    assert!(runs.is_empty(), "{runs:?}");
+}
+
+fn no_release_pr_dispatches_nothing() {
+    let commands = Recorded::new(|program: &str, args: &[String]| {
+        assert!(matches!((program, args[0].as_str()), ("gh", "pr")), "called {program} {args:?}");
+        Ok(exited(0, "[]", ""))
+    });
+    assert_eq!(dispatch_checks(&commands, "example/hamn"), Ok(None));
+}
+
+/// An ambiguous or unusable listing must fail loudly rather than dispatch
+/// checks for the wrong commit, or silently leave the release PR unmergeable.
+fn ambiguous_or_invalid_release_pr_cannot_dispatch() {
+    let one = json!({"number": 55, "headRefName": "release-please--branches--main", "headRefOid": HEAD});
+    for open in [
+        json!([one, {"number": 56, "headRefName": "other", "headRefOid": COMMIT}]),
+        json!([{"number": 55, "headRefName": "release-please--branches--main"}]),
+        json!([{"number": 55, "headRefName": "--repo", "headRefOid": HEAD}]),
+        json!([{"number": 55, "headRefName": "release-please--branches--main", "headRefOid": "short"}]),
+        json!([{"number": 0, "headRefName": "release-please--branches--main", "headRefOid": HEAD}]),
+        json!({}),
+    ] {
+        let (result, runs) = dispatch(open.clone(), json!(0));
+        assert!(result.is_err(), "{open}");
+        assert!(runs.is_empty(), "{open}: {runs:?}");
+    }
+    // A missing count is not "no checks": dispatching would be a guess.
+    let (result, runs) = dispatch(json!([one]), Value::Null);
+    assert!(result.is_err());
+    assert!(runs.is_empty(), "{runs:?}");
+    let commands = Recorded::new(|program: &str, args: &[String]| panic!("called {program} {args:?}"));
+    assert!(dispatch_checks(&commands, "example/hamn/../../other").is_err());
+    assert!(commands.calls.borrow().is_empty());
 }
 
 fn invalid_configuration_cannot_call_the_api() {
