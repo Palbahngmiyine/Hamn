@@ -13,6 +13,11 @@ tags against deletion and non-fast-forward changes. Pin Actions to full commit
 SHAs and keep the default GITHUB_TOKEN read-only. Allow only the Actions
 owners checked by `hamn-dev release preflight-repository`.
 
+Enable "Allow GitHub Actions to create and approve pull requests": Release
+Please writes the release PR with GITHUB_TOKEN and cannot do so without it.
+That one setting also permits approving reviews, which gates nothing here
+because the `main` ruleset requires no approving review.
+
 Create the `hamn-promotion` environment. Disable admin bypass and allow
 only `main`, without environment secrets or variables. The repository holds
 no secrets or variables at all: every workflow authenticates with the

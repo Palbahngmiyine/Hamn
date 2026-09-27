@@ -262,10 +262,16 @@ fn check(repository: &str, responses: &Responses) -> Result<(), String> {
     )?;
     let workflow = responses.read("workflow-permissions")?;
     require(
-        workflow.is_object()
-            && workflow.get("default_workflow_permissions") == Some(&json!("read"))
-            && workflow.get("can_approve_pull_request_reviews") == Some(&json!(false)),
+        workflow.is_object() && workflow.get("default_workflow_permissions") == Some(&json!("read")),
         "default GITHUB_TOKEN permissions must be read-only",
+    )?;
+    // One setting covers creating and approving pull requests. Release Please
+    // needs the first, and the main ruleset checked below requires no
+    // approving review, so the second gates nothing here. Without it the
+    // release PR is never written and no release can start.
+    require(
+        workflow.get("can_approve_pull_request_reviews") == Some(&json!(true)),
+        "Actions must be allowed to create pull requests for Release Please",
     )?;
     require(
         responses.read("fork-approval")? == json!({"approval_policy": "all_external_contributors"}),

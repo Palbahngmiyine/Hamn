@@ -12,6 +12,11 @@
 기본 GITHUB_TOKEN은 읽기 전용으로 둡니다. 허용하는 Action 소유자는
 `hamn-dev release preflight-repository` 검사와 일치해야 합니다.
 
+"Allow GitHub Actions to create and approve pull requests"를 켭니다. Release
+Please가 GITHUB_TOKEN으로 릴리스 PR을 작성하므로 이 설정 없이는 PR이 만들어지지
+않습니다. 이 설정 하나가 리뷰 승인 권한도 함께 허용하지만, `main` ruleset이
+승인 리뷰를 요구하지 않으므로 여기서는 아무 게이트도 약화되지 않습니다.
+
 `hamn-promotion` 환경을 만들고 관리자 우회를 끄며 `main`에서만 배포를
 허용합니다. 환경에 secret이나 variable을 두지 않습니다. 저장소에도 secret과
 variable을 전혀 두지 않습니다. 모든 workflow는 만료되지 않는 실행 단위
