@@ -47,6 +47,10 @@ pub fn main(filters: &[String]) -> ExitCode {
                 stranded_release_branch_names_the_actions_setting,
             ),
             case(
+                "release_pr_is_found_by_branch_beside_unrelated_prs",
+                release_pr_is_found_by_branch_beside_unrelated_prs,
+            ),
+            case(
                 "ambiguous_or_invalid_release_pr_cannot_dispatch",
                 ambiguous_or_invalid_release_pr_cannot_dispatch,
             ),
@@ -382,13 +386,33 @@ fn stranded_release_branch_names_the_actions_setting() {
     }
 }
 
+/// The release PR is recognized by its head branch, not by a label: a label
+/// filter answers through GitHub's search index, which still reports no PR
+/// seconds after Release Please opened one. Other open PRs on `main` are not
+/// release PRs and must not be dispatched or counted as ambiguity.
+fn release_pr_is_found_by_branch_beside_unrelated_prs() {
+    let open = json!([
+        {"number": 56, "headRefName": "claude/some-fix", "headRefOid": COMMIT},
+        release_pr(),
+        {"number": 54, "headRefName": "codex/other", "headRefOid": MERGE},
+    ]);
+    let (result, runs) = Dispatch { open, ..Default::default() }.exercise();
+    assert_eq!(result, Ok(Some(BRANCH.to_owned())));
+    assert_eq!(runs, [["workflow", "run", "ci.yml", "--repo", "example/hamn", "--ref", BRANCH]]);
+    // Unrelated PRs alone mean no release is due, not a stranded release.
+    let open = json!([{"number": 56, "headRefName": "claude/some-fix", "headRefOid": COMMIT}]);
+    let (result, runs) = Dispatch { open, ..Default::default() }.exercise();
+    assert_eq!(result, Ok(None));
+    assert!(runs.is_empty(), "{runs:?}");
+}
+
 /// An ambiguous or unusable listing must fail loudly rather than dispatch
 /// checks for the wrong commit, or silently leave the release PR unmergeable.
 fn ambiguous_or_invalid_release_pr_cannot_dispatch() {
     for open in [
-        json!([release_pr(), {"number": 56, "headRefName": "other", "headRefOid": COMMIT}]),
+        json!([release_pr(), {"number": 56, "headRefName": format!("{BRANCH}-2"), "headRefOid": COMMIT}]),
         json!([{"number": 55, "headRefName": BRANCH}]),
-        json!([{"number": 55, "headRefName": "--repo", "headRefOid": HEAD}]),
+        json!([{"number": 55, "headRefName": format!("{BRANCH};rm"), "headRefOid": HEAD}]),
         json!([{"number": 55, "headRefName": BRANCH, "headRefOid": "short"}]),
         json!([{"number": 0, "headRefName": BRANCH, "headRefOid": HEAD}]),
         json!({}),
@@ -400,6 +424,12 @@ fn ambiguous_or_invalid_release_pr_cannot_dispatch() {
     // A missing count is not "no checks": dispatching would be a guess.
     let (result, runs) = Dispatch { reported: Value::Null, ..Default::default() }.exercise();
     assert!(result.is_err());
+    assert!(runs.is_empty(), "{runs:?}");
+    // A listing filled to its limit may hide the release PR behind the page.
+    let full: Vec<Value> =
+        (0..100).map(|number| json!({"number": number + 1, "headRefName": "x", "headRefOid": COMMIT})).collect();
+    let (result, runs) = Dispatch { open: json!(full), ..Default::default() }.exercise();
+    assert!(result.unwrap_err().contains("incomplete"));
     assert!(runs.is_empty(), "{runs:?}");
     // An unreadable branch listing must not be read as "nothing was due".
     for (branches, status) in [
