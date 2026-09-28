@@ -42,6 +42,8 @@ pub fn main(filters: &[String]) -> ExitCode {
                 "killed_lock_owner_keeps_bounded_partial_and_next_call_recovers",
                 killed_lock_owner_keeps_bounded_partial_and_next_call_recovers,
             ),
+            case("option_like_first_chunk_is_persisted_verbatim", option_like_first_chunk_is_persisted_verbatim),
+            case("option_like_resumed_chunk_is_persisted_verbatim", option_like_resumed_chunk_is_persisted_verbatim),
         ],
         filters,
     )
@@ -79,6 +81,13 @@ fn embedded_program() -> String {
     let start = "<<'HAMN_BOOTSTRAP_ACQUIRE'\n";
     let body = &template[template.find(start).expect("embedded acquisition program") + start.len()..];
     body[..body.find("\nHAMN_BOOTSTRAP_ACQUIRE").expect("program end")].to_owned()
+}
+
+/// 256 KiB of the repeating bytes 0..=255. A chunk that starts at a multiple
+/// of 256 (the first chunk of a cold transfer, and of the resume at 1024)
+/// begins with 0x00, never with `-`.
+fn default_payload() -> Vec<u8> {
+    (0..=255u8).cycle().take(256 * 1024).collect()
 }
 
 /// Server behaviors, one per scenario.
@@ -187,11 +196,15 @@ fn handle(request: &Request, payload: &[u8], state: &Arc<(Mutex<State>, Condvar)
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_payload(default_payload())
+    }
+
+    fn with_payload(payload: Vec<u8>) -> Self {
         let directory = TempDir::new("hamn-bootstrap-");
         let root = fs::canonicalize(directory.path()).unwrap();
         let home = root.join("home");
         fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
-        let payload: Arc<Vec<u8>> = Arc::new((0..=255u8).cycle().take(256 * 1024).collect());
+        let payload = Arc::new(payload);
         let key = digest(&payload);
         let store = home.join(".hamn/cache/downloads");
         let state = Arc::new((Mutex::new(State { mode: Mode::Normal, requests: Vec::new(), released: false }), Condvar::new()));
@@ -508,4 +521,46 @@ fn killed_lock_owner_keeps_bounded_partial_and_next_call_recovers() {
     f.acquire(true);
     assert_eq!(f.requests().last().unwrap().0, Some(format!("bytes={preserved}-")));
     assert_eq!(fs::read(&f.final_path).unwrap(), *f.payload);
+}
+
+/// Payload bytes that a zsh builtin parses as options unless `--` ends its
+/// options: `-^` are the bytes at which Hamn 0.2.0's published host archive
+/// stopped (offset 1097728), `--` is the end-of-options marker itself, and
+/// `-o` and `-c` are options of syswrite, which persists each chunk.
+const OPTION_LIKE: [&[u8]; 4] = [b"-^", b"--", b"-o", b"-c"];
+
+/// The default payload with `bytes` at `offset`.
+fn payload_with(offset: usize, bytes: &[u8]) -> Vec<u8> {
+    let mut payload = default_payload();
+    payload[offset..offset + bytes.len()].copy_from_slice(bytes);
+    payload
+}
+
+/// Only a transfer's first stream chunk has a deterministic start: payload
+/// offset 0 for a cold transfer.
+fn option_like_first_chunk_is_persisted_verbatim() {
+    for prefix in OPTION_LIKE {
+        let shown = String::from_utf8_lossy(prefix);
+        let f = Fixture::with_payload(payload_with(0, prefix));
+        f.acquire(true);
+        assert_eq!(f.requests(), [(None, None)], "{shown}");
+        assert_eq!(fs::read(&f.final_path).unwrap(), *f.payload, "{shown}");
+    }
+}
+
+/// A resumed transfer's first chunk starts where the persisted prefix ends
+/// (1024 bytes after `Mode::Interrupt`), so such bytes there failed every
+/// rerun of the published 0.2.0 installer again at the same offset.
+fn option_like_resumed_chunk_is_persisted_verbatim() {
+    for prefix in OPTION_LIKE {
+        let shown = String::from_utf8_lossy(prefix);
+        let f = Fixture::with_payload(payload_with(1024, prefix));
+        f.mode(Mode::Interrupt);
+        f.acquire(false);
+        assert_eq!(fs::read(&f.partial).unwrap(), f.payload[..1024], "{shown}");
+        f.mode(Mode::Normal);
+        f.acquire(true);
+        assert_eq!(f.requests(), [(None, None), resumed_request()], "{shown}");
+        assert_eq!(fs::read(&f.final_path).unwrap(), *f.payload, "{shown}");
+    }
 }

@@ -215,7 +215,9 @@ for attempt in 1 2; do
                 kill -TERM "$curl_pid" 2>/dev/null || :
                 break
             fi
-            syswrite -o "$partial_fd" "$data" || fail "cannot persist download partial"
+            # A chunk is arbitrary bytes and can begin with "-": "--" keeps
+            # syswrite from parsing it as options.
+            syswrite -o "$partial_fd" -- "$data" || fail "cannot persist download partial"
             (( received += amount ))
         else
             read_result=$?
