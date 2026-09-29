@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 (2026-09-29)
+
+## What's Changed
+* fix: write bootstrap download chunks that begin with a dash by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/58
+
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.2.0...v0.2.1
+
 ## 0.2.0 (2026-09-27)
 
 ## What's Changed
