@@ -92,14 +92,23 @@ impl Refresh {
                 .saturating_mul(1u32 << self.failures.min(5))
                 .min(std::time::Duration::from_secs(60));
     }
+    /// A Hamn VM that is not ready yet is an observed state, not a failed
+    /// query. Poll at the normal interval without backoff, so rows appear
+    /// soon after the VM starts; last OK still refers to real rows.
+    pub fn wait(&mut self, now: std::time::Instant) {
+        self.failures = 0;
+        self.next = now + self.interval;
+    }
     pub fn label(&self) -> String {
+        // Whole seconds keep the title width fixed across refreshes.
+        let printer = jiff::fmt::temporal::DateTimePrinter::new().precision(Some(0));
         format!(
             "{} {}s | timeout {}s | last OK {}{}",
             if self.paused { "Paused" } else { "Refresh" },
             self.interval.as_secs(),
             self.timeout.as_secs(),
             self.last_success
-                .map_or("never".into(), |time| time.to_string()),
+                .map_or("never".into(), |time| printer.timestamp_to_string(&time)),
             if self.failures > 0 {
                 format!(" | retry backoff ({})", self.failures)
             } else {
@@ -107,6 +116,42 @@ impl Refresh {
             }
         )
     }
+}
+
+/// The failure code of a Hamn profile Docker query while its VM is not ready.
+pub const VM_NOT_READY: &str = "vmNotReady";
+
+/// A Hamn profile's Docker socket answers only once its VM runs and guest
+/// Docker is ready. When the VM status observed by the same refresh says it
+/// is not ready, the CLI's nonzero exit is expected: report the VM state and
+/// the key that starts or repairs it instead. Without an observed status
+/// (the profile could not be read) nothing proves that Docker is down, so
+/// the CLI error stays. Spawn, protocol and size failures, and any failure
+/// while Docker reports ready, also stay unchanged.
+pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure) -> Failure {
+    let Some(status) = status else {
+        return error;
+    };
+    let docker = status["dockerStatus"].as_str().unwrap_or("unavailable");
+    if error.code != "cliError" || docker == "ready" {
+        return error;
+    }
+    let vm = status["state"].as_str().unwrap_or("unknown");
+    let message = match (vm, docker) {
+        (_, "recoveryRequired") => {
+            format!("Hamn VM {profile} needs recovery. Press s to repair it.")
+        }
+        ("starting", _) | (_, "preparing") => {
+            format!("Hamn VM {profile} is starting; the list appears when Docker is ready.")
+        }
+        ("running", _) => {
+            format!("Docker is unavailable in Hamn VM {profile}. Press s to repair it.")
+        }
+        _ => format!(
+            "Hamn VM {profile} is not running ({vm}). Press s to start it; the list appears when Docker is ready."
+        ),
+    };
+    Failure::new(VM_NOT_READY, message)
 }
 
 struct Browser {
@@ -144,7 +189,13 @@ pub struct State {
     pub detail: Option<String>,
     pub pending: Option<Request>,
     pub pending_native: Option<crate::native_actions::Action>,
+    /// A read that establishes or replaces the view is running; the title
+    /// shows it and actions wait for its rows.
     pub loading: bool,
+    /// An automatic refresh re-reads the displayed view. The screen and
+    /// actions keep the current rows until its result arrives, so an
+    /// unchanged result redraws nothing.
+    pub refreshing: bool,
     pub scroll: u16,
     pub stale: bool,
     pub uncertain: Vec<Value>,
@@ -183,6 +234,7 @@ impl State {
             pending: None,
             pending_native: None,
             loading: false,
+            refreshing: false,
             scroll: 0,
             stale: false,
             uncertain: Vec::new(),
@@ -597,11 +649,13 @@ impl State {
             }
             if value["ended"] == true {
                 self.loading = false;
+                self.refreshing = false;
                 self.message = "log stream ended".into();
                 return;
             }
         }
         self.loading = false;
+        self.refreshing = false;
         match result {
             Ok(value) if value.is_array() => {
                 let initial = self.data.is_null();
@@ -623,6 +677,13 @@ impl State {
                         .unwrap_or_else(|| serde_json::to_string_pretty(&value).unwrap()),
                 );
                 self.message.clear();
+            }
+            Err(error) if error.code == VM_NOT_READY => {
+                // Docker lists nothing until the VM is ready. Old rows would
+                // look live, so drop them and show how to start the VM.
+                self.data = Value::Null;
+                self.stale = true;
+                self.message = error.message;
             }
             Err(error) => {
                 self.stale = true;
@@ -1261,6 +1322,211 @@ mod tests {
         refresh.complete(true, now);
         assert_eq!(refresh.failures, 0);
         assert_eq!(refresh.next.duration_since(now).as_secs(), 2);
+    }
+    #[test]
+    fn waiting_for_a_vm_polls_at_the_normal_interval_without_claiming_success() {
+        let mut refresh = Refresh::default();
+        let now = std::time::Instant::now();
+        for _ in 0..3 {
+            refresh.complete(false, now);
+        }
+        assert!(refresh.label().contains("retry backoff (3)"));
+        refresh.wait(now);
+        assert_eq!(refresh.failures, 0);
+        assert_eq!(refresh.next.duration_since(now).as_secs(), 2);
+        assert!(refresh.last_success.is_none());
+        let label = refresh.label();
+        assert!(
+            label.contains("last OK never") && !label.contains("backoff"),
+            "{label}"
+        );
+        refresh.paused = true;
+        refresh.wait(now);
+        assert!(!refresh.due(now + std::time::Duration::from_secs(100)));
+    }
+    #[test]
+    fn last_success_label_keeps_a_fixed_width_across_refreshes() {
+        let mut refresh = Refresh::default();
+        for (time, shown) in [
+            (
+                "2026-09-30T05:12:33.123456789Z",
+                "last OK 2026-09-30T05:12:33Z",
+            ),
+            ("2026-09-30T05:12:35.9Z", "last OK 2026-09-30T05:12:35Z"),
+            ("2026-09-30T05:12:37Z", "last OK 2026-09-30T05:12:37Z"),
+        ] {
+            refresh.last_success = Some(time.parse().unwrap());
+            let label = refresh.label();
+            assert!(label.ends_with(shown), "{label}");
+        }
+    }
+    #[test]
+    fn failed_hamn_query_explains_a_vm_that_is_not_ready() {
+        let cli = || {
+            Failure::new(
+                "cliError",
+                "docker exited 1: Cannot connect to the Docker daemon",
+            )
+        };
+        for (vm, docker, expected) in [
+            (
+                "stopped",
+                "unavailable",
+                "Hamn VM work is not running (stopped). Press s to start it",
+            ),
+            (
+                "unknown",
+                "unavailable",
+                "Hamn VM work is not running (unknown). Press s to start it",
+            ),
+            (
+                "stopping",
+                "unavailable",
+                "Hamn VM work is not running (stopping). Press s to start it",
+            ),
+            (
+                "starting",
+                "unavailable",
+                "Hamn VM work is starting; the list appears when Docker is ready.",
+            ),
+            (
+                "running",
+                "preparing",
+                "Hamn VM work is starting; the list appears when Docker is ready.",
+            ),
+            (
+                "running",
+                "unavailable",
+                "Docker is unavailable in Hamn VM work. Press s to repair it.",
+            ),
+            (
+                "stopped",
+                "recoveryRequired",
+                "Hamn VM work needs recovery. Press s to repair it.",
+            ),
+            (
+                "running",
+                "recoveryRequired",
+                "Hamn VM work needs recovery. Press s to repair it.",
+            ),
+        ] {
+            let status = serde_json::json!({"state": vm, "dockerStatus": docker});
+            let failure = hamn_query_failure("work", Some(&status), cli());
+            assert_eq!(failure.code, VM_NOT_READY, "{vm}/{docker}");
+            assert!(
+                failure.message.starts_with(expected),
+                "{vm}/{docker}: {}",
+                failure.message
+            );
+            assert!(
+                !failure.message.contains("Cannot connect"),
+                "{}",
+                failure.message
+            );
+        }
+        // A status without fields cannot claim that Docker is ready.
+        let failure = hamn_query_failure("work", Some(&Value::Null), cli());
+        assert_eq!(failure.code, VM_NOT_READY);
+        assert!(
+            failure.message.contains("not running (unknown)"),
+            "{}",
+            failure.message
+        );
+    }
+    #[test]
+    fn failed_hamn_query_keeps_errors_that_starting_the_vm_cannot_fix() {
+        let stopped = serde_json::json!({"state": "stopped", "dockerStatus": "unavailable"});
+        let ready = serde_json::json!({"state": "running", "dockerStatus": "ready"});
+        for (status, code) in [
+            // An unreadable profile proves nothing about the Docker socket.
+            (None, "cliError"),
+            (Some(&ready), "cliError"),
+            (Some(&stopped), "cliUnavailable"),
+            (Some(&stopped), "cliProtocol"),
+            (Some(&stopped), "responseTooLarge"),
+        ] {
+            let failure =
+                hamn_query_failure("work", status, Failure::new(code, "original diagnostic"));
+            assert_eq!(
+                (failure.code.as_str(), failure.message.as_str()),
+                (code, "original diagnostic")
+            );
+        }
+    }
+    #[test]
+    fn vm_not_ready_clears_rows_and_shows_guidance_until_docker_answers() {
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        let rows = serde_json::json!([{"ID":"a", "Names":"alpha"}, {"ID":"b", "Names":"beta"}]);
+        state.accept(Ok(rows.clone()));
+        state.move_by(1);
+        let guidance = "Hamn VM default is not running (stopped). Press s to start it; the list appears when Docker is ready.";
+        state.refreshing = true;
+        state.accept(Err(Failure::new(VM_NOT_READY, guidance)));
+        assert!(!state.refreshing && !state.loading);
+        assert!(state.rows().is_empty() && state.selected().is_none());
+        assert_eq!(state.message, guidance);
+        assert_eq!(state.action("stop").unwrap_err().code, "staleData");
+        // The cleared table still renders with the old selection index.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("Press s to start it") && !text.contains("beta"),
+            "{text}"
+        );
+        state.accept(Ok(rows));
+        assert!(!state.stale && state.message.is_empty());
+        assert_eq!(state.selected().unwrap()["ID"], "a");
+    }
+    #[test]
+    fn automatic_refresh_of_unchanged_rows_redraws_no_cell() {
+        let screen = |state: &State| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let last_ok: jiff::Timestamp = "2026-09-30T05:12:33Z".parse().unwrap();
+        let rows = serde_json::json!([{"ID":"a", "Names":"alpha", "State":"running"}]);
+        let runtime = serde_json::json!({"type":"runtimeStatus",
+            "data":{"state":"running", "dockerStatus":"ready"}});
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        state.accept(Ok(runtime.clone()));
+        state.accept(Ok(rows.clone()));
+        state.connection_status = "Available".into();
+        state.refresh.last_success = Some(last_ok);
+        let before = screen(&state);
+        // The same sequence the TUI applies to a periodic refresh.
+        state.refreshing = true;
+        assert_eq!(
+            screen(&state),
+            before,
+            "starting a refresh changed the screen"
+        );
+        state.accept(Ok(runtime));
+        state.refresh.complete(true, std::time::Instant::now());
+        state.refresh.last_success = Some(last_ok);
+        state.accept(Ok(rows));
+        assert_eq!(
+            screen(&state),
+            before,
+            "an unchanged result changed the screen"
+        );
+        // A load that replaces the view still shows that it is running.
+        state.loading = true;
+        let loading = screen(&state);
+        assert_ne!(loading, before);
+        let text: String = loading.content().iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains("[loading]"), "{text}");
     }
     #[test]
     fn environment_picker_never_interprets_context_names_as_vm_profiles() {
