@@ -122,18 +122,20 @@ impl Refresh {
 pub const VM_NOT_READY: &str = "vmNotReady";
 
 /// A Hamn profile's Docker socket answers only once its VM runs and guest
-/// Docker is ready. When the VM status observed by the same refresh says it
-/// is not ready, the CLI's nonzero exit is expected: report the VM state and
-/// the key that starts or repairs it instead. Without an observed status
-/// (the profile could not be read) nothing proves that Docker is down, so
-/// the CLI error stays. Spawn, protocol and size failures, and any failure
-/// while Docker reports ready, also stay unchanged.
+/// Docker is ready. The Docker CLI proves that it could not reach the daemon
+/// (`DOCKER_UNREACHABLE`); the VM status observed by the same refresh then
+/// explains why and names the key that starts or repairs the VM. Status alone
+/// is no proof: recoveryRequired comes from the operation record without a
+/// Docker check. Every other failure, such as a usage error, an unknown
+/// command or the output limit, keeps its message because starting the VM
+/// cannot fix it. Without an observed status (the profile could not be read),
+/// or while Docker reports ready, the failure also stays unchanged.
 pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure) -> Failure {
     let Some(status) = status else {
         return error;
     };
     let docker = status["dockerStatus"].as_str().unwrap_or("unavailable");
-    if error.code != "cliError" || docker == "ready" {
+    if error.code != crate::native::DOCKER_UNREACHABLE || docker == "ready" {
         return error;
     }
     let vm = status["state"].as_str().unwrap_or("unknown");
@@ -1364,7 +1366,7 @@ mod tests {
     fn failed_hamn_query_explains_a_vm_that_is_not_ready() {
         let cli = || {
             Failure::new(
-                "cliError",
+                crate::native::DOCKER_UNREACHABLE,
                 "docker exited 1: Cannot connect to the Docker daemon",
             )
         };
@@ -1437,19 +1439,57 @@ mod tests {
     fn failed_hamn_query_keeps_errors_that_starting_the_vm_cannot_fix() {
         let stopped = serde_json::json!({"state": "stopped", "dockerStatus": "unavailable"});
         let ready = serde_json::json!({"state": "running", "dockerStatus": "ready"});
-        for (status, code) in [
-            // An unreadable profile proves nothing about the Docker socket.
-            (None, "cliError"),
-            (Some(&ready), "cliError"),
-            (Some(&stopped), "cliUnavailable"),
-            (Some(&stopped), "cliProtocol"),
-            (Some(&stopped), "responseTooLarge"),
+        // recoveryRequired comes from the operation record while Docker may work.
+        let recovery = serde_json::json!({"state": "running", "dockerStatus": "recoveryRequired"});
+        let unreachable = crate::native::DOCKER_UNREACHABLE;
+        for (status, code, message) in [
+            // An unreadable profile proves nothing about the VM.
+            (
+                None,
+                unreachable,
+                "docker exited 1: failed to connect to the docker API at",
+            ),
+            (
+                Some(&ready),
+                unreachable,
+                "docker exited 1: error during connect: EOF",
+            ),
+            // native::query reports these as cliError; the daemon never answered.
+            (
+                Some(&stopped),
+                "cliError",
+                "docker exited 125: unknown flag: --bogus-flag",
+            ),
+            (
+                Some(&stopped),
+                "cliError",
+                "docker exited 1: docker: unknown command: docker compose",
+            ),
+            (
+                Some(&stopped),
+                "cliError",
+                "CLI output exceeds 16 MiB; / filters fetched rows only.",
+            ),
+            (
+                Some(&recovery),
+                "cliError",
+                "docker exited 125: unknown flag: --bogus-flag",
+            ),
+            (
+                Some(&stopped),
+                "cliUnavailable",
+                "docker: No such file or directory",
+            ),
+            (
+                Some(&stopped),
+                "cliProtocol",
+                "expected value at line 1 column 1",
+            ),
         ] {
-            let failure =
-                hamn_query_failure("work", status, Failure::new(code, "original diagnostic"));
+            let failure = hamn_query_failure("work", status, Failure::new(code, message));
             assert_eq!(
                 (failure.code.as_str(), failure.message.as_str()),
-                (code, "original diagnostic")
+                (code, message)
             );
         }
     }
