@@ -31,8 +31,13 @@ their existing contract; only external Docker `--context` operations require Doc
 | Esc, `q` | Return; quit |
 
 Containers opens with running containers. A stopped Hamn environment offers
-start; listing never boots a VM. The VM panel shows VM state separately from
-Docker readiness. External Docker contexts have no Hamn VM controls.
+start; listing never boots a VM. If a Hamn environment's list fails while its VM
+status reports the VM or Docker not ready, the list shows the VM state and the `s`
+start/repair key instead of the Docker CLI error, clears rows that would look
+current, and keeps polling at the normal interval, so rows appear once Docker is
+ready. If the profile's status cannot be read, the CLI error remains. The VM panel
+shows VM state separately from Docker readiness. External Docker contexts have no
+Hamn VM controls.
 The `a` key toggles Docker's `--all` value, including grouped flags such as `-as`
 and repeated boolean options. It preserves filters, size, and `--last`/`--latest`;
 those last two options retain Docker's behavior of including all container states.
@@ -215,8 +220,10 @@ unknown types expose no selected-object mutation shortcut.
 
 Refresh defaults to 2 seconds with a 30-second query deadline. `p` pauses it,
 `R` refreshes immediately, and `[`/`]` adjust the interval. Failures back off up to
-60 seconds. The header distinguishes loading, pause, errors and last successful
-refresh. `:refresh-timeout 30` changes the deadline (1–300 seconds). For the 16 MiB
+60 seconds; waiting for a Hamn VM does not. Automatic refresh leaves the displayed
+rows and title unchanged until its result arrives and does not block actions on
+those rows; `[loading]` marks only loads you start, such as opening a view or `R`.
+The header distinguishes loading, pause, errors and last successful refresh. `:refresh-timeout 30` changes the deadline (1–300 seconds). For the 16 MiB
 query limit, narrow Kubernetes queries using `--namespace`, `--selector` or
 `--field-selector`; `/` filters only rows already fetched.
 

@@ -121,6 +121,7 @@ impl Job {
         }
         self.generation += 1;
         state.loading = false;
+        state.refreshing = false;
     }
     fn start(&mut self, request: Request, state: &mut State) {
         if self.mutation.is_some() {
@@ -165,6 +166,12 @@ impl Job {
             self.start(state.request.clone(), state);
         }
     }
+    // The periodic tick re-reads the displayed view without marking it as
+    // loading: the title and actions stay as they are until the result.
+    fn refresh_in_background(&mut self, state: &mut State) {
+        self.refresh(state);
+        state.refreshing = std::mem::take(&mut state.loading);
+    }
     fn start_reload(&mut self, invocation: crate::native::Invocation, state: &mut State) {
         self.cancel(state);
         state.invalidate_results();
@@ -190,6 +197,7 @@ impl Job {
                         if let Some(profile) = &invocation.hamn_profile {
                             let request = Request { words: vec!["vm".into(), "status".into()], profile: Some(profile.clone()), timeout: 30, ..Default::default() };
                             let (result, status) = tokio::join!(crate::native::query(&invocation), crate::core::call(&request));
+                            let result = result.map_err(|error| tui_state::hamn_query_failure(profile, status.as_ref().ok(), error));
                             let data = status.unwrap_or_else(|_| serde_json::json!({"state":"not created", "dockerStatus":"unavailable"}));
                             let _ = sender.send((generation, false, Ok(serde_json::json!({"type":"runtimeStatus", "data":data})))).await;
                             result
@@ -654,8 +662,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             }
                         }
                     }
+                    let vm_not_ready = result.as_ref().is_err_and(|error| error.code == tui_state::VM_NOT_READY);
                     if finished && state.native.is_some() {
-                        state.connection_status = if result.is_ok() { "Available" } else if state.hamn_environment() { "Connection failed; e environments, v VM controls" } else { "Connection failed; verify CLI installation, credentials and target; e selects target" }.into();
+                        state.connection_status = if result.is_ok() { "Available" } else if vm_not_ready { "Waiting for the Hamn VM" } else if state.hamn_environment() { "Connection failed; e environments, v VM controls" } else { "Connection failed; verify CLI installation, credentials and target; e selects target" }.into();
                     }
                     if finished && result.is_ok() && !state.environment_picker {
                         if let Some(target) = current_target(&state).filter(|target| Some(target) != remembered_target.as_ref()) {
@@ -663,13 +672,14 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             else { remembered_target = Some(target); }
                         }
                     }
-                    if finished { state.refresh.complete(result.is_ok(), std::time::Instant::now()); }
+                    if finished && vm_not_ready { state.refresh.wait(std::time::Instant::now()); }
+                    else if finished { state.refresh.complete(result.is_ok(), std::time::Instant::now()); }
                     state.accept(result);
                 }
             }
             _ = refresh.tick() => {
-                if state.refresh.due(std::time::Instant::now()) && cli.is_none() && menu.is_none() && !sessions_open && !choosing && !state.loading && state.pending.is_none() && state.pending_native.is_none() && state.input.is_none() && state.detail.is_none() {
-                    job.refresh(&mut state);
+                if state.refresh.due(std::time::Instant::now()) && cli.is_none() && menu.is_none() && !sessions_open && !choosing && !state.loading && !state.refreshing && state.pending.is_none() && state.pending_native.is_none() && state.input.is_none() && state.detail.is_none() {
+                    job.refresh_in_background(&mut state);
                 }
             }
             event = events.next() => {
