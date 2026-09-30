@@ -254,6 +254,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-native-regressions
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-quoting
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-reload
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-refresh
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test native-query-lifetime
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test workspace-live-checks
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-docker-all

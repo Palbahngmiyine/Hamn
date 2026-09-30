@@ -686,6 +686,28 @@ pub fn toggle_all(invocation: &mut Invocation) {
 fn docker_bool(value: &str) -> bool {
     ["1", "t", "T", "true", "TRUE", "True"].contains(&value)
 }
+
+/// The failure code of a Docker CLI that exited because it could not reach
+/// its daemon. Other nonzero exits keep `cliError`.
+pub const DOCKER_UNREACHABLE: &str = "dockerUnreachable";
+
+// The Docker CLI reports an unreachable daemon only as text. These are its
+// client's connection messages, current and earlier releases. "error during
+// connect" also covers a socket that accepts and then closes the connection,
+// which is how a forward behaves while nothing listens behind it. Usage
+// errors, unknown commands and permission errors contain none of them.
+const DOCKER_UNREACHABLE_MESSAGES: &[&str] = &[
+    "failed to connect to the docker API at",
+    "Cannot connect to the Docker daemon",
+    "error during connect:",
+    "the docker daemon is not running",
+];
+
+fn docker_unreachable(stderr: &str) -> bool {
+    DOCKER_UNREACHABLE_MESSAGES
+        .iter()
+        .any(|message| stderr.contains(message))
+}
 pub async fn query(invocation: &Invocation) -> Result<Value> {
     let (mut child, stdout, stderr) =
         crate::query_process::QueryProcess::spawn(invocation.command(true)).map_err(|e| {
@@ -707,14 +729,16 @@ pub async fn query(invocation: &Invocation) -> Result<Value> {
     let (status, out, err) = tokio::try_join!(child.wait(), read(stdout), read(stderr))
         .map_err(|e| Failure::new("cliError", e))?;
     if !status.success() {
+        let err = String::from_utf8_lossy(&err);
+        let daemon_unreachable =
+            invocation.workspace == Workspace::Containers && docker_unreachable(&err);
         return Err(Failure::new(
-            "cliError",
-            format!(
-                "{} exited {}: {}",
-                invocation.program(),
-                status,
-                String::from_utf8_lossy(&err)
-            ),
+            if daemon_unreachable {
+                DOCKER_UNREACHABLE
+            } else {
+                "cliError"
+            },
+            format!("{} exited {}: {}", invocation.program(), status, err),
         ));
     }
     if out.len() > 16 * 1024 * 1024 {
@@ -752,6 +776,28 @@ pub async fn query(invocation: &Invocation) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_daemon_connection_failures_count_as_an_unreachable_docker() {
+        // Docker CLI 29.8.1 output for a missing socket and for a socket that
+        // accepts and closes, plus the earlier release's wording.
+        for stderr in [
+            "failed to connect to the docker API at unix:///home/.hamn/default/docker.sock; check if the path is correct and if the daemon is running: dial unix /home/.hamn/default/docker.sock: connect: no such file or directory",
+            "error during connect: Get \"http://%2Fhome%2F.hamn%2Fdefault%2Fdocker.sock/v1.56/containers/json\": EOF",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+            "error during connect: this error may indicate that the docker daemon is not running: open //./pipe/docker_engine",
+        ] {
+            assert!(docker_unreachable(stderr), "{stderr}");
+        }
+        for stderr in [
+            "unknown flag: --bogus-flag\n\nUsage:  docker ps [OPTIONS]",
+            "docker: unknown command: docker compose\n\nRun 'docker --help' for more information",
+            "permission denied while trying to connect to the docker API at unix:///var/run/docker.sock",
+            "Error response from daemon: page not found",
+            "",
+        ] {
+            assert!(!docker_unreachable(stderr), "{stderr}");
+        }
+    }
     #[test]
     fn structured_queries_keep_full_ids_and_generic_resources_readable() {
         let mut state = State::new(Default::default());
