@@ -97,6 +97,10 @@ through `docker --context <name> system dial-stdio`; Docker owns TLS/SSH/context
 configuration. The response schema, ID resolution and mutation error contract stay
 the same. Deadline/cancellation kills and reaps only owned CLI groups and removes
 the temporary socket. An unavailable context never falls back to a profile or default.
+When the Docker CLI transport exits unsuccessfully, the error message carries its
+exit status and stderr, such as an unknown context name. The code is
+`dockerUnavailable`; a mutation reports `outcomeUnknown` only if the transport had
+already relayed an Engine response, because before that no mutation was sent.
 
 Kubernetes loads an explicit `--kubeconfig`, otherwise `KUBECONFIG`, otherwise
 `~/.kube/config`. Context and namespace selection never write those files.

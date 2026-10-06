@@ -2,14 +2,17 @@
 //! CLI: the context and Docker config are used only when named, mutations
 //! use the immutable container ID, large and denied responses keep their
 //! meaning, the deadline holds, and no profile state is touched. Requires the
-//! Docker CLI, as the script did.
+//! Docker CLI, as the script did. A failed transport is reported with the
+//! CLI's own diagnosis, as an unknown outcome only once a mutation could have
+//! been dispatched; that case uses a recorded `docker` peer.
 use super::docker_api::strip_api_version;
 use crate::runner::{self, case};
 use crate::support::api_fixtures::{self, Completed, MkdTemp, py_json, reason, respond, utf8};
-use crate::support::hamn;
 use crate::support::http::{Options, Reply, Server};
+use crate::support::{hamn, tui::install_fixture};
 use serde_json::{Value, json};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::{Arc, Condvar, Mutex};
@@ -19,7 +22,10 @@ pub fn main(filters: &[String]) -> ExitCode {
     runner::run(
         "docker-context",
         "explicit real Docker context, Engine schema, immutable mutation ID, no profile side effects, deadline",
-        vec![case("explicit_docker_context_keeps_the_engine_schema", explicit_docker_context_keeps_the_engine_schema)],
+        vec![
+            case("explicit_docker_context_keeps_the_engine_schema", explicit_docker_context_keeps_the_engine_schema),
+            case("failed_transport_keeps_the_dispatch_boundary", failed_transport_keeps_the_dispatch_boundary),
+        ],
         filters,
     )
 }
@@ -196,8 +202,18 @@ fn explicit_docker_context_keeps_the_engine_schema() {
         assert!(!result.success() && data["error"]["code"] == "invalidRequest", "{data}");
         assert_eq!(engine.calls().len(), count);
     }
-    let (result, data) = hamn.run(&["containers", "list", "--context", "does-not-exist"]);
-    assert!(!result.success() && engine.calls().len() == count, "{data}");
+    // A context the Docker CLI cannot resolve reaches no Engine. A read and a
+    // mutation both fail before dispatch, with the CLI's diagnosis.
+    for arguments in [
+        &["containers", "list", "--context", "does-not-exist"][..],
+        &["containers", "start", "external", "--context", "does-not-exist", "--yes"],
+    ] {
+        let (result, data) = hamn.run(arguments);
+        let message = data["error"]["message"].as_str().unwrap_or_default();
+        assert!(!result.success() && data["error"]["code"] == "dockerUnavailable", "{data}");
+        assert!(message.starts_with("Docker context transport exited") && message.contains("does-not-exist"), "{data}");
+        assert_eq!(engine.calls().len(), count);
+    }
     engine.set(|mode| mode.large = true);
     let (result, data) = hamn.run(&["containers", "list", "--context", "fixture"]);
     let rows = data["data"].as_array();
@@ -218,4 +234,79 @@ fn explicit_docker_context_keeps_the_engine_schema() {
     assert!(!home.join(".hamn").exists());
     drop(release);
     drop(server);
+}
+
+/// What the recorded transport prints before it fails.
+const TRANSPORT_FAILURE: &str = "fixture transport lost the Engine";
+
+/// The `docker --context NAME system dial-stdio` peer of one connection. It
+/// answers version negotiation and a container inspection, the two reads that
+/// precede a container mutation, and fails on every other request without a
+/// response, like a transport that broke after its Engine had answered.
+pub fn failing_transport(_program: &str, args: &[String]) -> ExitCode {
+    if args.len() < 4 || args[args.len() - 4] != "--context" || args[args.len() - 2..] != ["system", "dial-stdio"] {
+        eprintln!("unexpected transport arguments {args:?}");
+        return ExitCode::from(2);
+    }
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    let mut input = std::io::stdin().lock();
+    while !head.ends_with(b"\r\n\r\n") {
+        match input.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return ExitCode::from(3),
+        }
+    }
+    let head = String::from_utf8_lossy(&head).into_owned();
+    let mut words = head.split_whitespace();
+    let (method, target) = (words.next().unwrap_or(""), words.next().unwrap_or(""));
+    let path = strip_api_version(target).split('?').next().unwrap_or("");
+    let body = if method == "GET" && path == "/version" {
+        json!({"ApiVersion": "1.47", "MinAPIVersion": "1.24"})
+    } else if method == "GET" && path != "/containers/json" && path.ends_with("/json") {
+        json!({"Id": "a".repeat(64), "Name": "/external", "State": {"Running": true}})
+    } else {
+        eprintln!("{TRANSPORT_FAILURE}");
+        return ExitCode::from(7);
+    };
+    let body = py_json(&body);
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut output = std::io::stdout().lock();
+    if output.write_all(response.as_bytes()).and_then(|()| output.flush()).is_err() {
+        return ExitCode::from(4);
+    }
+    ExitCode::SUCCESS
+}
+
+fn failed_transport_keeps_the_dispatch_boundary() {
+    let temp = MkdTemp::new_in(Path::new("/tmp"), "hamn-context-");
+    let (bin, home) = (temp.path().join("bin"), temp.path().join("home"));
+    fs::create_dir(&bin).unwrap();
+    fs::create_dir(&home).unwrap();
+    install_fixture(&bin, "docker");
+    let hamn = Hamn {
+        binary: hamn(),
+        env: vec![
+            ("HOME", utf8(&home).to_owned()),
+            ("PATH", format!("{}:/usr/bin:/bin", utf8(&bin))),
+            ("HAMN_DEV_FIXTURE", "docker-context-failing-transport".to_owned()),
+        ],
+    };
+    let failure = |data: &Value| {
+        let message = data["error"]["message"].as_str().unwrap_or_default().to_owned();
+        assert!(message.starts_with("Docker context transport exited") && message.ends_with(TRANSPORT_FAILURE), "{data}");
+        data["error"]["code"].clone()
+    };
+    // Version negotiation was answered, then the list request's transport
+    // failed. Nothing was mutated, so the Engine is reported unavailable.
+    let (result, data) = hamn.run(&["containers", "list", "--context", "fixture"]);
+    assert!(!result.success() && failure(&data) == "dockerUnavailable", "{data}");
+    // Negotiation and name resolution were answered, then the transport of
+    // the start request failed. The Engine may have applied it.
+    let (result, data) = hamn.run(&["containers", "start", "external", "--context", "fixture", "--yes"]);
+    assert!(!result.success() && failure(&data) == "outcomeUnknown", "{data}");
+    assert!(!home.join(".hamn").exists());
 }
