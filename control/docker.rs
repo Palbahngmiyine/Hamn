@@ -3,6 +3,10 @@ use bollard::{API_DEFAULT_VERSION, Docker, query_parameters::*};
 use futures_util::TryStreamExt;
 use serde_json::{Value, json};
 
+/// The code for a failed read, or for a failure before a mutation was sent.
+/// `engineError` is a 5xx answer: the daemon was reached and failed, for
+/// example on a storage error. `dockerUnavailable` is everything that is not
+/// a classified Engine answer, in particular a daemon that cannot be reached.
 fn failure(error: bollard::errors::Error) -> Failure {
     let code = match &error {
         bollard::errors::Error::DockerResponseServerError {
@@ -17,6 +21,10 @@ fn failure(error: bollard::errors::Error) -> Failure {
         bollard::errors::Error::DockerResponseServerError {
             status_code: 409, ..
         } => "conflict",
+        bollard::errors::Error::DockerResponseServerError {
+            status_code: 500..=599,
+            ..
+        } => "engineError",
         _ => "dockerUnavailable",
     };
     Failure::new(code, error)
