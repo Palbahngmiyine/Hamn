@@ -14,6 +14,11 @@ There is no positional-profile or `HAMN_PROFILE` fallback in the public API.
 Profile names may contain only letters, digits, `_`, and `-`. `cache`, `.` and
 `..` are not valid profile names.
 
+Logs are in `~/.hamn/<profile>/logs/`. `serial.log` is the guest console of
+the current boot, and each start keeps the console of the boot before it as
+`serial.previous.log`, so the console of a failed start survives one retry.
+`vmrun.log` and `port-observer.log` are appended to.
+
 `vm delete` stops the VM and removes the profile from listings, but keeps
 `~/.hamn/<profile>/` with its `disk.img` and Docker data. `vm create` then
 refuses the same name with `profile already exists`. No operation discards the

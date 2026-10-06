@@ -82,7 +82,8 @@ configure accept `--cpu`, `--memory` (GiB), and `--disk` (GiB). `vm diagnostics`
 accepts `--path` for an archive: a ustar file holding `manifest.json`,
 `status.json` (the VM state, `dockerStatus` and `hostFreeMiB` that `vm status`
 reports), `operation.json` (the last operation record, or `null`), and redacted
-tails of `logs/serial.log`, `logs/vmrun.log` and `logs/port-observer.log`.
+tails of `logs/serial.log`, `logs/serial.previous.log`, `logs/vmrun.log` and
+`logs/port-observer.log`.
 `system upgrade` accepts
 `--manifest`, `--check` (read-only, no `--yes` required), and `--force`
 (same-version reinstall, still requires `--yes`). `--check` conflicts with `--force`.

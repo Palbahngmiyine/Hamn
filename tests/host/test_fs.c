@@ -84,8 +84,32 @@ int main(void)
     errno = 0;
     assert(fs_unlink_if_exists(removable) == -1 && errno != ENOENT);
     assert(rmdir(removable) == 0);
+
+    /* Keeping a previous copy: nothing to keep, a first copy, a replaced
+     * copy, and a destination that cannot be replaced. */
+    char current[256], previous[256];
+    assert(snprintf(current, sizeof(current), "%s/serial.log", dir) > 0);
+    assert(snprintf(previous, sizeof(previous), "%s/serial.previous.log", dir) > 0);
+    assert(fs_keep_previous(current, previous) == 0);
+    assert(access(previous, F_OK) == -1 && errno == ENOENT);
+    assert(fs_write_file_atomic(current, "boot 1", 6, 0600) == 0);
+    assert(fs_keep_previous(current, previous) == 0);
+    assert(access(current, F_OK) == -1 && errno == ENOENT);
+    expect_file(previous, "boot 1", 6);
+    assert(fs_write_file_atomic(current, "boot 2", 6, 0600) == 0);
+    assert(fs_keep_previous(current, previous) == 0);
+    expect_file(previous, "boot 2", 6);
+    assert(fs_keep_previous(current, previous) == 0);
+    expect_file(previous, "boot 2", 6);
+    assert(unlink(previous) == 0 && mkdir(previous, 0700) == 0);
+    assert(fs_write_file_atomic(current, "boot 3", 6, 0600) == 0);
+    errno = 0;
+    assert(fs_keep_previous(current, previous) == -1 && errno != 0);
+    expect_file(current, "boot 3", 6);
+    assert(rmdir(previous) == 0 && unlink(current) == 0);
+
     assert(unlink(stale) == 0 && unlink(state) == 0 && unlink(victim) == 0 &&
            rmdir(dir) == 0);
-    puts("PASS: safe atomic file replacement");
+    puts("PASS: safe atomic file replacement and previous-copy retention");
     return 0;
 }

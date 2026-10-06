@@ -728,11 +728,13 @@ int hamn_control_diagnostics(const char *profile_name, const char *requested_pat
         return 1;
     }
 
-    struct text_buffer serial = { 0 }, vmrun = { 0 }, observer = { 0 };
+    struct text_buffer serial = { 0 }, serial_previous = { 0 }, vmrun = { 0 };
+    struct text_buffer observer = { 0 };
     char *manifest = NULL, *status = NULL, *operation = NULL;
     cJSON *snapshot = NULL;
     int rc = 1;
     if (read_log_tail(&profile, "serial.log", &serial) != 0 ||
+        read_log_tail(&profile, "serial.previous.log", &serial_previous) != 0 ||
         read_log_tail(&profile, "vmrun.log", &vmrun) != 0 ||
         read_log_tail(&profile, "port-observer.log", &observer) != 0 ||
         !(snapshot = query_snapshot(&profile)) ||
@@ -745,6 +747,8 @@ int hamn_control_diagnostics(const char *profile_name, const char *requested_pat
         { "status.json", status, strlen(status) },
         { "operation.json", operation, strlen(operation) },
         { "logs/serial.log", serial.data, serial.length },
+        { "logs/serial.previous.log", serial_previous.data,
+          serial_previous.length },
         { "logs/vmrun.log", vmrun.data, vmrun.length },
         { "logs/port-observer.log", observer.data, observer.length },
     };
@@ -790,6 +794,7 @@ out:
     cJSON_free(operation);
     cJSON_Delete(snapshot);
     buffer_free(&serial);
+    buffer_free(&serial_previous);
     buffer_free(&vmrun);
     buffer_free(&observer);
     return rc;
