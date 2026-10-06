@@ -683,6 +683,8 @@ static int cmd_start_execute(const struct start_options *options,
     char dsock[1024];
     profile_path(&p, "docker.sock", dsock, sizeof(dsock));
     logmsg("Docker API is up: %s", dsock);
+    logmsg("external Docker tools reach it with: export DOCKER_HOST=unix://%s",
+           dsock);
     if (docker_observer_start(&p, &st) != 0) {
         logerr("cannot start the Docker port observer");
         goto rollback;
