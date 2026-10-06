@@ -126,8 +126,10 @@ agent tests separately when changing agent behavior. Release inputs and exact
 candidate requirements are in [Release setup](docs/RELEASE-SETUP.md).
 
 After `make install`, `hamn` opens the TUI in a terminal. Use
-`hamn --headless vm status` and `hamn --headless vm start --yes` for automation;
-headless mutations require `--yes`. Consult `control/model.rs` and `docs/API.md`
+`hamn --headless vm status --profile <name>` and
+`hamn --headless vm start --profile <name> --yes` for automation; VM operations
+require an explicit `--profile` and headless mutations require `--yes`. Consult
+`control/model.rs` and `docs/API.md`
 for current operations. Hamn's structured Docker operations coexist with the
 separately installed Docker CLI/API; they do not implement arbitrary Docker CLI
 passthrough. Docker uses guest containerd's `moby` namespace. The guest containerd
