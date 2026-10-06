@@ -103,6 +103,17 @@ features.buildkit을 설정하면 반드시 true여야 하며 Hamn은 BuildKit�
 host.docker.internal gateway는 항상 Hamn이 설정합니다. 설정 오류는 partial daemon을
 조용히 수용하는 대신 이전 guest transaction을 복구 가능한 상태로 둡니다.
 
+그 밖의 daemon 설정은 그대로 전달됩니다. Registry mirror가 한 예입니다. 한 VM의 모든
+pull은 하나의 주소로 Docker Hub에 도달하고, Docker Hub는 익명 pull을 주소별로
+제한합니다.
+
+~~~yaml
+docker:
+  daemonJson: "{\"registry-mirrors\":[\"https://mirror.gcr.io\"]}"
+~~~
+
+다음 시작 뒤 `docker info`의 `Registry Mirrors`에 mirror가 표시됩니다.
+
 ## Mount
 
 추가 mount schema는 다음과 같습니다.
