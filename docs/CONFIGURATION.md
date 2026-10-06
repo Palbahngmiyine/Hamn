@@ -74,6 +74,13 @@ coercion.
 | `mounts` | sequence, at most 16 entries | Additional virtiofs shares. |
 | `provision` | sequence, at most 16 entries | Lifecycle hooks. |
 
+Without `rosetta`, `linux/amd64` containers run under the guest's QEMU
+user-mode emulation. Simple programs work, and `uname -m` prints `x86_64`, but
+that does not show that a given workload runs: Node.js `corepack`, for one,
+ends with `QEMU internal SIGSEGV` (exit code 139). VM status reports the
+configured `rosetta` value, not the translator in use. For amd64 builds and
+runtimes, stop the VM, set `rosetta: true` in `config.yaml`, and start it again.
+
 ## Docker daemon JSON
 
 `docker.daemonJson` must decode as a strict JSON object with unique keys. It is
