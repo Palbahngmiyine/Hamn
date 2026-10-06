@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
+#include <sys/param.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -231,4 +233,18 @@ out: {
     errno = saved;
     return -1;
 }
+}
+
+int fs_free_mib(const char *path, unsigned long long *mib)
+{
+    struct statfs volume;
+    if (!path || !mib) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (statfs(path, &volume) != 0)
+        return -1;
+    *mib = (unsigned long long)volume.f_bavail *
+        (unsigned long long)volume.f_bsize / (1024ULL * 1024ULL);
+    return 0;
 }

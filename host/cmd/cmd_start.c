@@ -126,6 +126,25 @@ static int running_start_ready(const struct profile *p)
     return guest_deployment_runtime_ready(p, st.ip, 1) == 0;
 }
 
+#define HOST_FREE_WARNING_MIB (10ULL * 1024ULL)
+
+/* The VM disk is a sparse file that grows with the guest's writes, and the
+ * guest's Docker store fails with I/O errors once the host volume is full.
+ * A start is not refused for it: it may be the way to free space in the VM. */
+static void warn_if_host_volume_is_low(const struct profile *p)
+{
+    unsigned long long free_mib = 0;
+    const char *injected = getenv("HAMN_TEST_HOST_FREE_MIB");
+    if (injected)
+        free_mib = strtoull(injected, NULL, 10);
+    else if (fs_free_mib(p->dir, &free_mib) != 0)
+        return;
+    if (free_mib < HOST_FREE_WARNING_MIB)
+        logmsg("warning: %llu MiB free on the volume holding %s; the VM disk "
+               "can grow to %u GiB, and the guest fails with I/O errors when "
+               "the volume is full", free_mib, p->dir, p->disk_gib);
+}
+
 static int rollback_incomplete_start(const struct profile *p)
 {
     logmsg("rolling back incomplete start ...");
@@ -305,6 +324,7 @@ static int cmd_start_execute(const struct start_options *options,
         profile_mutation_unlock(mutation_fd);
         return 1;
     }
+    warn_if_host_volume_is_low(&p);
     if (vm_process_wait_spawn_transition(&p, 50) != 0) {
         logerr("an existing vmrun spawn is still in progress or uncertain");
         goto out;

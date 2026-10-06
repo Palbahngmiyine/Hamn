@@ -14,7 +14,10 @@ pub fn main(filters: &[String]) -> ExitCode {
     runner::run(
         "start-preflight",
         "rejected start preserves stopped VM/configuration and reports known failure",
-        vec![case("rejected_start_preserves_stopped_vm_and_configuration", rejected_start_preserves_stopped_vm_and_configuration)],
+        vec![
+            case("rejected_start_preserves_stopped_vm_and_configuration", rejected_start_preserves_stopped_vm_and_configuration),
+            case("start_warns_when_the_host_volume_is_nearly_full", start_warns_when_the_host_volume_is_nearly_full),
+        ],
         filters,
     )
 }
@@ -55,4 +58,32 @@ fn rejected_start_preserves_stopped_vm_and_configuration() {
     let state = call(root, &["vm", "status", "--profile", "fixture"], 0)["data"].clone();
     assert_eq!(state["dockerStatus"], "recoveryRequired", "{state}");
     assert_eq!(fs::read(profile.join("config.yaml")).unwrap(), before);
+}
+
+/// A start names a nearly full host volume before any VM work, and is not
+/// refused because of it. The start used here is rejected afterwards for its
+/// disk shrink, so no VM runs. `HAMN_TEST_HOST_FREE_MIB` stands in for the
+/// measured free space.
+fn start_warns_when_the_host_volume_is_nearly_full() {
+    let temporary = MkdTemp::new("hamn-start-preflight-");
+    let root = temporary.path();
+    call(root, &["vm", "create", "--profile", "fixture", "--disk", "20", "--yes"], 0);
+    let start = |free_mib: &str| {
+        let mut command = Command::new(hamn());
+        command
+            .args(["--headless", "vm", "start", "--profile", "fixture", "--disk", "10", "--yes"])
+            .env("HOME", root)
+            .env("HAMN_TEST_HOST_FREE_MIB", free_mib);
+        let result = api_fixtures::run(&mut command, None, Duration::from_secs(15));
+        assert_eq!(result.status.code(), Some(1), "{result:?}");
+        assert!(result.json()["error"]["message"].as_str().is_some_and(|message| message.contains("disk size cannot shrink")), "{result:?}");
+        result.stderr
+    };
+    // Below 10 GiB the start warns with the measured amount; at 10 GiB it does not.
+    for (free_mib, warned) in [("0", true), ("1024", true), ("10239", true), ("10240", false), ("204800", false)] {
+        let stderr = start(free_mib);
+        let warning = format!("warning: {free_mib} MiB free on the volume holding ");
+        assert_eq!(stderr.contains(&warning), warned, "{free_mib}: {stderr}");
+        assert_eq!(stderr.contains("warning:"), warned, "{free_mib}: {stderr}");
+    }
 }

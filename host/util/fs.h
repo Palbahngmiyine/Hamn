@@ -13,6 +13,10 @@ int fs_unlink_if_exists(const char *path);
 int fs_write_file_atomic(const char *path, const char *data, size_t len,
                          mode_t mode);
 
+/* Space available to this user on the volume that holds path, in MiB.
+ * Returns -1 with errno set when the volume cannot be queried. */
+int fs_free_mib(const char *path, unsigned long long *mib);
+
 #ifdef HAMN_TEST
 void fs_test_fail_parent_fsync_once(int error);
 #endif

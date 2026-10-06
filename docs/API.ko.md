@@ -39,6 +39,10 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 표시합니다. `fileEvents`는 `disabled` 또는 `best-effort-existing-files`이며 모든 파일
 변경에 대한 hot reload 보장이 아닙니다.
 `state:running`은 VM 프로세스 상태이며 `ready`에는 Docker `/_ping` 확인이 필요합니다.
+`hostFreeMiB`는 프로필 디렉터리가 있는 볼륨의 여유 공간입니다. 희소 파일인 VM 디스크가
+이 볼륨에서 커집니다. 측정할 수 없으면 null입니다. 10 GiB 미만이면 `vm start`가
+stderr에 경고를 출력하고 계속 진행합니다. 볼륨이 가득 차면 게스트의 Docker 저장소가
+I/O 오류로 실패합니다.
 `lastOperation`에는 `schemaVersion`, `operationId`, `operation`, `status`, `phase`,
 `startedVm`, `exitCode`, `error`가 포함됩니다. 실행 중에는 종료·오류 필드가 없을 수 있습니다.
 소유권은 PID·프로세스 시작 시각·실행 파일 UUID를 함께 검사하며 PID만 신뢰하지 않습니다.
