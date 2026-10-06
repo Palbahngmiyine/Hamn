@@ -109,6 +109,31 @@ fn core_worker_isolation_and_protocol() {
     let reported = created["Ok"]["hostFreeMiB"].as_u64().unwrap_or_else(|| panic!("{created}"));
     let measured = free_mib(&home);
     assert!(reported > 0 && reported.abs_diff(measured) < 4096, "{reported} MiB reported, {measured} MiB measured");
+    // The host directories a container can bind-mount, as configured: the
+    // home share (its canonical host path, mounted at the caller's HOME),
+    // then each `mounts` entry.
+    let (canonical_home, shared_config) = (fs::canonicalize(&home).unwrap(), home.join(".hamn/test/config.yaml"));
+    let home_share = |writable: bool| json!({"hostPath": utf8(&canonical_home), "guestPath": utf8(&home), "writable": writable});
+    assert_ne!(canonical_home, home, "the fixture HOME must differ from its canonical path");
+    assert_eq!(created["Ok"]["sharedDirectories"], json!([home_share(true)]), "{created}");
+    let generated = fs::read_to_string(&shared_config).unwrap();
+    let mounts = "mounts:\n  - location: \"/private/tmp/build-input\"\n    mountPoint: \"/tmp/build-input\"\n    writable: false\n  - location: \"/Users/example/project\"\n    mountPoint: \"/workspace/project\"\n    writable: true";
+    assert!(generated.contains("homeReadOnly: false") && generated.contains("mounts: []") && generated.contains("mountHome: true"));
+    fs::write(&shared_config, generated.replace("homeReadOnly: false", "homeReadOnly: true").replace("mounts: []", mounts)).unwrap();
+    let status = worker.call("vm status", json!({"profile": "test"}));
+    assert_eq!(
+        status["Ok"]["sharedDirectories"],
+        json!([
+            home_share(false),
+            {"hostPath": "/private/tmp/build-input", "guestPath": "/tmp/build-input", "writable": false},
+            {"hostPath": "/Users/example/project", "guestPath": "/workspace/project", "writable": true},
+        ]),
+        "{status}"
+    );
+    fs::write(&shared_config, generated.replace("mountHome: true", "mountHome: false")).unwrap();
+    let status = worker.call("vm status", json!({"profile": "test"}));
+    assert_eq!(status["Ok"]["sharedDirectories"], json!([]), "{status}");
+    fs::write(&shared_config, &generated).unwrap();
     assert_eq!(worker.call("vm create", json!({"profile": "test", "yes": true, "cpu": 10}))["Err"]["code"], json!("conflict"));
     assert_eq!(worker.call("vm status", json!({"profile": "test"}))["Ok"]["cpus"], json!(2));
 

@@ -2,7 +2,9 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -19,6 +21,49 @@
 #include "util/fs.h"
 
 const char *vm_live_state(const struct profile *, char *, size_t);
+
+static int append_shared_directory(cJSON *shares, const char *host_path,
+                                   const char *guest_path, int writable)
+{
+    cJSON *share = cJSON_CreateObject();
+    if (!share || !cJSON_AddStringToObject(share, "hostPath", host_path) ||
+        !cJSON_AddStringToObject(share, "guestPath", guest_path) ||
+        !cJSON_AddBoolToObject(share, "writable", writable) ||
+        !cJSON_AddItemToArray(shares, share)) {
+        cJSON_Delete(share);
+        return -1;
+    }
+    return 0;
+}
+
+/* The host directories a container can bind-mount, as the profile and the
+ * caller's HOME configure them: the home share, which the guest mounts at
+ * HOME as given, then each `mounts` entry. A bind source outside them exists
+ * only in the guest. A running VM keeps the shares it was started with. */
+static cJSON *shared_directories(const struct profile *profile)
+{
+    cJSON *shares = cJSON_CreateArray();
+    if (!shares)
+        return NULL;
+    const char *home = getenv("HOME");
+    if (profile->mount_home && home && home[0]) {
+        char canonical[PATH_MAX];
+        if (append_shared_directory(shares,
+                                    realpath(home, canonical) ? canonical : home,
+                                    home, !profile->home_read_only) != 0)
+            goto fail;
+    }
+    for (size_t index = 0; index < profile->mount_count; index++) {
+        const struct profile_mount *mount = &profile->mounts[index];
+        if (append_shared_directory(shares, mount->location,
+                                    mount->mount_point, mount->writable) != 0)
+            goto fail;
+    }
+    return shares;
+fail:
+    cJSON_Delete(shares);
+    return NULL;
+}
 
 static cJSON *profile_snapshot(const char *name)
 {
@@ -46,6 +91,12 @@ static cJSON *profile_snapshot(const char *name)
         !cJSON_AddStringToObject(value, "fileEvents", profile.mount_inotify ?
             "best-effort-existing-files" : "disabled") ||
         !cJSON_AddStringToObject(value, "ip", state.ip)) {
+        cJSON_Delete(value);
+        return NULL;
+    }
+    cJSON *shares = shared_directories(&profile);
+    if (!shares || !cJSON_AddItemToObject(value, "sharedDirectories", shares)) {
+        cJSON_Delete(shares);
         cJSON_Delete(value);
         return NULL;
     }

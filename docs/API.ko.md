@@ -38,6 +38,11 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 `mountHome`, `homeReadOnly`, `mountInotify`, `rosetta`, `fileEvents`는 공유·번역 설정을
 표시합니다. `fileEvents`는 `disabled` 또는 `best-effort-existing-files`이며 모든 파일
 변경에 대한 hot reload 보장이 아닙니다.
+`sharedDirectories`는 컨테이너가 bind mount할 수 있는 호스트 디렉터리를 설정 기준으로
+나열합니다. 항목은 `hostPath`, Docker 클라이언트가 지정해야 하는 `guestPath`,
+`writable`입니다. `mountHome`이 true면 home 공유가 먼저 오고 그 뒤에 `mounts` 항목이
+옵니다. 그 밖의 호스트 경로를 bind mount하면 게스트 쪽 경로만 보입니다. 실행 중인
+VM은 시작할 때의 공유를 유지합니다.
 `state:running`은 VM 프로세스 상태이며 `ready`에는 Docker `/_ping` 확인이 필요합니다.
 `hostFreeMiB`는 프로필 디렉터리가 있는 볼륨의 여유 공간입니다. 희소 파일인 VM 디스크가
 이 볼륨에서 커집니다. 측정할 수 없으면 null입니다. 10 GiB 미만이면 `vm start`가

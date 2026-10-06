@@ -144,7 +144,9 @@ Hamn does not automatically mount the SSH agent into containers, including
 when `sshAgent` is enabled.
 
 A container can bind-mount only the host paths that the VM shares: `$HOME`
-while `mountHome` is true, and each `mounts` entry at its `mountPoint`. The
+while `mountHome` is true, and each `mounts` entry at its `mountPoint`.
+`hamn --headless vm status --profile <name>` lists them as
+`sharedDirectories`. The
 Docker daemon resolves a bind source inside the guest, and Hamn does not see
 the requests that external Docker tools send to the profile socket, so a path
 outside the shares is not rejected:

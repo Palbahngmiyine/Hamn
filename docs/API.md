@@ -42,6 +42,11 @@ VM status retains existing fields and adds `dockerStatus` (`ready`, `preparing`,
 `mountHome`, `homeReadOnly`, `mountInotify`, `rosetta` and `fileEvents` expose
 configured sharing/translation settings; `fileEvents` is `disabled` or
 `best-effort-existing-files`, not a full hot-reload guarantee.
+`sharedDirectories` lists the host directories a container can bind-mount, as
+configured: `hostPath`, the `guestPath` that Docker clients must name, and
+`writable`. The home share comes first when `mountHome` is true, then each
+`mounts` entry. A bind mount of any other host path sees only the guest. A
+running VM keeps the shares it was started with.
 `state:running` describes the VM process only; `ready` requires Docker `/_ping`.
 `hostFreeMiB` is the space available on the volume that holds the profile
 directory, where the sparse VM disk grows; it is null when it cannot be
