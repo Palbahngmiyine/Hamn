@@ -142,6 +142,7 @@ $HOME 안에 있어야 하고 $HOME 밖 source는 read-only여야 합니다. ssh
 
 Container가 bind mount할 수 있는 host path는 VM이 공유하는 경로뿐입니다.
 `mountHome`이 true일 때의 `$HOME`과 각 `mounts` 항목의 `mountPoint`입니다.
+`hamn --headless vm status --profile <name>`의 `sharedDirectories`에서 확인할 수 있습니다.
 Docker daemon은 bind source를 guest 안에서 찾고, Hamn은 외부 Docker 도구가
 프로필 소켓으로 보내는 요청을 보지 못하므로 공유 밖 경로를 거절하지 않습니다.
 
