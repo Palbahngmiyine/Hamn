@@ -29,6 +29,7 @@ int main(int argc, char **argv)
         int rc = ssh_forward_add_tcp_observed(&p, "127.0.0.1", "127.0.0.1",
             54321, "127.0.0.1", 54321, completed, NULL);
         assert(rc == PROC_RUN_TIMEOUT || rc == 255);
+        printf("forward detail: %s\n", ssh_forward_add_detail());
     }
     else if (strcmp(op, "cancel") == 0) {
         int rc = ssh_forward_cancel_tcp(&p, "127.0.0.1", "127.0.0.1",
