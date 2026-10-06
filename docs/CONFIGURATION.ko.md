@@ -73,6 +73,13 @@ alias, anchor, tag, merge key, plain이 아닌 boolean/integer, 잘못된 collec
 | mounts | 최대 16개 sequence | 추가 virtiofs share |
 | provision | 최대 16개 sequence | Lifecycle hook |
 
+`rosetta`를 켜지 않으면 `linux/amd64` container는 guest의 QEMU user-mode emulation으로
+실행됩니다. 단순한 프로그램은 동작하고 `uname -m`도 `x86_64`를 출력하지만, 그것이
+특정 workload가 동작한다는 근거는 아닙니다. 예를 들어 Node.js `corepack`은
+`QEMU internal SIGSEGV`(종료 코드 139)로 끝납니다. VM 상태의 `rosetta`는 설정값이며
+실제로 쓰이는 번역기를 나타내지 않습니다. amd64 build와 runtime이 필요하면 VM을
+정지하고 `config.yaml`의 `rosetta`를 `true`로 바꾼 뒤 다시 시작하세요.
+
 ## Docker daemon JSON
 
 docker.daemonJson은 duplicate key가 없는 strict JSON object여야 합니다. Hamn이
