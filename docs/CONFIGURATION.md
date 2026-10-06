@@ -14,6 +14,12 @@ There is no positional-profile or `HAMN_PROFILE` fallback in the public API.
 Profile names may contain only letters, digits, `_`, and `-`. `cache`, `.` and
 `..` are not valid profile names.
 
+`vm delete` stops the VM and removes the profile from listings, but keeps
+`~/.hamn/<profile>/` with its `disk.img` and Docker data. `vm create` then
+refuses the same name with `profile already exists`. No operation discards the
+disk of one profile; `system uninstall` removes every profile and disk. To
+start from an empty disk, create a profile under a new name.
+
 `~/.hamn/<profile>/config.yaml` stores profile configuration. The TUI default
 workspace is stored separately in `~/.hamn/tui.json`; see [TUI preferences](TUI.md). The
 file is written atomically with mode `0600`. A legacy `hamn.conf` containing
