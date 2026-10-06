@@ -163,6 +163,19 @@ YAML schema는 `network`를 거부하고 `configure`에는 `--network` 또는
 `--network-interface` option이 없습니다. Hamn은 0.0.1에서 LAN-reachable guest
 address를 제공하지 않습니다.
 
+Published port는 Docker daemon이 container를 받아들인 뒤에 프로필별 port observer가
+전달합니다. 그래서 다음 두 경우에는 `docker run`이 실패하지 않습니다.
+
+- Host process가 published port를 이미 listen하고 있는 경우. `docker ps`에는 mapping이
+  보이지만 host port로 들어온 연결은 계속 그 process가 받습니다. Observer는
+  `~/.hamn/<profile>/logs/port-observer.log`에 `cannot bind host tcp port <address>:<port>`를
+  남기고 재시도하며, port가 비면 전달이 시작됩니다.
+- Observer는 동기화마다 실행 중인 container 목록을 한 번 읽습니다. Container가 2,048개를
+  넘거나, 목록 응답이 512 KiB 이상이거나, published port mapping이 128개를 넘으면
+  한도 아래로 돌아올 때까지 모든 published port의 동기화가 멈추고, log에
+  `Docker port observer snapshot failed; retrying`이 반복됩니다. 이 한도는 observer의
+  것이며 헤드리스 `docker containers list`의 한도가 아닙니다.
+
 Guest Docker network는 host.docker.internal을 resolve합니다. 0.0.1의
 host.hamn.internal alias는 제거되었으므로 host.docker.internal을 사용합니다. Hamn은 host
 /var/run/docker.sock을 건드리지 않습니다.
