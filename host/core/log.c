@@ -3,12 +3,31 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "cjson/cJSON.h"
 
 static char last_error[8192];
 static int machine_json;
 static int machine_error_emitted;
+static int line_timestamps;
+
+void log_set_timestamps(int enabled)
+{
+    line_timestamps = enabled != 0;
+}
+
+static void line_start(FILE *stream)
+{
+    if (!line_timestamps)
+        return;
+    time_t now = time(NULL);
+    struct tm utc;
+    char text[32];
+    if (gmtime_r(&now, &utc) &&
+        strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%SZ ", &utc) > 0)
+        fputs(text, stream);
+}
 
 const char *log_last_error(void)
 {
@@ -71,6 +90,7 @@ void log_emit_machine_error(int exit_code)
 void logmsg(const char *fmt, ...)
 {
     va_list ap;
+    line_start(stdout);
     va_start(ap, fmt);
     vfprintf(stdout, fmt, ap);
     va_end(ap);
@@ -82,6 +102,7 @@ void logerr(const char *fmt, ...)
 {
     va_list ap;
     va_list copy;
+    line_start(stderr);
     fputs("hamn: ", stderr);
     va_start(ap, fmt);
     va_copy(copy, ap);
@@ -104,6 +125,7 @@ void die(const char *fmt, ...)
 {
     va_list ap;
     va_list copy;
+    line_start(stderr);
     fputs("hamn: ", stderr);
     va_start(ap, fmt);
     va_copy(copy, ap);

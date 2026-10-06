@@ -11,10 +11,13 @@ int hamn_core_main(int argc, char **argv)
     cli_set_invocation_path(argc > 0 ? argv[0] : NULL);
     if (argc < 2) return 2;
     const char *cmd = argv[1];
-    if (strcmp(cmd, "vmrun") == 0)
-        return cmd_vmrun(argc - 1, argv + 1);
+    /* qcow2-extract reports to the terminal of the command that runs it.
+     * The other modes outlive that command and append to a profile log. */
     if (strcmp(cmd, "qcow2-extract") == 0)
         return cmd_qcow2_extract(argc - 1, argv + 1);
+    log_set_timestamps(1);
+    if (strcmp(cmd, "vmrun") == 0)
+        return cmd_vmrun(argc - 1, argv + 1);
     if (strcmp(cmd, "port-observer") == 0)
         return cmd_port_observer(argc - 1, argv + 1);
     if (strcmp(cmd, "mount-inotify-watch") == 0)

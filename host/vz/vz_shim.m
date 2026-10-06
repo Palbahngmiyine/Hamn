@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 
+#include "core/log.h"
 #include "vz/vz_shim.h"
 
 /* vz_config.m */
@@ -38,8 +39,8 @@ static void err_from_ns(char **err, NSError *e, const char *what)
       didStopWithError:(NSError *)error
 {
     (void)virtualMachine;
-    fprintf(stderr, "hamn: vm stopped with error: %s\n",
-            error.localizedDescription.UTF8String);
+    logerr("vm stopped with error: %s",
+           error.localizedDescription.UTF8String);
     if (self.cb)
         self.cb(self.ud, VZ_ST_ERROR);
 }

@@ -17,7 +17,8 @@ Profile names may contain only letters, digits, `_`, and `-`. `cache`, `.` and
 Logs are in `~/.hamn/<profile>/logs/`. `serial.log` is the guest console of
 the current boot, and each start keeps the console of the boot before it as
 `serial.previous.log`, so the console of a failed start survives one retry.
-`vmrun.log` and `port-observer.log` are appended to.
+`vmrun.log` and `port-observer.log` are appended to; the lines Hamn writes
+there start with the UTC time, and lines from the SSH client do not.
 
 `vm delete` stops the VM and removes the profile from listings, but keeps
 `~/.hamn/<profile>/` with its `disk.img` and Docker data. `vm create` then
