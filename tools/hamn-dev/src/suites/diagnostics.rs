@@ -252,6 +252,7 @@ fn archive_is_private_complete_and_redacted() {
     assert!(status["schemaVersion"] == 1 && status["profile"] == "default", "{status}");
     assert!(status["vm"]["state"] == "stopped" && status["vm"]["dockerStatus"] == "unavailable", "{status}");
     assert!(status["hostFreeMiB"].as_u64().is_some_and(|free| free > 0), "{status}");
+    assert_eq!(status["portForwardFailures"], serde_json::json!([]), "{status}");
     assert!(status["vm"].get("dockerContext").is_none(), "{status}");
     let live: serde_json::Value =
         serde_json::from_slice(&home.hamn(&["vm", "status", "--profile", "default"]).stdout).unwrap();

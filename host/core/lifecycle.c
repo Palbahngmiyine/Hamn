@@ -790,7 +790,7 @@ static int cleanup_stopped_state(const struct profile *p)
     static const char *const files[] = {
         "ssh.sock", "vmrun.pid", "vmrun.pid.tmp", "vmrun.identity",
         "vmrun.identity.tmp", "vmrun.spawning", "vmrun.sock",
-        "docker.sock", "agent.sock", NULL
+        "docker.sock", "agent.sock", "port-forward-failures.json", NULL
     };
     char path[1024];
     for (int i = 0; files[i]; i++) {

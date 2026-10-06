@@ -59,6 +59,8 @@ const DRIVER_CASES: &[(&str, Test)] = &[
         "docker_sync_commits_listeners_and_rejects_an_ambiguous_snapshot",
         docker_sync_commits_listeners_and_rejects_an_ambiguous_snapshot,
     ),
+    ("sync_records_unforwarded_ports_and_logs_each_change_once", sync_records_unforwarded_ports_and_logs_each_change_once),
+    ("watch_names_an_unreadable_container_list_once", watch_names_an_unreadable_container_list_once),
     ("late_owned_completion_leaves_the_replacement_record", late_owned_completion_leaves_the_replacement_record),
     ("serialized_reconcile_keeps_a_live_foreign_generation", serialized_reconcile_keeps_a_live_foreign_generation),
     ("every_host_address_maps_to_one_guest_listener", every_host_address_maps_to_one_guest_listener),
@@ -586,6 +588,75 @@ fn docker_sync_commits_listeners_and_rejects_an_ambiguous_snapshot(driver: &Driv
     assert!(record.container_port == 81 && record.ownership == "committed", "{record:?}");
     profile.ok(&["sync"]);
     profile.assert_no_state();
+}
+
+fn sync_records_unforwarded_ports_and_logs_each_change_once(driver: &Driver) {
+    // A synchronization that cannot create a host listener records the port
+    // and why, keeps forwarding the others, and stays silent while nothing
+    // changes: the observer repeats the same snapshot twice a second.
+    let profile = Profile::new(driver);
+    let failures = |profile: &Profile| -> serde_json::Value {
+        serde_json::from_slice(&profile.ok(&["failures"]).stdout).expect("a JSON array of failures")
+    };
+    let logged = |output: &Output| -> Vec<String> {
+        String::from_utf8_lossy(&output.stderr).lines().filter(|line| line.contains("published")).map(str::to_owned).collect()
+    };
+    assert_eq!(failures(&profile), serde_json::json!([]));
+    // Another process holds 48243; the request for the free port 48240 fails.
+    let holder = std::net::TcpListener::bind("127.0.0.1:48243").expect("bind the host port a container publishes");
+    let earlier = ["sync", "127.0.0.1:48240:80/tcp", "127.0.0.1:48241:81/tcp"];
+    let snapshot = ["sync", "127.0.0.1:48243:83/tcp", "127.0.0.1:48240:80/tcp", "127.0.0.1:48241:81/tcp"];
+    let broken = [("FAIL_FORWARD_PORT", "48240")];
+    let held = [("FAIL_FORWARD_PORT", "48243")];
+    let first = profile.fails_with(&broken, &earlier);
+    assert_eq!(logged(&first), ["cannot forward published tcp port 127.0.0.1:48240: the forward request failed"]);
+    assert_eq!(
+        failures(&profile),
+        serde_json::json!([{"hostIp": "127.0.0.1", "hostPort": 48240, "protocol": "tcp", "reason": "forwardFailed"}])
+    );
+    assert_eq!(profile.record(48241).ownership, "committed");
+    assert!(profile.records().iter().all(|record| record.host_port != 48240));
+    // The same failing snapshot again: a new attempt, no new record or line.
+    let recorded = fs::metadata(profile.path().join("port-forward-failures.json")).unwrap().modified().unwrap();
+    let repeated = profile.fails_with(&broken, &earlier);
+    assert_eq!(logged(&repeated), Vec::<String>::new());
+    assert_eq!(profile.event_count("add\t127.0.0.1\t48240"), 2);
+    assert_eq!(fs::metadata(profile.path().join("port-forward-failures.json")).unwrap().modified().unwrap(), recorded);
+    // 48240 recovers while the published 48243 is held by the other process.
+    let changed = profile.fails_with(&held, &snapshot);
+    assert_eq!(logged(&changed), ["cannot forward published tcp port 127.0.0.1:48243: another process holds the host port"]);
+    assert_eq!(
+        failures(&profile),
+        serde_json::json!([{"hostIp": "127.0.0.1", "hostPort": 48243, "protocol": "tcp", "reason": "hostPortInUse"}])
+    );
+    assert_eq!(profile.record(48240).ownership, "committed");
+    // The process releases the port and the next pass forwards everything.
+    drop(holder);
+    assert_eq!(logged(&profile.ok(&snapshot)), Vec::<String>::new());
+    assert_eq!(profile.record(48243).ownership, "committed");
+    assert_eq!(failures(&profile), serde_json::json!([]));
+    assert_eq!(logged(&profile.ok(&snapshot)), Vec::<String>::new());
+    // A record that is not what the synchronization writes is not reported.
+    for invalid in ["{}", "[{\"hostIp\":\"127.0.0.1\",\"hostPort\":70000,\"protocol\":\"tcp\",\"reason\":\"hostPortInUse\"}]", "not json"] {
+        fs::write(profile.path().join("port-forward-failures.json"), invalid).unwrap();
+        assert_eq!(failures(&profile), serde_json::json!([]), "{invalid}");
+    }
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
+}
+
+fn watch_names_an_unreadable_container_list_once(driver: &Driver) {
+    // The watch loop retries twice a second. Three passes without a Docker
+    // socket name the cause once.
+    let profile = Profile::new(driver);
+    let output = profile.ok(&["watch-unavailable"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(
+        lines,
+        ["cannot read a usable container list from the Docker socket; published ports stay as they are until it answers"],
+        "{stderr}"
+    );
 }
 
 fn late_owned_completion_leaves_the_replacement_record(driver: &Driver) {

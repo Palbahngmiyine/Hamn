@@ -414,14 +414,18 @@ static char *build_status_json(const struct profile *profile,
         cJSON_GetObjectItemCaseSensitive(snapshot, "dockerStatus");
     const cJSON *host_free =
         cJSON_GetObjectItemCaseSensitive(snapshot, "hostFreeMiB");
+    const cJSON *forward_failures =
+        cJSON_GetObjectItemCaseSensitive(snapshot, "portForwardFailures");
     if (!cJSON_IsString(state) || !cJSON_IsString(docker_status) ||
-        !(cJSON_IsNumber(host_free) || cJSON_IsNull(host_free)))
+        !(cJSON_IsNumber(host_free) || cJSON_IsNull(host_free)) ||
+        !cJSON_IsArray(forward_failures))
         return NULL;
 
     cJSON *root = cJSON_CreateObject();
     cJSON *vm = NULL, *logs = NULL;
     cJSON *free_space = cJSON_Duplicate(host_free, 0);
-    if (!root || !free_space ||
+    cJSON *failures = cJSON_Duplicate(forward_failures, 1);
+    if (!root || !free_space || !failures ||
         !cJSON_AddNumberToObject(root, "schemaVersion", 1) ||
         !cJSON_AddStringToObject(root, "hamnVersion", HAMN_VERSION) ||
         !cJSON_AddStringToObject(root, "profile", profile->name) ||
@@ -433,12 +437,17 @@ static char *build_status_json(const struct profile *profile,
         !cJSON_AddStringToObject(vm, "dockerStatus",
                                  docker_status->valuestring) ||
         !cJSON_AddItemToObject(root, "hostFreeMiB", free_space) ||
+        !cJSON_AddItemToObject(root, "portForwardFailures", failures) ||
         !(logs = cJSON_AddObjectToObject(root, "logs")) ||
         !cJSON_AddNumberToObject(logs, "tailBytes",
                                 DIAGNOSTIC_LOG_TAIL_BYTES) ||
         !cJSON_AddBoolToObject(logs, "redacted", 1)) {
-        if (free_space && !cJSON_GetObjectItemCaseSensitive(root, "hostFreeMiB"))
+        /* Items that never reached root are still owned here. */
+        if (!root || !cJSON_GetObjectItemCaseSensitive(root, "hostFreeMiB"))
             cJSON_Delete(free_space);
+        if (!root ||
+            !cJSON_GetObjectItemCaseSensitive(root, "portForwardFailures"))
+            cJSON_Delete(failures);
         cJSON_Delete(root);
         return NULL;
     }
