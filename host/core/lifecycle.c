@@ -583,8 +583,7 @@ static enum ctl_status_result ctl_status_read(
     char ctl[1024], resp[512];
     memset(status, 0, sizeof(*status));
     profile_path(p, "vmrun.sock", ctl, sizeof(ctl));
-    int query = ctlsock_query(ctl, "{\"cmd\":\"status\"}", resp,
-                              sizeof(resp), 300);
+    int query = ctlsock_query_status(ctl, resp, sizeof(resp), 300);
     if (query == CTLSOCK_QUERY_UNAVAILABLE)
         return CTL_STATUS_UNAVAILABLE;
     if (query != CTLSOCK_QUERY_OK)
