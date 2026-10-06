@@ -532,6 +532,9 @@ int proc_run_guarded(const char *const argv[], char *out, size_t cap,
                        spawn_ack_fd, 0);
 }
 
+/* What a run_supervised() supervisor writes to its result pipe: one byte once
+ * it leads its own process group, then this header and `length` captured
+ * bytes. */
 struct supervised_result {
     int rc;
     int truncated;
@@ -579,21 +582,6 @@ int proc_read_all(int fd, void *data, size_t length)
         length -= (size_t)received;
     }
     return 0;
-}
-
-/* Do not reap here: retaining the exact child prevents PID reuse until its
- * result pipe and exit status have both been consumed. */
-static int supervisor_has_exited(pid_t supervisor)
-{
-    siginfo_t info = {0};
-    int rc;
-    do {
-        rc = waitid(P_PID, (id_t)supervisor, &info,
-                    WEXITED | WNOHANG | WNOWAIT);
-    } while (rc < 0 && errno == EINTR);
-    return rc == 0 && info.si_pid == supervisor &&
-        (info.si_code == CLD_EXITED || info.si_code == CLD_KILLED ||
-         info.si_code == CLD_DUMPED);
 }
 
 static int run_supervised(const char *const argv[], char *out, size_t cap,
@@ -666,6 +654,9 @@ static int run_supervised(const char *const argv[], char *out, size_t cap,
             _exit(1);
         close(owner_pipe[1]);
         close(result_pipe[0]);
+        /* The owner forwards nothing to this group until it reads this. */
+        if (proc_write_all(result_pipe[1], "", 1) != 0)
+            _exit(1);
         char *capture = out ? calloc(cap, 1) : NULL;
         struct supervised_result result = { .rc = -1 };
         if (!out || capture) {
@@ -686,56 +677,50 @@ static int run_supervised(const char *const argv[], char *out, size_t cap,
         close(result_pipe[1]);
         _exit(failed ? 1 : 0);
     }
-    struct signal_forwarding forwarding;
-    int group_result = setpgid(supervisor, supervisor);
-    int group_error = errno;
-    int supervisor_exited = group_result != 0 && group_error == ESRCH &&
-        supervisor_has_exited(supervisor);
-    if (group_result != 0 && group_error != EACCES && !supervisor_exited) {
-        /* ESRCH without child-exit proof is not success. Closing the owner pipe
-         * requests cleanup without risking a signal to a reused PID. */
-        if (group_error != ESRCH) (void)kill(supervisor, SIGKILL);
+    close(owner_pipe[0]);
+    close(result_pipe[1]);
+    /* Only the supervisor moves itself into its process group, and its first
+     * protocol byte reports that the group exists. A second setpgid from here
+     * would race that call: macOS then fails either one with EPERM, and the
+     * failed call can return before the other has taken effect. Forwarded
+     * signals stay blocked and pending until the group can receive them. */
+    char group_ready;
+    if (proc_read_all(result_pipe[0], &group_ready, 1) != 0) {
+        /* End of file: the supervisor ended before it led a group, so it
+         * started no command. No signal goes to a process that may already
+         * have exited; closing the owner pipe is what would end a supervisor
+         * that is still running. */
         (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
-        close(owner_pipe[0]);
         close(owner_pipe[1]);
         close(result_pipe[0]);
-        close(result_pipe[1]);
         while (waitpid(supervisor, NULL, 0) < 0 && errno == EINTR)
             ;
         return -1;
     }
-    if (!supervisor_exited &&
-        signal_forwarding_install(supervisor, &forwarding) != 0) {
+    struct signal_forwarding forwarding;
+    if (signal_forwarding_install(supervisor, &forwarding) != 0) {
         (void)kill(-supervisor, SIGKILL);
         (void)kill(supervisor, SIGKILL);
         (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
-        close(owner_pipe[0]);
         close(owner_pipe[1]);
         close(result_pipe[0]);
-        close(result_pipe[1]);
         while (waitpid(supervisor, NULL, 0) < 0 && errno == EINTR)
             ;
         return -1;
     }
-    close(owner_pipe[0]);
-    close(result_pipe[1]);
     if (sigprocmask(SIG_SETMASK, &previous_mask, NULL) != 0) {
-        if (!supervisor_exited) {
-            signal_forwarding_restore(&forwarding);
-            (void)kill(-supervisor, SIGKILL);
-        }
+        signal_forwarding_restore(&forwarding);
+        (void)kill(-supervisor, SIGKILL);
         close(owner_pipe[1]);
         close(result_pipe[0]);
         while (waitpid(supervisor, NULL, 0) < 0 && errno == EINTR)
             ;
         return -1;
     }
-    if (terminal_mode && !supervisor_exited &&
+    if (terminal_mode &&
         terminal_foreground_set(terminal.fd, supervisor) != 0) {
-        if (!supervisor_exited) {
-            signal_forwarding_restore(&forwarding);
-            (void)kill(-supervisor, SIGKILL);
-        }
+        signal_forwarding_restore(&forwarding);
+        (void)kill(-supervisor, SIGKILL);
         close(owner_pipe[1]);
         close(result_pipe[0]);
         while (waitpid(supervisor, NULL, 0) < 0 && errno == EINTR)
@@ -768,7 +753,7 @@ static int run_supervised(const char *const argv[], char *out, size_t cap,
         } while (waited < 0 && errno == EINTR);
     }
     close(owner_pipe[1]);
-    if (!supervisor_exited) signal_forwarding_restore(&forwarding);
+    signal_forwarding_restore(&forwarding);
     if (terminal_mode && terminal_state_restore(&terminal) != 0) {
         fprintf(stderr, "cannot restore terminal after job exit: %s\n",
                 strerror(errno));
