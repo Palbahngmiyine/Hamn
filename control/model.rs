@@ -179,7 +179,7 @@ impl Request {
             "vm diagnostics" => "Write a redacted diagnostic archive to the selected path.".into(),
             "system upgrade" => "Download and publish a verified Hamn release and managed guest image.".into(),
             "system uninstall" => "Permanently remove ALL Hamn profiles, VM disks, Docker data and the managed installation.".into(),
-            "docker containers delete" => "Delete the selected container. Named volumes are preserved.".into(),
+            "docker containers delete" => "Delete the selected container. Its named and anonymous volumes are preserved.".into(),
             "docker containers start" => "Start the selected container.".into(),
             "docker containers stop" => "Stop the selected container and interrupt its workload.".into(),
             "docker containers restart" => "Restart the selected container and interrupt its workload.".into(),
@@ -429,6 +429,17 @@ mod tests {
         assert_eq!(
             both,
             "Docker requires exactly one explicit --profile or --context"
+        );
+    }
+    #[test]
+    fn container_deletion_impact_covers_anonymous_volumes() {
+        let request = Request {
+            words: vec!["docker".into(), "containers".into(), "delete".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            request.impact(),
+            "Delete the selected container. Its named and anonymous volumes are preserved."
         );
     }
     #[test]

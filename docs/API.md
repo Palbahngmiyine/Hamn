@@ -90,8 +90,10 @@ Mutations cannot use `--watch`, `--follow`, or `--all-namespaces`.
 
 Profile Docker API requests go directly to `~/.hamn/<profile>/docker.sock`, after Engine
 API version negotiation. Container names resolve to immutable IDs before
-mutation. Removal preserves volumes. The C port observer still owns forwarded
-Docker-published ports. External Docker tools may connect to this same socket.
+mutation. Container removal preserves the container's named and anonymous
+volumes; remove unused ones with the Docker CLI. The C port observer still owns
+forwarded Docker-published ports. External Docker tools may connect to this same
+socket.
 For `--context`, a private temporary socket proxies the existing Engine API client
 through `docker --context <name> system dial-stdio`; Docker owns TLS/SSH/context
 configuration. The response schema, ID resolution and mutation error contract stay
