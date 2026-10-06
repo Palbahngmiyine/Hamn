@@ -157,6 +157,13 @@ fn docker_api_without_docker_cli() {
     let (ok, result) = hamn.run(&["docker", "containers", "start", "sample", "--profile", "test", "--yes"]);
     assert!(!ok && result["error"]["code"] == "permissionDenied", "{result}");
     engine.set(|mode| mode.post = 204);
+    // Deletion leaves the container's volumes to the Engine's default: it does
+    // not ask for the anonymous ones to be removed.
+    let (ok, result) = hamn.run(&["docker", "containers", "delete", "sample", "--profile", "test", "--yes"]);
+    assert!(ok && result["data"] == json!({"deleted": true, "id": "abc123"}), "{result}");
+    let requests = engine.requests();
+    let (_, removal) = requests.iter().rev().find(|(method, _)| method == "DELETE").expect("a DELETE request");
+    assert!(removal.contains("/containers/abc123") && !removal.contains("v=true") && !removal.contains("v=1"), "{removal}");
     engine.set(|mode| mode.status = 403);
     let (ok, result) = hamn.run(&["docker", "containers", "list", "--profile", "test"]);
     assert!(!ok && result["error"]["code"] == "permissionDenied", "{result}");
