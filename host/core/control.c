@@ -18,6 +18,7 @@
 #include "core/mutation_lock.h"
 #include "core/profile.h"
 #include "core/state.h"
+#include "fwd/ports.h"
 #include "util/fs.h"
 
 const char *vm_live_state(const struct profile *, char *, size_t);
@@ -127,6 +128,16 @@ static cJSON *profile_snapshot(const char *name)
     }
     cJSON_AddStringToObject(value, "dockerStatus", docker_status);
     cJSON_AddItemToObject(value, "lastOperation", operation);
+    /* The record is the running VM's port observer's; a file left by a VM
+     * that is not running says nothing about the present. */
+    cJSON *failures = strcmp(live, "running") == 0 ?
+        port_forward_failures(&profile) : cJSON_CreateArray();
+    if (!failures ||
+        !cJSON_AddItemToObject(value, "portForwardFailures", failures)) {
+        cJSON_Delete(failures);
+        cJSON_Delete(value);
+        return NULL;
+    }
     return value;
 }
 

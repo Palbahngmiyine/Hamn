@@ -17,6 +17,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "cjson/cJSON.h"
 #include "core/log.h"
 #include "sshmgr/ssh.h"
 #include "util/fs.h"
@@ -839,10 +840,27 @@ static int complete_tcp_control(int rc, void *opaque)
     return -1;
 }
 
-static int port_forward_add_under_operation_lock(const struct profile *p,
-                                                 const char *guest_ip,
-                                                 const struct port_spec *spec)
+enum forward_failure {
+    FORWARD_FAILURE_HOST_PORT_IN_USE,
+    FORWARD_FAILURE_OTHER,
+};
+
+#define FORWARD_DETAIL_CAP 256
+
+/* `failure`, when given, receives why the host listener could not be created
+ * and `detail_out` (FORWARD_DETAIL_CAP bytes, optional) what the SSH client
+ * said; the caller reports them. Without `failure` the failure is logged
+ * here. */
+static int add_forward_under_operation_lock(const struct profile *p,
+                                            const char *guest_ip,
+                                            const struct port_spec *spec,
+                                            enum forward_failure *failure,
+                                            char *detail_out)
 {
+    if (detail_out)
+        detail_out[0] = '\0';
+    if (failure)
+        *failure = FORWARD_FAILURE_OTHER;
     int lock_fd = state_lock(p);
     if (lock_fd < 0) {
         logerr("cannot lock port forward state");
@@ -919,8 +937,17 @@ static int port_forward_add_under_operation_lock(const struct profile *p,
             udp_state_test_barrier();
     }
     if (rc != 0) {
-        logerr("cannot bind host %s port %s:%u", protocol_name(spec->protocol),
-               spec->host_ip, spec->host_port);
+        if (!failure) {
+            const char *detail = spec->protocol == PORT_TCP ?
+                ssh_forward_add_detail() : "";
+            logerr("cannot bind host %s port %s:%u%s%s",
+                   protocol_name(spec->protocol), spec->host_ip,
+                   spec->host_port, detail[0] ? ": " : "", detail);
+        } else if (detail_out) {
+            snprintf(detail_out, FORWARD_DETAIL_CAP, "%s",
+                     spec->protocol == PORT_TCP ? ssh_forward_add_detail() :
+                     "");
+        }
         if (spec->protocol == PORT_TCP) {
             int cancelled = ssh_forward_cancel_tcp(
                 p, guest_ip, spec->host_ip, spec->host_port, "127.0.0.1",
@@ -942,6 +969,12 @@ static int port_forward_add_under_operation_lock(const struct profile *p,
         } else if (records_save(p, records, count - 1) != 0) {
             logerr("cannot remove reserved port forward state");
         }
+        /* After the failed request was cancelled, a host port that still
+         * cannot be bound belongs to another process. */
+        if (failure && !(spec->protocol == PORT_TCP ?
+                         tcp_listener_available(spec) :
+                         udp_listener_available(spec)))
+            *failure = FORWARD_FAILURE_HOST_PORT_IN_USE;
         goto out;
     }
 
@@ -970,6 +1003,13 @@ static int port_forward_add_under_operation_lock(const struct profile *p,
 out:
     close(lock_fd);
     return result;
+}
+
+static int port_forward_add_under_operation_lock(const struct profile *p,
+                                                 const char *guest_ip,
+                                                 const struct port_spec *spec)
+{
+    return add_forward_under_operation_lock(p, guest_ip, spec, NULL, NULL);
 }
 
 int port_forward_add_serialized(const struct profile *p, const char *guest_ip,
@@ -1489,6 +1529,194 @@ static void record_mark_committed(struct forward_record *record)
     record->owner_start_usec = 0;
 }
 
+#define FAILURES_FILE "port-forward-failures.json"
+#define FAILURES_FILE_CAP (32 * 1024)
+
+struct failed_forward {
+    struct port_spec spec;
+    enum forward_failure reason;
+    char detail[FORWARD_DETAIL_CAP]; /* logged, never recorded */
+};
+
+static const char *failure_reason(enum forward_failure reason)
+{
+    return reason == FORWARD_FAILURE_HOST_PORT_IN_USE ? "hostPortInUse" :
+        "forwardFailed";
+}
+
+static int failed_forward_order(const void *left_item, const void *right_item)
+{
+    const struct failed_forward *left = left_item, *right = right_item;
+    if (left->spec.protocol != right->spec.protocol)
+        return left->spec.protocol < right->spec.protocol ? -1 : 1;
+    if (left->spec.host_port != right->spec.host_port)
+        return left->spec.host_port < right->spec.host_port ? -1 : 1;
+    return strcmp(left->spec.host_ip, right->spec.host_ip);
+}
+
+/* The record's text, or "[]\n" when the file is absent. NULL when it cannot
+ * be read or exceeds the bound. The caller frees it. */
+static char *failures_read(const struct profile *p)
+{
+    char path[1100];
+    if (!profile_path(p, FAILURES_FILE, path, sizeof(path)))
+        return NULL;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return errno == ENOENT ? strdup("[]\n") : NULL;
+    char *text = malloc(FAILURES_FILE_CAP + 1);
+    size_t length = 0;
+    while (text && length <= FAILURES_FILE_CAP) {
+        ssize_t count = read(fd, text + length, FAILURES_FILE_CAP + 1 - length);
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count <= 0) {
+            if (count < 0)
+                length = FAILURES_FILE_CAP + 1;
+            break;
+        }
+        length += (size_t)count;
+    }
+    close(fd);
+    if (!text || length > FAILURES_FILE_CAP) {
+        free(text);
+        return NULL;
+    }
+    text[length] = '\0';
+    return text;
+}
+
+static char *failures_text(const struct failed_forward failures[], int count)
+{
+    cJSON *array = cJSON_CreateArray();
+    for (int i = 0; array && i < count; i++) {
+        cJSON *entry = cJSON_CreateObject();
+        if (!entry ||
+            !cJSON_AddStringToObject(entry, "hostIp", failures[i].spec.host_ip) ||
+            !cJSON_AddNumberToObject(entry, "hostPort",
+                                     failures[i].spec.host_port) ||
+            !cJSON_AddStringToObject(entry, "protocol",
+                                     protocol_name(failures[i].spec.protocol)) ||
+            !cJSON_AddStringToObject(entry, "reason",
+                                     failure_reason(failures[i].reason)) ||
+            !cJSON_AddItemToArray(array, entry)) {
+            cJSON_Delete(entry);
+            cJSON_Delete(array);
+            array = NULL;
+        }
+    }
+    char *compact = array ? cJSON_PrintUnformatted(array) : NULL;
+    cJSON_Delete(array);
+    if (!compact)
+        return NULL;
+    size_t length = strlen(compact);
+    char *text = malloc(length + 2);
+    if (text) {
+        memcpy(text, compact, length);
+        text[length] = '\n';
+        text[length + 1] = '\0';
+    }
+    cJSON_free(compact);
+    return text;
+}
+
+/* Records the forwards this synchronization could not create. A repeated
+ * pass with the same failures writes and logs nothing: the observer retries
+ * twice a second, and each change is what a reader of the log needs. */
+static void failures_publish(const struct profile *p,
+                             struct failed_forward failures[], int count)
+{
+    char path[1100];
+    qsort(failures, (size_t)count, sizeof(failures[0]), failed_forward_order);
+    char *text = failures_text(failures, count);
+    char *previous = failures_read(p);
+    if (text && previous && strcmp(text, previous) == 0)
+        goto out;
+    if (!text || !profile_path(p, FAILURES_FILE, path, sizeof(path)) ||
+        fs_write_file_atomic(path, text, strlen(text), 0600) != 0) {
+        logerr("cannot record the published ports that are not forwarded: %s",
+               strerror(errno));
+        goto out;
+    }
+    for (int i = 0; i < count; i++) {
+        int in_use = failures[i].reason == FORWARD_FAILURE_HOST_PORT_IN_USE;
+        int explained = !in_use && failures[i].detail[0];
+        logerr("cannot forward published %s port %s:%u: %s%s%s",
+               protocol_name(failures[i].spec.protocol),
+               failures[i].spec.host_ip, failures[i].spec.host_port,
+               in_use ? "another process holds the host port" :
+               "the forward request failed",
+               explained ? ": " : "", explained ? failures[i].detail : "");
+    }
+    if (count == 0)
+        logmsg("every published port is forwarded again");
+out:
+    free(text);
+    free(previous);
+}
+
+int port_forward_failures_clear(const struct profile *p)
+{
+    char path[1100];
+    if (!p || !profile_path(p, FAILURES_FILE, path, sizeof(path))) {
+        errno = EINVAL;
+        return -1;
+    }
+    return fs_unlink_if_exists(path);
+}
+
+cJSON *port_forward_failures(const struct profile *p)
+{
+    cJSON *failures = cJSON_CreateArray();
+    char *text = p ? failures_read(p) : NULL;
+    cJSON *recorded = text ? cJSON_Parse(text) : NULL;
+    free(text);
+    if (!failures || !cJSON_IsArray(recorded))
+        goto out;
+    cJSON *valid = cJSON_CreateArray();
+    for (const cJSON *entry = recorded->child; valid && entry;
+         entry = entry->next) {
+        const cJSON *host_ip = cJSON_GetObjectItemCaseSensitive(entry, "hostIp");
+        const cJSON *host_port =
+            cJSON_GetObjectItemCaseSensitive(entry, "hostPort");
+        const cJSON *protocol =
+            cJSON_GetObjectItemCaseSensitive(entry, "protocol");
+        const cJSON *reason = cJSON_GetObjectItemCaseSensitive(entry, "reason");
+        struct in_addr address;
+        cJSON *copy = NULL;
+        /* A record that is not exactly what the synchronization writes is not
+         * reported in part. */
+        if (!cJSON_IsObject(entry) || !cJSON_IsString(host_ip) ||
+            inet_pton(AF_INET, host_ip->valuestring, &address) != 1 ||
+            !cJSON_IsNumber(host_port) || host_port->valuedouble < 1 ||
+            host_port->valuedouble > 65535 ||
+            host_port->valuedouble != (double)(int)host_port->valuedouble ||
+            !cJSON_IsString(protocol) ||
+            (strcmp(protocol->valuestring, "tcp") != 0 &&
+             strcmp(protocol->valuestring, "udp") != 0) ||
+            !cJSON_IsString(reason) ||
+            (strcmp(reason->valuestring, "hostPortInUse") != 0 &&
+             strcmp(reason->valuestring, "forwardFailed") != 0) ||
+            !(copy = cJSON_CreateObject()) ||
+            !cJSON_AddStringToObject(copy, "hostIp", host_ip->valuestring) ||
+            !cJSON_AddNumberToObject(copy, "hostPort", host_port->valuedouble) ||
+            !cJSON_AddStringToObject(copy, "protocol", protocol->valuestring) ||
+            !cJSON_AddStringToObject(copy, "reason", reason->valuestring) ||
+            !cJSON_AddItemToArray(valid, copy)) {
+            cJSON_Delete(copy);
+            cJSON_Delete(valid);
+            valid = NULL;
+        }
+    }
+    if (valid) {
+        cJSON_Delete(failures);
+        failures = valid;
+    }
+out:
+    cJSON_Delete(recorded);
+    return failures;
+}
+
 int port_forward_sync_docker_serialized(const struct profile *p,
                                         const char *guest_ip,
                                         const struct port_spec specs[],
@@ -1545,17 +1773,24 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     }
     close(lock_fd);
 
+    struct failed_forward failures[MAX_FORWARD_RECORDS];
+    int failure_count = 0;
     for (int i = 0; i < spec_count; i++) {
         if (present[i])
             continue;
-        if (port_forward_add_under_operation_lock(p, guest_ip, &specs[i]) !=
-            0) {
+        enum forward_failure reason;
+        if (add_forward_under_operation_lock(
+                p, guest_ip, &specs[i], &reason,
+                failures[failure_count].detail) != 0) {
+            failures[failure_count].spec = specs[i];
+            failures[failure_count++].reason = reason;
             failed = 1;
             continue;
         }
         if (port_forward_commit(p, &specs[i]) != 0)
             failed = 1;
     }
+    failures_publish(p, failures, failure_count);
     return failed ? -1 : 0;
 }
 

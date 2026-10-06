@@ -460,9 +460,12 @@ int docker_observer_parse_list(const char *json, struct port_spec specs[],
     const char *end = NULL;
     cJSON *containers = cJSON_ParseWithOpts(json, &end, 1);
     int result = -1;
-    if (!containers || !end || *end != '\0' || !cJSON_IsArray(containers) ||
-        cJSON_GetArraySize(containers) > DOCKER_SNAPSHOT_MAX_CONTAINERS) {
+    if (!containers || !end || *end != '\0' || !cJSON_IsArray(containers)) {
         errno = EPROTO;
+        goto out;
+    }
+    if (cJSON_GetArraySize(containers) > DOCKER_SNAPSHOT_MAX_CONTAINERS) {
+        errno = EOVERFLOW;
         goto out;
     }
     struct port_spec staged[DOCKER_OBSERVER_MAX_PORTS];
@@ -573,6 +576,40 @@ int docker_observer_revoke(const struct profile *profile)
     return fs_unlink_if_exists(path);
 }
 
+/* How one synchronization pass ended. The failures are told apart so that the
+ * watch loop can name the cause once, instead of one line for every retry. */
+enum observer_pass {
+    OBSERVER_PASS_SYNCHRONIZED,
+    OBSERVER_PASS_LEASE_LOST,
+    OBSERVER_PASS_SNAPSHOT_UNAVAILABLE, /* no usable container list */
+    OBSERVER_PASS_SNAPSHOT_OVER_LIMIT,  /* the list exceeds a bound */
+    OBSERVER_PASS_STATE_UNAVAILABLE,    /* the forward state cannot be locked */
+    OBSERVER_PASS_FORWARD_FAILED,       /* named by the port forward state */
+};
+
+static enum observer_pass observer_pass(const struct profile *profile,
+                                        const char *guest_ip,
+                                        const char *lease)
+{
+    if (!observer_lease_matches(profile, lease))
+        return OBSERVER_PASS_LEASE_LOST;
+    struct port_spec specs[DOCKER_OBSERVER_MAX_PORTS];
+    int spec_count = 0;
+    if (docker_observer_read_snapshot(profile, specs, &spec_count,
+                                      DOCKER_OBSERVER_MAX_PORTS) != 0)
+        return errno == EOVERFLOW ? OBSERVER_PASS_SNAPSHOT_OVER_LIMIT :
+            OBSERVER_PASS_SNAPSHOT_UNAVAILABLE;
+    int operation_lock = port_forward_operation_lock(profile);
+    if (operation_lock < 0)
+        return OBSERVER_PASS_STATE_UNAVAILABLE;
+    int result = observer_lease_matches(profile, lease) ?
+        port_forward_sync_docker_serialized(profile, guest_ip, specs,
+                                            spec_count) : 1;
+    port_forward_operation_unlock(operation_lock);
+    return result == 0 ? OBSERVER_PASS_SYNCHRONIZED :
+        result == 1 ? OBSERVER_PASS_LEASE_LOST : OBSERVER_PASS_FORWARD_FAILED;
+}
+
 int docker_observer_sync_once(const struct profile *profile,
                               const char *guest_ip, const char *lease)
 {
@@ -580,21 +617,32 @@ int docker_observer_sync_once(const struct profile *profile,
         errno = EINVAL;
         return -1;
     }
-    if (!observer_lease_matches(profile, lease))
-        return 1;
-    struct port_spec specs[DOCKER_OBSERVER_MAX_PORTS];
-    int spec_count = 0;
-    if (docker_observer_read_snapshot(profile, specs, &spec_count,
-                                      DOCKER_OBSERVER_MAX_PORTS) != 0)
-        return -1;
-    int operation_lock = port_forward_operation_lock(profile);
-    if (operation_lock < 0)
-        return -1;
-    int result = observer_lease_matches(profile, lease) ?
-        port_forward_sync_docker_serialized(profile, guest_ip, specs,
-                                            spec_count) : 1;
-    port_forward_operation_unlock(operation_lock);
-    return result;
+    enum observer_pass pass = observer_pass(profile, guest_ip, lease);
+    return pass == OBSERVER_PASS_SYNCHRONIZED ? 0 :
+        pass == OBSERVER_PASS_LEASE_LOST ? 1 : -1;
+}
+
+/* Logs a change of the pass outcome. A failed forward is not named here: the
+ * port forward state logs the ports and the reason when that set changes. */
+static void observer_pass_report(enum observer_pass previous,
+                                 enum observer_pass pass)
+{
+    if (pass == previous)
+        return;
+    if (pass == OBSERVER_PASS_SNAPSHOT_UNAVAILABLE)
+        logerr("cannot read a usable container list from the Docker socket; "
+               "published ports stay as they are until it answers");
+    else if (pass == OBSERVER_PASS_SNAPSHOT_OVER_LIMIT)
+        logerr("the container list exceeds the port observer's limits (%d "
+               "containers, %d KiB, %d published ports); published ports are "
+               "not synchronized", DOCKER_SNAPSHOT_MAX_CONTAINERS,
+               DOCKER_HTTP_BODY_CAP / 1024, DOCKER_OBSERVER_MAX_PORTS);
+    else if (pass == OBSERVER_PASS_STATE_UNAVAILABLE)
+        logerr("cannot lock the port forward state; published ports stay as "
+               "they are");
+    else if (pass == OBSERVER_PASS_SYNCHRONIZED &&
+             previous != OBSERVER_PASS_FORWARD_FAILED)
+        logmsg("published port synchronization resumed");
 }
 
 static void lease_token_generate(char token[DOCKER_OBSERVER_LEASE_TOKEN_SIZE])
@@ -651,26 +699,38 @@ static int docker_observer_wait_events(const struct profile *profile)
 int docker_observer_watch(const struct profile *profile, const char *guest_ip,
                           const char *lease, unsigned cycle_limit)
 {
+    if (!profile || !guest_ip || !guest_ip[0] || !lease_token_valid(lease)) {
+        errno = EINVAL;
+        return -1;
+    }
     unsigned cycles = 0;
+    enum observer_pass reported = OBSERVER_PASS_SYNCHRONIZED;
+    int events_failed = 0;
     for (;;) {
-        int sync = docker_observer_sync_once(profile, guest_ip, lease);
-        if (sync == 1)
+        enum observer_pass pass = observer_pass(profile, guest_ip, lease);
+        if (pass == OBSERVER_PASS_LEASE_LOST)
             return 0;
-        if (sync != 0) {
-            logerr("Docker port observer snapshot failed; retrying");
+        observer_pass_report(reported, pass);
+        reported = pass;
+        if (pass != OBSERVER_PASS_SYNCHRONIZED) {
             observer_delay_milliseconds(500);
-            continue;
-        }
-        if (!observer_lease_matches(profile, lease))
-            return 0;
-        int events = docker_observer_wait_events(profile);
-        if (events < 0) {
+        } else {
             if (!observer_lease_matches(profile, lease))
                 return 0;
-            logerr("Docker port observer event stream failed; retrying");
-            observer_delay_milliseconds(500);
-        } else if (events == 0) {
-            observer_delay_milliseconds(100);
+            int events = docker_observer_wait_events(profile);
+            if (events < 0 && !observer_lease_matches(profile, lease))
+                return 0;
+            /* Without events the loop still synchronizes twice a second. */
+            if (events < 0 && !events_failed)
+                logerr("the Docker event stream failed; published ports are "
+                       "polled until it answers");
+            else if (events >= 0 && events_failed)
+                logmsg("the Docker event stream answers again");
+            events_failed = events < 0;
+            if (events < 0)
+                observer_delay_milliseconds(500);
+            else if (events == 0)
+                observer_delay_milliseconds(100);
         }
         if (cycle_limit && ++cycles >= cycle_limit)
             return 0;
@@ -741,7 +801,9 @@ int docker_observer_start(const struct profile *profile,
     char token[DOCKER_OBSERVER_LEASE_TOKEN_SIZE], self[PATH_MAX];
     char logs[PATH_MAX], logfile[PATH_MAX];
     lease_token_generate(token);
-    if (observer_lease_write(profile, token) != 0 ||
+    /* A record of failed forwards belongs to one observer's passes. */
+    if (port_forward_failures_clear(profile) != 0 ||
+        observer_lease_write(profile, token) != 0 ||
         !proc_self_path(self, sizeof(self)) ||
         !profile_path(profile, "logs", logs, sizeof(logs)) ||
         fs_mkdirs(logs, 0755) != 0 ||

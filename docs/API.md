@@ -47,6 +47,12 @@ configured: `hostPath`, the `guestPath` that Docker clients must name, and
 `writable`. The home share comes first when `mountHome` is true, then each
 `mounts` entry. A bind mount of any other host path sees only the guest. A
 running VM keeps the shares it was started with.
+`portForwardFailures` lists the published ports that the running VM's port
+observer could not forward at its last pass: `hostIp`, `hostPort`, `protocol`
+and `reason`, which is `hostPortInUse` when another host process holds the port
+and `forwardFailed` otherwise. Docker reports such a container as started and
+shows the mapping; the port is forwarded once the cause is gone. The array is
+empty for a VM that is not running.
 `state:running` describes the VM process only; `ready` requires Docker `/_ping`.
 `hostFreeMiB` is the space available on the volume that holds the profile
 directory, where the sparse VM disk grows; it is null when it cannot be
@@ -87,8 +93,8 @@ configure accept `--cpu`, `--memory` (GiB), `--disk` (GiB), and
 `--rosetta <true|false>`; `vm start` accepts the first three. An omitted
 argument keeps the profile's value. `vm diagnostics`
 accepts `--path` for an archive: a ustar file holding `manifest.json`,
-`status.json` (the VM state, `dockerStatus` and `hostFreeMiB` that `vm status`
-reports), `operation.json` (the last operation record, or `null`), and redacted
+`status.json` (the VM state, `dockerStatus`, `hostFreeMiB` and
+`portForwardFailures` that `vm status` reports), `operation.json` (the last operation record, or `null`), and redacted
 tails of `logs/serial.log`, `logs/serial.previous.log`, `logs/vmrun.log` and
 `logs/port-observer.log`.
 `system upgrade` accepts

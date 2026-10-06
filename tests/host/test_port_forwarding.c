@@ -15,6 +15,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "cjson/cJSON.h"
 #include "core/log.h"
 #include "core/profile.h"
 #include "fwd/docker_observer.h"
@@ -528,6 +529,31 @@ int main(int argc, char **argv)
 
     if (strcmp(argv[1], "cleanup") == 0)
         return port_forward_cleanup(&profile, guest_ip) == 0 ? 0 : 1;
+    if (strcmp(argv[1], "failures") == 0 && argc == 2) {
+        /* What VM status reports for a running VM. */
+        cJSON *failures = port_forward_failures(&profile);
+        char *text = failures ? cJSON_PrintUnformatted(failures) : NULL;
+        cJSON_Delete(failures);
+        if (!text)
+            return 1;
+        puts(text);
+        cJSON_free(text);
+        return 0;
+    }
+    if (strcmp(argv[1], "watch-unavailable") == 0 && argc == 2) {
+        /* Three passes of the watch loop against a profile that has a lease
+         * and no Docker socket. */
+        static const char lease[] = "0123456789abcdef0123456789abcdef";
+        char lease_path[PATH_MAX];
+        return snprintf(lease_path, sizeof(lease_path),
+                        "%s/port-observer.lease", directory) <
+                   (int)sizeof(lease_path) &&
+               fs_write_file_atomic(lease_path,
+                                    "0123456789abcdef0123456789abcdef\n",
+                                    sizeof(lease), 0600) == 0 &&
+               docker_observer_watch(&profile, guest_ip, lease, 3) == 0 ?
+               0 : 1;
+    }
     if (strcmp(argv[1], "reconcile") == 0 && argc == 3)
         return port_forward_reconcile(&profile, guest_ip, argv[2]) == 0 ?
                0 : 1;

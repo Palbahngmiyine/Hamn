@@ -43,6 +43,11 @@ Hamn은 서버가 수락한 변경을 되돌렸다고 보고하지 않습니다.
 `writable`입니다. `mountHome`이 true면 home 공유가 먼저 오고 그 뒤에 `mounts` 항목이
 옵니다. 그 밖의 호스트 경로를 bind mount하면 게스트 쪽 경로만 보입니다. 실행 중인
 VM은 시작할 때의 공유를 유지합니다.
+`portForwardFailures`는 실행 중인 VM의 port observer가 마지막 동기화에서 전달하지 못한
+게시 포트를 나열합니다. 항목은 `hostIp`, `hostPort`, `protocol`, `reason`이며 `reason`은
+다른 호스트 프로세스가 그 포트를 쥐고 있으면 `hostPortInUse`, 그 밖에는
+`forwardFailed`입니다. Docker는 이런 컨테이너도 시작된 것으로 보고하고 mapping을
+보여 줍니다. 원인이 사라지면 포트가 전달됩니다. 실행 중이 아닌 VM에서는 빈 배열입니다.
 `state:running`은 VM 프로세스 상태이며 `ready`에는 Docker `/_ping` 확인이 필요합니다.
 `hostFreeMiB`는 프로필 디렉터리가 있는 볼륨의 여유 공간입니다. 희소 파일인 VM 디스크가
 이 볼륨에서 커집니다. 측정할 수 없으면 null입니다. 10 GiB 미만이면 `vm start`가
@@ -81,7 +86,7 @@ VM 작업은 `vm list`를 제외하고 `--profile`이 필요합니다. Docker는
 `--cpu`, `--memory`(GiB), `--disk`(GiB), `--rosetta <true|false>`를 받고 `vm start`는 앞의
 세 가지를 받습니다. 생략한 인자는 프로필의 값을 유지합니다. `vm diagnostics`의 `--path`는
 아카이브 경로입니다. 아카이브는 ustar 파일이며 `manifest.json`, `status.json`(`vm status`가
-보고하는 VM 상태·`dockerStatus`·`hostFreeMiB`), `operation.json`(마지막 작업 기록, 없으면
+보고하는 VM 상태·`dockerStatus`·`hostFreeMiB`·`portForwardFailures`), `operation.json`(마지막 작업 기록, 없으면
 `null`), 그리고 가림 처리한 `logs/serial.log`·`logs/serial.previous.log`·`logs/vmrun.log`·
 `logs/port-observer.log`의 끝부분을 담습니다. `system upgrade`는 `--manifest`,
 `--check`(조회 전용, `--yes` 불필요), `--force`(동일 버전 재설치, `--yes` 필요)를

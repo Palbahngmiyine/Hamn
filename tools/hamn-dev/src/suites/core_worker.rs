@@ -134,6 +134,16 @@ fn core_worker_isolation_and_protocol() {
     let status = worker.call("vm status", json!({"profile": "test"}));
     assert_eq!(status["Ok"]["sharedDirectories"], json!([]), "{status}");
     fs::write(&shared_config, &generated).unwrap();
+    // Failed forwards are a running VM's port observer's record. One left in
+    // the profile of a stopped VM is not reported.
+    fs::write(
+        home.join(".hamn/test/port-forward-failures.json"),
+        r#"[{"hostIp":"127.0.0.1","hostPort":5432,"protocol":"tcp","reason":"hostPortInUse"}]"#,
+    )
+    .unwrap();
+    let status = worker.call("vm status", json!({"profile": "test"}));
+    assert!(status["Ok"]["state"] == "stopped" && status["Ok"]["portForwardFailures"] == json!([]), "{status}");
+    fs::remove_file(home.join(".hamn/test/port-forward-failures.json")).unwrap();
     assert_eq!(worker.call("vm create", json!({"profile": "test", "yes": true, "cpu": 10}))["Err"]["code"], json!("conflict"));
     // Rosetta is set on a stopped profile, kept when not named, and never by a start.
     let configured = |worker: &mut Worker, arguments: Value| worker.call("vm configure", arguments);
