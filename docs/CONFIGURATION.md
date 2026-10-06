@@ -170,6 +170,21 @@ schema rejects `network`, and `configure` has no `--network` or
 `--network-interface` option. Hamn does not provide a LAN-reachable guest
 address in 0.0.1.
 
+Published ports are forwarded by a per-profile port observer after the Docker
+daemon has accepted the container, so two conditions do not fail `docker run`:
+
+- A host process already listens on the published port. `docker ps` shows the
+  mapping, but connections to the host port keep reaching that process. The
+  observer writes `cannot bind host tcp port <address>:<port>` to
+  `~/.hamn/<profile>/logs/port-observer.log` and retries; forwarding starts
+  once the port is free.
+- The observer reads one listing of running containers per synchronization.
+  More than 2,048 containers, a listing of 512 KiB or more, or more than 128
+  published port mappings stops the synchronization of every published port
+  until the VM is back under the limit, and the log repeats
+  `Docker port observer snapshot failed; retrying`. These limits belong to the
+  observer, not to headless `docker containers list`.
+
 Guest Docker networks resolve `host.docker.internal`. The 0.0.1
 `host.hamn.internal` alias has been removed; use `host.docker.internal`.
 Hamn does not touch host `/var/run/docker.sock`.
