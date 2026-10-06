@@ -62,10 +62,6 @@ int profile_read_existing(struct profile *profile, const char *name);
 /* Save config.yaml atomically. */
 int profile_save(const struct profile *profile);
 
-/* Docker context is hamn for default and hamn-<profile> otherwise. */
-int profile_docker_context_name(const struct profile *profile, char *out,
-                                size_t cap);
-
 /* p->dir/<file> path. Successful calls return buf. */
 const char *profile_path(const struct profile *profile, const char *file,
                          char *buf, size_t cap);

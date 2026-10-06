@@ -140,23 +140,6 @@ const char *profile_path(const struct profile *profile, const char *file,
     return buf;
 }
 
-int profile_docker_context_name(const struct profile *profile, char *out,
-                                size_t cap)
-{
-    if (!profile || !profile_name_valid(profile->name) || !out || cap == 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    int length = strcmp(profile->name, "default") == 0 ?
-        snprintf(out, cap, "hamn") : snprintf(out, cap, "hamn-%s",
-                                                profile->name);
-    if (length < 0 || length >= (int)cap) {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
-    return 0;
-}
-
 static void yaml_fail(struct yaml_parse *parse, const char *format, ...)
 {
     if (parse->error[0])

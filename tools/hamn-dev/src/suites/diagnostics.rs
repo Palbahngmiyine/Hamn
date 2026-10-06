@@ -17,6 +17,7 @@ pub fn main(filters: &[String]) -> ExitCode {
         "diagnostic archives are bounded, atomic, and credential-redacted",
         vec![
             case("archive_is_private_complete_and_redacted", archive_is_private_complete_and_redacted),
+            case("operation_error_is_redacted", operation_error_is_redacted),
             case("existing_files_and_symlinks_are_never_replaced", existing_files_and_symlinks_are_never_replaced),
             case("bounded_tail_drops_its_partial_first_line", bounded_tail_drops_its_partial_first_line),
             case("log_symlinks_are_not_followed", log_symlinks_are_not_followed),
@@ -107,6 +108,13 @@ impl Home {
                  kind: Secret\ndata:\n  arbitrary-name: {SECRET}\nvmrun completed after redaction safely\n"
             ),
         );
+        private_file(
+            &home.logs().join("port-observer.log"),
+            &format!("port observer started safely\ntoken: {TOKEN}\nhamn: cannot bind host tcp port 127.0.0.1:5432\n"),
+        );
+        // A start rejected before any VM work leaves a failed operation record.
+        let rejected = home.hamn(&["vm", "start", "--profile", "default", "--disk", "1", "--yes"]);
+        assert!(!rejected.status.success() && home.profile().join("operation.json").is_file(), "{rejected:?}");
         home
     }
 
@@ -192,7 +200,10 @@ fn archive_is_private_complete_and_redacted() {
     let mut members: Vec<String> =
         run(Command::new("/usr/bin/tar").arg("-tf").arg(&archive)).lines().map(str::to_owned).collect();
     members.sort();
-    assert_eq!(members, ["logs/serial.log", "logs/vmrun.log", "manifest.json", "status.json"]);
+    assert_eq!(
+        members,
+        ["logs/port-observer.log", "logs/serial.log", "logs/vmrun.log", "manifest.json", "operation.json", "status.json"]
+    );
 
     let extracted = home.path().join("extracted");
     fs::create_dir(&extracted).unwrap();
@@ -215,10 +226,43 @@ fn archive_is_private_complete_and_redacted() {
     for line in ["vmrun started safely", "vmrun completed after redaction safely"] {
         assert!(has_line(&vmrun, line), "vmrun.log lacks {line:?}: {:?}", lines(&vmrun));
     }
-    let status = fs::read_to_string(extracted.join("status.json")).unwrap();
-    assert!(status.contains(r#""schemaVersion":1"#) && status.contains(r#""dockerContext":"hamn""#), "{status}");
-    let manifest = fs::read_to_string(extracted.join("manifest.json")).unwrap();
-    assert!(manifest.contains(r#""collectionPolicy":"allowlisted metadata and bounded log tails""#), "{manifest}");
+    let observer = extracted.join("logs/port-observer.log");
+    for line in ["port observer started safely", "[REDACTED sensitive log line]", "hamn: cannot bind host tcp port 127.0.0.1:5432"] {
+        assert!(has_line(&observer, line), "port-observer.log lacks {line:?}: {:?}", lines(&observer));
+    }
+    // The status is the one `vm status` reports. Hamn creates no Docker
+    // context, so none is named.
+    let status: serde_json::Value = serde_json::from_str(&fs::read_to_string(extracted.join("status.json")).unwrap()).unwrap();
+    assert!(status["schemaVersion"] == 1 && status["profile"] == "default", "{status}");
+    assert!(status["vm"]["state"] == "stopped" && status["vm"]["dockerStatus"] == "unavailable", "{status}");
+    assert!(status["hostFreeMiB"].as_u64().is_some_and(|free| free > 0), "{status}");
+    assert!(status["vm"].get("dockerContext").is_none(), "{status}");
+    let live: serde_json::Value =
+        serde_json::from_slice(&home.hamn(&["vm", "status", "--profile", "default"]).stdout).unwrap();
+    let operation: serde_json::Value = serde_json::from_str(&fs::read_to_string(extracted.join("operation.json")).unwrap()).unwrap();
+    assert_eq!(operation, live["data"]["lastOperation"]);
+    assert!(operation["operation"] == "vm start" && operation["status"] == "failed", "{operation}");
+    assert!(operation["error"].as_str().is_some_and(|error| error.contains("disk size cannot shrink")), "{operation}");
+    let manifest: serde_json::Value = serde_json::from_str(&fs::read_to_string(extracted.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["collectionPolicy"], "allowlisted metadata and bounded log tails");
+    assert_eq!(
+        manifest["files"],
+        serde_json::json!(["status.json", "operation.json", "logs/serial.log", "logs/vmrun.log", "logs/port-observer.log"])
+    );
+}
+
+/// The operation record's error text is redacted like a log line, and the
+/// rest of the record is kept.
+fn operation_error_is_redacted() {
+    let home = Home::new();
+    let record = home.profile().join("operation.json");
+    let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    value["error"] = serde_json::json!(format!("token: {TOKEN}"));
+    fs::write(&record, serde_json::to_string(&value).unwrap()).unwrap();
+    let extracted = home.extracted("operation");
+    let operation: serde_json::Value = serde_json::from_str(&fs::read_to_string(extracted.join("operation.json")).unwrap()).unwrap();
+    assert_eq!(operation["error"], "[REDACTED sensitive log line]", "{operation}");
+    assert!(operation["operation"] == "vm start" && operation["status"] == "failed", "{operation}");
 }
 
 fn existing_files_and_symlinks_are_never_replaced() {
