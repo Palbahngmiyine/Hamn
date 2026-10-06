@@ -105,6 +105,17 @@ The guest always sets its system containerd socket, Docker bridge DNS, and
 previous guest transaction recoverable instead of silently accepting a
 partially applied daemon.
 
+Other daemon settings pass through. A registry mirror is one example; every
+pull from a VM reaches Docker Hub from one address, which Docker Hub
+rate-limits for anonymous pulls:
+
+```yaml
+docker:
+  daemonJson: "{\"registry-mirrors\":[\"https://mirror.gcr.io\"]}"
+```
+
+After the next start, `docker info` lists the mirror under `Registry Mirrors`.
+
 ## Mounts
 
 Each additional mount has this schema:
