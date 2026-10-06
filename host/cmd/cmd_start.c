@@ -640,7 +640,8 @@ static int cmd_start_execute(const struct start_options *options,
     /* 6. ssh (첫 부팅은 cloud-init 사용자 생성까지 대기) */
     logmsg("waiting for ssh ...");
     if (ssh_master_start(&p, ip, 180) != 0) {
-        logerr("ssh did not come up; check %s", serial);
+        logerr("ssh did not come up; check %s before retrying: the next "
+               "start overwrites it", serial);
         goto rollback;
     }
     start_trace_stage(&trace, "ssh-ready");
@@ -698,8 +699,20 @@ static int cmd_start_execute(const struct start_options *options,
 rollback:
     proc_cleanup_begin();
     if (start_spawned && !guest_deployment_cleanup_pending() &&
-        !remote_mutation_cleanup_pending())
+        !remote_mutation_cleanup_pending()) {
+        /* Stopping the VM logs its own progress and failures. The reported
+         * error stays the reason the start failed, followed by the fact that
+         * the VM no longer runs: a caller must not wait for it to finish
+         * booting. */
+        char reason[2048];
+        snprintf(reason, sizeof(reason), "%s", log_last_error());
         start_restored = rollback_incomplete_start(&p) == 0;
+        if (start_restored) {
+            logmsg("the failed start was rolled back; the VM is stopped");
+            log_set_error("%s; the failed start was rolled back and the VM "
+                          "is stopped", reason[0] ? reason : "start failed");
+        }
+    }
     proc_cleanup_end();
 out:
     profile_mutation_unlock(mutation_fd);
