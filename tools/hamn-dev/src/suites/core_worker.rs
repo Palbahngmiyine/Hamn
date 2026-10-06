@@ -135,6 +135,17 @@ fn core_worker_isolation_and_protocol() {
     assert_eq!(status["Ok"]["sharedDirectories"], json!([]), "{status}");
     fs::write(&shared_config, &generated).unwrap();
     assert_eq!(worker.call("vm create", json!({"profile": "test", "yes": true, "cpu": 10}))["Err"]["code"], json!("conflict"));
+    // Rosetta is set on a stopped profile, kept when not named, and never by a start.
+    let configured = |worker: &mut Worker, arguments: Value| worker.call("vm configure", arguments);
+    assert_eq!(configured(&mut worker, json!({"profile": "test", "yes": true, "rosetta": true}))["Ok"]["rosetta"], json!(true));
+    assert!(fs::read_to_string(home.join(".hamn/test/config.yaml")).unwrap().contains("rosetta: true"));
+    let kept = configured(&mut worker, json!({"profile": "test", "yes": true, "cpu": 2}));
+    assert!(kept["Ok"]["rosetta"] == json!(true) && kept["Ok"]["cpus"] == json!(2), "{kept}");
+    assert_eq!(configured(&mut worker, json!({"profile": "test", "yes": true, "rosetta": false}))["Ok"]["rosetta"], json!(false));
+    assert!(fs::read_to_string(home.join(".hamn/test/config.yaml")).unwrap().contains("rosetta: false"));
+    let refused = worker.call("vm start", json!({"profile": "test", "yes": true, "rosetta": true}));
+    assert_eq!(refused["Err"]["code"], json!("invalidRequest"), "{refused}");
+    assert_eq!(worker.call("vm status", json!({"profile": "test"}))["Ok"]["rosetta"], json!(false));
     assert_eq!(worker.call("vm status", json!({"profile": "test"}))["Ok"]["cpus"], json!(2));
 
     let disk = home.join(".hamn/test/disk.img");

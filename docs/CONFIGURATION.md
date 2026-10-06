@@ -37,13 +37,15 @@ does not convert legacy runtime data in place.
 ```sh
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
 hamn --headless vm configure --profile work --cpu 6 --memory 8 --disk 80 --yes
+hamn --headless vm configure --profile work --rosetta true --yes
 hamn --headless vm start --profile work --yes
 ```
 
 `configure` changes stopped profiles only. Existing VM disks are not shrunk.
-For advanced settings, edit `~/.hamn/<profile>/config.yaml` while the VM is
-stopped. Resource-only updates preserve mounts, Docker daemon settings, Rosetta,
-and existing provisioning hooks. In the TUI, `v` then `c` opens the resource
+`create` and `configure` also take `--rosetta <true|false>`. For the other
+advanced settings, edit `~/.hamn/<profile>/config.yaml` while the VM is
+stopped. An update preserves the settings it does not name: mounts, Docker
+daemon settings, Rosetta, and existing provisioning hooks. In the TUI, `v` then `c` opens the resource
 configuration command. Native `kubectl edit` uses the installed editor in the PTY.
 
 ## YAML schema
@@ -91,7 +93,9 @@ user-mode emulation. Simple programs work, and `uname -m` prints `x86_64`, but
 that does not show that a given workload runs: Node.js `corepack`, for one,
 ends with `QEMU internal SIGSEGV` (exit code 139). VM status reports the
 configured `rosetta` value, not the translator in use. For amd64 builds and
-runtimes, stop the VM, set `rosetta: true` in `config.yaml`, and start it again.
+runtimes, stop the VM, run `hamn --headless vm configure --profile <name>
+--rosetta true --yes` (or set `rosetta: true` in `config.yaml`), and start it
+again.
 
 ## Docker daemon JSON
 

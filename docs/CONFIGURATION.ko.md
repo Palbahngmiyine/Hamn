@@ -37,13 +37,14 @@ fail closed합니다. Hamn은 legacy runtime data를 제자리에서 변환하�
 ```sh
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
 hamn --headless vm configure --profile work --cpu 6 --memory 8 --disk 80 --yes
+hamn --headless vm configure --profile work --rosetta true --yes
 hamn --headless vm start --profile work --yes
 ```
 
 `configure`는 정지된 프로필만 변경하며 기존 VM 디스크를 축소하지 않습니다.
-고급 설정은 VM이 정지된 상태에서 `~/.hamn/<profile>/config.yaml`을 편집하세요.
-리소스 설정 변경은 기존 마운트·Docker daemon 설정·Rosetta·provisioning hook을
-보존합니다. TUI의 `v` → `c`로 리소스 설정 명령을 편집할 수 있습니다.
+`create`와 `configure`는 `--rosetta <true|false>`도 받습니다. 그 밖의 고급 설정은 VM이
+정지된 상태에서 `~/.hamn/<profile>/config.yaml`을 편집하세요. 설정 변경은 지정하지 않은
+항목(마운트·Docker daemon 설정·Rosetta·provisioning hook)을 보존합니다. TUI의 `v` → `c`로 리소스 설정 명령을 편집할 수 있습니다.
 네이티브 `kubectl edit`는 내부 터미널에서 설치된 편집기를 실행합니다.
 
 ## YAML schema
@@ -90,7 +91,8 @@ alias, anchor, tag, merge key, plain이 아닌 boolean/integer, 잘못된 collec
 특정 workload가 동작한다는 근거는 아닙니다. 예를 들어 Node.js `corepack`은
 `QEMU internal SIGSEGV`(종료 코드 139)로 끝납니다. VM 상태의 `rosetta`는 설정값이며
 실제로 쓰이는 번역기를 나타내지 않습니다. amd64 build와 runtime이 필요하면 VM을
-정지하고 `config.yaml`의 `rosetta`를 `true`로 바꾼 뒤 다시 시작하세요.
+정지하고 `hamn --headless vm configure --profile <name> --rosetta true --yes`를 실행한
+뒤(또는 `config.yaml`의 `rosetta`를 `true`로 바꾼 뒤) 다시 시작하세요.
 
 ## Docker daemon JSON
 

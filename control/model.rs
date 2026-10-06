@@ -39,6 +39,13 @@ pub struct Request {
     pub memory: Option<u32>,
     #[arg(long)]
     pub disk: Option<u32>,
+    #[arg(
+        long,
+        value_name = "BOOL",
+        action = clap::ArgAction::Set,
+        help = "Apple Linux Rosetta translation for vm create and vm configure: true or false"
+    )]
+    pub rosetta: Option<bool>,
     #[arg(long)]
     pub replicas: Option<u32>,
     #[arg(long)]
@@ -173,7 +180,7 @@ impl Request {
     pub fn impact(&self) -> String {
         match self.operation().as_str() {
             "vm create" => "Create a profile and its VM configuration.".into(),
-            "vm configure" => "Change the stopped VM's CPU, memory or disk settings.".into(),
+            "vm configure" => "Change the stopped VM's CPU, memory, disk or Rosetta settings.".into(),
             "vm start" => "Start the VM.".into(),
             "vm stop" => "Stop the VM and interrupt its running containers.".into(),
             "vm delete" => "Stop and remove the profile from active listings. Its disk and Docker data are preserved.".into(),
@@ -264,6 +271,13 @@ impl Request {
         }
         if self.check && self.force {
             return Err(invalid("--check conflicts with --force"));
+        }
+        if self.rosetta.is_some()
+            && !matches!(self.operation().as_str(), "vm create" | "vm configure")
+        {
+            return Err(invalid(
+                "--rosetta is only supported for vm create and vm configure",
+            ));
         }
         if let Some(profile) = &self.profile {
             if profile.is_empty()
@@ -451,6 +465,41 @@ mod tests {
             let help = help.to_string();
             assert!(help.contains("hamn --headless capabilities"), "{help}");
         }
+    }
+    #[test]
+    fn rosetta_takes_a_boolean_and_only_configures_a_profile() {
+        let parse = |operation: &str, value: &str| {
+            Request::try_parse_from([
+                "hamn",
+                "--headless",
+                "vm",
+                operation,
+                "--profile",
+                "work",
+                "--yes",
+                "--rosetta",
+                value,
+            ])
+        };
+        for operation in ["create", "configure"] {
+            assert_eq!(parse(operation, "true").unwrap().rosetta, Some(true));
+            let off = parse(operation, "false").unwrap();
+            assert!(off.rosetta == Some(false) && off.validate().is_ok());
+            assert!(parse(operation, "maybe").is_err());
+        }
+        for operation in ["start", "stop", "status", "delete"] {
+            let message = parse(operation, "true")
+                .unwrap()
+                .validate()
+                .unwrap_err()
+                .message;
+            assert_eq!(
+                message,
+                "--rosetta is only supported for vm create and vm configure"
+            );
+        }
+        let unset = Request::try_parse_from(["hamn", "--headless", "vm", "list"]).unwrap();
+        assert_eq!(unset.rosetta, None);
     }
     #[test]
     fn failures_never_publish_success_data() {

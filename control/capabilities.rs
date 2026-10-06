@@ -102,6 +102,13 @@ fn operation(name: &str, mutation: bool) -> Value {
             );
         }
     }
+    if matches!(name, "vm create" | "vm configure") {
+        add(
+            "rosetta",
+            json!({"type":"boolean", "description":"Apple Linux Rosetta translation for linux/amd64; omitted keeps the profile's setting (false for a new profile)"}),
+            false,
+        );
+    }
     if name == "vm diagnostics" {
         add(
             "path",
@@ -242,5 +249,14 @@ mod tests {
             vm["arguments"]["properties"]["memory"]["description"],
             "GiB of memory"
         );
+        // Rosetta is a setting of a stopped profile: create and configure only.
+        for op in operations {
+            let name = op["name"].as_str().unwrap();
+            assert_eq!(
+                op["arguments"]["properties"]["rosetta"]["type"] == "boolean",
+                matches!(name, "vm create" | "vm configure"),
+                "{name}"
+            );
+        }
     }
 }

@@ -83,7 +83,9 @@ VM requests require `--profile`, except `vm list`. Docker requests require exact
 one of `--profile` or `--context`. External contexts use Docker CLI authentication
 and transport; `--docker-config` optionally selects its configuration directory.
 They do not query or mutate Hamn profiles. VM create and
-configure accept `--cpu`, `--memory` (GiB), and `--disk` (GiB). `vm diagnostics`
+configure accept `--cpu`, `--memory` (GiB), `--disk` (GiB), and
+`--rosetta <true|false>`; `vm start` accepts the first three. An omitted
+argument keeps the profile's value. `vm diagnostics`
 accepts `--path` for an archive: a ustar file holding `manifest.json`,
 `status.json` (the VM state, `dockerStatus` and `hostFreeMiB` that `vm status`
 reports), `operation.json` (the last operation record, or `null`), and redacted

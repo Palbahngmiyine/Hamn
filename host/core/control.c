@@ -224,9 +224,11 @@ const char *hamn_version(void)
 }
 
 int hamn_control_configure(const char *name, unsigned cpus,
-                           unsigned memory_gib, unsigned disk_gib, int create)
+                           unsigned memory_gib, unsigned disk_gib, int create,
+                           int rosetta)
 {
-    if (!profile_name_valid(name) || memory_gib > UINT_MAX / 1024U)
+    if (!profile_name_valid(name) || memory_gib > UINT_MAX / 1024U ||
+        rosetta < -1 || rosetta > 1)
         return 2;
     struct vm_lifecycle_lock lifecycle;
     if (vm_lifecycle_lock_acquire(name, &lifecycle) != 0)
@@ -263,6 +265,7 @@ int hamn_control_configure(const char *name, unsigned cpus,
     if (cpus) profile.cpus = cpus;
     if (memory_gib) profile.mem_mib = memory_gib * 1024U;
     if (disk_gib) profile.disk_gib = disk_gib;
+    if (rosetta >= 0) profile.rosetta = rosetta;
     if (profile_save(&profile) != 0) {
         logerr("cannot save settings: %s", strerror(errno));
         goto out;

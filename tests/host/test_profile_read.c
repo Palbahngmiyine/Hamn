@@ -34,13 +34,26 @@ int main(void)
     assert(profile_save(&profile) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
     assert(hamn_control_start("../escape", 0, 0, 0) == 2);
-    assert(hamn_control_configure("existing", 2, 2, 0, 0) == 0);
+    assert(hamn_control_configure("existing", 2, 2, 0, 0, -1) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
     assert(profile.cpus == 2 && profile.mem_mib == 2048);
     assert(profile.disk_gib == 60);
-    assert(hamn_control_configure("existing", 0, UINT_MAX, 0, 0) == 2);
+    assert(hamn_control_configure("existing", 0, UINT_MAX, 0, 0, -1) == 2);
     assert(profile_read_existing(&profile, "existing") == 0);
     assert(profile.mem_mib == 2048);
+    /* Rosetta: -1 keeps the setting, 0 and 1 set it, anything else is invalid. */
+    assert(profile.rosetta == 0);
+    assert(hamn_control_configure("existing", 0, 0, 0, 0, 1) == 0);
+    assert(profile_read_existing(&profile, "existing") == 0 && profile.rosetta == 1);
+    assert(hamn_control_configure("existing", 3, 0, 0, 0, -1) == 0);
+    assert(profile_read_existing(&profile, "existing") == 0);
+    assert(profile.rosetta == 1 && profile.cpus == 3);
+    assert(hamn_control_configure("existing", 0, 0, 0, 0, 2) == 2);
+    assert(hamn_control_configure("existing", 0, 0, 0, 0, -2) == 2);
+    assert(profile_read_existing(&profile, "existing") == 0 && profile.rosetta == 1);
+    assert(hamn_control_configure("existing", 2, 0, 0, 0, 0) == 0);
+    assert(profile_read_existing(&profile, "existing") == 0);
+    assert(profile.rosetta == 0 && profile.cpus == 2);
     /* The managed K3s `kubernetes` key was removed: a profile that still has
      * it is rejected rather than read with the key silently dropped. */
     char path[1024];
@@ -80,7 +93,7 @@ int main(void)
     assert(symlink(foreign, root) == 0);
     assert(profile_read_existing(&profile, "existing") == -1);
     assert(hamn_control_query(NULL, &json) == -1);
-    assert(hamn_control_configure("escape", 2, 2, 0, 1) != 0);
+    assert(hamn_control_configure("escape", 2, 2, 0, 1, -1) != 0);
     assert(unlink(root) == 0);
     assert(mkdir(root, 0700) == 0);
     snprintf(config, sizeof(config), "%s/escape", root);
@@ -89,7 +102,7 @@ int main(void)
     assert(unlink(config) == 0);
     snprintf(config, sizeof(config), "%s/.locks", root);
     assert(symlink(foreign, config) == 0);
-    assert(hamn_control_configure("escape", 2, 2, 0, 1) != 0);
+    assert(hamn_control_configure("escape", 2, 2, 0, 1, -1) != 0);
     assert(unlink(config) == 0);
     assert(rmdir(root) == 0);
     assert(rmdir(foreign) == 0); /* No state or lock was created in the target. */
