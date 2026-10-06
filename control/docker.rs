@@ -47,6 +47,39 @@ fn value<T: serde::Serialize>(data: T) -> Result<Value> {
     serde_json::to_value(data).map_err(|e| Failure::new("invalidResponse", e))
 }
 
+/// The `State` members a container mutation reports, under the Engine's names.
+const CONFIRMED_STATE: [&str; 10] = [
+    "Status",
+    "Running",
+    "Paused",
+    "Restarting",
+    "OOMKilled",
+    "Dead",
+    "ExitCode",
+    "Error",
+    "StartedAt",
+    "FinishedAt",
+];
+
+/// Reads back the container a mutation was accepted for and reports its
+/// identity and run state: `{"Id","Name","State"}`. A failed read is an unknown
+/// outcome, not a success. The rest of the inspection is left out on purpose:
+/// the caller asked for a mutation, and `Config.Env`, labels, mounts and
+/// health-check output can hold secrets that a logged response would publish.
+async fn confirmed(docker: &Docker, id: &str) -> Result<Value> {
+    let inspected = value(
+        docker
+            .inspect_container(id, None)
+            .await
+            .map_err(confirmation_failure)?,
+    )?;
+    let state: serde_json::Map<String, Value> = CONFIRMED_STATE
+        .iter()
+        .filter_map(|key| Some(((*key).to_owned(), inspected["State"].get(*key)?.clone())))
+        .collect();
+    Ok(json!({"Id": id, "Name": inspected["Name"], "State": state}))
+}
+
 pub async fn execute(
     request: &Request,
     socket: &str,
@@ -165,12 +198,7 @@ pub async fn execute(
                 .start_container(id, None)
                 .await
                 .map_err(mutation_failure)?;
-            value(
-                docker
-                    .inspect_container(id, None)
-                    .await
-                    .map_err(confirmation_failure)?,
-            )
+            confirmed(&docker, id).await
         }
         Some("stop") => {
             docker
@@ -183,12 +211,7 @@ pub async fn execute(
                 )
                 .await
                 .map_err(mutation_failure)?;
-            value(
-                docker
-                    .inspect_container(id, None)
-                    .await
-                    .map_err(confirmation_failure)?,
-            )
+            confirmed(&docker, id).await
         }
         Some("restart") => {
             docker
@@ -201,12 +224,7 @@ pub async fn execute(
                 )
                 .await
                 .map_err(mutation_failure)?;
-            value(
-                docker
-                    .inspect_container(id, None)
-                    .await
-                    .map_err(confirmation_failure)?,
-            )
+            confirmed(&docker, id).await
         }
         Some("delete") => {
             docker

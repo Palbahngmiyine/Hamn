@@ -189,6 +189,7 @@ fn explicit_docker_context_keeps_the_engine_schema() {
     hamn.set("DOCKER_CONFIG", config);
     let (result, data) = hamn.run(&["containers", "start", "external", "--context", "fixture", "--yes"]);
     assert!(result.success(), "{result:?} {data}");
+    assert_eq!(data["data"], json!({"Id": a64, "Name": "/external", "State": {"Running": true}}));
     let start = format!("/containers/{a64}/start");
     let calls = engine.calls();
     assert!(calls.iter().any(|(method, path)| method == "POST" && path.contains(&start)), "{calls:?}");
