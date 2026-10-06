@@ -84,7 +84,7 @@ impl Engine {
                 "HostConfig": {"Binds": [format!("/{UNREQUESTED}:/data")]},
                 "Mounts": [{"Type": "bind", "Source": format!("/{UNREQUESTED}"), "Destination": "/data"}],
             });
-            if mode.posted {
+            if mode.posted && mode.confirm != 200 {
                 status = mode.confirm;
             }
         } else {
@@ -221,7 +221,27 @@ fn docker_api_without_docker_cli() {
     engine.set(|mode| mode.status = 403);
     let (ok, result) = hamn.run(&["docker", "containers", "list", "--profile", "test"]);
     assert!(!ok && result["error"]["code"] == "permissionDenied", "{result}");
+    // A server error is an answer from a daemon that was reached. A read, and
+    // the name resolution that precedes a mutation, report it as such and
+    // send nothing further.
+    engine.set(|mode| mode.status = 500);
+    let posts = |engine: &Engine| engine.requests().iter().filter(|(method, _)| method == "POST").count();
+    let before = posts(&engine);
+    for arguments in [
+        &["docker", "containers", "list", "--profile", "test"][..],
+        &["docker", "images", "list", "--profile", "test"],
+        &["docker", "containers", "start", "sample", "--profile", "test", "--yes"],
+    ] {
+        let (ok, result) = hamn.run(arguments);
+        let message = result["error"]["message"].as_str().unwrap_or_default();
+        assert!(!ok && result["error"]["code"] == "engineError", "{result}");
+        assert!(message.contains("500") && message.contains("fixture denied"), "{result}");
+    }
+    assert_eq!(posts(&engine), before);
+    // Without a daemon behind the socket there is no answer at all.
     drop(server);
+    let (ok, result) = hamn.run(&["docker", "containers", "list", "--profile", "test"]);
+    assert!(!ok && result["error"]["code"] == "dockerUnavailable", "{result}");
 }
 
 fn serve(socket: &Path, engine: &Arc<Engine>) -> Server {

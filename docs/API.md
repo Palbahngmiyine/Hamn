@@ -16,6 +16,12 @@ Treat error codes as machine-readable; messages are diagnostic text. A nonzero
 process exit means failure. Parse errors and missing-terminal errors also use
 JSON. `--help` and `--version` print text.
 
+Docker operations separate a daemon that failed from one that was not reached.
+`engineError` is a 5xx answer from the Engine to a read or to the name
+resolution before a mutation, for example a storage error: the daemon is
+running and nothing was changed. `dockerUnavailable` means no Engine answer was
+received. A 5xx answer to the mutation request itself is `outcomeUnknown`.
+
 `--watch` repeats queries every two seconds. `--follow` streams Docker container
 or Pod logs. Log queries use NDJSON even without `--follow`. Each NDJSON record
 carries the response fields plus `type` and
