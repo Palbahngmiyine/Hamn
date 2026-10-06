@@ -34,6 +34,7 @@ int main(int argc, char **argv)
         int rc = ssh_forward_cancel_tcp(&p, "127.0.0.1", "127.0.0.1",
             54321, "127.0.0.1", 54321);
         assert(rc == PROC_RUN_TIMEOUT || rc == 255);
+        printf("cancel detail: %s\n", ssh_forward_cancel_detail());
     }
     else {
         assert(strcmp(op, "exec") == 0);

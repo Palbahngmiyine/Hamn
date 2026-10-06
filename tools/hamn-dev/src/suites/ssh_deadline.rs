@@ -27,6 +27,7 @@ pub fn main(filters: &[String]) -> ExitCode {
         }));
     }
     cases.push(case("fresh_master_start_shares_the_total_deadline", fresh_master_start_shares_the_total_deadline));
+    cases.push(case("absent_master_cancel_is_quiet", absent_master_cancel_is_quiet));
     runner::run("ssh-deadline", "real SSH check/exit/start/forward/cancel/exec obey operation deadlines", cases, filters)
 }
 
@@ -55,6 +56,23 @@ fn unresponsive_master(operation: &str, budget: Duration) {
         assert_eq!(text.matches("completion observed failure").count(), 1, "{result:?}");
     }
     server.finish();
+}
+
+/// Cancelling a forward after the master ended with its guest is an expected
+/// outcome, which callers classify from the result. The real client's
+/// complaint about the missing control socket must not reach the user's
+/// stderr; it stays available to a caller that reports a real failure.
+fn absent_master_cancel_is_quiet() {
+    let binary = binary();
+    let directory = TempDir::new("hamn-ssh-");
+    let result = bounded_process::output(
+        Command::new(&binary).arg(directory.path()).arg("cancel").env("PATH", "/usr/bin:/bin"),
+        Duration::from_secs(9),
+    );
+    assert_eq!(result.status.code(), Some(0), "{result:?}");
+    assert!(result.stderr.is_empty(), "{result:?}");
+    let detail = String::from_utf8_lossy(&result.stdout);
+    assert!(detail.lines().any(|line| line.starts_with("cancel detail: ") && line.ends_with("ssh.sock): No such file or directory")), "{result:?}");
 }
 
 /// A fresh-master attempt must share the total deadline, including
