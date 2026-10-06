@@ -79,5 +79,10 @@ int ssh_forward_add_tcp_observed(const struct profile *p, const char *ip,
 int ssh_forward_cancel_tcp(const struct profile *p, const char *ip,
                            const char *bind_address, unsigned local_port,
                            const char *remote_address, unsigned remote_port);
+/* Cancel requests print nothing. This is the ssh client's one-line output for
+ * the most recent cancel that failed, and "" after one that succeeded: a
+ * static string, valid until the next cancel in this single-threaded process.
+ * A caller reports it only when the failure is not an expected outcome. */
+const char *ssh_forward_cancel_detail(void);
 
 #endif

@@ -781,8 +781,10 @@ static int stop_record(const struct profile *p, const char *guest_ip,
             "127.0.0.1", record->spec.host_port) == 0;
         if (!cancelled && ssh_master_alive(p) == 0 &&
             !tcp_listener_available(&record->spec)) {
-            logerr("cannot stop TCP forward on %s:%u",
-                   record->spec.host_ip, record->spec.host_port);
+            const char *detail = ssh_forward_cancel_detail();
+            logerr("cannot stop TCP forward on %s:%u%s%s",
+                   record->spec.host_ip, record->spec.host_port,
+                   detail[0] ? ": " : "", detail);
             return -1;
         }
         return 0;
