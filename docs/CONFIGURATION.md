@@ -113,6 +113,30 @@ inside the canonical `$HOME`; a source outside `$HOME` must remain read-only.
 Hamn does not automatically mount the SSH agent into containers, including
 when `sshAgent` is enabled.
 
+A container can bind-mount only the host paths that the VM shares: `$HOME`
+while `mountHome` is true, and each `mounts` entry at its `mountPoint`. The
+Docker daemon resolves a bind source inside the guest, and Hamn does not see
+the requests that external Docker tools send to the profile socket, so a path
+outside the shares is not rejected:
+
+- `docker run -v /private/tmp/data:/data` succeeds with an empty `/data`. The
+  daemon creates the missing source directory in the guest, and the command
+  can exit 0 without having read a single host file.
+- `docker run --mount type=bind,source=/private/tmp/data,target=/data` fails
+  with `bind source path does not exist`, unless an earlier `-v` already
+  created that directory in the guest.
+
+To use a directory outside `$HOME`, add it as a read-only mount whose
+`mountPoint` is the path you pass to Docker. `location` must be the canonical
+path, for example `/private/tmp/...` rather than the `/tmp` symlink:
+
+```yaml
+mounts:
+  - location: "/private/tmp/build-input"
+    mountPoint: "/tmp/build-input"
+    writable: false
+```
+
 `mountInotify` is off by default. When enabled, Hamn watches writable host
 shares with macOS FSEvents and asks the guest agent to refresh the timestamp of
 the corresponding existing regular file. This produces Linux `IN_ATTRIB` and

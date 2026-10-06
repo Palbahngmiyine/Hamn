@@ -110,6 +110,29 @@ false이며 mountPoint는 서로 달라야 합니다. Launch 전에 Hamn은 host
 $HOME 안에 있어야 하고 $HOME 밖 source는 read-only여야 합니다. sshAgent를
 활성화해도 SSH agent socket을 container에 자동 mount하지 않습니다.
 
+Container가 bind mount할 수 있는 host path는 VM이 공유하는 경로뿐입니다.
+`mountHome`이 true일 때의 `$HOME`과 각 `mounts` 항목의 `mountPoint`입니다.
+Docker daemon은 bind source를 guest 안에서 찾고, Hamn은 외부 Docker 도구가
+프로필 소켓으로 보내는 요청을 보지 못하므로 공유 밖 경로를 거절하지 않습니다.
+
+- `docker run -v /private/tmp/data:/data`는 빈 `/data`로 성공합니다. Daemon이
+  없는 source directory를 guest에 만들기 때문이며, host file을 하나도 읽지
+  않은 명령이 종료 코드 0으로 끝날 수 있습니다.
+- `docker run --mount type=bind,source=/private/tmp/data,target=/data`는
+  `bind source path does not exist`로 실패합니다. 다만 앞선 `-v`가 그
+  directory를 guest에 이미 만들었다면 실패하지 않습니다.
+
+`$HOME` 밖 directory를 쓰려면 Docker에 넘기는 path를 `mountPoint`로 하는
+read-only mount로 추가하세요. `location`은 canonical path여야 합니다. 예를 들어
+symlink인 `/tmp`가 아니라 `/private/tmp/...`입니다.
+
+~~~yaml
+mounts:
+  - location: "/private/tmp/build-input"
+    mountPoint: "/tmp/build-input"
+    writable: false
+~~~
+
 `mountInotify`는 기본적으로 꺼져 있습니다. 켜면 Hamn은 macOS FSEvents로 writable host
 share를 감시하고 guest agent에게 대응하는 기존 regular file의 timestamp 갱신을 요청합니다.
 file content를 다시 쓰지 않고 Linux `IN_ATTRIB`와 `IN_CLOSE_WRITE` event를 만듭니다. 새 file,
