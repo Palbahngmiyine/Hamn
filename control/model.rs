@@ -215,14 +215,18 @@ impl Request {
             && self.operation() != "vm list"
             && self.profile.is_none()
         {
-            return Err(invalid("an explicit --profile is required"));
+            return Err(invalid(
+                "an explicit --profile is required; list profiles with: hamn --headless vm list",
+            ));
         }
         if self.words.first().is_some_and(|word| word == "docker")
             && (self.profile.is_some() == self.context.is_some())
         {
-            return Err(invalid(
-                "Docker requires exactly one explicit --profile or --context",
-            ));
+            return Err(invalid(if self.profile.is_some() {
+                "Docker requires exactly one explicit --profile or --context"
+            } else {
+                "Docker requires exactly one explicit --profile or --context; list profiles with: hamn --headless vm list"
+            }));
         }
         if self.docker_config.is_some()
             && (!self.words.first().is_some_and(|word| word == "docker") || self.context.is_none())
@@ -396,6 +400,36 @@ mod tests {
                 "unknown operation; use --headless capabilities"
             );
         }
+    }
+    #[test]
+    fn a_missing_target_names_the_profile_listing() {
+        for arguments in [
+            &["hamn", "--headless", "vm", "status"][..],
+            &["hamn", "--headless", "vm", "start", "--yes"],
+            &["hamn", "--headless", "docker", "containers", "list"],
+        ] {
+            let message = rejection(arguments);
+            assert!(
+                message.contains("--profile") && message.ends_with("hamn --headless vm list"),
+                "{message}"
+            );
+        }
+        // Naming both Docker targets is not a missing profile.
+        let both = rejection(&[
+            "hamn",
+            "--headless",
+            "docker",
+            "containers",
+            "list",
+            "--profile",
+            "work",
+            "--context",
+            "remote",
+        ]);
+        assert_eq!(
+            both,
+            "Docker requires exactly one explicit --profile or --context"
+        );
     }
     #[test]
     fn failures_never_publish_success_data() {
