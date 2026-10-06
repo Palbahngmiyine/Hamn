@@ -15,6 +15,12 @@ TUI는 초기값 `default`인 자체 선택을 유지합니다. 공개 API에는
 프로필 이름에는 영문자, 숫자, _, -만 쓸 수 있습니다. cache, ., ..은 유효한
 프로필 이름이 아닙니다.
 
+`vm delete`는 VM을 정지하고 프로필을 목록에서 빼지만 `~/.hamn/<profile>/`과 그 안의
+`disk.img`, Docker 데이터는 남깁니다. 그 뒤 같은 이름의 `vm create`는
+`profile already exists`로 거절됩니다. 프로필 하나의 디스크만 버리는 연산은 없고
+`system uninstall`은 모든 프로필과 디스크를 지웁니다. 빈 디스크에서 시작하려면 새
+이름으로 프로필을 만드세요.
+
 `~/.hamn/<profile>/config.yaml`은 프로필 설정 파일입니다. TUI 기본 작업 영역은
 별도 `~/.hamn/tui.json`에 저장합니다. [TUI 환경설정](TUI.ko.md)을 참고하세요. 이 파일은 mode 0600으로
 atomic write됩니다. runtime=containerd 또는 runtime=hamn이 있는 legacy hamn.conf는
