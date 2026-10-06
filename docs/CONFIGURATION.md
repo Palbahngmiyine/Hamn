@@ -254,6 +254,15 @@ export TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal
 Docker CLI, Compose, buildx, and SDK clients share the public Docker socket.
 There is no public containerd socket.
 
+`docker cp -` applies the extended attributes that a tar stream carries, and
+the guest filesystem refuses macOS attributes. A stream written by macOS `tar`
+fails with `lsetxattr ...: xattr "com.apple.provenance": operation not
+supported`. Write the stream without them:
+
+```sh
+COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -cf - dir | docker cp - container:/
+```
+
 
 ## Upgrade checks and artifact caches
 

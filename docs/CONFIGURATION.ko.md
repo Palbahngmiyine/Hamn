@@ -243,6 +243,15 @@ export TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal
 Docker CLI·Compose·buildx·SDK는 같은 Docker 소켓을 사용합니다.
 공개 containerd 소켓은 제공하지 않습니다.
 
+`docker cp -`는 tar stream에 실린 확장 속성을 그대로 적용하는데, guest 파일시스템은
+macOS 속성을 받지 않습니다. macOS `tar`로 만든 stream은
+`lsetxattr ...: xattr "com.apple.provenance": operation not supported`로 실패합니다.
+속성 없이 stream을 만드세요.
+
+```sh
+COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -cf - dir | docker cp - container:/
+```
+
 
 ## 업그레이드 확인과 파일 캐시
 
