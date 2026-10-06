@@ -18,7 +18,8 @@ TUI는 초기값 `default`인 자체 선택을 유지합니다. 공개 API에는
 로그는 `~/.hamn/<profile>/logs/`에 있습니다. `serial.log`는 현재 부팅의 게스트
 콘솔이고, 시작할 때마다 직전 부팅의 콘솔을 `serial.previous.log`로 남깁니다. 그래서
 실패한 시작의 콘솔은 한 번의 재시도까지 보존됩니다. `vmrun.log`와
-`port-observer.log`는 이어 쓰는 파일입니다.
+`port-observer.log`는 이어 쓰는 파일이며, Hamn이 쓰는 줄은 UTC 시각으로 시작하고 SSH
+클라이언트가 쓰는 줄에는 시각이 없습니다.
 
 `vm delete`는 VM을 정지하고 프로필을 목록에서 빼지만 `~/.hamn/<profile>/`과 그 안의
 `disk.img`, Docker 데이터는 남깁니다. 그 뒤 같은 이름의 `vm create`는
