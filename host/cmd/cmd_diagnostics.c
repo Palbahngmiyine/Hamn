@@ -20,8 +20,6 @@
 
 #define DIAGNOSTIC_LOG_TAIL_BYTES (128U * 1024U)
 
-const char *vm_live_state(const struct profile *p, char *buf, size_t cap);
-
 struct text_buffer {
     char *data;
     size_t length;
@@ -396,28 +394,51 @@ static int read_log_tail(const struct profile *profile, const char *name,
     return rc;
 }
 
-static char *build_status_json(const struct profile *profile)
+/* The status that `vm status` reports for this profile, so the archive holds
+ * the same answer and not a second derivation. The caller deletes it. */
+static cJSON *query_snapshot(const struct profile *profile)
 {
-    char live[32], context[128];
-    vm_live_state(profile, live, sizeof(live));
-    if (profile_docker_context_name(profile, context, sizeof(context)) != 0)
+    char *text = NULL;
+    if (hamn_control_query(profile->name, &text) != 0)
+        return NULL;
+    cJSON *snapshot = cJSON_Parse(text);
+    hamn_control_free(text);
+    return snapshot;
+}
+
+static char *build_status_json(const struct profile *profile,
+                               const cJSON *snapshot)
+{
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(snapshot, "state");
+    const cJSON *docker_status =
+        cJSON_GetObjectItemCaseSensitive(snapshot, "dockerStatus");
+    const cJSON *host_free =
+        cJSON_GetObjectItemCaseSensitive(snapshot, "hostFreeMiB");
+    if (!cJSON_IsString(state) || !cJSON_IsString(docker_status) ||
+        !(cJSON_IsNumber(host_free) || cJSON_IsNull(host_free)))
         return NULL;
 
     cJSON *root = cJSON_CreateObject();
     cJSON *vm = NULL, *logs = NULL;
-    if (!root || !cJSON_AddNumberToObject(root, "schemaVersion", 1) ||
+    cJSON *free_space = cJSON_Duplicate(host_free, 0);
+    if (!root || !free_space ||
+        !cJSON_AddNumberToObject(root, "schemaVersion", 1) ||
         !cJSON_AddStringToObject(root, "hamnVersion", HAMN_VERSION) ||
         !cJSON_AddStringToObject(root, "profile", profile->name) ||
         !(vm = cJSON_AddObjectToObject(root, "vm")) ||
-        !cJSON_AddStringToObject(vm, "state", live) ||
+        !cJSON_AddStringToObject(vm, "state", state->valuestring) ||
         !cJSON_AddNumberToObject(vm, "cpus", profile->cpus) ||
         !cJSON_AddNumberToObject(vm, "memoryMiB", profile->mem_mib) ||
         !cJSON_AddNumberToObject(vm, "diskGiB", profile->disk_gib) ||
-        !cJSON_AddStringToObject(vm, "dockerContext", context) ||
+        !cJSON_AddStringToObject(vm, "dockerStatus",
+                                 docker_status->valuestring) ||
+        !cJSON_AddItemToObject(root, "hostFreeMiB", free_space) ||
         !(logs = cJSON_AddObjectToObject(root, "logs")) ||
         !cJSON_AddNumberToObject(logs, "tailBytes",
                                 DIAGNOSTIC_LOG_TAIL_BYTES) ||
         !cJSON_AddBoolToObject(logs, "redacted", 1)) {
+        if (free_space && !cJSON_GetObjectItemCaseSensitive(root, "hostFreeMiB"))
+            cJSON_Delete(free_space);
         cJSON_Delete(root);
         return NULL;
     }
@@ -426,7 +447,49 @@ static char *build_status_json(const struct profile *profile)
     return text;
 }
 
-static char *build_manifest_json(void)
+/* The last operation record as `vm status` reports it (`null` when there is
+ * none). Its error text is free-form, so it is redacted like a log line. */
+static char *build_operation_json(const cJSON *snapshot)
+{
+    const cJSON *recorded =
+        cJSON_GetObjectItemCaseSensitive(snapshot, "lastOperation");
+    cJSON *operation = recorded ? cJSON_Duplicate(recorded, 1) :
+        cJSON_CreateNull();
+    if (!operation)
+        return NULL;
+    const cJSON *error = cJSON_GetObjectItemCaseSensitive(operation, "error");
+    if (cJSON_IsString(error) && error->valuestring[0]) {
+        struct text_buffer redacted = { 0 };
+        cJSON *replacement = NULL;
+        if (redact_log_text(error->valuestring, strlen(error->valuestring),
+                            &redacted) == 0 && redacted.data) {
+            while (redacted.length > 0 &&
+                   redacted.data[redacted.length - 1] == '\n')
+                redacted.data[--redacted.length] = '\0';
+            replacement = cJSON_CreateString(redacted.data);
+        }
+        buffer_free(&redacted);
+        if (!replacement ||
+            !cJSON_ReplaceItemInObjectCaseSensitive(operation, "error",
+                                                    replacement)) {
+            cJSON_Delete(replacement);
+            cJSON_Delete(operation);
+            return NULL;
+        }
+    }
+    char *text = cJSON_PrintUnformatted(operation);
+    cJSON_Delete(operation);
+    return text;
+}
+
+struct archive_member {
+    const char *name;
+    const char *data;
+    size_t length;
+};
+
+static char *build_manifest_json(const struct archive_member members[],
+                                 size_t count)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON *files = NULL;
@@ -435,14 +498,17 @@ static char *build_manifest_json(void)
         !cJSON_AddBoolToObject(root, "redacted", 1) ||
         !cJSON_AddStringToObject(root, "collectionPolicy",
                                 "allowlisted metadata and bounded log tails") ||
-        !(files = cJSON_AddArrayToObject(root, "files")) ||
-        !cJSON_AddItemToArray(files, cJSON_CreateString("status.json")) ||
-        !cJSON_AddItemToArray(files,
-                             cJSON_CreateString("logs/serial.log")) ||
-        !cJSON_AddItemToArray(files,
-                             cJSON_CreateString("logs/vmrun.log"))) {
+        !(files = cJSON_AddArrayToObject(root, "files"))) {
         cJSON_Delete(root);
         return NULL;
+    }
+    for (size_t index = 0; index < count; index++) {
+        cJSON *name = cJSON_CreateString(members[index].name);
+        if (!name || !cJSON_AddItemToArray(files, name)) {
+            cJSON_Delete(name);
+            cJSON_Delete(root);
+            return NULL;
+        }
     }
     char *text = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -542,10 +608,9 @@ static void fsync_directory(const char *directory)
     }
 }
 
+/* Writes manifest.json, then every member in order. */
 static int create_archive(const char *path, const char *manifest,
-                          const char *status,
-                          const struct text_buffer *serial,
-                          const struct text_buffer *vmrun,
+                          const struct archive_member members[], size_t count,
                           unsigned long long *size_out)
 {
     char directory[PATH_MAX], temporary[PATH_MAX];
@@ -578,14 +643,14 @@ static int create_archive(const char *path, const char *manifest,
     static const char archive_end[1024];
     if (fchmod(fd, 0600) != 0 ||
         tar_add_file(fd, "manifest.json", manifest, strlen(manifest),
-                     timestamp) != 0 ||
-        tar_add_file(fd, "status.json", status, strlen(status), timestamp) !=
-            0 ||
-        tar_add_file(fd, "logs/serial.log", serial->data, serial->length,
-                     timestamp) != 0 ||
-        tar_add_file(fd, "logs/vmrun.log", vmrun->data, vmrun->length,
-                     timestamp) != 0 ||
-        full_write(fd, archive_end, sizeof(archive_end)) != 0 ||
+                     timestamp) != 0)
+        goto out;
+    for (size_t index = 0; index < count; index++) {
+        if (tar_add_file(fd, members[index].name, members[index].data,
+                         members[index].length, timestamp) != 0)
+            goto out;
+    }
+    if (full_write(fd, archive_end, sizeof(archive_end)) != 0 ||
         fsync(fd) != 0)
         goto out;
 
@@ -663,19 +728,34 @@ int hamn_control_diagnostics(const char *profile_name, const char *requested_pat
         return 1;
     }
 
-    struct text_buffer serial = { 0 }, vmrun = { 0 };
-    char *manifest = NULL, *status = NULL;
+    struct text_buffer serial = { 0 }, vmrun = { 0 }, observer = { 0 };
+    char *manifest = NULL, *status = NULL, *operation = NULL;
+    cJSON *snapshot = NULL;
     int rc = 1;
     if (read_log_tail(&profile, "serial.log", &serial) != 0 ||
         read_log_tail(&profile, "vmrun.log", &vmrun) != 0 ||
-        !(manifest = build_manifest_json()) ||
-        !(status = build_status_json(&profile))) {
+        read_log_tail(&profile, "port-observer.log", &observer) != 0 ||
+        !(snapshot = query_snapshot(&profile)) ||
+        !(status = build_status_json(&profile, snapshot)) ||
+        !(operation = build_operation_json(snapshot))) {
+        logerr("cannot build redacted diagnostic data");
+        goto out;
+    }
+    const struct archive_member members[] = {
+        { "status.json", status, strlen(status) },
+        { "operation.json", operation, strlen(operation) },
+        { "logs/serial.log", serial.data, serial.length },
+        { "logs/vmrun.log", vmrun.data, vmrun.length },
+        { "logs/port-observer.log", observer.data, observer.length },
+    };
+    size_t member_count = sizeof(members) / sizeof(members[0]);
+    if (!(manifest = build_manifest_json(members, member_count))) {
         logerr("cannot build redacted diagnostic data");
         goto out;
     }
 
     unsigned long long archive_size = 0;
-    if (create_archive(path, manifest, status, &serial, &vmrun,
+    if (create_archive(path, manifest, members, member_count,
                        &archive_size) != 0) {
         logerr("cannot create diagnostic archive %s: %s", path,
                strerror(errno));
@@ -707,7 +787,10 @@ int hamn_control_diagnostics(const char *profile_name, const char *requested_pat
 out:
     cJSON_free(manifest);
     cJSON_free(status);
+    cJSON_free(operation);
+    cJSON_Delete(snapshot);
     buffer_free(&serial);
     buffer_free(&vmrun);
+    buffer_free(&observer);
     return rc;
 }

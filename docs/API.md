@@ -79,7 +79,11 @@ one of `--profile` or `--context`. External contexts use Docker CLI authenticati
 and transport; `--docker-config` optionally selects its configuration directory.
 They do not query or mutate Hamn profiles. VM create and
 configure accept `--cpu`, `--memory` (GiB), and `--disk` (GiB). `vm diagnostics`
-accepts `--path` for an archive. `system upgrade` accepts
+accepts `--path` for an archive: a ustar file holding `manifest.json`,
+`status.json` (the VM state, `dockerStatus` and `hostFreeMiB` that `vm status`
+reports), `operation.json` (the last operation record, or `null`), and redacted
+tails of `logs/serial.log`, `logs/vmrun.log` and `logs/port-observer.log`.
+`system upgrade` accepts
 `--manifest`, `--check` (read-only, no `--yes` required), and `--force`
 (same-version reinstall, still requires `--yes`). `--check` conflicts with `--force`.
 Use `hamn --headless system upgrade --help` for upgrade-specific usage and recovery.
