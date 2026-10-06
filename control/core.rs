@@ -12,12 +12,14 @@ unsafe extern "C" {
     fn hamn_control_query(profile: *const libc::c_char, result: *mut *mut libc::c_char) -> i32;
     fn hamn_control_free(result: *mut libc::c_char);
     fn hamn_control_start(profile: *const libc::c_char, cpu: u32, memory: u32, disk: u32) -> i32;
+    // rosetta: 1 or 0 sets the profile's setting, -1 keeps it.
     fn hamn_control_configure(
         profile: *const libc::c_char,
         cpu: u32,
         memory: u32,
         disk: u32,
         create: i32,
+        rosetta: i32,
     ) -> i32;
     fn hamn_control_stop(profile: *const libc::c_char) -> i32;
     fn hamn_control_delete(profile: *const libc::c_char) -> i32;
@@ -134,6 +136,7 @@ fn execute(request: &Request) -> Result<Value> {
                 memory,
                 disk,
                 i32::from(operation == "vm create"),
+                request.rosetta.map_or(-1, i32::from),
             ),
             "vm stop" => hamn_control_stop(pointer),
             "vm delete" => hamn_control_delete(pointer),

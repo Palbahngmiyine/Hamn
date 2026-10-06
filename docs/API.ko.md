@@ -78,7 +78,8 @@ VM 작업은 `vm list`를 제외하고 `--profile`이 필요합니다. Docker는
 `--context` 중 정확히 하나를 지정합니다. 외부 context는 Docker CLI의 인증·전송을
 사용하며 `--docker-config`로 설정 디렉터리를 지정할 수 있습니다. 이 경로는 Hamn
 프로필 조회·변경을 수행하지 않습니다. 생성·설정은
-`--cpu`, `--memory`(GiB), `--disk`(GiB)를 받습니다. `vm diagnostics`의 `--path`는
+`--cpu`, `--memory`(GiB), `--disk`(GiB), `--rosetta <true|false>`를 받고 `vm start`는 앞의
+세 가지를 받습니다. 생략한 인자는 프로필의 값을 유지합니다. `vm diagnostics`의 `--path`는
 아카이브 경로입니다. 아카이브는 ustar 파일이며 `manifest.json`, `status.json`(`vm status`가
 보고하는 VM 상태·`dockerStatus`·`hostFreeMiB`), `operation.json`(마지막 작업 기록, 없으면
 `null`), 그리고 가림 처리한 `logs/serial.log`·`logs/serial.previous.log`·`logs/vmrun.log`·

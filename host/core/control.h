@@ -7,8 +7,11 @@ int hamn_control_query(const char *profile, char **result);
 void hamn_control_free(char *result);
 int hamn_control_start(const char *profile, unsigned cpus,
                        unsigned memory_gib, unsigned disk_gib);
+/* A zero resource keeps the profile's value. rosetta is 1 or 0 to set Apple
+ * Linux Rosetta translation, -1 to keep it; any other value is invalid. */
 int hamn_control_configure(const char *profile, unsigned cpus,
-                           unsigned memory_gib, unsigned disk_gib, int create);
+                           unsigned memory_gib, unsigned disk_gib, int create,
+                           int rosetta);
 int hamn_control_stop(const char *profile);
 int hamn_control_delete(const char *profile);
 int hamn_control_diagnostics(const char *profile, const char *path, char **result);
