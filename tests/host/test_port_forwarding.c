@@ -170,6 +170,11 @@ int ssh_forward_cancel_tcp(const struct profile *p, const char *ip,
     return configured_port("FAIL_CANCEL_PORT", local_port) ? -1 : 0;
 }
 
+const char *ssh_forward_add_detail(void)
+{
+    return "";
+}
+
 const char *ssh_forward_cancel_detail(void)
 {
     return "";
