@@ -82,6 +82,15 @@ A resource name can follow the operation or use `--name`. `--uid` prevents
 operating on a replacement Kubernetes object. Scale requires `--replicas`;
 zero is allowed. Pod logs accept `--container` and `--previous`.
 
+`docker containers start`, `stop` and `restart` return the state they read back
+after the Engine accepted the request, under the Engine's key names:
+`{"Id":"...","Name":"/...","State":{...}}`. `State` holds `Status`, `Running`,
+`Paused`, `Restarting`, `OOMKilled`, `Dead`, `ExitCode`, `Error`, `StartedAt`
+and `FinishedAt`, each when the Engine reports it. The rest of the inspection,
+such as `Config.Env`, is not returned; use `docker containers inspect` for the
+full Engine object. If the state cannot be read back the result is
+`outcomeUnknown`. `docker containers delete` returns `{"deleted":true,"id":"..."}`.
+
 All headless mutations require `--yes`; TUI VM confirmation supplies it after approval.
 Typed native CLI commands retain their own confirmation and output semantics.
 Mutations cannot use `--watch`, `--follow`, or `--all-namespaces`.

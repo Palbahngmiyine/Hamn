@@ -78,6 +78,15 @@ Kubernetes는 context 목록을 제외하고 `--context`가 필요합니다. 네
 객체에 대한 조작을 방지합니다. 스케일에는 `--replicas`가 필요하고 0도 허용합니다.
 Pod 로그에는 `--container`·`--previous`를 사용할 수 있습니다.
 
+`docker containers start`, `stop`, `restart`는 Engine이 요청을 받아들인 뒤 다시 읽은
+상태를 Engine의 키 이름 그대로 반환합니다: `{"Id":"...","Name":"/...","State":{...}}`.
+`State`에는 `Status`, `Running`, `Paused`, `Restarting`, `OOMKilled`, `Dead`,
+`ExitCode`, `Error`, `StartedAt`, `FinishedAt` 가운데 Engine이 보고한 것만 담깁니다.
+`Config.Env` 같은 inspect의 나머지 내용은 반환하지 않습니다. Engine 객체 전체가
+필요하면 `docker containers inspect`를 쓰세요. 상태를 다시 읽지 못하면 결과는
+`outcomeUnknown`입니다. `docker containers delete`는 `{"deleted":true,"id":"..."}`를
+반환합니다.
+
 모든 헤드리스 변경에는 `--yes`가 필요하며 TUI VM 제어는 확인 후 이를 전달합니다.
 입력한 네이티브 CLI 명령은 자체 확인·출력 의미를 유지합니다. 변경에는
 `--watch`, `--follow`, `--all-namespaces`를 사용할 수 없습니다.

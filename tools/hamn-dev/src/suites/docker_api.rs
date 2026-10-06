@@ -1,6 +1,7 @@
 //! The embedded Docker client against a fake Engine on the profile's Unix
-//! socket, with no Docker CLI on PATH: listing, guarded mutations, framed
-//! log streams split inside a UTF-8 character, and error classification.
+//! socket, with no Docker CLI on PATH: listing, guarded mutations and what
+//! they report, framed log streams split inside a UTF-8 character, and error
+//! classification.
 use crate::runner::{self, case};
 use crate::support::api_fixtures::{self, Completed, MkdTemp, py_json};
 use crate::support::hamn;
@@ -32,7 +33,15 @@ struct Engine {
 struct Mode {
     status: u16,
     post: u16,
+    /// The status of a container inspection that follows a POST.
+    confirm: u16,
+    /// A POST has been answered since `confirm` was last set.
+    posted: bool,
 }
+
+/// A value that only the fake inspection carries, in every part of it that a
+/// mutation must not repeat.
+const UNREQUESTED: &str = "dummy-not-a-secret";
 
 impl Engine {
     fn set(&self, change: impl FnOnce(&mut Mode)) {
@@ -47,7 +56,12 @@ impl Engine {
     /// the connection closes after the response.
     fn answer(&self, method: &str, target: &str) -> Vec<u8> {
         self.requests.lock().unwrap().push((method.to_owned(), target.to_owned()));
-        let mode = *self.mode.lock().unwrap();
+        let mode = {
+            let mut mode = self.mode.lock().unwrap();
+            let before = *mode;
+            mode.posted |= method == "POST";
+            before
+        };
         let path = strip_api_version(target).split('?').next().unwrap_or("");
         let mut status = mode.status;
         let mut data;
@@ -56,7 +70,23 @@ impl Engine {
         } else if path == "/containers/json" {
             data = json!([{"Id": "abc123", "Names": ["/sample"], "State": "running"}]);
         } else if path.ends_with("/json") {
-            data = json!({"Id": "abc123", "Name": "/sample", "State": {"Running": true}});
+            data = json!({
+                "Id": "abc123",
+                "Name": "/sample",
+                "State": {
+                    "Status": "running",
+                    "Running": true,
+                    "ExitCode": 0,
+                    "StartedAt": "2026-10-06T00:00:00Z",
+                    "Health": {"Status": "healthy", "Log": [{"ExitCode": 0, "Output": UNREQUESTED}]},
+                },
+                "Config": {"Env": [format!("PROBE_SECRET={UNREQUESTED}")], "Cmd": ["sleep", UNREQUESTED], "Labels": {"owner": UNREQUESTED}},
+                "HostConfig": {"Binds": [format!("/{UNREQUESTED}:/data")]},
+                "Mounts": [{"Type": "bind", "Source": format!("/{UNREQUESTED}"), "Destination": "/data"}],
+            });
+            if mode.posted {
+                status = mode.confirm;
+            }
         } else {
             (data, status) = (json!({}), if method == "POST" { mode.post } else { 204 });
         }
@@ -125,7 +155,7 @@ fn docker_api_without_docker_cli() {
     let socket = directory.path().join(".hamn/test/docker.sock");
     let engine = Arc::new(Engine {
         requests: Mutex::new(Vec::new()),
-        mode: Mutex::new(Mode { status: 200, post: 204 }),
+        mode: Mutex::new(Mode { status: 200, post: 204, confirm: 200, posted: false }),
         serial: Mutex::new(()),
     });
     let server = serve(&socket, &engine);
@@ -136,6 +166,30 @@ fn docker_api_without_docker_cli() {
     assert!(ok, "{result}");
     let requests = engine.requests();
     assert!(requests.iter().any(|(method, path)| method == "POST" && path.contains("/containers/abc123/start")), "{requests:?}");
+    // A mutation reports the state it confirmed, under the Engine's key names,
+    // and nothing else of the inspection it read for that.
+    for operation in ["start", "stop", "restart"] {
+        let completed = hamn.headless(&["docker", "containers", operation, "sample", "--profile", "test", "--yes"]);
+        assert!(completed.success() && !completed.stdout.contains(UNREQUESTED), "{operation}: {completed:?}");
+        let data = completed.json()["data"].clone();
+        let expected = json!({
+            "Id": "abc123",
+            "Name": "/sample",
+            "State": {"Status": "running", "Running": true, "ExitCode": 0, "StartedAt": "2026-10-06T00:00:00Z"},
+        });
+        assert_eq!(data, expected, "{operation}");
+        let posted = format!("/containers/abc123/{operation}");
+        assert!(engine.requests().iter().any(|(method, path)| method == "POST" && path.contains(&posted)));
+    }
+    // The inspection itself keeps the Engine's format.
+    let (ok, result) = hamn.run(&["docker", "containers", "inspect", "sample", "--profile", "test"]);
+    assert!(ok && result["data"]["Config"]["Env"] == json!([format!("PROBE_SECRET={UNREQUESTED}")]), "{result}");
+    // An accepted mutation whose state cannot be read back is not a success.
+    engine.set(|mode| (mode.confirm, mode.posted) = (500, false));
+    let (ok, result) = hamn.run(&["docker", "containers", "stop", "sample", "--profile", "test", "--yes"]);
+    let message = result["error"]["message"].as_str().unwrap_or_default();
+    assert!(!ok && result["error"]["code"] == "outcomeUnknown" && message.starts_with("mutation accepted; final state could not be read"), "{result}");
+    engine.set(|mode| (mode.confirm, mode.posted) = (200, false));
     let before = engine.requests().len();
     assert!(!hamn.run(&["docker", "containers", "delete", "sample", "--profile", "test"]).0);
     assert_eq!(engine.requests().len(), before);
