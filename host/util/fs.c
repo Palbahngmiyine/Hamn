@@ -248,3 +248,14 @@ int fs_free_mib(const char *path, unsigned long long *mib)
         (unsigned long long)volume.f_bsize / (1024ULL * 1024ULL);
     return 0;
 }
+
+int fs_keep_previous(const char *path, const char *previous)
+{
+    if (!path || !previous) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (rename(path, previous) == 0 || errno == ENOENT)
+        return 0;
+    return -1;
+}

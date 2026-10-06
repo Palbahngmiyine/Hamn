@@ -564,6 +564,14 @@ static int cmd_start_execute(const struct start_options *options,
     }
     vmargv[vmargc] = NULL;
 
+    /* vmrun truncates the serial log. Keep the last boot's console, which
+     * is what explains a start that failed before this one. */
+    char serial_previous[1024];
+    profile_path(&p, "logs/serial.previous.log", serial_previous,
+                 sizeof(serial_previous));
+    if (fs_keep_previous(serial, serial_previous) != 0)
+        logmsg("warning: cannot keep the previous serial log as %s: %s",
+               serial_previous, strerror(errno));
     logmsg("starting vm (cpus=%u memory=%uMiB disk=%uGiB) ...", p.cpus,
            p.mem_mib, p.disk_gib);
     pid_t vmrun_pid = proc_spawn_daemon(vmargv, vmlog);
@@ -660,8 +668,8 @@ static int cmd_start_execute(const struct start_options *options,
     /* 6. ssh (첫 부팅은 cloud-init 사용자 생성까지 대기) */
     logmsg("waiting for ssh ...");
     if (ssh_master_start(&p, ip, 180) != 0) {
-        logerr("ssh did not come up; check %s before retrying: the next "
-               "start overwrites it", serial);
+        logerr("ssh did not come up; check %s (the next start keeps it as "
+               "serial.previous.log)", serial);
         goto rollback;
     }
     start_trace_stage(&trace, "ssh-ready");

@@ -109,6 +109,10 @@ impl Home {
             ),
         );
         private_file(
+            &home.logs().join("serial.previous.log"),
+            &format!("previous boot console kept safely\ntoken: {TOKEN}\n"),
+        );
+        private_file(
             &home.logs().join("port-observer.log"),
             &format!("port observer started safely\ntoken: {TOKEN}\nhamn: cannot bind host tcp port 127.0.0.1:5432\n"),
         );
@@ -202,7 +206,15 @@ fn archive_is_private_complete_and_redacted() {
     members.sort();
     assert_eq!(
         members,
-        ["logs/port-observer.log", "logs/serial.log", "logs/vmrun.log", "manifest.json", "operation.json", "status.json"]
+        [
+            "logs/port-observer.log",
+            "logs/serial.log",
+            "logs/serial.previous.log",
+            "logs/vmrun.log",
+            "manifest.json",
+            "operation.json",
+            "status.json"
+        ]
     );
 
     let extracted = home.path().join("extracted");
@@ -226,6 +238,10 @@ fn archive_is_private_complete_and_redacted() {
     for line in ["vmrun started safely", "vmrun completed after redaction safely"] {
         assert!(has_line(&vmrun, line), "vmrun.log lacks {line:?}: {:?}", lines(&vmrun));
     }
+    let previous = extracted.join("logs/serial.previous.log");
+    for line in ["previous boot console kept safely", "[REDACTED sensitive log line]"] {
+        assert!(has_line(&previous, line), "serial.previous.log lacks {line:?}: {:?}", lines(&previous));
+    }
     let observer = extracted.join("logs/port-observer.log");
     for line in ["port observer started safely", "[REDACTED sensitive log line]", "hamn: cannot bind host tcp port 127.0.0.1:5432"] {
         assert!(has_line(&observer, line), "port-observer.log lacks {line:?}: {:?}", lines(&observer));
@@ -247,7 +263,14 @@ fn archive_is_private_complete_and_redacted() {
     assert_eq!(manifest["collectionPolicy"], "allowlisted metadata and bounded log tails");
     assert_eq!(
         manifest["files"],
-        serde_json::json!(["status.json", "operation.json", "logs/serial.log", "logs/vmrun.log", "logs/port-observer.log"])
+        serde_json::json!([
+            "status.json",
+            "operation.json",
+            "logs/serial.log",
+            "logs/serial.previous.log",
+            "logs/vmrun.log",
+            "logs/port-observer.log"
+        ])
     );
 }
 
