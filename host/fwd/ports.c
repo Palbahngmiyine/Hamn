@@ -847,13 +847,35 @@ enum forward_failure {
 
 #define FORWARD_DETAIL_CAP 256
 
-/* `failure`, when given, receives why the host listener could not be created
+static void records_remove(struct forward_record records[], int *count,
+                           int index)
+{
+    memmove(&records[index], &records[index + 1],
+            (size_t)(*count - index - 1) * sizeof(records[0]));
+    (*count)--;
+}
+
+/* Creates the host listener for `spec` and leaves its record pending for the
+ * caller to commit. A record that already claims the listener refuses the
+ * request, with one exception.
+ *
+ * With `adopt_unconfirmed`, a pending TCP record of this exact forward is
+ * taken over instead: it says that a control request was reserved or sent,
+ * not that the listener exists. The request is sent again under this
+ * process's ownership. The SSH master answers a forward it already holds with
+ * success and creates nothing, so success is the master's own statement that
+ * it holds the listener, whichever request created it. A failure is handled
+ * like that of a first request, and the record never leaves the state file
+ * while the outcome is open.
+ *
+ * `failure`, when given, receives why the host listener could not be created
  * and `detail_out` (FORWARD_DETAIL_CAP bytes, optional) what the SSH client
  * said; the caller reports them. Without `failure` the failure is logged
  * here. */
 static int add_forward_under_operation_lock(const struct profile *p,
                                             const char *guest_ip,
                                             const struct port_spec *spec,
+                                            int adopt_unconfirmed,
                                             enum forward_failure *failure,
                                             char *detail_out)
 {
@@ -873,21 +895,27 @@ static int add_forward_under_operation_lock(const struct profile *p,
         logerr("cannot read port forward state");
         goto out;
     }
+    int slot = -1;
     for (int i = 0; i < count; i++) {
-        if (same_listener(&records[i].spec, spec)) {
-            logerr("host %s port %s:%u is already published",
-                   protocol_name(spec->protocol), spec->host_ip,
-                   spec->host_port);
-            goto out;
+        if (!same_listener(&records[i].spec, spec))
+            continue;
+        if (adopt_unconfirmed && slot < 0 && spec->protocol == PORT_TCP &&
+            records[i].pending && same_forward(&records[i].spec, spec)) {
+            slot = i;
+            continue;
         }
-    }
-    if (count >= MAX_FORWARD_RECORDS)
+        logerr("host %s port %s:%u is already published",
+               protocol_name(spec->protocol), spec->host_ip,
+               spec->host_port);
         goto out;
+    }
+    int adopted = slot >= 0;
+    if (!adopted) {
+        if (count >= MAX_FORWARD_RECORDS)
+            goto out;
+        slot = count++;
+    }
 
-    /*
-     * Persist ownership before creating the listener. If the filesystem
-     * cannot reserve recovery state, no host resource is created.
-     */
     struct forward_record record = {
         .spec = *spec,
         .pid = 0,
@@ -899,16 +927,25 @@ static int add_forward_under_operation_lock(const struct profile *p,
         logerr("cannot identify port forward owner process");
         goto out;
     }
-    records[count++] = record;
-    if (records_save(p, records, count) != 0)
-        goto out;
+    if (!adopted) {
+        /*
+         * Persist ownership before creating the listener. If the filesystem
+         * cannot reserve recovery state, no host resource is created. An
+         * adopted record is already reserved and keeps its phase until the
+         * control-request phase below replaces it in one write.
+         */
+        records[slot] = record;
+        if (records_save(p, records, count) != 0)
+            goto out;
 
-    if (spec->protocol == PORT_UDP)
-        udp_reservation_test_barrier();
-    else
-        tcp_reservation_test_barrier();
+        if (spec->protocol == PORT_UDP)
+            udp_reservation_test_barrier();
+        else
+            tcp_reservation_test_barrier();
+    }
 
     int rc;
+    int cancelled = 0;
     if (spec->protocol == PORT_TCP) {
         /*
          * A killed wrapper or failed SSH response may leave the master request
@@ -918,7 +955,7 @@ static int add_forward_under_operation_lock(const struct profile *p,
          */
         record.submitted = 0;
         record.serialized = 1;
-        records[count - 1] = record;
+        records[slot] = record;
         if (records_save(p, records, count) != 0)
             goto out;
         struct tcp_control_completion completion = {
@@ -949,31 +986,36 @@ static int add_forward_under_operation_lock(const struct profile *p,
                      "");
         }
         if (spec->protocol == PORT_TCP) {
-            int cancelled = ssh_forward_cancel_tcp(
+            cancelled = ssh_forward_cancel_tcp(
                 p, guest_ip, spec->host_ip, spec->host_port, "127.0.0.1",
                 spec->host_port) == 0;
             int absent = cancelled ||
                 (ssh_master_alive(p) != 0 && tcp_listener_available(spec));
             if (absent) {
-                if (records_save(p, records, count - 1) != 0)
+                records_remove(records, &count, slot);
+                if (records_save(p, records, count) != 0)
                     logerr("cannot remove failed TCP forward state");
             } else {
-                records[count - 1] = record;
+                records[slot] = record;
                 if (records_save(p, records, count) != 0)
                     logerr("cannot persist uncertain TCP forward state");
             }
         } else if (rc == UDP_START_UNSAFE) {
-            records[count - 1] = record;
+            records[slot] = record;
             if (records_save(p, records, count) != 0)
                 logerr("cannot persist uncertain UDP forward identity");
-        } else if (records_save(p, records, count - 1) != 0) {
-            logerr("cannot remove reserved port forward state");
+        } else {
+            records_remove(records, &count, slot);
+            if (records_save(p, records, count) != 0)
+                logerr("cannot remove reserved port forward state");
         }
-        /* After the failed request was cancelled, a host port that still
-         * cannot be bound belongs to another process. */
-        if (failure && !(spec->protocol == PORT_TCP ?
-                         tcp_listener_available(spec) :
-                         udp_listener_available(spec)))
+        /* A host port that still cannot be bound belongs to another process
+         * only once the master answered the cancel: then it holds no such
+         * forward. While the cancel is unanswered, the master itself may hold
+         * the port, and the holder is not named. */
+        if (failure && (spec->protocol == PORT_TCP ?
+                        cancelled && !tcp_listener_available(spec) :
+                        !udp_listener_available(spec)))
             *failure = FORWARD_FAILURE_HOST_PORT_IN_USE;
         goto out;
     }
@@ -989,12 +1031,15 @@ static int add_forward_under_operation_lock(const struct profile *p,
         record.serialized = 0;
         tcp_added_test_barrier();
     } else {
-        records[count - 1] = record;
+        records[slot] = record;
         if (records_save(p, records, count) != 0) {
-            if (stop_record(p, guest_ip, &record) != 0)
+            if (stop_record(p, guest_ip, &record) != 0) {
                 logerr("cannot roll back uncommitted UDP forward");
-            else if (records_save(p, records, count - 1) != 0)
-                logerr("cannot remove reserved port forward state");
+            } else {
+                records_remove(records, &count, slot);
+                if (records_save(p, records, count) != 0)
+                    logerr("cannot remove reserved port forward state");
+            }
             goto out;
         }
     }
@@ -1009,7 +1054,7 @@ static int port_forward_add_under_operation_lock(const struct profile *p,
                                                  const char *guest_ip,
                                                  const struct port_spec *spec)
 {
-    return add_forward_under_operation_lock(p, guest_ip, spec, NULL, NULL);
+    return add_forward_under_operation_lock(p, guest_ip, spec, 0, NULL, NULL);
 }
 
 int port_forward_add_serialized(const struct profile *p, const char *guest_ip,
@@ -1161,9 +1206,7 @@ static int remove_under_operation_lock(const struct profile *p,
             }
             if (records[i].spec.protocol == PORT_TCP)
                 tcp_cancelled_test_barrier();
-            memmove(&records[i], &records[i + 1],
-                    (size_t)(count - i - 1) * sizeof(records[0]));
-            count--;
+            records_remove(records, &count, i);
             result = records_save(p, records, count);
             break;
         }
@@ -1732,7 +1775,9 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     if (lock_fd < 0)
         return -1;
     struct forward_record records[MAX_FORWARD_RECORDS];
-    int present[MAX_FORWARD_RECORDS] = {0};
+    /* What the state says about each published port. */
+    enum { SPEC_UNRECORDED, SPEC_FORWARDED, SPEC_UNCONFIRMED };
+    int recorded[MAX_FORWARD_RECORDS] = {0};
     int count = 0;
     int kept = 0;
     int failed = 0;
@@ -1749,11 +1794,23 @@ int port_forward_sync_docker_serialized(const struct profile *p,
                 break;
             }
         }
+        if (desired >= 0 && records[i].pending &&
+            records[i].spec.protocol == PORT_TCP) {
+            /*
+             * A pending TCP record says that a control request was reserved
+             * or sent, not that the master holds the listener: the request
+             * may have failed, or its answer was lost. Committing it here
+             * would end the retries for a port that nothing forwards. The
+             * record stays as it is until the request is sent again below.
+             */
+            recorded[desired] = SPEC_UNCONFIRMED;
+            records[kept++] = records[i];
+            continue;
+        }
         if (desired >= 0) {
-            present[desired] = 1;
+            recorded[desired] = SPEC_FORWARDED;
             if (records[i].pending &&
-                (records[i].spec.protocol != PORT_UDP ||
-                 process_identity(&records[i]) == PROCESS_IDENTITY_MATCH))
+                process_identity(&records[i]) == PROCESS_IDENTITY_MATCH)
                 record_mark_committed(&records[i]);
             else if (records[i].pending) {
                 /* Do not claim an unverified UDP relay is ready. */
@@ -1776,12 +1833,12 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     struct failed_forward failures[MAX_FORWARD_RECORDS];
     int failure_count = 0;
     for (int i = 0; i < spec_count; i++) {
-        if (present[i])
+        if (recorded[i] == SPEC_FORWARDED)
             continue;
         enum forward_failure reason;
         if (add_forward_under_operation_lock(
-                p, guest_ip, &specs[i], &reason,
-                failures[failure_count].detail) != 0) {
+                p, guest_ip, &specs[i], recorded[i] == SPEC_UNCONFIRMED,
+                &reason, failures[failure_count].detail) != 0) {
             failures[failure_count].spec = specs[i];
             failures[failure_count++].reason = reason;
             failed = 1;

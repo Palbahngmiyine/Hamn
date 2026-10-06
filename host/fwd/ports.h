@@ -81,6 +81,13 @@ int port_forward_reconcile_rm_serialized(const struct profile *p,
  * Caller must hold port_forward_operation_lock().  Docker is already the
  * authority for guest publication, so this function only changes host-side
  * listeners and their recovery records.
+ *
+ * A published TCP port is committed only by a forward request that the SSH
+ * master answered with success. A pending TCP record, left by a request that
+ * was reserved or sent without such an answer, is not evidence of a listener:
+ * every call sends its request again, which a master that already holds the
+ * forward answers with success. Until then the call returns -1 and
+ * port_forward_failures() lists the port.
  */
 int port_forward_sync_docker_serialized(const struct profile *p,
                                         const char *guest_ip,
@@ -91,8 +98,10 @@ int port_forward_sync_docker_serialized(const struct profile *p,
  * The published ports that the last Docker synchronization could not forward,
  * as a new JSON array of {"hostIp","hostPort","protocol","reason"}. reason is
  * "hostPortInUse" when another process holds the host port and "forwardFailed"
- * otherwise. The array is empty when there are none and when the profile has
- * no valid record. The caller deletes it; NULL means out of memory.
+ * otherwise, which includes a TCP port that cannot be bound while the SSH
+ * master has not answered whether it holds that port itself. The array is
+ * empty when there are none and when the profile has no valid record. The
+ * caller deletes it; NULL means out of memory.
  *
  * The synchronization writes the record only when the set changes, and logs
  * each change once. It describes the port observer's last pass, so it is
