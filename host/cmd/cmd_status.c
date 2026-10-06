@@ -20,8 +20,7 @@ const char *vm_live_state(const struct profile *p, char *buf, size_t cap)
     profile_path(p, "vmrun.sock", ctl, sizeof(ctl));
     enum vm_process_state process_state = vm_process_probe(p, NULL);
     if (process_state == VM_PROCESS_VERIFIED &&
-        ctlsock_query(ctl, "{\"cmd\":\"status\"}", resp, sizeof(resp),
-                      300) == 0) {
+        ctlsock_query_status(ctl, resp, sizeof(resp), 300) == 0) {
         const char *k = strstr(resp, "\"state\":\"");
         if (k) {
             k += 9;

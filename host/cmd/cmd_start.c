@@ -160,8 +160,7 @@ static int wait_vmrun_running(const struct profile *p, const char *ctl,
 {
     char resp[256];
     for (int i = 0; i < timeout_sec * 2; i++) {
-        if (ctlsock_query(ctl, "{\"cmd\":\"status\"}", resp, sizeof(resp),
-                          300) == 0 &&
+        if (ctlsock_query_status(ctl, resp, sizeof(resp), 300) == 0 &&
             strstr(resp, "\"running\"") && vm_running_pid(p) > 0)
             return 0;
         usleep(500 * 1000);
