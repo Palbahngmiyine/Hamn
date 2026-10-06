@@ -60,6 +60,9 @@ const DRIVER_CASES: &[(&str, Test)] = &[
         docker_sync_commits_listeners_and_rejects_an_ambiguous_snapshot,
     ),
     ("sync_records_unforwarded_ports_and_logs_each_change_once", sync_records_unforwarded_ports_and_logs_each_change_once),
+    ("sync_retries_an_unanswered_tcp_request_until_it_succeeds", sync_retries_an_unanswered_tcp_request_until_it_succeeds),
+    ("sync_does_not_take_another_process_listener_for_its_own", sync_does_not_take_another_process_listener_for_its_own),
+    ("sync_commits_a_pending_tcp_record_only_on_the_master_answer", sync_commits_a_pending_tcp_record_only_on_the_master_answer),
     ("watch_names_an_unreadable_container_list_once", watch_names_an_unreadable_container_list_once),
     ("late_owned_completion_leaves_the_replacement_record", late_owned_completion_leaves_the_replacement_record),
     ("serialized_reconcile_keeps_a_live_foreign_generation", serialized_reconcile_keeps_a_live_foreign_generation),
@@ -507,6 +510,16 @@ fn committed_tcp(port: u16, container_port: u16) -> String {
     format!("tcp\t127.0.0.1\t{port}\t{container_port}\t0\t0\t0\tcommitted\t0\t0\t0")
 }
 
+/// The unforwarded published ports that VM status reports for the profile.
+fn failures(profile: &Profile) -> serde_json::Value {
+    serde_json::from_slice(&profile.ok(&["failures"]).stdout).expect("a JSON array of failures")
+}
+
+/// What `failures` reports for one unforwarded 127.0.0.1 TCP port.
+fn unforwarded_tcp(port: u16, reason: &str) -> serde_json::Value {
+    serde_json::json!([{"hostIp": "127.0.0.1", "hostPort": port, "protocol": "tcp", "reason": reason}])
+}
+
 fn docker_snapshot_sync_and_revocation(driver: &Driver) {
     // The driver serves a fixture Engine on PROFILE/docker.sock, syncs one
     // snapshot (TCP 48250 and UDP 48251) through the observer, checks the
@@ -595,9 +608,6 @@ fn sync_records_unforwarded_ports_and_logs_each_change_once(driver: &Driver) {
     // and why, keeps forwarding the others, and stays silent while nothing
     // changes: the observer repeats the same snapshot twice a second.
     let profile = Profile::new(driver);
-    let failures = |profile: &Profile| -> serde_json::Value {
-        serde_json::from_slice(&profile.ok(&["failures"]).stdout).expect("a JSON array of failures")
-    };
     let logged = |output: &Output| -> Vec<String> {
         String::from_utf8_lossy(&output.stderr).lines().filter(|line| line.contains("published")).map(str::to_owned).collect()
     };
@@ -643,6 +653,122 @@ fn sync_records_unforwarded_ports_and_logs_each_change_once(driver: &Driver) {
     }
     profile.ok(&["sync"]);
     profile.assert_no_state();
+}
+
+fn sync_retries_an_unanswered_tcp_request_until_it_succeeds(driver: &Driver) {
+    // The forward request and its cancel both fail while the SSH master is
+    // alive, so the request can still take effect: the record stays
+    // control-locked. That record says a request was sent, not that a host
+    // listener exists. Every later synchronization sends the request again
+    // and keeps reporting the port, and the record is committed only by a
+    // request that succeeds.
+    let profile = Profile::new(driver);
+    let snapshot = ["sync", "127.0.0.1:48260:80/tcp"];
+    let unanswered = [("FAIL_FORWARD_PORT", "48260"), ("FAIL_CANCEL_PORT", "48260")];
+    for attempt in 1..=2 {
+        let output = profile.fails_with(&unanswered, &snapshot);
+        let record = profile.record(48260);
+        assert!(record.ownership == "control-locked" && record.owner_pid > 1, "attempt {attempt}: {record:?}");
+        assert_eq!(failures(&profile), unforwarded_tcp(48260, "forwardFailed"), "attempt {attempt}");
+        assert_eq!(profile.event_count("add\t127.0.0.1\t48260"), attempt, "attempt {attempt}: {}", profile.events());
+        // The observer repeats this twice a second: only the change is logged.
+        let logged = String::from_utf8_lossy(&output.stderr).into_owned();
+        let expected = if attempt == 1 { "cannot forward published tcp port 127.0.0.1:48260: the forward request failed\n" } else { "" };
+        assert_eq!(logged, expected, "attempt {attempt}");
+    }
+    profile.ok(&snapshot);
+    let record = profile.record(48260);
+    assert!(record.ownership == "committed" && record.has_no_owner(), "{record:?}");
+    assert_eq!(failures(&profile), serde_json::json!([]));
+    assert_eq!(profile.event_count("add\t127.0.0.1\t48260"), 3, "{}", profile.events());
+    // A committed record is not asked about again.
+    profile.ok(&snapshot);
+    assert_eq!(profile.event_count("add\t127.0.0.1\t48260"), 3, "{}", profile.events());
+
+    // An unanswered request for a port that is no longer published is
+    // cancelled instead of sent again.
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
+    profile.fails_with(&unanswered, &snapshot);
+    assert_eq!(profile.record(48260).ownership, "control-locked");
+    let cancels = profile.event_count("cancel\t127.0.0.1\t48260");
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
+    assert_eq!(profile.event_count("add\t127.0.0.1\t48260"), 4, "{}", profile.events());
+    assert_eq!(profile.event_count("cancel\t127.0.0.1\t48260"), cancels + 1, "{}", profile.events());
+    assert_eq!(failures(&profile), serde_json::json!([]));
+}
+
+fn sync_does_not_take_another_process_listener_for_its_own(driver: &Driver) {
+    // A host port that cannot be bound is not evidence of our listener:
+    // another process holds 48261 throughout. While neither the request nor
+    // its cancel is answered, who holds the port is unknown. Once the cancel
+    // is answered the master holds no such forward, so the holder is another
+    // process and nothing remains to resolve.
+    let profile = Profile::new(driver);
+    let holder = std::net::TcpListener::bind("127.0.0.1:48261").expect("bind the host port a container publishes");
+    let snapshot = ["sync", "127.0.0.1:48261:80/tcp"];
+    profile.fails_with(&[("FAIL_FORWARD_PORT", "48261"), ("FAIL_CANCEL_PORT", "48261")], &snapshot);
+    assert_eq!(profile.record(48261).ownership, "control-locked");
+    assert_eq!(failures(&profile), unforwarded_tcp(48261, "forwardFailed"));
+    profile.fails_with(&[("FAIL_FORWARD_PORT", "48261")], &snapshot);
+    profile.assert_no_state();
+    assert_eq!(failures(&profile), unforwarded_tcp(48261, "hostPortInUse"));
+    assert_eq!(profile.event_count("add\t127.0.0.1\t48261"), 2, "{}", profile.events());
+    // The process releases the port and the next pass forwards it.
+    drop(holder);
+    profile.ok(&snapshot);
+    assert_eq!(profile.record(48261).ownership, "committed");
+    assert_eq!(failures(&profile), serde_json::json!([]));
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
+}
+
+fn sync_commits_a_pending_tcp_record_only_on_the_master_answer(driver: &Driver) {
+    // An add that never returned leaves its record as reserved (pending) or
+    // as sent (control-locked), with an owner that is gone. Neither shape is
+    // committed as it stands. The synchronization sends the request once
+    // more: a master that already holds the forward answers with success,
+    // and that answer commits the record. The committed forward recorded
+    // after it is neither asked about nor changed.
+    let profile = Profile::new(driver);
+    let neighbor = committed_tcp(48264, 81);
+    for (port, ownership) in [(48262_u16, "pending"), (48263, "control-locked")] {
+        let specification = format!("127.0.0.1:{port}:80/tcp");
+        let snapshot = ["sync", specification.as_str(), "127.0.0.1:48264:81/tcp"];
+        let added = format!("add\t127.0.0.1\t{port}");
+        let abandoned = format!("tcp\t127.0.0.1\t{port}\t80\t0\t0\t0\t{ownership}\t{IMPOSSIBLE_OWNER}\t1\t1");
+        profile.write_state(&[abandoned.clone(), neighbor.clone()]);
+        profile.ok(&snapshot);
+        let record = profile.record(port);
+        assert!(record.ownership == "committed" && record.has_no_owner(), "{ownership}: {record:?}");
+        assert_eq!(profile.line(48264), neighbor, "{ownership}");
+        assert_eq!(profile.event_count(&added), 1, "{ownership}: {}", profile.events());
+        assert_eq!(failures(&profile), serde_json::json!([]), "{ownership}");
+
+        // Neither the request nor its cancel is answered: the record stays
+        // where it is, owned by the process that asked.
+        let port_text = port.to_string();
+        profile.write_state(&[abandoned.clone(), neighbor.clone()]);
+        profile.fails_with(&[("FAIL_FORWARD_PORT", port_text.as_str()), ("FAIL_CANCEL_PORT", port_text.as_str())], &snapshot);
+        let record = profile.record(port);
+        assert!(record.ownership == "control-locked" && record.owner_pid != IMPOSSIBLE_OWNER, "{ownership}: {record:?}");
+        assert_eq!(profile.lines()[1..], [neighbor.clone()], "{ownership}");
+
+        // The master answers that it holds no such forward: the record goes
+        // and the port is reported until a later pass forwards it.
+        profile.write_state(&[abandoned, neighbor.clone()]);
+        profile.fails_with(&[("FAIL_FORWARD_PORT", port_text.as_str())], &snapshot);
+        assert_eq!(profile.lines(), [neighbor.clone()], "{ownership}");
+        assert_eq!(failures(&profile), unforwarded_tcp(port, "forwardFailed"), "{ownership}");
+        profile.ok(&snapshot);
+        assert_eq!(profile.record(port).ownership, "committed", "{ownership}");
+        assert_eq!(profile.line(48264), neighbor, "{ownership}");
+        assert_eq!(profile.event_count(&added), 4, "{ownership}: {}", profile.events());
+        assert_eq!(profile.event_count("add\t127.0.0.1\t48264"), 0, "{ownership}: {}", profile.events());
+        profile.ok(&["sync"]);
+        profile.assert_no_state();
+    }
 }
 
 fn watch_names_an_unreadable_container_list_once(driver: &Driver) {
