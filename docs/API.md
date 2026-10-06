@@ -43,6 +43,10 @@ VM status retains existing fields and adds `dockerStatus` (`ready`, `preparing`,
 configured sharing/translation settings; `fileEvents` is `disabled` or
 `best-effort-existing-files`, not a full hot-reload guarantee.
 `state:running` describes the VM process only; `ready` requires Docker `/_ping`.
+`hostFreeMiB` is the space available on the volume that holds the profile
+directory, where the sparse VM disk grows; it is null when it cannot be
+measured. Below 10 GiB, `vm start` prints a warning to stderr and continues: a
+full volume makes the guest's Docker store fail with I/O errors.
 `lastOperation` includes `schemaVersion`, `operationId`, `operation`, `status`,
 `phase`, `startedVm`, `exitCode`, and `error`. While running, exit/error may be absent.
 Ownership evidence includes PID, process start time, and executable UUID; PID alone

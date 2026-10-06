@@ -75,6 +75,18 @@ fn has(value: &Value, key: &str) -> bool {
     value.get(key).is_some()
 }
 
+/// The space available to this user on the volume that holds `path`, in MiB.
+fn free_mib(path: &Path) -> u64 {
+    let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: path is a NUL-terminated string and status is writable for one statvfs.
+    let status = unsafe {
+        let mut status: libc::statvfs = std::mem::zeroed();
+        assert_eq!(libc::statvfs(path.as_ptr(), &mut status), 0, "statvfs: {}", std::io::Error::last_os_error());
+        status
+    };
+    (status.f_bavail as u64).saturating_mul(status.f_frsize as u64) / (1024 * 1024)
+}
+
 fn core_worker_isolation_and_protocol() {
     let directory = MkdTemp::new("hamn-worker-");
     let home = directory.path().to_path_buf();
@@ -92,6 +104,11 @@ fn core_worker_isolation_and_protocol() {
     assert_eq!(created["Ok"]["fileEvents"], json!("disabled"), "{created}");
     assert_eq!(created["Ok"]["cpus"], json!(2), "{created}");
     assert_eq!(created["Ok"]["memoryMiB"], json!(2048), "{created}");
+    // The free space of the volume that holds the profile, as this process
+    // measures it a moment later.
+    let reported = created["Ok"]["hostFreeMiB"].as_u64().unwrap_or_else(|| panic!("{created}"));
+    let measured = free_mib(&home);
+    assert!(reported > 0 && reported.abs_diff(measured) < 4096, "{reported} MiB reported, {measured} MiB measured");
     assert_eq!(worker.call("vm create", json!({"profile": "test", "yes": true, "cpu": 10}))["Err"]["code"], json!("conflict"));
     assert_eq!(worker.call("vm status", json!({"profile": "test"}))["Ok"]["cpus"], json!(2));
 

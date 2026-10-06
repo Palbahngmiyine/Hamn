@@ -16,6 +16,7 @@
 #include "core/mutation_lock.h"
 #include "core/profile.h"
 #include "core/state.h"
+#include "util/fs.h"
 
 const char *vm_live_state(const struct profile *, char *, size_t);
 
@@ -45,6 +46,14 @@ static cJSON *profile_snapshot(const char *name)
         !cJSON_AddStringToObject(value, "fileEvents", profile.mount_inotify ?
             "best-effort-existing-files" : "disabled") ||
         !cJSON_AddStringToObject(value, "ip", state.ip)) {
+        cJSON_Delete(value);
+        return NULL;
+    }
+    /* The VM disk is a sparse file on this volume; null when unmeasurable. */
+    unsigned long long host_free_mib = 0;
+    if (!(fs_free_mib(profile.dir, &host_free_mib) == 0 ?
+          cJSON_AddNumberToObject(value, "hostFreeMiB", (double)host_free_mib) :
+          cJSON_AddNullToObject(value, "hostFreeMiB"))) {
         cJSON_Delete(value);
         return NULL;
     }
