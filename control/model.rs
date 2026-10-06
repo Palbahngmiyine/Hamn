@@ -192,7 +192,18 @@ impl Request {
     pub fn validate(&self) -> Result<()> {
         let invalid = |message| Failure::new("invalidRequest", message);
         if !OPERATIONS.iter().any(|(op, _)| *op == self.operation()) {
-            return Err(invalid("unknown operation; use --headless capabilities"));
+            // `vm status work`: a profile-taking VM operation followed by a word.
+            let positional_profile = self.words.len() > 2
+                && self.words[0] == "vm"
+                && self.words[1] != "list"
+                && OPERATIONS
+                    .iter()
+                    .any(|(op, _)| *op == self.words[..2].join(" "));
+            return Err(invalid(if positional_profile {
+                "unknown operation; select the VM profile with --profile <name>, not a positional word"
+            } else {
+                "unknown operation; use --headless capabilities"
+            }));
         }
         if self.timeout == 0 || self.timeout > 3600 || self.tail > 10000 {
             return Err(invalid("timeout must be 1..3600 seconds and tail <= 10000"));
@@ -354,6 +365,37 @@ mod tests {
         assert!(r.validate().is_ok());
         r.profile = Some("../escape".into());
         assert!(r.validate().is_err());
+    }
+    fn rejection(arguments: &[&str]) -> String {
+        let mut request = Request::try_parse_from(arguments).unwrap();
+        request.normalize().unwrap();
+        request.validate().unwrap_err().message
+    }
+    #[test]
+    fn a_positional_vm_profile_is_rejected_with_the_profile_flag() {
+        for arguments in [
+            &["hamn", "--headless", "vm", "status", "work"][..],
+            &["hamn", "--headless", "vm", "start", "work", "--yes"],
+            &["hamn", "--headless", "vm", "status", "work", "extra"],
+        ] {
+            let message = rejection(arguments);
+            assert!(
+                message.starts_with("unknown operation") && message.contains("--profile <name>"),
+                "{message}"
+            );
+        }
+        // Words that follow no profile-taking VM operation keep the registry hint.
+        for arguments in [
+            &["hamn", "--headless", "vm", "resume"][..],
+            &["hamn", "--headless", "vm", "resume", "work"],
+            &["hamn", "--headless", "vm", "list", "work"],
+            &["hamn", "--headless", "docker", "containers", "prune"],
+        ] {
+            assert_eq!(
+                rejection(arguments),
+                "unknown operation; use --headless capabilities"
+            );
+        }
     }
     #[test]
     fn failures_never_publish_success_data() {
