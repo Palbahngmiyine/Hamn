@@ -322,15 +322,18 @@ static int fixture_replace_master_socket(const char *path)
 }
 
 /* Serves `cycles` observer passes, each a container list and an event. The
- * master socket is replaced while the list of pass `replace_at_cycle`
- * (counted from 1, 0 for never) is requested, before that pass looks at it. */
+ * list publishes TCP 48250 on 127.0.0.1, UDP 48251 on all addresses, and UDP
+ * 48252 on 127.0.0.1, which no relay can carry. The master socket is replaced
+ * while the list of pass `replace_at_cycle` (counted from 1, 0 for never) is
+ * requested, before that pass looks at it. */
 static int snapshot_fixture_server(const char *path, int ready_fd,
                                    unsigned cycles, const char *master_socket,
                                    unsigned replace_at_cycle)
 {
     static const char *const bodies[] = {
         "[{\"Id\":\"aaaaaaaaaaaa\",\"Ports\":[{\"IP\":\"127.0.0.1\",\"PrivatePort\":80,\"PublicPort\":48250,\"Type\":\"tcp\"}]},"
-        "{\"Id\":\"bbbbbbbbbbbb\",\"Ports\":[{\"IP\":\"0.0.0.0\",\"PrivatePort\":53,\"PublicPort\":48251,\"Type\":\"udp\"}]}]",
+        "{\"Id\":\"bbbbbbbbbbbb\",\"Ports\":[{\"IP\":\"0.0.0.0\",\"PrivatePort\":53,\"PublicPort\":48251,\"Type\":\"udp\"}]},"
+        "{\"Id\":\"cccccccccccc\",\"Ports\":[{\"IP\":\"127.0.0.1\",\"PrivatePort\":5353,\"PublicPort\":48252,\"Type\":\"udp\"}]}]",
         "{\"Type\":\"container\",\"Action\":\"start\"}",
     };
     static const char *const targets[] = { "GET /containers/json HTTP/1.1" };
@@ -458,17 +461,27 @@ static int inspect_snapshot_fixture(const char *directory)
                                "%s/port-forwards.tsv", directory) >=
             (int)sizeof(state_path))
         return 1;
+    /* The pass counts as synchronized although UDP 48252 is not forwarded:
+     * the watch loop goes on to wait for an event, which the fixture serves,
+     * instead of retrying a pass that cannot change. */
     int synchronized = watch_fixture(&profile, directory, 1, 0) == 0;
     char state[1024] = {0};
     FILE *f = fopen(state_path, "r");
     int state_ok = f && fread(state, 1, sizeof(state) - 1, f) > 0 &&
         fclose(f) == 0 && strstr(state, "tcp\t127.0.0.1\t48250\t80") &&
-        strstr(state, "udp\t0.0.0.0\t48251\t53");
+        strstr(state, "udp\t0.0.0.0\t48251\t53") && !strstr(state, "48252");
+    cJSON *failures = port_forward_failures(&profile);
+    char *reported = failures ? cJSON_PrintUnformatted(failures) : NULL;
+    int reported_ok = reported && strcmp(reported,
+        "[{\"hostIp\":\"127.0.0.1\",\"hostPort\":48252,\"protocol\":\"udp\","
+        "\"reason\":\"udpAddressUnsupported\"}]") == 0;
+    cJSON_free(reported);
+    cJSON_Delete(failures);
     int cleaned = port_forward_cleanup(&profile, "192.0.2.10") == 0 &&
         docker_observer_revoke(&profile) == 0 &&
         docker_observer_sync_once(&profile, "192.0.2.10",
                                   fixture_lease) == 1;
-    return synchronized && state_ok && cleaned ? 0 : 1;
+    return synchronized && state_ok && reported_ok && cleaned ? 0 : 1;
 }
 
 static int parse_count(const char *text, unsigned *count)

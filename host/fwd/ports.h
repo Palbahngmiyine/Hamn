@@ -60,12 +60,22 @@ int port_forward_cleanup(const struct profile *p, const char *guest_ip);
  * port_forward_failures() lists the port. A committed TCP record is trusted
  * until port_forward_unconfirm_tcp_serialized() withdraws that trust.
  *
- * A published UDP port is judged by its relay process on every call. A relay
- * that is gone is replaced by a new one. A record that does not name its
- * relay takes the identity from the relay's pidfile, or counts as gone when
- * there is no pidfile and the host port can be bound. A relay that cannot be
- * verified is never signalled or replaced: the call returns -1 and
- * port_forward_failures() lists the port as "forwardFailed".
+ * A UDP port gets a relay only when it is published on all addresses
+ * (0.0.0.0). The relay sends to the guest's NAT address `guest_ip`, where
+ * Docker in the guest does not listen for a port that is published on one
+ * address, such as the guest's own 127.0.0.1. Such a port gets no host
+ * listener and no record, and a relay that an earlier version recorded for it
+ * is stopped like that of a port that is no longer published.
+ * port_forward_failures() lists the port as "udpAddressUnsupported". This
+ * alone does not make the call return -1: repeating the call cannot forward
+ * the port while it is published as it is.
+ *
+ * A UDP port published on all addresses is judged by its relay process on
+ * every call. A relay that is gone is replaced by a new one. A record that
+ * does not name its relay takes the identity from the relay's pidfile, or
+ * counts as gone when there is no pidfile and the host port can be bound. A
+ * relay that cannot be verified is never signalled or replaced: the call
+ * returns -1 and port_forward_failures() lists the port as "forwardFailed".
  */
 int port_forward_sync_docker_serialized(const struct profile *p,
                                         const char *guest_ip,
@@ -86,12 +96,13 @@ int port_forward_unconfirm_tcp_serialized(const struct profile *p);
 /*
  * The published ports that the last Docker synchronization could not forward,
  * as a new JSON array of {"hostIp","hostPort","protocol","reason"}. reason is
- * "hostPortInUse" when another process holds the host port and "forwardFailed"
- * otherwise, which includes a TCP port that cannot be bound while the SSH
- * master has not answered whether it holds that port itself, and a UDP port
- * whose relay cannot be verified. The array is empty when there are none and
- * when the profile has no valid record. The caller deletes it; NULL means out
- * of memory.
+ * "hostPortInUse" when another process holds the host port,
+ * "udpAddressUnsupported" for a UDP port that is not published on all
+ * addresses, and "forwardFailed" otherwise, which includes a TCP port that
+ * cannot be bound while the SSH master has not answered whether it holds that
+ * port itself, and a UDP port whose relay cannot be verified. The array is
+ * empty when there are none and when the profile has no valid record. The
+ * caller deletes it; NULL means out of memory.
  *
  * The synchronization writes the record only when the set changes, and logs
  * each change once. It describes the port observer's last pass, so it is

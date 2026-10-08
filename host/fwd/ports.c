@@ -359,6 +359,24 @@ static int same_forward(const struct port_spec *a, const struct port_spec *b)
            a->container_port == b->container_port;
 }
 
+/*
+ * Whether a host listener can carry `spec` to the guest. A UDP relay listens
+ * on the published address on the host and sends to the guest's NAT address.
+ * Docker in the guest receives a port that is published on one address on
+ * that address of the guest alone. For 127.0.0.1, the guest's own loopback,
+ * the relay's datagrams find no listener; the guest's NAT address is one that
+ * the host cannot bind. Only a port published on all addresses is received
+ * where the relay sends. A TCP forward is not judged here: it enters the
+ * guest through SSH and connects to the guest's loopback.
+ */
+static int spec_forwardable(const struct port_spec *spec)
+{
+    struct in_addr address;
+    return spec->protocol != PORT_UDP ||
+           (inet_pton(AF_INET, spec->host_ip, &address) == 1 &&
+            address.s_addr == htonl(INADDR_ANY));
+}
+
 static int udp_pidfile(const struct profile *p, const struct port_spec *spec,
                        char *path, size_t cap)
 {
@@ -837,6 +855,7 @@ enum forward_failure {
     FORWARD_FAILURE_HOST_PORT_IN_USE,
     FORWARD_FAILURE_OTHER,
     FORWARD_FAILURE_RELAY_UNVERIFIED, /* reported as FORWARD_FAILURE_OTHER */
+    FORWARD_FAILURE_UDP_ADDRESS_UNSUPPORTED, /* !spec_forwardable() */
 };
 
 #define FORWARD_DETAIL_CAP 256
@@ -1180,7 +1199,25 @@ struct failed_forward {
 static const char *failure_reason(enum forward_failure reason)
 {
     return reason == FORWARD_FAILURE_HOST_PORT_IN_USE ? "hostPortInUse" :
-        "forwardFailed";
+        reason == FORWARD_FAILURE_UDP_ADDRESS_UNSUPPORTED ?
+        "udpAddressUnsupported" : "forwardFailed";
+}
+
+/* What the log says about a published port that is not forwarded. */
+static const char *failure_log_text(enum forward_failure reason)
+{
+    switch (reason) {
+    case FORWARD_FAILURE_HOST_PORT_IN_USE:
+        return "another process holds the host port";
+    case FORWARD_FAILURE_RELAY_UNVERIFIED:
+        return "its relay cannot be verified";
+    case FORWARD_FAILURE_UDP_ADDRESS_UNSUPPORTED:
+        return "a UDP port is forwarded only when it is published on all "
+               "addresses";
+    case FORWARD_FAILURE_OTHER:
+        break;
+    }
+    return "the forward request failed";
 }
 
 static int failed_forward_order(const void *left_item, const void *right_item)
@@ -1284,10 +1321,7 @@ static void failures_publish(const struct profile *p,
         logerr("cannot forward published %s port %s:%u: %s%s%s",
                protocol_name(failures[i].spec.protocol),
                failures[i].spec.host_ip, failures[i].spec.host_port,
-               reason == FORWARD_FAILURE_HOST_PORT_IN_USE ?
-               "another process holds the host port" :
-               reason == FORWARD_FAILURE_RELAY_UNVERIFIED ?
-               "its relay cannot be verified" : "the forward request failed",
+               failure_log_text(reason),
                explained ? ": " : "", explained ? failures[i].detail : "");
     }
     if (count == 0)
@@ -1338,7 +1372,8 @@ cJSON *port_forward_failures(const struct profile *p)
              strcmp(protocol->valuestring, "udp") != 0) ||
             !cJSON_IsString(reason) ||
             (strcmp(reason->valuestring, "hostPortInUse") != 0 &&
-             strcmp(reason->valuestring, "forwardFailed") != 0) ||
+             strcmp(reason->valuestring, "forwardFailed") != 0 &&
+             strcmp(reason->valuestring, "udpAddressUnsupported") != 0) ||
             !(copy = cJSON_CreateObject()) ||
             !cJSON_AddStringToObject(copy, "hostIp", host_ip->valuestring) ||
             !cJSON_AddNumberToObject(copy, "hostPort", host_port->valuedouble) ||
@@ -1391,7 +1426,11 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     for (int i = 0; i < count; i++) {
         int desired = -1;
         for (int candidate = 0; candidate < spec_count; candidate++) {
-            if (same_forward(&records[i].spec, &specs[candidate])) {
+            /* A record of a port that no listener can carry, left by a
+             * version that started a relay for it, is stopped like a record
+             * of a port that is no longer published. */
+            if (same_forward(&records[i].spec, &specs[candidate]) &&
+                spec_forwardable(&specs[candidate])) {
                 desired = candidate;
                 break;
             }
@@ -1454,6 +1493,15 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     close(lock_fd);
 
     for (int i = 0; i < spec_count; i++) {
+        if (!spec_forwardable(&specs[i])) {
+            /* Reported, and not a failure of this call: no later call can
+             * forward the port while it is published as it is. */
+            failures[failure_count].spec = specs[i];
+            failures[failure_count].detail[0] = '\0';
+            failures[failure_count++].reason =
+                FORWARD_FAILURE_UDP_ADDRESS_UNSUPPORTED;
+            continue;
+        }
         if (recorded[i] == SPEC_FORWARDED)
             continue;
         enum forward_failure reason;
