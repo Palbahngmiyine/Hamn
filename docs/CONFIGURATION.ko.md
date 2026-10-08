@@ -199,6 +199,12 @@ Published port는 Docker daemon이 container를 받아들인 뒤에 프로필별
   `portForwardFailures`에는 port가 나타나지 않습니다. 이 한도는 observer의 것이며
   헤드리스 `docker containers list`의 한도가 아닙니다.
 
+Observer는 VM 실행 중에 끊긴 전달도 복구합니다. Published UDP port의 host relay
+process가 끝났으면 다음 동기화에서 새 relay를 시작합니다. 실행 중인 VM에
+`hamn start`로 다시 연결한 뒤에는, 새 SSH 연결에 이전 forward가 하나도 없으므로
+observer가 모든 published TCP port를 다시 요청합니다. Relay를 확인할 수 없는 UDP
+port는 그대로 두고 `portForwardFailures`에 `forwardFailed`로 표시합니다.
+
 Guest Docker network는 host.docker.internal을 resolve합니다. 0.0.1의
 host.hamn.internal alias는 제거되었으므로 host.docker.internal을 사용합니다. Hamn은 host
 /var/run/docker.sock을 건드리지 않습니다.
