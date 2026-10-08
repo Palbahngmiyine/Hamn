@@ -257,8 +257,7 @@ static int apply_evaluate(const struct profile *desired,
             return APPLY_OK;
         }
         if (errno != ENOENT) {
-            logerr("cannot read the configuration of profile %s: %s",
-                   desired->name, reason);
+            logerr(PROFILE_UNREADABLE_FORMAT, desired->name, reason);
             return APPLY_FAILED;
         }
         /* A directory without config.yaml. One that holds nothing, or only

@@ -874,8 +874,10 @@ static int profile_open_config(const struct profile *profile, FILE **file_out,
                                char *reason)
 {
     char path[PROFILE_PATH_CAP];
-    if (!profile_path(profile, PROFILE_CONFIG_FILE, path, sizeof(path)))
+    if (!profile_path(profile, PROFILE_CONFIG_FILE, path, sizeof(path))) {
+        errno = ENAMETOOLONG;
         return -1;
+    }
     /* O_NONBLOCK: a FIFO in place of the file must not make the open wait for
      * a writer; it is refused below as not a regular file. */
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
@@ -925,8 +927,12 @@ int profile_locate(struct profile *profile)
     return 0;
 }
 
-/* reason, when given, receives the cause of a refusal that errno alone does
- * not name; it is left untouched otherwise. */
+/* The profile cannot be read (-1), or with create its directory cannot be
+ * made (PROFILE_UNCREATED): there was no configuration to read yet. reason,
+ * when given, receives the cause of a refusal that errno alone does not name;
+ * it is left untouched otherwise. */
+#define PROFILE_UNCREATED (-2)
+
 static int profile_read(struct profile *profile, const char *name, int create,
                         char *reason)
 {
@@ -944,7 +950,7 @@ static int profile_read(struct profile *profile, const char *name, int create,
         return -1;
     }
     if (create && fs_mkdirs(profile->dir, 0700) != 0)
-        return -1;
+        return PROFILE_UNCREATED;
     {
         struct stat status;
         if (lstat(profile->dir, &status) != 0)
@@ -978,7 +984,7 @@ static int profile_read(struct profile *profile, const char *name, int create,
 
 int profile_load(struct profile *profile, const char *name)
 {
-    return profile_read(profile, name, 1, NULL);
+    return profile_read(profile, name, 1, NULL) == 0 ? 0 : -1;
 }
 
 int profile_read_existing(struct profile *profile, const char *name)
@@ -986,17 +992,65 @@ int profile_read_existing(struct profile *profile, const char *name)
     return profile_read(profile, name, 0, NULL);
 }
 
-int profile_read_existing_reason(struct profile *profile, const char *name,
-                                 char reason[PROFILE_REASON_CAP])
+/* profile_read with a reason for every failure: the error text when the
+ * reader named none. errno is kept. */
+static int profile_read_reason(struct profile *profile, const char *name,
+                               int create, char reason[PROFILE_REASON_CAP])
 {
     reason[0] = '\0';
-    int rc = profile_read(profile, name, 0, reason);
+    int rc = profile_read(profile, name, create, reason);
     if (rc != 0 && !reason[0]) {
         int saved = errno;
         snprintf(reason, PROFILE_REASON_CAP, "%s", strerror(saved));
         errno = saved;
     }
     return rc;
+}
+
+int profile_read_existing_reason(struct profile *profile, const char *name,
+                                 char reason[PROFILE_REASON_CAP])
+{
+    return profile_read_reason(profile, name, 0, reason);
+}
+
+/* The sentence that reports the result rc of profile_read_reason, which left
+ * errno and reason. The name is quoted only when it is a profile name: any
+ * other text is the caller's and can hold anything. errno is kept. */
+static int profile_explain(int rc, const char *name, const char *reason,
+                           char failure[PROFILE_FAILURE_CAP])
+{
+    int saved = errno;
+    if (rc == 0)
+        failure[0] = '\0';
+    else if (!profile_name_valid(name))
+        snprintf(failure, PROFILE_FAILURE_CAP, "invalid profile name");
+    else if (rc == PROFILE_UNCREATED)
+        snprintf(failure, PROFILE_FAILURE_CAP, "cannot create profile %s: %s",
+                 name, reason);
+    else if (saved == ENOENT)
+        snprintf(failure, PROFILE_FAILURE_CAP, "profile %s does not exist",
+                 name);
+    else
+        snprintf(failure, PROFILE_FAILURE_CAP, PROFILE_UNREADABLE_FORMAT, name,
+                 reason);
+    errno = saved;
+    return rc == 0 ? 0 : -1;
+}
+
+int profile_read_existing_explained(struct profile *profile, const char *name,
+                                    char failure[PROFILE_FAILURE_CAP])
+{
+    char reason[PROFILE_REASON_CAP];
+    int rc = profile_read_reason(profile, name, 0, reason);
+    return profile_explain(rc, name, reason, failure);
+}
+
+int profile_load_explained(struct profile *profile, const char *name,
+                           char failure[PROFILE_FAILURE_CAP])
+{
+    char reason[PROFILE_REASON_CAP];
+    int rc = profile_read_reason(profile, name, 1, reason);
+    return profile_explain(rc, name, reason, failure);
 }
 
 const char *profile_setting_key(enum profile_setting setting)

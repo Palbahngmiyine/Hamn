@@ -90,6 +90,34 @@ int profile_read_existing(struct profile *profile, const char *name);
 int profile_read_existing_reason(struct profile *profile, const char *name,
                                  char reason[PROFILE_REASON_CAP]);
 
+/* How a stored configuration that cannot be read is reported: a printf
+ * format that takes the profile name and the reason. */
+#define PROFILE_UNREADABLE_FORMAT \
+    "cannot read the configuration of profile %s: %s"
+
+/* Capacity, with the terminating NUL, of the sentence below: its longest
+ * text, the longest name and the longest reason. */
+#define PROFILE_FAILURE_CAP (PROFILE_NAME_CAP + PROFILE_REASON_CAP + 64)
+
+/* profile_read_existing for an operation that reports its failure. On -1
+ * errno is as for profile_read_existing and failure holds the sentence to
+ * report, NUL-terminated printable ASCII:
+ *   "invalid profile name" for a name that names no profile;
+ *   "profile <name> does not exist" when it has no config.yaml (ENOENT);
+ *   PROFILE_UNREADABLE_FORMAT, with the reason of
+ *   profile_read_existing_reason, for every other failure.
+ * On 0 failure is empty. */
+int profile_read_existing_explained(struct profile *profile, const char *name,
+                                    char failure[PROFILE_FAILURE_CAP]);
+
+/* profile_load for an operation that reports its failure, with the same
+ * sentences. A profile without config.yaml is no failure here: it loads with
+ * the defaults. A profile directory that cannot be created is reported as
+ * "cannot create profile <name>: <error text>", because there was no
+ * configuration to read. */
+int profile_load_explained(struct profile *profile, const char *name,
+                           char failure[PROFILE_FAILURE_CAP]);
+
 /* Parse a profile definition: the document that `vm apply` reads. It is one
  * YAML mapping with exactly these keys, all required:
  *

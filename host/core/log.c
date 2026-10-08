@@ -121,6 +121,11 @@ void log_set_error(const char *fmt, ...)
     va_end(ap);
 }
 
+void log_clear_error(void)
+{
+    last_error[0] = '\0';
+}
+
 void die(const char *fmt, ...)
 {
     va_list ap;

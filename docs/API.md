@@ -104,6 +104,15 @@ Use `hamn --headless system upgrade --help` for upgrade-specific usage and recov
 See [installation and upgrade experience](INSTALLATION.md) for progress and compatibility.
 `vm env` returns Docker connection information, not shell text.
 
+An operation that needs the stored configuration of a profile refuses a
+`config.yaml` that it cannot read, and changes nothing in the profile. The
+message names the profile and the rule the file breaks, such as an unknown
+key. `vm status`, `vm env` and Docker requests with `--profile` fail with
+`profileUnavailable`; `vm configure`, `vm stop` and `vm diagnostics` fail with
+`operationFailed`, as `vm apply` does. A profile that does not exist is refused
+with the same codes and a message that says so. Correct the file by hand:
+[YAML schema](CONFIGURATION.md#yaml-schema) lists what it can hold.
+
 `vm apply` takes `--file <path>`, a
 [profile definition](CONFIGURATION.md#declarative-configuration), and
 `--dry-run` (read-only, no `--yes` required). It makes the stored

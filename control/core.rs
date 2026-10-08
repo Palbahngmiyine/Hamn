@@ -64,6 +64,20 @@ pub fn version() -> &'static str {
     version
 }
 
+/// The reason the C core recorded for its latest failure in this worker,
+/// empty when it recorded none. An owned copy: the buffer is C's, and the
+/// next C call can clear or rewrite it.
+fn recorded_error() -> String {
+    // SAFETY: log_last_error returns a static NUL-terminated buffer.
+    unsafe { CStr::from_ptr(log_last_error()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `vm status` of a profile, or `vm list` without one. The C call forgets
+/// the reason of an earlier call before it starts, so a recorded reason is
+/// this call's: a profile that does not exist, or a configuration that
+/// cannot be read and the rule it breaks. Without one, errno says why.
 fn query(profile: Option<&CString>) -> Result<Value> {
     let mut output = std::ptr::null_mut();
     let rc = unsafe {
@@ -73,10 +87,14 @@ fn query(profile: Option<&CString>) -> Result<Value> {
         )
     };
     if rc != 0 {
-        return Err(Failure::new(
-            "profileUnavailable",
-            std::io::Error::last_os_error(),
-        ));
+        // errno first: it is only meaningful right after the failed call.
+        let os_error = std::io::Error::last_os_error();
+        let reason = recorded_error();
+        return Err(if reason.is_empty() {
+            Failure::new("profileUnavailable", os_error)
+        } else {
+            Failure::new("profileUnavailable", reason)
+        });
     }
     if output.is_null() {
         return Err(Failure::new("coreProtocol", "missing C result"));
@@ -119,8 +137,7 @@ fn apply(request: &Request, profile: *const libc::c_char) -> Result<Value> {
             .ok_or_else(|| Failure::new("coreProtocol", "missing C result"))?
             .map_err(|e| Failure::new("coreProtocol", e));
     }
-    // SAFETY: log_last_error returns a static NUL-terminated buffer.
-    let message = unsafe { CStr::from_ptr(log_last_error()) }.to_string_lossy();
+    let message = recorded_error();
     Err(Failure::new(
         apply_failure_code(rc),
         if message.is_empty() {
@@ -220,10 +237,12 @@ fn execute(request: &Request) -> Result<Value> {
         }
     }
     if rc != 0 {
+        // The operation's reason, taken before the status query below: that
+        // query forgets it and can record a reason of its own.
+        let message = recorded_error();
         let unknown = operation.starts_with("vm ")
             && query(profile.as_ref())
                 .is_ok_and(|v| v["lastOperation"]["status"] == "outcomeUnknown");
-        let message = unsafe { CStr::from_ptr(log_last_error()) }.to_string_lossy();
         return Err(Failure::new(
             if unknown {
                 "outcomeUnknown"

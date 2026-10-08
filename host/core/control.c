@@ -70,8 +70,16 @@ static cJSON *profile_snapshot(const char *name)
 {
     struct profile profile;
     struct vm_state state;
-    if (profile_read_existing(&profile, name) != 0 ||
-        state_load(&profile, &state) != 0)
+    char failure[PROFILE_FAILURE_CAP];
+    if (profile_read_existing_explained(&profile, name, failure) != 0) {
+        /* Recorded, not printed: this query also follows a failed operation
+         * that has already printed the same sentence. */
+        int saved = errno;
+        log_set_error("%s", failure);
+        errno = saved;
+        return NULL;
+    }
+    if (state_load(&profile, &state) != 0)
         return NULL;
     char live[32], socket[PROFILE_PATH_CAP];
     vm_live_state(&profile, live, sizeof(live));
@@ -212,6 +220,7 @@ int hamn_control_query(const char *profile, char **result)
         return -1;
     }
     *result = NULL;
+    log_clear_error();
     cJSON *value = profile ? profile_snapshot(profile) : profiles_snapshot();
     if (!value)
         return -1;
@@ -259,9 +268,12 @@ int hamn_control_configure(const char *name, unsigned cpus,
         }
         if (errno != ENOENT) goto out;
     }
-    if ((create ? profile_load(&profile, name) :
-         profile_read_existing(&profile, name)) != 0)
+    char failure[PROFILE_FAILURE_CAP];
+    if ((create ? profile_load_explained(&profile, name, failure) :
+         profile_read_existing_explained(&profile, name, failure)) != 0) {
+        logerr("%s", failure);
         goto out;
+    }
     mutation = profile_mutation_lock(&profile);
     if (mutation < 0)
         goto out;

@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include "core/profile.h"
 #include "core/control.h"
+#include "core/log.h"
 #include "util/fs.h"
 #include <string.h>
 #include "cjson/cJSON.h"
@@ -316,6 +317,94 @@ static void settings_that_would_not_read_back_are_not_saved(void)
            memcmp(before, after, length) == 0);
 }
 
+/* The operation recorded exactly this sentence as its reason. */
+static int said(const char *sentence)
+{
+    if (strcmp(log_last_error(), sentence) == 0)
+        return 1;
+    fprintf(stderr, "expected \"%s\", recorded \"%s\"\n", sentence,
+            log_last_error());
+    return 0;
+}
+
+/* Each operation that needs the stored configuration says why it cannot
+ * read it: the rule the file breaks, or that there is no such profile. The
+ * configuration of `existing` is unreadable during the call, with the removed
+ * kubernetes mapping, and holds length bytes that no operation changes. */
+static void operations_say_why_a_profile_cannot_be_read(const char *root,
+                                                        const char *path)
+{
+    static const char unreadable[] = "cannot read the configuration of "
+        "profile existing: unknown configuration key: kubernetes";
+    static const char absent[] = "profile absent does not exist";
+    char before[8192], after[8192], archive[1100], other[1100];
+    size_t length = read_bytes(path, before, sizeof(before));
+    snprintf(archive, sizeof(archive), "%s/diagnostics.tar", root);
+    char *json = (char *)"";
+
+    /* A status query records the sentence; the caller reports it. */
+    log_clear_error();
+    assert(hamn_control_query("existing", &json) == -1 && json == NULL);
+    assert(said(unreadable));
+    log_clear_error();
+    assert(hamn_control_configure("existing", 3, 0, 0, 0, -1) == 1);
+    assert(said(unreadable));
+    log_clear_error();
+    assert(hamn_control_stop("existing") == 1);
+    assert(said(unreadable));
+    log_clear_error();
+    json = (char *)"";
+    assert(hamn_control_diagnostics("existing", archive, &json) == 1);
+    assert(json == NULL && said(unreadable));
+    assert(access(archive, F_OK) == -1 && errno == ENOENT);
+    assert(read_bytes(path, after, sizeof(after)) == length &&
+           memcmp(before, after, length) == 0);
+
+    /* A name that no profile has is not a configuration that cannot be
+     * read, and asking about it creates no profile. */
+    log_clear_error();
+    assert(hamn_control_query("absent", &json) == -1 && said(absent));
+    log_clear_error();
+    assert(hamn_control_configure("absent", 3, 0, 0, 0, -1) == 1);
+    assert(said(absent));
+    log_clear_error();
+    assert(hamn_control_stop("absent") == 1 && said(absent));
+    log_clear_error();
+    assert(hamn_control_diagnostics("absent", archive, &json) == 1);
+    assert(said(absent) && access(archive, F_OK) == -1);
+    snprintf(other, sizeof(other), "%s/absent", root);
+    assert(access(other, F_OK) == -1 && errno == ENOENT);
+    snprintf(other, sizeof(other), "%s/.locks/absent.lock", root);
+    assert(unlink(other) == 0);
+
+    /* A profile that cannot be created had no configuration to read: the
+     * reason is the directory. Root would create it all the same. */
+    if (geteuid() != 0) {
+        assert(chmod(root, 0500) == 0);
+        log_clear_error();
+        assert(hamn_control_configure("fresh", 2, 2, 0, 1, -1) == 1);
+        assert(said("cannot create profile fresh: Permission denied"));
+        assert(chmod(root, 0700) == 0);
+        snprintf(other, sizeof(other), "%s/fresh", root);
+        assert(access(other, F_OK) == -1 && errno == ENOENT);
+        snprintf(other, sizeof(other), "%s/.locks/fresh.lock", root);
+        assert(unlink(other) == 0);
+    }
+}
+
+/* A query reports its own failure only. It forgets the reason an earlier
+ * call recorded, so that a failure it has no sentence for is not reported
+ * with the sentence of another operation. `existing` reads. */
+static void a_query_forgets_the_reason_of_an_earlier_call(void)
+{
+    char *json = NULL;
+    assert(hamn_control_configure("existing", 0, 0, 1, 0, -1) == 1);
+    assert(strstr(log_last_error(), "disk size cannot shrink"));
+    assert(hamn_control_query("existing", &json) == 0);
+    hamn_control_free(json);
+    assert(log_last_error()[0] == '\0');
+}
+
 int main(void)
 {
     char temporary[] = "/tmp/hamn-profile-read-XXXXXX";
@@ -375,8 +464,10 @@ int main(void)
     FILE *legacy = fopen(path, "a");
     assert(legacy && fputs("kubernetes:\n  enabled: true\n", legacy) >= 0 && fclose(legacy) == 0);
     assert(profile_read_existing(&profile, "existing") == -1);
+    operations_say_why_a_profile_cannot_be_read(root, path);
     assert(fs_write_file_atomic(path, original, length, 0600) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
+    a_query_forgets_the_reason_of_an_earlier_call();
     /* A config.yaml that is a directory, or is over the size limit, is
      * invalid. It is never reported as missing, whatever errno held before:
      * ENOENT means that the profile has no configuration. */
@@ -430,7 +521,10 @@ int main(void)
     assert(mkdir(foreign, 0700) == 0);
     assert(symlink(foreign, root) == 0);
     assert(profile_read_existing(&profile, "existing") == -1);
+    /* A list that fails for a reason without a sentence reports none. */
+    log_set_error("the reason of an earlier call");
     assert(hamn_control_query(NULL, &json) == -1);
+    assert(log_last_error()[0] == '\0');
     assert(hamn_control_configure("escape", 2, 2, 0, 1, -1) != 0);
     assert(unlink(root) == 0);
     assert(mkdir(root, 0700) == 0);

@@ -2,13 +2,29 @@
 #define HAMN_CONTROL_H
 
 /* Call only in a fresh, single-threaded worker process. The caller owns the
- * returned UTF-8 JSON and must release it with hamn_control_free(). */
+ * returned UTF-8 JSON and must release it with hamn_control_free().
+ *
+ * A call that needs the stored configuration of its profile and cannot read
+ * it changes nothing in the profile and says why through log_last_error():
+ * "profile <name> does not exist" when there is no config.yaml, and otherwise
+ * "cannot read the configuration of profile <name>: <reason>" with the rule
+ * the file breaks (core/profile.h). */
+
+/* The status of profile, or the list of all profiles when profile is NULL.
+ * Returns 0 with *result owning the JSON, or -1 with *result NULL. The call
+ * first forgets the reason an earlier call recorded. After -1,
+ * log_last_error() holds the sentence above for a profile that cannot be
+ * read and the complaint about a state file that cannot be read; for any
+ * other failure it is empty and errno holds the error. The sentence is
+ * recorded without being printed. */
 int hamn_control_query(const char *profile, char **result);
 void hamn_control_free(char *result);
 int hamn_control_start(const char *profile, unsigned cpus,
                        unsigned memory_gib, unsigned disk_gib);
 /* A zero resource keeps the profile's value. rosetta is 1 or 0 to set Apple
- * Linux Rosetta translation, -1 to keep it; any other value is invalid. */
+ * Linux Rosetta translation, -1 to keep it; any other value is invalid.
+ * Returns 0, 2 for invalid arguments, 4 when create finds that the profile
+ * exists, and 1 for any other failure. */
 int hamn_control_configure(const char *profile, unsigned cpus,
                            unsigned memory_gib, unsigned disk_gib, int create,
                            int rosetta);
