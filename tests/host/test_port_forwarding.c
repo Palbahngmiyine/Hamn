@@ -567,7 +567,9 @@ int main(int argc, char **argv)
         return result == 0 ? 0 : 1;
     }
     if (strcmp(argv[1], "sync") == 0) {
-        struct port_spec specs[128];
+        /* One more than the synchronization accepts, so that the refusal of
+         * an oversized snapshot is the product's and not this driver's. */
+        struct port_spec specs[DOCKER_OBSERVER_MAX_PORTS + 1];
         int spec_count = argc - 2;
         if (spec_count > (int)(sizeof(specs) / sizeof(specs[0])))
             return 2;
