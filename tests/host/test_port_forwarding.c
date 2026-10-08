@@ -1,14 +1,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <semaphore.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -43,85 +40,6 @@ static void append_event(const char *operation, const char *bind_address,
     }
 }
 
-static int parent_holds_state_lock(const struct profile *p)
-{
-    pid_t child = fork();
-    if (child < 0)
-        return 0;
-    if (child == 0) {
-        char path[1200];
-        snprintf(path, sizeof(path), "%s/port-forwards.lock", p->dir);
-        int fd = open(path, O_RDWR | O_CLOEXEC);
-        int held = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) != 0 &&
-                   (errno == EWOULDBLOCK || errno == EAGAIN);
-        if (fd >= 0)
-            close(fd);
-        _exit(held ? 0 : 1);
-    }
-    int status = 0;
-    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
-           WEXITSTATUS(status) == 0;
-}
-
-static void unlocked_regression_barrier(const struct profile *p)
-{
-    const char *name = getenv("PORT_TEST_BARRIER_NAME");
-    const char *counter_path = getenv("PORT_TEST_BARRIER_COUNTER");
-    const char *expected_text = getenv("PORT_TEST_BARRIER_COUNT");
-    if (!name || !counter_path || !expected_text ||
-        parent_holds_state_lock(p))
-        return;
-
-    char *end = NULL;
-    errno = 0;
-    long expected = strtol(expected_text, &end, 10);
-    if (errno || !end || *end || expected < 2 || expected > 128)
-        exit(90);
-    sem_t *barrier = sem_open(name, O_CREAT, 0600, 0);
-    if (barrier == SEM_FAILED)
-        exit(91);
-    int fd = open(counter_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (fd < 0)
-        exit(92);
-    struct flock lock = {
-        .l_type = F_WRLCK,
-        .l_whence = SEEK_SET,
-        .l_start = 0,
-        .l_len = 0,
-    };
-    while (fcntl(fd, F_SETLKW, &lock) != 0) {
-        if (errno != EINTR)
-            exit(93);
-    }
-    long arrived = 0;
-    char text[32] = {0};
-    ssize_t length = pread(fd, text, sizeof(text) - 1, 0);
-    if (length > 0)
-        arrived = strtol(text, NULL, 10);
-    arrived++;
-    int written = snprintf(text, sizeof(text), "%ld\n", arrived);
-    if (ftruncate(fd, 0) != 0 ||
-        pwrite(fd, text, (size_t)written, 0) != written)
-        exit(94);
-    lock.l_type = F_UNLCK;
-    if (fcntl(fd, F_SETLK, &lock) != 0)
-        exit(95);
-    close(fd);
-
-    if (arrived == expected) {
-        for (long i = 0; i < expected; i++) {
-            if (sem_post(barrier) != 0)
-                exit(96);
-        }
-        sem_unlink(name);
-    }
-    while (sem_wait(barrier) != 0) {
-        if (errno != EINTR)
-            exit(97);
-    }
-    sem_close(barrier);
-}
-
 static int configured_port(const char *name, unsigned local_port)
 {
     const char *value = getenv(name);
@@ -136,11 +54,11 @@ int ssh_forward_add_tcp(const struct profile *p, const char *ip,
                         const char *bind_address, unsigned local_port,
                         const char *remote_address, unsigned remote_port)
 {
+    (void)p;
     (void)ip;
     (void)remote_address;
     (void)remote_port;
     append_event("add", bind_address, local_port);
-    unlocked_regression_barrier(p);
     return configured_port("FAIL_FORWARD_PORT", local_port) ? -1 : 0;
 }
 
@@ -163,11 +81,11 @@ int ssh_forward_cancel_tcp(const struct profile *p, const char *ip,
                            const char *bind_address, unsigned local_port,
                            const char *remote_address, unsigned remote_port)
 {
+    (void)p;
     (void)ip;
     (void)remote_address;
     (void)remote_port;
     append_event("cancel", bind_address, local_port);
-    unlocked_regression_barrier(p);
     return configured_port("FAIL_CANCEL_PORT", local_port) ? -1 : 0;
 }
 
@@ -238,28 +156,6 @@ static int load_spec(const char *text, struct port_spec *spec)
         return 0;
     fprintf(stderr, "invalid test port specification: %s\n", error);
     return -1;
-}
-
-static int load_generation(char **argv,
-                           struct port_forward_generation *generation)
-{
-    char *end = NULL;
-    errno = 0;
-    long pid = strtol(argv[0], &end, 10);
-    if (errno || !end || *end || pid <= 1 || pid > INT32_MAX)
-        return -1;
-    errno = 0;
-    unsigned long long sec = strtoull(argv[1], &end, 10);
-    if (errno || !end || *end || sec == 0 || sec > UINT64_MAX)
-        return -1;
-    errno = 0;
-    unsigned long long usec = strtoull(argv[2], &end, 10);
-    if (errno || !end || *end || usec >= 1000000 || usec > UINT64_MAX)
-        return -1;
-    generation->owner_pid = (int)pid;
-    generation->owner_start_sec = (uint64_t)sec;
-    generation->owner_start_usec = (uint64_t)usec;
-    return 0;
 }
 
 static int ignore_sigterm(void)
@@ -554,18 +450,6 @@ int main(int argc, char **argv)
                docker_observer_watch(&profile, guest_ip, lease, 3) == 0 ?
                0 : 1;
     }
-    if (strcmp(argv[1], "reconcile") == 0 && argc == 3)
-        return port_forward_reconcile(&profile, guest_ip, argv[2]) == 0 ?
-               0 : 1;
-    if (strcmp(argv[1], "reconcile-serialized") == 0 && argc == 3) {
-        int operation_lock = port_forward_operation_lock(&profile);
-        if (operation_lock < 0)
-            return 1;
-        int result = port_forward_reconcile_serialized(&profile, guest_ip,
-                                                       argv[2]);
-        port_forward_operation_unlock(operation_lock);
-        return result == 0 ? 0 : 1;
-    }
     if (strcmp(argv[1], "sync") == 0) {
         /* One more than the synchronization accepts, so that the refusal of
          * an oversized snapshot is the product's and not this driver's. */
@@ -585,29 +469,5 @@ int main(int argc, char **argv)
         port_forward_operation_unlock(operation_lock);
         return result == 0 ? 0 : 1;
     }
-    if (argc != 3 && argc != 6)
-        return 2;
-
-    struct port_spec spec;
-    if (load_spec(argv[2], &spec) != 0)
-        return 2;
-    if (argc == 6) {
-        struct port_forward_generation generation;
-        if (load_generation(argv + 3, &generation) != 0)
-            return 2;
-        if (strcmp(argv[1], "commit-owned") == 0)
-            return port_forward_commit_owned(&profile, &spec,
-                                             &generation) == 0 ? 0 : 1;
-        if (strcmp(argv[1], "remove-owned") == 0)
-            return port_forward_remove_owned(&profile, guest_ip, &spec,
-                                             &generation) == 0 ? 0 : 1;
-        return 2;
-    }
-    if (strcmp(argv[1], "add") == 0)
-        return port_forward_add(&profile, guest_ip, &spec) == 0 ? 0 : 1;
-    if (strcmp(argv[1], "commit") == 0)
-        return port_forward_commit(&profile, &spec) == 0 ? 0 : 1;
-    if (strcmp(argv[1], "remove") == 0)
-        return port_forward_remove(&profile, guest_ip, &spec) == 0 ? 0 : 1;
     return 2;
 }
