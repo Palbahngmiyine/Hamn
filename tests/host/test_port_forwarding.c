@@ -1,14 +1,11 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <semaphore.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -43,85 +40,6 @@ static void append_event(const char *operation, const char *bind_address,
     }
 }
 
-static int parent_holds_state_lock(const struct profile *p)
-{
-    pid_t child = fork();
-    if (child < 0)
-        return 0;
-    if (child == 0) {
-        char path[1200];
-        snprintf(path, sizeof(path), "%s/port-forwards.lock", p->dir);
-        int fd = open(path, O_RDWR | O_CLOEXEC);
-        int held = fd >= 0 && flock(fd, LOCK_EX | LOCK_NB) != 0 &&
-                   (errno == EWOULDBLOCK || errno == EAGAIN);
-        if (fd >= 0)
-            close(fd);
-        _exit(held ? 0 : 1);
-    }
-    int status = 0;
-    return waitpid(child, &status, 0) == child && WIFEXITED(status) &&
-           WEXITSTATUS(status) == 0;
-}
-
-static void unlocked_regression_barrier(const struct profile *p)
-{
-    const char *name = getenv("PORT_TEST_BARRIER_NAME");
-    const char *counter_path = getenv("PORT_TEST_BARRIER_COUNTER");
-    const char *expected_text = getenv("PORT_TEST_BARRIER_COUNT");
-    if (!name || !counter_path || !expected_text ||
-        parent_holds_state_lock(p))
-        return;
-
-    char *end = NULL;
-    errno = 0;
-    long expected = strtol(expected_text, &end, 10);
-    if (errno || !end || *end || expected < 2 || expected > 128)
-        exit(90);
-    sem_t *barrier = sem_open(name, O_CREAT, 0600, 0);
-    if (barrier == SEM_FAILED)
-        exit(91);
-    int fd = open(counter_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
-    if (fd < 0)
-        exit(92);
-    struct flock lock = {
-        .l_type = F_WRLCK,
-        .l_whence = SEEK_SET,
-        .l_start = 0,
-        .l_len = 0,
-    };
-    while (fcntl(fd, F_SETLKW, &lock) != 0) {
-        if (errno != EINTR)
-            exit(93);
-    }
-    long arrived = 0;
-    char text[32] = {0};
-    ssize_t length = pread(fd, text, sizeof(text) - 1, 0);
-    if (length > 0)
-        arrived = strtol(text, NULL, 10);
-    arrived++;
-    int written = snprintf(text, sizeof(text), "%ld\n", arrived);
-    if (ftruncate(fd, 0) != 0 ||
-        pwrite(fd, text, (size_t)written, 0) != written)
-        exit(94);
-    lock.l_type = F_UNLCK;
-    if (fcntl(fd, F_SETLK, &lock) != 0)
-        exit(95);
-    close(fd);
-
-    if (arrived == expected) {
-        for (long i = 0; i < expected; i++) {
-            if (sem_post(barrier) != 0)
-                exit(96);
-        }
-        sem_unlink(name);
-    }
-    while (sem_wait(barrier) != 0) {
-        if (errno != EINTR)
-            exit(97);
-    }
-    sem_close(barrier);
-}
-
 static int configured_port(const char *name, unsigned local_port)
 {
     const char *value = getenv(name);
@@ -136,11 +54,11 @@ int ssh_forward_add_tcp(const struct profile *p, const char *ip,
                         const char *bind_address, unsigned local_port,
                         const char *remote_address, unsigned remote_port)
 {
+    (void)p;
     (void)ip;
     (void)remote_address;
     (void)remote_port;
     append_event("add", bind_address, local_port);
-    unlocked_regression_barrier(p);
     return configured_port("FAIL_FORWARD_PORT", local_port) ? -1 : 0;
 }
 
@@ -163,11 +81,11 @@ int ssh_forward_cancel_tcp(const struct profile *p, const char *ip,
                            const char *bind_address, unsigned local_port,
                            const char *remote_address, unsigned remote_port)
 {
+    (void)p;
     (void)ip;
     (void)remote_address;
     (void)remote_port;
     append_event("cancel", bind_address, local_port);
-    unlocked_regression_barrier(p);
     return configured_port("FAIL_CANCEL_PORT", local_port) ? -1 : 0;
 }
 
@@ -240,26 +158,29 @@ static int load_spec(const char *text, struct port_spec *spec)
     return -1;
 }
 
-static int load_generation(char **argv,
-                           struct port_forward_generation *generation)
+/* Announces on PORT_TEST_READY_FIFO that the suite may act and waits for a
+ * byte on PORT_TEST_RELEASE_FIFO. Neither descriptor reaches a child. */
+static int suite_rendezvous(void)
 {
-    char *end = NULL;
-    errno = 0;
-    long pid = strtol(argv[0], &end, 10);
-    if (errno || !end || *end || pid <= 1 || pid > INT32_MAX)
+    const char *ready = getenv("PORT_TEST_READY_FIFO");
+    const char *release = getenv("PORT_TEST_RELEASE_FIFO");
+    if (!ready || !release)
         return -1;
-    errno = 0;
-    unsigned long long sec = strtoull(argv[1], &end, 10);
-    if (errno || !end || *end || sec == 0 || sec > UINT64_MAX)
+    int fd = open(ready, O_WRONLY | O_CLOEXEC);
+    if (fd < 0)
         return -1;
-    errno = 0;
-    unsigned long long usec = strtoull(argv[2], &end, 10);
-    if (errno || !end || *end || usec >= 1000000 || usec > UINT64_MAX)
+    int announced = write(fd, "ready\n", 6) == 6;
+    close(fd);
+    fd = announced ? open(release, O_RDONLY | O_CLOEXEC) : -1;
+    if (fd < 0)
         return -1;
-    generation->owner_pid = (int)pid;
-    generation->owner_start_sec = (uint64_t)sec;
-    generation->owner_start_usec = (uint64_t)usec;
-    return 0;
+    char byte;
+    ssize_t received;
+    do {
+        received = read(fd, &byte, 1);
+    } while (received < 0 && errno == EINTR);
+    close(fd);
+    return received == 1 ? 0 : -1;
 }
 
 static int ignore_sigterm(void)
@@ -391,11 +312,28 @@ static int fixture_write_all(int fd, const char *text, size_t length)
     return 0;
 }
 
-static int snapshot_fixture_server(const char *path, int ready_fd)
+/* Stands in for a new SSH master: the control socket becomes another file. */
+static int fixture_replace_master_socket(const char *path)
+{
+    if (unlink(path) != 0 && errno != ENOENT)
+        return -1;
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    return fd >= 0 && close(fd) == 0 ? 0 : -1;
+}
+
+/* Serves `cycles` observer passes, each a container list and an event. The
+ * list publishes TCP 48250 on 127.0.0.1, UDP 48251 on all addresses, and UDP
+ * 48252 on 127.0.0.1, which no relay can carry. The master socket is replaced
+ * while the list of pass `replace_at_cycle` (counted from 1, 0 for never) is
+ * requested, before that pass looks at it. */
+static int snapshot_fixture_server(const char *path, int ready_fd,
+                                   unsigned cycles, const char *master_socket,
+                                   unsigned replace_at_cycle)
 {
     static const char *const bodies[] = {
         "[{\"Id\":\"aaaaaaaaaaaa\",\"Ports\":[{\"IP\":\"127.0.0.1\",\"PrivatePort\":80,\"PublicPort\":48250,\"Type\":\"tcp\"}]},"
-        "{\"Id\":\"bbbbbbbbbbbb\",\"Ports\":[{\"IP\":\"0.0.0.0\",\"PrivatePort\":53,\"PublicPort\":48251,\"Type\":\"udp\"}]}]",
+        "{\"Id\":\"bbbbbbbbbbbb\",\"Ports\":[{\"IP\":\"0.0.0.0\",\"PrivatePort\":53,\"PublicPort\":48251,\"Type\":\"udp\"}]},"
+        "{\"Id\":\"cccccccccccc\",\"Ports\":[{\"IP\":\"127.0.0.1\",\"PrivatePort\":5353,\"PublicPort\":48252,\"Type\":\"udp\"}]}]",
         "{\"Type\":\"container\",\"Action\":\"start\"}",
     };
     static const char *const targets[] = { "GET /containers/json HTTP/1.1" };
@@ -415,8 +353,18 @@ static int snapshot_fixture_server(const char *path, int ready_fd)
         return -1;
     }
     close(ready_fd);
-    for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+    size_t requests = (size_t)cycles * 2;
+    for (size_t request_index = 0; request_index < requests; request_index++) {
+        size_t i = request_index % 2;
         int client = accept(listener, NULL, NULL);
+        if (i == 0 && request_index / 2 + 1 == replace_at_cycle &&
+            fixture_replace_master_socket(master_socket) != 0) {
+            if (client >= 0)
+                close(client);
+            close(listener);
+            unlink(path);
+            return -1;
+        }
         char request[512] = {0}, response[2048];
         ssize_t read_count = client < 0 ? -1 : read(client, request,
                                                      sizeof(request) - 1);
@@ -447,49 +395,104 @@ static int snapshot_fixture_server(const char *path, int ready_fd)
     return 0;
 }
 
-static int inspect_snapshot_fixture(const char *directory)
+static const char fixture_lease[] = "0123456789abcdef0123456789abcdef";
+
+/* Runs the observer's watch loop for `cycles` passes against the fixture
+ * Engine on PROFILE/docker.sock. Returns 0 when every pass was served. */
+static int watch_fixture(struct profile *profile, const char *directory,
+                         unsigned cycles, unsigned replace_at_cycle)
 {
-    struct profile profile = {0};
-    char socket_path[PATH_MAX], lease_path[PATH_MAX], state_path[PATH_MAX];
-    static const char lease[] = "0123456789abcdef0123456789abcdef";
-    if (!directory || snprintf(profile.dir, sizeof(profile.dir), "%s",
-                               directory) >= (int)sizeof(profile.dir) ||
+    char socket_path[PATH_MAX], lease_path[PATH_MAX], master_socket[PATH_MAX];
+    memset(profile, 0, sizeof(*profile));
+    if (!directory || cycles == 0 ||
+        snprintf(profile->dir, sizeof(profile->dir), "%s", directory) >=
+            (int)sizeof(profile->dir) ||
         snprintf(socket_path, sizeof(socket_path), "%s/docker.sock",
                  directory) >= (int)sizeof(socket_path) ||
         snprintf(lease_path, sizeof(lease_path), "%s/port-observer.lease",
                  directory) >= (int)sizeof(lease_path) ||
-        snprintf(state_path, sizeof(state_path), "%s/port-forwards.tsv",
-                 directory) >= (int)sizeof(state_path))
-        return 1;
+        snprintf(master_socket, sizeof(master_socket), "%s/ssh.sock",
+                 directory) >= (int)sizeof(master_socket))
+        return -1;
     int ready[2];
     if (pipe(ready) != 0)
-        return 1;
+        return -1;
     pid_t child = fork();
     if (child < 0)
-        return 1;
+        return -1;
     if (child == 0) {
         close(ready[0]);
-        _exit(snapshot_fixture_server(socket_path, ready[1]) == 0 ? 0 : 1);
+        _exit(snapshot_fixture_server(socket_path, ready[1], cycles,
+                                      master_socket, replace_at_cycle) == 0 ?
+              0 : 1);
     }
     close(ready[1]);
     char marker = '\0';
     int ready_ok = read(ready[0], &marker, 1) == 1 && marker == '1';
     close(ready[0]);
-    int synchronized = ready_ok && fs_write_file_atomic(lease_path,
-        "0123456789abcdef0123456789abcdef\n", sizeof(lease), 0600) == 0 &&
-        docker_observer_watch(&profile, "192.0.2.10", lease, 1) == 0;
+    int watched = ready_ok && fs_write_file_atomic(lease_path,
+        "0123456789abcdef0123456789abcdef\n", sizeof(fixture_lease),
+        0600) == 0 &&
+        docker_observer_watch(profile, "192.0.2.10", fixture_lease,
+                              cycles) == 0;
+    /* The server ends once it has served every pass. A pass that made fewer
+     * requests leaves it waiting: give it 2 s, then end it as a failure. */
     int status = 0;
+    pid_t waited = 0;
+    for (int i = 0; watched && i < 200 && waited == 0; i++) {
+        waited = waitpid(child, &status, WNOHANG);
+        if (waited == 0)
+            usleep(10 * 1000);
+    }
+    if (waited != child) {
+        kill(child, SIGKILL);
+        while (waitpid(child, &status, 0) < 0 && errno == EINTR)
+            ;
+        return -1;
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
+}
+
+static int inspect_snapshot_fixture(const char *directory)
+{
+    struct profile profile;
+    char state_path[PATH_MAX];
+    if (!directory || snprintf(state_path, sizeof(state_path),
+                               "%s/port-forwards.tsv", directory) >=
+            (int)sizeof(state_path))
+        return 1;
+    /* The pass counts as synchronized although UDP 48252 is not forwarded:
+     * the watch loop goes on to wait for an event, which the fixture serves,
+     * instead of retrying a pass that cannot change. */
+    int synchronized = watch_fixture(&profile, directory, 1, 0) == 0;
     char state[1024] = {0};
     FILE *f = fopen(state_path, "r");
     int state_ok = f && fread(state, 1, sizeof(state) - 1, f) > 0 &&
         fclose(f) == 0 && strstr(state, "tcp\t127.0.0.1\t48250\t80") &&
-        strstr(state, "udp\t0.0.0.0\t48251\t53");
+        strstr(state, "udp\t0.0.0.0\t48251\t53") && !strstr(state, "48252");
+    cJSON *failures = port_forward_failures(&profile);
+    char *reported = failures ? cJSON_PrintUnformatted(failures) : NULL;
+    int reported_ok = reported && strcmp(reported,
+        "[{\"hostIp\":\"127.0.0.1\",\"hostPort\":48252,\"protocol\":\"udp\","
+        "\"reason\":\"udpAddressUnsupported\"}]") == 0;
+    cJSON_free(reported);
+    cJSON_Delete(failures);
     int cleaned = port_forward_cleanup(&profile, "192.0.2.10") == 0 &&
         docker_observer_revoke(&profile) == 0 &&
-        docker_observer_sync_once(&profile, "192.0.2.10", lease) == 1;
-    return synchronized && state_ok && cleaned &&
-        waitpid(child, &status, 0) == child && WIFEXITED(status) &&
-        WEXITSTATUS(status) == 0 ? 0 : 1;
+        docker_observer_sync_once(&profile, "192.0.2.10",
+                                  fixture_lease) == 1;
+    return synchronized && state_ok && reported_ok && cleaned ? 0 : 1;
+}
+
+static int parse_count(const char *text, unsigned *count)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno || !end || end == text || *end || value > 64)
+        return -1;
+    *count = (unsigned)value;
+    return 0;
 }
 
 int main(int argc, char **argv)
@@ -519,6 +522,18 @@ int main(int argc, char **argv)
         return inspect_parser_fixtures();
     if (argc == 3 && strcmp(argv[1], "snapshot-fixture") == 0)
         return inspect_snapshot_fixture(argv[2]);
+    if (argc == 5 && strcmp(argv[1], "observe-fixture") == 0) {
+        /* CYCLES passes of one observer against the fixture Engine; the
+         * master socket is replaced during pass REPLACE-AT (0: never). The
+         * state stays for the caller to inspect and clean up. */
+        struct profile profile;
+        unsigned cycles = 0, replace_at_cycle = 0;
+        if (parse_count(argv[3], &cycles) != 0 ||
+            parse_count(argv[4], &replace_at_cycle) != 0)
+            return 2;
+        return watch_fixture(&profile, argv[2], cycles,
+                             replace_at_cycle) == 0 ? 0 : 1;
+    }
 
     const char *directory = getenv("PORT_TEST_DIR");
     if (!directory || argc < 2)
@@ -554,20 +569,24 @@ int main(int argc, char **argv)
                docker_observer_watch(&profile, guest_ip, lease, 3) == 0 ?
                0 : 1;
     }
-    if (strcmp(argv[1], "reconcile") == 0 && argc == 3)
-        return port_forward_reconcile(&profile, guest_ip, argv[2]) == 0 ?
-               0 : 1;
-    if (strcmp(argv[1], "reconcile-serialized") == 0 && argc == 3) {
+    if (strcmp(argv[1], "unconfirm") == 0 && argc == 2) {
         int operation_lock = port_forward_operation_lock(&profile);
         if (operation_lock < 0)
             return 1;
-        int result = port_forward_reconcile_serialized(&profile, guest_ip,
-                                                       argv[2]);
+        int result = port_forward_unconfirm_tcp_serialized(&profile);
         port_forward_operation_unlock(operation_lock);
         return result == 0 ? 0 : 1;
     }
-    if (strcmp(argv[1], "sync") == 0) {
-        struct port_spec specs[128];
+    /* `sync` is one pass. `sync-again` is two passes of this one process, as
+     * the observer makes them: a relay that the first pass starts is this
+     * process's child during the second. The suite acts at a rendezvous
+     * after each pass, and the exit status is that of the second. */
+    int passes = strcmp(argv[1], "sync") == 0 ? 1 :
+        strcmp(argv[1], "sync-again") == 0 ? 2 : 0;
+    if (passes) {
+        /* One more than the synchronization accepts, so that the refusal of
+         * an oversized snapshot is the product's and not this driver's. */
+        struct port_spec specs[DOCKER_OBSERVER_MAX_PORTS + 1];
         int spec_count = argc - 2;
         if (spec_count > (int)(sizeof(specs) / sizeof(specs[0])))
             return 2;
@@ -575,37 +594,18 @@ int main(int argc, char **argv)
             if (load_spec(argv[i + 2], &specs[i]) != 0)
                 return 2;
         }
-        int operation_lock = port_forward_operation_lock(&profile);
-        if (operation_lock < 0)
-            return 1;
-        int result = port_forward_sync_docker_serialized(
-            &profile, guest_ip, specs, spec_count);
-        port_forward_operation_unlock(operation_lock);
+        int result = -1;
+        for (int pass = 0; pass < passes; pass++) {
+            int operation_lock = port_forward_operation_lock(&profile);
+            if (operation_lock < 0)
+                return 1;
+            result = port_forward_sync_docker_serialized(
+                &profile, guest_ip, specs, spec_count);
+            port_forward_operation_unlock(operation_lock);
+            if (passes > 1 && suite_rendezvous() != 0)
+                return 2;
+        }
         return result == 0 ? 0 : 1;
     }
-    if (argc != 3 && argc != 6)
-        return 2;
-
-    struct port_spec spec;
-    if (load_spec(argv[2], &spec) != 0)
-        return 2;
-    if (argc == 6) {
-        struct port_forward_generation generation;
-        if (load_generation(argv + 3, &generation) != 0)
-            return 2;
-        if (strcmp(argv[1], "commit-owned") == 0)
-            return port_forward_commit_owned(&profile, &spec,
-                                             &generation) == 0 ? 0 : 1;
-        if (strcmp(argv[1], "remove-owned") == 0)
-            return port_forward_remove_owned(&profile, guest_ip, &spec,
-                                             &generation) == 0 ? 0 : 1;
-        return 2;
-    }
-    if (strcmp(argv[1], "add") == 0)
-        return port_forward_add(&profile, guest_ip, &spec) == 0 ? 0 : 1;
-    if (strcmp(argv[1], "commit") == 0)
-        return port_forward_commit(&profile, &spec) == 0 ? 0 : 1;
-    if (strcmp(argv[1], "remove") == 0)
-        return port_forward_remove(&profile, guest_ip, &spec) == 0 ? 0 : 1;
     return 2;
 }

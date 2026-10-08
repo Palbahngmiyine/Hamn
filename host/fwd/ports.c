@@ -14,6 +14,7 @@
 #include <sys/file.h>
 #include <sys/proc_info.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -116,15 +117,6 @@ int port_spec_parse(const char *text, struct port_spec *spec,
     return 0;
 }
 
-int port_spec_guest_text(const struct port_spec *spec, const char *guest_ip,
-                         char *text, size_t cap)
-{
-    const char *bind_ip = spec->protocol == PORT_UDP ? guest_ip : "127.0.0.1";
-    int n = snprintf(text, cap, "%s:%u:%u/%s", bind_ip, spec->host_port,
-                     spec->container_port, protocol_name(spec->protocol));
-    return n >= 0 && n < (int)cap ? 0 : -1;
-}
-
 static int ownership_parse(const char *ownership,
                            struct forward_record *record)
 {
@@ -135,6 +127,9 @@ static int ownership_parse(const char *ownership,
         record->serialized = 1;
     } else if (strcmp(ownership, "submitted") == 0 ||
                strcmp(ownership, "submitted-locked") == 0) {
+        /* Nothing sets `submitted` any more. The two shapes stay readable, as
+         * the pending records they are, so that the accepted file format is
+         * unchanged. */
         record->pending = 1;
         record->submitted = 1;
         record->serialized = strcmp(ownership, "submitted-locked") == 0;
@@ -150,7 +145,7 @@ static int ownership_parse(const char *ownership,
  *   protocol host_ip host_port container_port pid start_sec start_usec
  *   ownership owner_pid owner_start_sec owner_start_usec
  * separated by tabs. The relay pid/start token identifies a UDP relay (TCP
- * records carry pid 0); the owner fields identify the wrapper generation of a
+ * records carry pid 0); the owner fields identify the process that reserved a
  * pending record. Any other record shape, including the pre-release 5-, 7-
  * and 8-field ones, is corrupt: the whole load fails, so no caller rewrites
  * the file or signals a process on partial evidence.
@@ -305,44 +300,24 @@ static int process_start_token(int pid, uint64_t *start_sec,
     return 0;
 }
 
-int port_forward_generation_current(struct port_forward_generation *generation)
-{
-    if (!generation)
-        return -1;
-    memset(generation, 0, sizeof(*generation));
-    generation->owner_pid = (int)getpid();
-    if (generation->owner_pid <= 1 ||
-        process_start_token(generation->owner_pid,
-                            &generation->owner_start_sec,
-                            &generation->owner_start_usec) != 0) {
-        memset(generation, 0, sizeof(*generation));
-        return -1;
-    }
-    return 0;
-}
-
-static int generation_valid(const struct port_forward_generation *generation)
-{
-    return generation && generation->owner_pid > 1 &&
-           generation->owner_start_sec > 0 &&
-           generation->owner_start_usec < 1000000;
-}
-
-static int generation_matches(
-    const struct forward_record *record,
-    const struct port_forward_generation *generation)
-{
-    return generation_valid(generation) && record->pending &&
-           record->owner_pid == generation->owner_pid &&
-           record->owner_start_sec == generation->owner_start_sec &&
-           record->owner_start_usec == generation->owner_start_usec;
-}
-
 enum process_identity {
     PROCESS_IDENTITY_UNKNOWN = -1,
     PROCESS_IDENTITY_CHANGED = 0,
     PROCESS_IDENTITY_MATCH = 1,
 };
+
+/* A process that has ended and that its parent has not reaped. libproc
+ * reports it as absent while it still answers signals; it runs nothing and
+ * holds no socket. */
+static int process_is_zombie(int pid)
+{
+    int name[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+    struct kinfo_proc info;
+    size_t size = sizeof(info);
+    return sysctl(name, 4, &info, &size, NULL, 0) == 0 &&
+           size == sizeof(info) && info.kp_proc.p_pid == pid &&
+           info.kp_proc.p_stat == SZOMB;
+}
 
 static enum process_identity process_identity_values(int pid,
                                                       uint64_t start_sec,
@@ -358,6 +333,9 @@ static enum process_identity process_identity_values(int pid,
     }
     if (kill(pid, 0) != 0 && errno == ESRCH)
         return PROCESS_IDENTITY_CHANGED;
+    /* Whichever process the zombie was, the recorded one does not run. */
+    if (process_is_zombie(pid))
+        return PROCESS_IDENTITY_CHANGED;
     return PROCESS_IDENTITY_UNKNOWN;
 }
 
@@ -365,13 +343,6 @@ static enum process_identity process_identity(const struct forward_record *recor
 {
     return process_identity_values(record->pid, record->start_sec,
                                    record->start_usec);
-}
-
-static enum process_identity owner_identity(const struct forward_record *record)
-{
-    return process_identity_values(record->owner_pid,
-                                   record->owner_start_sec,
-                                   record->owner_start_usec);
 }
 
 static int same_listener(const struct port_spec *a, const struct port_spec *b)
@@ -386,6 +357,24 @@ static int same_forward(const struct port_spec *a, const struct port_spec *b)
            strcmp(a->host_ip, b->host_ip) == 0 &&
            a->host_port == b->host_port &&
            a->container_port == b->container_port;
+}
+
+/*
+ * Whether a host listener can carry `spec` to the guest. A UDP relay listens
+ * on the published address on the host and sends to the guest's NAT address.
+ * Docker in the guest receives a port that is published on one address on
+ * that address of the guest alone. For 127.0.0.1, the guest's own loopback,
+ * the relay's datagrams find no listener; the guest's NAT address is one that
+ * the host cannot bind. Only a port published on all addresses is received
+ * where the relay sends. A TCP forward is not judged here: it enters the
+ * guest through SSH and connects to the guest's loopback.
+ */
+static int spec_forwardable(const struct port_spec *spec)
+{
+    struct in_addr address;
+    return spec->protocol != PORT_UDP ||
+           (inet_pton(AF_INET, spec->host_ip, &address) == 1 &&
+            address.s_addr == htonl(INADDR_ANY));
 }
 
 static int udp_pidfile(const struct profile *p, const struct port_spec *spec,
@@ -669,13 +658,6 @@ static void tcp_added_test_barrier(void)
                       "TCP added state");
 }
 
-static void tcp_cancelled_test_barrier(void)
-{
-    test_fifo_barrier("HAMN_TEST_TCP_CANCELLED_READY_FIFO",
-                      "HAMN_TEST_TCP_CANCELLED_RELEASE_FIFO",
-                      "TCP cancelled state");
-}
-
 static void udp_state_test_barrier(void)
 {
     test_fifo_barrier("HAMN_TEST_UDP_STATE_READY_FIFO",
@@ -711,12 +693,6 @@ static int remove_udp_pidfile(const struct profile *p,
     return fs_unlink_if_exists(pidfile);
 }
 
-enum udp_pending_recovery {
-    UDP_PENDING_UNKNOWN = -1,
-    UDP_PENDING_GONE = 0,
-    UDP_PENDING_MATCH = 1,
-};
-
 static int udp_listener_available(const struct port_spec *spec)
 {
     int fd = open_udp_listener(spec);
@@ -744,33 +720,63 @@ static int tcp_listener_available(const struct port_spec *spec)
     return available;
 }
 
-static enum udp_pending_recovery recover_pending_udp(
-    const struct profile *p, struct forward_record *record)
+/* Reaps `pid` when it is a child of this process that has ended. It does
+ * nothing to a child that runs or to a process that is not a child. */
+static void reap_ended_child(int pid)
 {
-    char pidfile[1100];
-    int pid = 0;
-    uint64_t start_sec = 0, start_usec = 0;
-    if (udp_pidfile(p, &record->spec, pidfile, sizeof(pidfile)) != 0)
-        return UDP_PENDING_UNKNOWN;
-    if (udp_pidfile_identity(pidfile, &pid, &start_sec, &start_usec) != 0) {
-        if (errno != ENOENT)
-            return UDP_PENDING_UNKNOWN;
-        return udp_listener_available(&record->spec) ?
-               UDP_PENDING_GONE : UDP_PENDING_UNKNOWN;
+    int status = 0;
+    while (waitpid(pid, &status, WNOHANG) < 0 && errno == EINTR)
+        ;
+}
+
+enum udp_relay {
+    UDP_RELAY_UNVERIFIED = -1, /* never signalled, replaced or reported ready */
+    UDP_RELAY_GONE = 0,
+    UDP_RELAY_RUNNING = 1,
+};
+
+/*
+ * Establishes whether the relay of a UDP record runs. The caller holds the
+ * operation lock, so no relay of the profile is being started meanwhile.
+ *
+ * The observer starts the relays and lives on, so a relay that ends stays its
+ * child until the observer reaps it, which it does here.
+ *
+ * A record that names its relay is judged by that process identity. A record
+ * without one was reserved by a process that ended before it recorded the
+ * relay it may have started. The relay's own pidfile then decides: a pidfile
+ * that identifies a live process is that relay, and its identity is copied
+ * into `record`; one that identifies a process that is gone leaves no relay;
+ * and without a pidfile, a host port that can be bound has no relay.
+ * Everything else cannot be verified.
+ */
+static enum udp_relay udp_relay_state(const struct profile *p,
+                                      struct forward_record *record)
+{
+    enum process_identity identity;
+    if (record->pid != 0) {
+        reap_ended_child(record->pid);
+        identity = process_identity(record);
+    } else {
+        char pidfile[1100];
+        int pid = 0;
+        uint64_t start_sec = 0, start_usec = 0;
+        if (udp_pidfile(p, &record->spec, pidfile, sizeof(pidfile)) != 0)
+            return UDP_RELAY_UNVERIFIED;
+        if (udp_pidfile_identity(pidfile, &pid, &start_sec, &start_usec) != 0)
+            return errno == ENOENT && udp_listener_available(&record->spec) ?
+                   UDP_RELAY_GONE : UDP_RELAY_UNVERIFIED;
+        reap_ended_child(pid);
+        identity = process_identity_values(pid, start_sec, start_usec);
+        if (identity == PROCESS_IDENTITY_MATCH) {
+            record->pid = pid;
+            record->start_sec = start_sec;
+            record->start_usec = start_usec;
+        }
     }
-    enum process_identity identity = process_identity_values(pid, start_sec,
-                                                              start_usec);
-    if (identity == PROCESS_IDENTITY_UNKNOWN)
-        return UDP_PENDING_UNKNOWN;
-    if (identity == PROCESS_IDENTITY_CHANGED) {
-        if (remove_udp_pidfile(p, record) != 0)
-            return UDP_PENDING_UNKNOWN;
-        return UDP_PENDING_GONE;
-    }
-    record->pid = pid;
-    record->start_sec = start_sec;
-    record->start_usec = start_usec;
-    return UDP_PENDING_MATCH;
+    return identity == PROCESS_IDENTITY_MATCH ? UDP_RELAY_RUNNING :
+           identity == PROCESS_IDENTITY_CHANGED ? UDP_RELAY_GONE :
+           UDP_RELAY_UNVERIFIED;
 }
 
 static int stop_record(const struct profile *p, const char *guest_ip,
@@ -791,19 +797,24 @@ static int stop_record(const struct profile *p, const char *guest_ip,
         return 0;
     }
 
-    enum process_identity identity = process_identity(record);
-    if (identity == PROCESS_IDENTITY_UNKNOWN) {
-        logerr("refusing to stop unverified UDP forward process %d",
-               record->pid);
+    struct forward_record relay = *record;
+    enum udp_relay state = udp_relay_state(p, &relay);
+    if (state == UDP_RELAY_UNVERIFIED) {
+        if (relay.pid != 0)
+            logerr("refusing to stop unverified UDP forward process %d",
+                   relay.pid);
+        else
+            logerr("refusing to stop the UDP forward on %s:%u: its relay "
+                   "cannot be identified", relay.spec.host_ip,
+                   relay.spec.host_port);
         return -1;
     }
-    if (identity == PROCESS_IDENTITY_MATCH &&
-        terminate_udp_process(record) != 0) {
-        logerr("cannot stop UDP forward process %d", record->pid);
+    if (state == UDP_RELAY_RUNNING && terminate_udp_process(&relay) != 0) {
+        logerr("cannot stop UDP forward process %d", relay.pid);
         return -1;
     }
-    if (remove_udp_pidfile(p, record) != 0) {
-        logerr("cannot remove UDP forward pidfile for %d", record->pid);
+    if (remove_udp_pidfile(p, &relay) != 0) {
+        logerr("cannot remove UDP forward pidfile for %d", relay.pid);
         return -1;
     }
     return 0;
@@ -843,24 +854,45 @@ static int complete_tcp_control(int rc, void *opaque)
 enum forward_failure {
     FORWARD_FAILURE_HOST_PORT_IN_USE,
     FORWARD_FAILURE_OTHER,
+    FORWARD_FAILURE_RELAY_UNVERIFIED, /* reported as FORWARD_FAILURE_OTHER */
+    FORWARD_FAILURE_UDP_ADDRESS_UNSUPPORTED, /* !spec_forwardable() */
 };
 
 #define FORWARD_DETAIL_CAP 256
 
-/* `failure`, when given, receives why the host listener could not be created
- * and `detail_out` (FORWARD_DETAIL_CAP bytes, optional) what the SSH client
- * said; the caller reports them. Without `failure` the failure is logged
- * here. */
+static void records_remove(struct forward_record records[], int *count,
+                           int index)
+{
+    memmove(&records[index], &records[index + 1],
+            (size_t)(*count - index - 1) * sizeof(records[0]));
+    (*count)--;
+}
+
+/* Creates the host listener for `spec` and leaves its record pending for the
+ * caller to commit. A record that already claims the listener refuses the
+ * request, with one exception.
+ *
+ * With `adopt_unconfirmed`, a pending TCP record of this exact forward is
+ * taken over instead: it says that a control request was reserved or sent,
+ * not that the listener exists. The request is sent again under this
+ * process's ownership. The SSH master answers a forward it already holds with
+ * success and creates nothing, so success is the master's own statement that
+ * it holds the listener, whichever request created it. A failure is handled
+ * like that of a first request, and the record never leaves the state file
+ * while the outcome is open.
+ *
+ * On failure, `*failure` is why the host listener could not be created and
+ * `detail_out` (FORWARD_DETAIL_CAP bytes) is what the SSH client said, empty
+ * when it said nothing. The caller reports them. */
 static int add_forward_under_operation_lock(const struct profile *p,
                                             const char *guest_ip,
                                             const struct port_spec *spec,
+                                            int adopt_unconfirmed,
                                             enum forward_failure *failure,
                                             char *detail_out)
 {
-    if (detail_out)
-        detail_out[0] = '\0';
-    if (failure)
-        *failure = FORWARD_FAILURE_OTHER;
+    detail_out[0] = '\0';
+    *failure = FORWARD_FAILURE_OTHER;
     int lock_fd = state_lock(p);
     if (lock_fd < 0) {
         logerr("cannot lock port forward state");
@@ -873,21 +905,27 @@ static int add_forward_under_operation_lock(const struct profile *p,
         logerr("cannot read port forward state");
         goto out;
     }
+    int slot = -1;
     for (int i = 0; i < count; i++) {
-        if (same_listener(&records[i].spec, spec)) {
-            logerr("host %s port %s:%u is already published",
-                   protocol_name(spec->protocol), spec->host_ip,
-                   spec->host_port);
-            goto out;
+        if (!same_listener(&records[i].spec, spec))
+            continue;
+        if (adopt_unconfirmed && slot < 0 && spec->protocol == PORT_TCP &&
+            records[i].pending && same_forward(&records[i].spec, spec)) {
+            slot = i;
+            continue;
         }
-    }
-    if (count >= MAX_FORWARD_RECORDS)
+        logerr("host %s port %s:%u is already published",
+               protocol_name(spec->protocol), spec->host_ip,
+               spec->host_port);
         goto out;
+    }
+    int adopted = slot >= 0;
+    if (!adopted) {
+        if (count >= MAX_FORWARD_RECORDS)
+            goto out;
+        slot = count++;
+    }
 
-    /*
-     * Persist ownership before creating the listener. If the filesystem
-     * cannot reserve recovery state, no host resource is created.
-     */
     struct forward_record record = {
         .spec = *spec,
         .pid = 0,
@@ -899,26 +937,36 @@ static int add_forward_under_operation_lock(const struct profile *p,
         logerr("cannot identify port forward owner process");
         goto out;
     }
-    records[count++] = record;
-    if (records_save(p, records, count) != 0)
-        goto out;
+    if (!adopted) {
+        /*
+         * Persist ownership before creating the listener. If the filesystem
+         * cannot reserve recovery state, no host resource is created. An
+         * adopted record is already reserved and keeps its phase until the
+         * control-request phase below replaces it in one write.
+         */
+        records[slot] = record;
+        if (records_save(p, records, count) != 0)
+            goto out;
 
-    if (spec->protocol == PORT_UDP)
-        udp_reservation_test_barrier();
-    else
-        tcp_reservation_test_barrier();
+        if (spec->protocol == PORT_UDP)
+            udp_reservation_test_barrier();
+        else
+            tcp_reservation_test_barrier();
+    }
 
     int rc;
+    int cancelled = 0;
     if (spec->protocol == PORT_TCP) {
         /*
-         * A killed wrapper or failed SSH response may leave the master request
-         * applied after our caller disappears. Persist an uncertain external
-         * mutation phase before sending the control request; only explicit
-         * cleanup or positive inventory may resolve it.
+         * A killed process or a failed SSH response may leave the master
+         * request applied after this process is gone. Persist an uncertain
+         * external mutation phase before sending the control request. Only
+         * the master's answer to that request or to its cancel, or evidence
+         * that no listener exists, may resolve it.
          */
         record.submitted = 0;
         record.serialized = 1;
-        records[count - 1] = record;
+        records[slot] = record;
         if (records_save(p, records, count) != 0)
             goto out;
         struct tcp_control_completion completion = {
@@ -937,43 +985,39 @@ static int add_forward_under_operation_lock(const struct profile *p,
             udp_state_test_barrier();
     }
     if (rc != 0) {
-        if (!failure) {
-            const char *detail = spec->protocol == PORT_TCP ?
-                ssh_forward_add_detail() : "";
-            logerr("cannot bind host %s port %s:%u%s%s",
-                   protocol_name(spec->protocol), spec->host_ip,
-                   spec->host_port, detail[0] ? ": " : "", detail);
-        } else if (detail_out) {
-            snprintf(detail_out, FORWARD_DETAIL_CAP, "%s",
-                     spec->protocol == PORT_TCP ? ssh_forward_add_detail() :
-                     "");
-        }
         if (spec->protocol == PORT_TCP) {
-            int cancelled = ssh_forward_cancel_tcp(
+            snprintf(detail_out, FORWARD_DETAIL_CAP, "%s",
+                     ssh_forward_add_detail());
+            cancelled = ssh_forward_cancel_tcp(
                 p, guest_ip, spec->host_ip, spec->host_port, "127.0.0.1",
                 spec->host_port) == 0;
             int absent = cancelled ||
                 (ssh_master_alive(p) != 0 && tcp_listener_available(spec));
             if (absent) {
-                if (records_save(p, records, count - 1) != 0)
+                records_remove(records, &count, slot);
+                if (records_save(p, records, count) != 0)
                     logerr("cannot remove failed TCP forward state");
             } else {
-                records[count - 1] = record;
+                records[slot] = record;
                 if (records_save(p, records, count) != 0)
                     logerr("cannot persist uncertain TCP forward state");
             }
         } else if (rc == UDP_START_UNSAFE) {
-            records[count - 1] = record;
+            records[slot] = record;
             if (records_save(p, records, count) != 0)
                 logerr("cannot persist uncertain UDP forward identity");
-        } else if (records_save(p, records, count - 1) != 0) {
-            logerr("cannot remove reserved port forward state");
+        } else {
+            records_remove(records, &count, slot);
+            if (records_save(p, records, count) != 0)
+                logerr("cannot remove reserved port forward state");
         }
-        /* After the failed request was cancelled, a host port that still
-         * cannot be bound belongs to another process. */
-        if (failure && !(spec->protocol == PORT_TCP ?
-                         tcp_listener_available(spec) :
-                         udp_listener_available(spec)))
+        /* A host port that still cannot be bound belongs to another process
+         * only once the master answered the cancel: then it holds no such
+         * forward. While the cancel is unanswered, the master itself may hold
+         * the port, and the holder is not named. */
+        if (spec->protocol == PORT_TCP ?
+            cancelled && !tcp_listener_available(spec) :
+            !udp_listener_available(spec))
             *failure = FORWARD_FAILURE_HOST_PORT_IN_USE;
         goto out;
     }
@@ -989,12 +1033,15 @@ static int add_forward_under_operation_lock(const struct profile *p,
         record.serialized = 0;
         tcp_added_test_barrier();
     } else {
-        records[count - 1] = record;
+        records[slot] = record;
         if (records_save(p, records, count) != 0) {
-            if (stop_record(p, guest_ip, &record) != 0)
+            if (stop_record(p, guest_ip, &record) != 0) {
                 logerr("cannot roll back uncommitted UDP forward");
-            else if (records_save(p, records, count - 1) != 0)
-                logerr("cannot remove reserved port forward state");
+            } else {
+                records_remove(records, &count, slot);
+                if (records_save(p, records, count) != 0)
+                    logerr("cannot remove reserved port forward state");
+            }
             goto out;
         }
     }
@@ -1005,72 +1052,10 @@ out:
     return result;
 }
 
-static int port_forward_add_under_operation_lock(const struct profile *p,
-                                                 const char *guest_ip,
-                                                 const struct port_spec *spec)
-{
-    return add_forward_under_operation_lock(p, guest_ip, spec, NULL, NULL);
-}
-
-int port_forward_add_serialized(const struct profile *p, const char *guest_ip,
-                                const struct port_spec *spec)
-{
-    return port_forward_add_under_operation_lock(p, guest_ip, spec);
-}
-
-int port_forward_add(const struct profile *p, const char *guest_ip,
-                     const struct port_spec *spec)
-{
-    int operation_lock = port_forward_operation_lock(p);
-    if (operation_lock < 0) {
-        logerr("cannot lock port-forward listener creation");
-        return -1;
-    }
-    int result = port_forward_add_under_operation_lock(p, guest_ip, spec);
-    port_forward_operation_unlock(operation_lock);
-    return result;
-}
-
-int port_forward_submit_many(const struct profile *p,
-                             const struct port_spec specs[], int spec_count,
-                             int serialized,
-                             const struct port_forward_generation *generation)
-{
-    if (!specs || spec_count <= 0 || spec_count > MAX_FORWARD_RECORDS ||
-        !generation_valid(generation))
-        return -1;
-    int lock_fd = state_lock(p);
-    if (lock_fd < 0)
-        return -1;
-    struct forward_record records[MAX_FORWARD_RECORDS];
-    int count = 0;
-    int result = -1;
-    if (records_load(p, records, &count) != 0)
-        goto out;
-    for (int spec_index = 0; spec_index < spec_count; spec_index++) {
-        int found = 0;
-        for (int i = 0; i < count; i++) {
-            if (!same_forward(&records[i].spec, &specs[spec_index]))
-                continue;
-            if (!generation_matches(&records[i], generation))
-                goto out;
-            records[i].submitted = 1;
-            records[i].serialized = serialized != 0;
-            found = 1;
-            break;
-        }
-        if (!found)
-            goto out;
-    }
-    result = records_save(p, records, count);
-
-out:
-    close(lock_fd);
-    return result;
-}
-
-int port_forward_commit(const struct profile *p,
-                        const struct port_spec *spec)
+/* Commits the pending record of `spec` once its listener exists. A record
+ * that is already committed stays as it is; a missing record is an error. */
+static int commit_forward(const struct profile *p,
+                          const struct port_spec *spec)
 {
     int lock_fd = state_lock(p);
     if (lock_fd < 0)
@@ -1099,121 +1084,6 @@ int port_forward_commit(const struct profile *p,
 
 out:
     close(lock_fd);
-    return result;
-}
-
-int port_forward_commit_owned(
-    const struct profile *p, const struct port_spec *spec,
-    const struct port_forward_generation *generation)
-{
-    if (!generation_valid(generation))
-        return -1;
-    int lock_fd = state_lock(p);
-    if (lock_fd < 0)
-        return -1;
-    struct forward_record records[MAX_FORWARD_RECORDS];
-    int count = 0;
-    int result = -1;
-    if (records_load(p, records, &count) != 0)
-        goto out;
-    result = 0;
-    for (int i = 0; i < count; i++) {
-        if (!same_forward(&records[i].spec, spec) ||
-            !generation_matches(&records[i], generation))
-            continue;
-        records[i].pending = 0;
-        records[i].submitted = 0;
-        records[i].serialized = 0;
-        records[i].owner_pid = 0;
-        records[i].owner_start_sec = 0;
-        records[i].owner_start_usec = 0;
-        result = records_save(p, records, count);
-        break;
-    }
-
-out:
-    close(lock_fd);
-    return result;
-}
-
-static int remove_under_operation_lock(const struct profile *p,
-                                       const char *guest_ip,
-                                       const struct port_spec *spec,
-                                       const struct port_forward_generation *generation)
-{
-    int lock_fd = state_lock(p);
-    if (lock_fd < 0)
-        return -1;
-    struct forward_record records[MAX_FORWARD_RECORDS];
-    int count = 0;
-    int result = -1;
-    if (records_load(p, records, &count) != 0)
-        goto out;
-    result = 0;
-    for (int i = 0; i < count; i++) {
-        if (same_listener(&records[i].spec, spec) &&
-            strcmp(records[i].spec.host_ip, spec->host_ip) == 0) {
-            if (generation && !generation_matches(&records[i], generation))
-                break;
-            if (stop_record(p, guest_ip, &records[i]) != 0) {
-                result = -1;
-                break;
-            }
-            if (records[i].spec.protocol == PORT_TCP)
-                tcp_cancelled_test_barrier();
-            memmove(&records[i], &records[i + 1],
-                    (size_t)(count - i - 1) * sizeof(records[0]));
-            count--;
-            result = records_save(p, records, count);
-            break;
-        }
-    }
-
-out:
-    close(lock_fd);
-    return result;
-}
-
-int port_forward_remove_serialized(const struct profile *p,
-                                   const char *guest_ip,
-                                   const struct port_spec *spec)
-{
-    return remove_under_operation_lock(p, guest_ip, spec, NULL);
-}
-
-int port_forward_remove_owned_serialized(
-    const struct profile *p, const char *guest_ip,
-    const struct port_spec *spec,
-    const struct port_forward_generation *generation)
-{
-    if (!generation_valid(generation))
-        return -1;
-    return remove_under_operation_lock(p, guest_ip, spec, generation);
-}
-
-int port_forward_remove(const struct profile *p, const char *guest_ip,
-                        const struct port_spec *spec)
-{
-    int operation_lock = port_forward_operation_lock(p);
-    if (operation_lock < 0)
-        return -1;
-    int result = remove_under_operation_lock(p, guest_ip, spec, NULL);
-    port_forward_operation_unlock(operation_lock);
-    return result;
-}
-
-int port_forward_remove_owned(
-    const struct profile *p, const char *guest_ip,
-    const struct port_spec *spec,
-    const struct port_forward_generation *generation)
-{
-    if (!generation_valid(generation))
-        return -1;
-    int operation_lock = port_forward_operation_lock(p);
-    if (operation_lock < 0)
-        return -1;
-    int result = remove_under_operation_lock(p, guest_ip, spec, generation);
-    port_forward_operation_unlock(operation_lock);
     return result;
 }
 
@@ -1249,249 +1119,37 @@ out:
     return result;
 }
 
-static int parse_published_range(const char *begin, const char *end,
-                                 unsigned *first, unsigned *last)
+int port_forward_unconfirm_tcp_serialized(const struct profile *p)
 {
-    while (begin < end && (*begin == ' ' || *begin == '\t'))
-        begin++;
-    while (end > begin && (end[-1] == ' ' || end[-1] == '\t'))
-        end--;
-    if (begin == end || (size_t)(end - begin) >= 32)
+    if (!p) {
+        errno = EINVAL;
         return -1;
-
-    char text[32];
-    memcpy(text, begin, (size_t)(end - begin));
-    text[end - begin] = '\0';
-    char *dash = strchr(text, '-');
-    if (!dash) {
-        if (port_number_parse(text, first) != 0)
-            return -1;
-        *last = *first;
-        return 0;
     }
-    *dash++ = '\0';
-    if (strchr(dash, '-') || port_number_parse(text, first) != 0 ||
-        port_number_parse(dash, last) != 0 || *last < *first)
-        return -1;
-    return 0;
-}
-
-static int published_group_contains(const char *begin, const char *end,
-                                    const char *expected_ip,
-                                    const struct forward_record *record)
-{
-    int have_bind_ip = 0;
-    int bind_ip_matches = 0;
-    const char *token = begin;
-    while (token < end) {
-        while (token < end &&
-               (*token == ',' || *token == ' ' || *token == '\t'))
-            token++;
-        const char *token_end = token;
-        while (token_end < end && *token_end != ',')
-            token_end++;
-        const char *trimmed_end = token_end;
-        while (trimmed_end > token &&
-               (trimmed_end[-1] == ' ' || trimmed_end[-1] == '\t'))
-            trimmed_end--;
-
-        const char *arrow = NULL;
-        for (const char *p = token; p + 1 < trimmed_end; p++) {
-            if (p[0] == '-' && p[1] == '>') {
-                arrow = p;
-                break;
-            }
-        }
-        if (!arrow) {
-            token = token_end < end ? token_end + 1 : end;
-            continue;
-        }
-
-        const char *colon = NULL;
-        for (const char *p = token; p < arrow; p++) {
-            if (*p == ':')
-                colon = p;
-        }
-        const char *host_range = token;
-        if (colon) {
-            size_t ip_len = (size_t)(colon - token);
-            have_bind_ip = 1;
-            bind_ip_matches = strlen(expected_ip) == ip_len &&
-                              strncmp(token, expected_ip, ip_len) == 0;
-            host_range = colon + 1;
-        }
-
-        unsigned host_first = 0, host_last = 0;
-        unsigned container_first = 0, container_last = 0;
-        if (have_bind_ip && bind_ip_matches &&
-            parse_published_range(host_range, arrow, &host_first,
-                                  &host_last) == 0 &&
-            parse_published_range(arrow + 2, trimmed_end, &container_first,
-                                  &container_last) == 0 &&
-            host_last - host_first == container_last - container_first &&
-            record->spec.host_port >= host_first &&
-            record->spec.host_port <= host_last &&
-            record->spec.container_port >= container_first &&
-            record->spec.container_port <= container_last &&
-            record->spec.host_port - host_first ==
-                record->spec.container_port - container_first)
-            return 1;
-
-        token = token_end < end ? token_end + 1 : end;
-    }
-    return 0;
-}
-
-static const char *published_protocol_suffix(const char *begin,
-                                             const char *end,
-                                             enum port_protocol *protocol)
-{
-    for (const char *p = begin; p + 4 <= end; p++) {
-        int bounded = p + 4 == end || p[4] == ',' || p[4] == ' ' ||
-                      p[4] == '\t';
-        if (bounded && memcmp(p, "/tcp", 4) == 0) {
-            *protocol = PORT_TCP;
-            return p;
-        }
-        if (bounded && memcmp(p, "/udp", 4) == 0) {
-            *protocol = PORT_UDP;
-            return p;
-        }
-    }
-    return NULL;
-}
-
-static int published_contains(const char *published_ports,
-                              const char *guest_ip,
-                              const struct forward_record *record)
-{
-    const char *expected_ip = record->spec.protocol == PORT_UDP ?
-                              guest_ip : "127.0.0.1";
-    const char *line = published_ports;
-    while (*line) {
-        const char *line_end = line;
-        while (*line_end && *line_end != '\r' && *line_end != '\n')
-            line_end++;
-
-        const char *group = line;
-        while (group < line_end) {
-            enum port_protocol protocol;
-            const char *suffix = published_protocol_suffix(group, line_end,
-                                                            &protocol);
-            if (!suffix)
-                break;
-            if (protocol == record->spec.protocol &&
-                published_group_contains(group, suffix, expected_ip,
-                                         record))
-                return 1;
-            group = suffix + 4;
-            while (group < line_end &&
-                   (*group == ',' || *group == ' ' || *group == '\t'))
-                group++;
-        }
-        line = line_end;
-        while (*line == '\r' || *line == '\n')
-            line++;
-    }
-    return 0;
-}
-
-static int reconcile(const struct profile *p, const char *guest_ip,
-                     const char *published_ports,
-                     int allow_serialized_cleanup,
-                     const char *previous_published_ports)
-{
     int lock_fd = state_lock(p);
     if (lock_fd < 0)
         return -1;
     struct forward_record records[MAX_FORWARD_RECORDS];
     int count = 0;
     int result = -1;
-    if (records_load(p, records, &count) != 0)
+    int owner_pid = (int)getpid();
+    uint64_t owner_start_sec = 0, owner_start_usec = 0;
+    if (records_load(p, records, &count) != 0 ||
+        process_start_token(owner_pid, &owner_start_sec,
+                            &owner_start_usec) != 0)
         goto out;
-    int kept = 0;
-    int stop_failed = 0;
+    int changed = 0;
     for (int i = 0; i < count; i++) {
-        int published = published_contains(published_ports, guest_ip,
-                                           &records[i]);
-        enum process_identity owner = records[i].pending ?
-                                      owner_identity(&records[i]) :
-                                      PROCESS_IDENTITY_CHANGED;
-        int resource_gone = 0;
-        if (allow_serialized_cleanup && records[i].pending &&
-            !records[i].submitted && !records[i].serialized &&
-            owner == PROCESS_IDENTITY_CHANGED &&
-            records[i].spec.protocol == PORT_TCP && !published &&
-            tcp_listener_available(&records[i].spec))
-            resource_gone = 1;
-        if (records[i].pending && owner == PROCESS_IDENTITY_CHANGED &&
-            records[i].spec.protocol == PORT_UDP && records[i].pid == 0) {
-            enum udp_pending_recovery recovery =
-                recover_pending_udp(p, &records[i]);
-            if (recovery == UDP_PENDING_UNKNOWN)
-                owner = PROCESS_IDENTITY_UNKNOWN;
-            else if (recovery == UDP_PENDING_GONE)
-                resource_gone = 1;
-        }
-        if (records[i].spec.protocol == PORT_UDP && published &&
-            !resource_gone &&
-            process_identity(&records[i]) != PROCESS_IDENTITY_MATCH) {
-            /*
-             * Guest inventory alone cannot prove host UDP readiness. Keep the
-             * record for explicit stop recovery, but fail reconciliation so a
-             * dead or unverified relay is never reported as committed-ready.
-             */
-            records[kept++] = records[i];
-            stop_failed = 1;
+        if (records[i].spec.protocol != PORT_TCP || records[i].pending)
             continue;
-        }
-        int submitted_absent = records[i].pending &&
-            records[i].submitted && !published;
-        int submitted_removed = submitted_absent &&
-            previous_published_ports &&
-            published_contains(previous_published_ports, guest_ip,
-                               &records[i]);
-        int submitted_absent_protected = submitted_absent &&
-            !submitted_removed;
-        int control_ambiguous_protected = records[i].pending &&
-            records[i].serialized && !records[i].submitted;
-        if (resource_gone && published) {
-            records[kept++] = records[i];
-            stop_failed = 1;
-            continue;
-        }
-        if (resource_gone && submitted_absent_protected) {
-            records[kept++] = records[i];
-            continue;
-        }
-        if (resource_gone)
-            continue;
-        if (records[i].pending && published &&
-            (owner == PROCESS_IDENTITY_CHANGED ||
-             (allow_serialized_cleanup && records[i].submitted &&
-              records[i].serialized))) {
-            records[i].pending = 0;
-            records[i].submitted = 0;
-            records[i].serialized = 0;
-            records[i].owner_pid = 0;
-            records[i].owner_start_sec = 0;
-            records[i].owner_start_usec = 0;
-        }
-        if ((records[i].pending &&
-             !submitted_removed &&
-             (owner != PROCESS_IDENTITY_CHANGED ||
-              submitted_absent_protected || control_ambiguous_protected)) ||
-            (!records[i].pending && published)) {
-            records[kept++] = records[i];
-        } else {
-            if (stop_record(p, guest_ip, &records[i]) != 0) {
-                records[kept++] = records[i];
-                stop_failed = 1;
-            }
-        }
+        /* The phase of a control request whose outcome is not known. */
+        records[i].pending = 1;
+        records[i].serialized = 1;
+        records[i].owner_pid = owner_pid;
+        records[i].owner_start_sec = owner_start_sec;
+        records[i].owner_start_usec = owner_start_usec;
+        changed = 1;
     }
-    if (records_save(p, records, kept) == 0)
-        result = stop_failed ? -1 : 0;
+    result = changed ? records_save(p, records, count) : 0;
 
 out:
     close(lock_fd);
@@ -1541,7 +1199,25 @@ struct failed_forward {
 static const char *failure_reason(enum forward_failure reason)
 {
     return reason == FORWARD_FAILURE_HOST_PORT_IN_USE ? "hostPortInUse" :
-        "forwardFailed";
+        reason == FORWARD_FAILURE_UDP_ADDRESS_UNSUPPORTED ?
+        "udpAddressUnsupported" : "forwardFailed";
+}
+
+/* What the log says about a published port that is not forwarded. */
+static const char *failure_log_text(enum forward_failure reason)
+{
+    switch (reason) {
+    case FORWARD_FAILURE_HOST_PORT_IN_USE:
+        return "another process holds the host port";
+    case FORWARD_FAILURE_RELAY_UNVERIFIED:
+        return "its relay cannot be verified";
+    case FORWARD_FAILURE_UDP_ADDRESS_UNSUPPORTED:
+        return "a UDP port is forwarded only when it is published on all "
+               "addresses";
+    case FORWARD_FAILURE_OTHER:
+        break;
+    }
+    return "the forward request failed";
 }
 
 static int failed_forward_order(const void *left_item, const void *right_item)
@@ -1639,13 +1315,13 @@ static void failures_publish(const struct profile *p,
         goto out;
     }
     for (int i = 0; i < count; i++) {
-        int in_use = failures[i].reason == FORWARD_FAILURE_HOST_PORT_IN_USE;
-        int explained = !in_use && failures[i].detail[0];
+        enum forward_failure reason = failures[i].reason;
+        int explained = reason == FORWARD_FAILURE_OTHER &&
+            failures[i].detail[0];
         logerr("cannot forward published %s port %s:%u: %s%s%s",
                protocol_name(failures[i].spec.protocol),
                failures[i].spec.host_ip, failures[i].spec.host_port,
-               in_use ? "another process holds the host port" :
-               "the forward request failed",
+               failure_log_text(reason),
                explained ? ": " : "", explained ? failures[i].detail : "");
     }
     if (count == 0)
@@ -1696,7 +1372,8 @@ cJSON *port_forward_failures(const struct profile *p)
              strcmp(protocol->valuestring, "udp") != 0) ||
             !cJSON_IsString(reason) ||
             (strcmp(reason->valuestring, "hostPortInUse") != 0 &&
-             strcmp(reason->valuestring, "forwardFailed") != 0) ||
+             strcmp(reason->valuestring, "forwardFailed") != 0 &&
+             strcmp(reason->valuestring, "udpAddressUnsupported") != 0) ||
             !(copy = cJSON_CreateObject()) ||
             !cJSON_AddStringToObject(copy, "hostIp", host_ip->valuestring) ||
             !cJSON_AddNumberToObject(copy, "hostPort", host_port->valuedouble) ||
@@ -1732,10 +1409,15 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     if (lock_fd < 0)
         return -1;
     struct forward_record records[MAX_FORWARD_RECORDS];
-    int present[MAX_FORWARD_RECORDS] = {0};
+    /* What the state says about each published port. */
+    enum { SPEC_UNRECORDED, SPEC_FORWARDED, SPEC_UNCONFIRMED };
+    int recorded[MAX_FORWARD_RECORDS] = {0};
     int count = 0;
     int kept = 0;
     int failed = 0;
+    /* At most one entry for each published port. */
+    struct failed_forward failures[MAX_FORWARD_RECORDS];
+    int failure_count = 0;
     if (records_load(p, records, &count) != 0) {
         close(lock_fd);
         return -1;
@@ -1744,21 +1426,58 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     for (int i = 0; i < count; i++) {
         int desired = -1;
         for (int candidate = 0; candidate < spec_count; candidate++) {
-            if (same_forward(&records[i].spec, &specs[candidate])) {
+            /* A record of a port that no listener can carry, left by a
+             * version that started a relay for it, is stopped like a record
+             * of a port that is no longer published. */
+            if (same_forward(&records[i].spec, &specs[candidate]) &&
+                spec_forwardable(&specs[candidate])) {
                 desired = candidate;
                 break;
             }
         }
-        if (desired >= 0) {
-            present[desired] = 1;
-            if (records[i].pending &&
-                (records[i].spec.protocol != PORT_UDP ||
-                 process_identity(&records[i]) == PROCESS_IDENTITY_MATCH))
-                record_mark_committed(&records[i]);
-            else if (records[i].pending) {
+        if (desired >= 0 && records[i].spec.protocol == PORT_UDP) {
+            /*
+             * A UDP record says that a relay was started, not that it still
+             * runs. Once the relay is gone and its pidfile cleared, the
+             * record goes too, and the port is forwarded below like one that
+             * was never recorded.
+             */
+            enum udp_relay relay = udp_relay_state(p, &records[i]);
+            if (relay == UDP_RELAY_GONE &&
+                stop_record(p, guest_ip, &records[i]) == 0)
+                continue;
+            recorded[desired] = SPEC_FORWARDED;
+            if (relay == UDP_RELAY_RUNNING) {
+                if (records[i].pending)
+                    record_mark_committed(&records[i]);
+            } else {
                 /* Do not claim an unverified UDP relay is ready. */
+                failures[failure_count].spec = specs[desired];
+                failures[failure_count].detail[0] = '\0';
+                failures[failure_count++].reason = relay == UDP_RELAY_GONE ?
+                    FORWARD_FAILURE_OTHER : FORWARD_FAILURE_RELAY_UNVERIFIED;
                 failed = 1;
             }
+            records[kept++] = records[i];
+            continue;
+        }
+        if (desired >= 0 && records[i].pending &&
+            records[i].spec.protocol == PORT_TCP) {
+            /*
+             * A pending TCP record says that a control request was reserved
+             * or sent, not that the master holds the listener: the request
+             * may have failed, or its answer was lost. Committing it here
+             * would end the retries for a port that nothing forwards. The
+             * record stays as it is until the request is sent again below.
+             */
+            recorded[desired] = SPEC_UNCONFIRMED;
+            records[kept++] = records[i];
+            continue;
+        }
+        if (desired >= 0) {
+            /* A committed TCP record: port_forward_unconfirm_tcp_serialized()
+             * is what withdraws the trust placed in it. */
+            recorded[desired] = SPEC_FORWARDED;
             records[kept++] = records[i];
             continue;
         }
@@ -1773,52 +1492,30 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     }
     close(lock_fd);
 
-    struct failed_forward failures[MAX_FORWARD_RECORDS];
-    int failure_count = 0;
     for (int i = 0; i < spec_count; i++) {
-        if (present[i])
+        if (!spec_forwardable(&specs[i])) {
+            /* Reported, and not a failure of this call: no later call can
+             * forward the port while it is published as it is. */
+            failures[failure_count].spec = specs[i];
+            failures[failure_count].detail[0] = '\0';
+            failures[failure_count++].reason =
+                FORWARD_FAILURE_UDP_ADDRESS_UNSUPPORTED;
+            continue;
+        }
+        if (recorded[i] == SPEC_FORWARDED)
             continue;
         enum forward_failure reason;
         if (add_forward_under_operation_lock(
-                p, guest_ip, &specs[i], &reason,
-                failures[failure_count].detail) != 0) {
+                p, guest_ip, &specs[i], recorded[i] == SPEC_UNCONFIRMED,
+                &reason, failures[failure_count].detail) != 0) {
             failures[failure_count].spec = specs[i];
             failures[failure_count++].reason = reason;
             failed = 1;
             continue;
         }
-        if (port_forward_commit(p, &specs[i]) != 0)
+        if (commit_forward(p, &specs[i]) != 0)
             failed = 1;
     }
     failures_publish(p, failures, failure_count);
     return failed ? -1 : 0;
-}
-
-int port_forward_reconcile(const struct profile *p, const char *guest_ip,
-                           const char *published_ports)
-{
-    int operation_lock = port_forward_operation_lock(p);
-    if (operation_lock < 0)
-        return -1;
-    int result = reconcile(p, guest_ip, published_ports, 0, NULL);
-    port_forward_operation_unlock(operation_lock);
-    return result;
-}
-
-int port_forward_reconcile_serialized(const struct profile *p,
-                                      const char *guest_ip,
-                                      const char *published_ports)
-{
-    return reconcile(p, guest_ip, published_ports, 1, NULL);
-}
-
-int port_forward_reconcile_rm_serialized(const struct profile *p,
-                                         const char *guest_ip,
-                                         const char *previous_published_ports,
-                                         const char *published_ports)
-{
-    if (!previous_published_ports)
-        return -1;
-    return reconcile(p, guest_ip, published_ports, 1,
-                     previous_published_ports);
 }

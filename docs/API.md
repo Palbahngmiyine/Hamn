@@ -48,11 +48,14 @@ configured: `hostPath`, the `guestPath` that Docker clients must name, and
 `mounts` entry. A bind mount of any other host path sees only the guest. A
 running VM keeps the shares it was started with.
 `portForwardFailures` lists the published ports that the running VM's port
-observer could not forward at its last pass: `hostIp`, `hostPort`, `protocol`
-and `reason`, which is `hostPortInUse` when another host process holds the port
-and `forwardFailed` otherwise. Docker reports such a container as started and
-shows the mapping; the port is forwarded once the cause is gone. The array is
-empty for a VM that is not running.
+observer did not forward at its last pass: `hostIp`, `hostPort`, `protocol`
+and `reason`. `reason` is `hostPortInUse` when another host process holds the
+port, `udpAddressUnsupported` for a UDP port that is published on one address
+instead of all addresses, and `forwardFailed` otherwise. Docker reports such a
+container as started and shows the mapping. A `hostPortInUse` or
+`forwardFailed` port is forwarded once the cause is gone; a
+`udpAddressUnsupported` port is not forwarded for as long as it is published
+that way. The array is empty for a VM that is not running.
 `state:running` describes the VM process only; `ready` requires Docker `/_ping`.
 `hostFreeMiB` is the space available on the volume that holds the profile
 directory, where the sparse VM disk grows; it is null when it cannot be

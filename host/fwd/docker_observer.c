@@ -583,13 +583,55 @@ enum observer_pass {
     OBSERVER_PASS_LEASE_LOST,
     OBSERVER_PASS_SNAPSHOT_UNAVAILABLE, /* no usable container list */
     OBSERVER_PASS_SNAPSHOT_OVER_LIMIT,  /* the list exceeds a bound */
-    OBSERVER_PASS_STATE_UNAVAILABLE,    /* the forward state cannot be locked */
+    OBSERVER_PASS_STATE_UNAVAILABLE,    /* the forward state cannot be updated */
     OBSERVER_PASS_FORWARD_FAILED,       /* named by the port forward state */
+};
+
+/* The SSH control socket as one master created it. A new master replaces the
+ * file, and none of the TCP listeners of the master before it remain. */
+struct master_socket {
+    int present;
+    dev_t device;
+    ino_t inode;
+    struct timespec created;
+};
+
+static void master_socket_read(const struct profile *profile,
+                               struct master_socket *identity)
+{
+    char path[PATH_MAX];
+    struct stat status;
+    memset(identity, 0, sizeof(*identity));
+    if (!profile_path(profile, "ssh.sock", path, sizeof(path)) ||
+        lstat(path, &status) != 0)
+        return;
+    identity->present = 1;
+    identity->device = status.st_dev;
+    identity->inode = status.st_ino;
+    identity->created = status.st_birthtimespec;
+}
+
+static int master_socket_same(const struct master_socket *left,
+                              const struct master_socket *right)
+{
+    return left->present == right->present &&
+        left->device == right->device && left->inode == right->inode &&
+        left->created.tv_sec == right->created.tv_sec &&
+        left->created.tv_nsec == right->created.tv_nsec;
+}
+
+/* The master whose answers the committed TCP records rest on, as far as one
+ * observer knows: `known` is 0 until a pass of this observer has withdrawn
+ * the trust in the records that it found. */
+struct observer_master {
+    int known;
+    struct master_socket control;
 };
 
 static enum observer_pass observer_pass(const struct profile *profile,
                                         const char *guest_ip,
-                                        const char *lease)
+                                        const char *lease,
+                                        struct observer_master *master)
 {
     if (!observer_lease_matches(profile, lease))
         return OBSERVER_PASS_LEASE_LOST;
@@ -602,12 +644,35 @@ static enum observer_pass observer_pass(const struct profile *profile,
     int operation_lock = port_forward_operation_lock(profile);
     if (operation_lock < 0)
         return OBSERVER_PASS_STATE_UNAVAILABLE;
-    int result = observer_lease_matches(profile, lease) ?
-        port_forward_sync_docker_serialized(profile, guest_ip, specs,
-                                            spec_count) : 1;
+    enum observer_pass pass = OBSERVER_PASS_LEASE_LOST;
+    if (observer_lease_matches(profile, lease)) {
+        /*
+         * Committed TCP records are trusted only for the master that this
+         * observer saw confirm them. A new observer inherits records that it
+         * did not see confirmed, and a replaced control socket is a master
+         * that holds none of them: both make every such record unconfirmed
+         * once, and the synchronization then asks the master again. The
+         * socket is read before the records are marked, so a master that is
+         * replaced during this pass is seen by the next one.
+         */
+        struct master_socket current;
+        master_socket_read(profile, &current);
+        if (master->known && master_socket_same(&master->control, &current)) {
+            pass = OBSERVER_PASS_SYNCHRONIZED;
+        } else if (port_forward_unconfirm_tcp_serialized(profile) == 0) {
+            master->known = 1;
+            master->control = current;
+            pass = OBSERVER_PASS_SYNCHRONIZED;
+        } else {
+            pass = OBSERVER_PASS_STATE_UNAVAILABLE;
+        }
+        if (pass == OBSERVER_PASS_SYNCHRONIZED &&
+            port_forward_sync_docker_serialized(profile, guest_ip, specs,
+                                                spec_count) != 0)
+            pass = OBSERVER_PASS_FORWARD_FAILED;
+    }
     port_forward_operation_unlock(operation_lock);
-    return result == 0 ? OBSERVER_PASS_SYNCHRONIZED :
-        result == 1 ? OBSERVER_PASS_LEASE_LOST : OBSERVER_PASS_FORWARD_FAILED;
+    return pass;
 }
 
 int docker_observer_sync_once(const struct profile *profile,
@@ -617,7 +682,8 @@ int docker_observer_sync_once(const struct profile *profile,
         errno = EINVAL;
         return -1;
     }
-    enum observer_pass pass = observer_pass(profile, guest_ip, lease);
+    struct observer_master master = {0};
+    enum observer_pass pass = observer_pass(profile, guest_ip, lease, &master);
     return pass == OBSERVER_PASS_SYNCHRONIZED ? 0 :
         pass == OBSERVER_PASS_LEASE_LOST ? 1 : -1;
 }
@@ -638,8 +704,8 @@ static void observer_pass_report(enum observer_pass previous,
                "not synchronized", DOCKER_SNAPSHOT_MAX_CONTAINERS,
                DOCKER_HTTP_BODY_CAP / 1024, DOCKER_OBSERVER_MAX_PORTS);
     else if (pass == OBSERVER_PASS_STATE_UNAVAILABLE)
-        logerr("cannot lock the port forward state; published ports stay as "
-               "they are");
+        logerr("cannot lock or update the port forward state; published "
+               "ports stay as they are");
     else if (pass == OBSERVER_PASS_SYNCHRONIZED &&
              previous != OBSERVER_PASS_FORWARD_FAILED)
         logmsg("published port synchronization resumed");
@@ -706,8 +772,10 @@ int docker_observer_watch(const struct profile *profile, const char *guest_ip,
     unsigned cycles = 0;
     enum observer_pass reported = OBSERVER_PASS_SYNCHRONIZED;
     int events_failed = 0;
+    struct observer_master master = {0};
     for (;;) {
-        enum observer_pass pass = observer_pass(profile, guest_ip, lease);
+        enum observer_pass pass = observer_pass(profile, guest_ip, lease,
+                                                &master);
         if (pass == OBSERVER_PASS_LEASE_LOST)
             return 0;
         observer_pass_report(reported, pass);

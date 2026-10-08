@@ -125,6 +125,8 @@ host path는 VM 시작 전에 canonicalize합니다. Absolute path, symlink trav
 
 모든 Hamn profile은 Virtualization.framework shared NAT를 사용합니다. Published TCP
 port는 SSH ControlMaster forward를, published UDP port는 bounded host relay를 사용합니다.
+Relay는 guest의 NAT 주소로 보내므로 UDP port는 모든 주소에 publish된 경우에만 전달되고,
+한 주소에 publish된 UDP port는 전달하지 않고 보고합니다([설정](CONFIGURATION.ko.md#network) 참고).
 Forward 생성/제거는 transactionally reconcile합니다. Network attachment는 profile마다
 설정할 수 없습니다. `network` YAML key와 network 선택 CLI option이 없습니다.
 `host.docker.internal`은 guest Docker network에 제공됩니다. 0.0.1의

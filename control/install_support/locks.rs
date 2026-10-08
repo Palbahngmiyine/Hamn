@@ -1,9 +1,14 @@
 //! Owner-only advisory locks that serialize installation transactions.
 //!
 //! Every lock is a permanent, owner-only (0600, one link) regular file,
-//! locked with `flock(LOCK_EX)` on an open file description this process
-//! owns; dropping the guard closes it and releases the lock, and so does
-//! any process exit, including SIGKILL, so no stale-lock protocol exists.
+//! locked with `flock(LOCK_EX)` on an open file description that this
+//! process opened. Dropping the guard unlocks that description and closes
+//! the descriptor. The unlock is explicit because a child that the process
+//! forks while the lock is held shares the description until it ends or
+//! execs, and closing our descriptor alone would leave the lock to that
+//! child. A process that ends without dropping the guard, SIGKILL included,
+//! releases the lock once no such child shares the description, so no
+//! stale-lock protocol exists.
 //! The path's identity (device, inode, owner, mode, link count) is compared
 //! with the open descriptor before and after blocking, so a lock file
 //! replaced meanwhile is refused rather than trusted.
@@ -35,7 +40,26 @@ use std::{
 
 /// One held lock. The descriptor stays open (and the lock held) until drop.
 pub(super) struct Held {
-    _file: File,
+    file: File,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        loop {
+            // The descriptor is owned by this guard and remains open
+            // throughout Drop. Unlock the shared description before File
+            // closes our copy.
+            if unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted,
+                "cannot unlock installation lock: {error}"
+            );
+        }
+    }
 }
 
 /// How a lock file is validated and how failures are described.
@@ -102,8 +126,8 @@ fn acquire(path: &Path, kind: Kind) -> Result<Held> {
         return Err(changed("opening"));
     }
     loop {
-        // flock locks this process's own open file description; nothing
-        // else holds the descriptor.
+        // flock locks the open file description, which a child forked from
+        // now on shares; `Held` is what ends the lock for every holder.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
             break;
         }
@@ -116,10 +140,12 @@ fn acquire(path: &Path, kind: Kind) -> Result<Held> {
         }
         interrupt::check()?;
     }
-    if !held(&file) {
+    // Every return from here unlocks explicitly, the refusal below included.
+    let lock = Held { file };
+    if !held(&lock.file) {
         return Err(changed("locking"));
     }
-    Ok(Held { _file: file })
+    Ok(lock)
 }
 
 /// Two lock paths in byte order, which every acquirer uses (no deadlock).
@@ -257,8 +283,134 @@ mod tests {
 
     fn try_lock(path: &Path) -> bool {
         let file = OpenOptions::new().append(true).open(path).unwrap();
-        // The probe owns its own description; LOCK_NB never blocks.
-        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+        // The probe owns its own description; LOCK_NB never blocks. It
+        // unlocks before closing: a child that another test forks meanwhile
+        // would otherwise keep the probe's lock on that description.
+        let free = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 };
+        assert_eq!(unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) }, 0);
+        free
+    }
+
+    /// A child of this process that does not exec: it shares every open file
+    /// description that the process had when it forked, until it ends.
+    struct ForkedChild {
+        pid: libc::pid_t,
+        release: libc::c_int,
+    }
+
+    impl ForkedChild {
+        fn fork() -> Self {
+            let mut release = [0; 2];
+            let mut ready = [0; 2];
+            assert_eq!(unsafe { libc::pipe(release.as_mut_ptr()) }, 0);
+            assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+            for fd in release.into_iter().chain(ready) {
+                assert_eq!(
+                    unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
+                    0
+                );
+            }
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0);
+            if pid == 0 {
+                // A multithreaded test runner may own Rust/allocator locks at
+                // fork. The child uses only async-signal-safe libc and exits
+                // without Drop.
+                unsafe {
+                    libc::close(release[1]);
+                    libc::close(ready[0]);
+                    let byte = 1_u8;
+                    if libc::write(ready[1], (&byte as *const u8).cast(), 1) != 1 {
+                        libc::_exit(2);
+                    }
+                    let mut event = libc::pollfd {
+                        fd: release[0],
+                        events: libc::POLLIN,
+                        revents: 0,
+                    };
+                    let released = libc::poll(&mut event, 1, 5000) > 0;
+                    libc::_exit(if released { 0 } else { 3 });
+                }
+            }
+            unsafe {
+                libc::close(release[0]);
+                libc::close(ready[1]);
+            }
+            let child = Self {
+                pid,
+                release: release[1],
+            };
+            let mut event = libc::pollfd {
+                fd: ready[0],
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let mut byte = 0_u8;
+            let started = unsafe { libc::poll(&mut event, 1, 5000) } > 0
+                && unsafe { libc::read(ready[0], (&mut byte as *mut u8).cast(), 1) } == 1;
+            unsafe { libc::close(ready[0]) };
+            assert!(started, "the forked child did not start");
+            child
+        }
+
+        /// Lets the child end and requires that it ended as asked. A byte,
+        /// not end-of-file: other tests' forked children inherit the writer.
+        fn end(self) {
+            let byte = 1_u8;
+            let asked = unsafe { libc::write(self.release, (&byte as *const u8).cast(), 1) };
+            let mut status = 0;
+            let reaped = loop {
+                let result = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+                let interrupted =
+                    std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted;
+                if result >= 0 || !interrupted {
+                    break result;
+                }
+            };
+            unsafe { libc::close(self.release) };
+            std::mem::forget(self);
+            assert_eq!(asked, 1);
+            assert!(
+                reaped >= 0 && libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+                "the forked child ended with status {status}"
+            );
+        }
+    }
+
+    impl Drop for ForkedChild {
+        /// A failed test must not leave the child or its descriptor behind.
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.pid, libc::SIGKILL);
+                libc::waitpid(self.pid, std::ptr::null_mut(), 0);
+                libc::close(self.release);
+            }
+        }
+    }
+
+    #[test]
+    fn forked_child_cannot_extend_released_transaction_and_install_locks() {
+        let t = Temp::new();
+        let r = roots(&t);
+        let transaction = Transaction::acquire(&r).unwrap();
+        let install = Install::acquire(&transaction).unwrap();
+        let paths: Vec<PathBuf> = r
+            .lock_pair("transaction")
+            .into_iter()
+            .chain(r.lock_pair("install"))
+            .collect();
+        let child = ForkedChild::fork();
+        assert!(paths.iter().all(|path| !try_lock(path)));
+        drop(install);
+        drop(transaction);
+        // The child still holds the inherited open file descriptions. The end
+        // of a transaction must not depend on that child's lifetime.
+        let free: Vec<bool> = paths.iter().map(|path| try_lock(path)).collect();
+        child.end();
+        assert_eq!(free, [true; 4], "{paths:?}");
+        // Another transaction can start at once, as an installer waiting on
+        // these locks would.
+        drop(Install::acquire(&Transaction::acquire(&r).unwrap()).unwrap());
     }
 
     #[test]
