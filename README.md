@@ -59,7 +59,6 @@ See [workspace and command guide](docs/TUI.md) for actions, settings, and cancel
 ```sh
 hamn --headless capabilities
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
-hamn --headless vm apply --profile work --file work.yaml --yes
 hamn --headless vm start --profile work --yes
 hamn --headless docker containers list --profile work
 hamn --headless docker containers list --context remote
@@ -72,10 +71,56 @@ hamn --headless vm stop --profile work --yes
 
 Mutations require `--yes` and explicit resource targets. One-shot commands emit
 one JSON response; `--follow` logs and `--watch` queries emit NDJSON. stdout is
-reserved for machine-readable responses. See [API](docs/API.md). `vm apply`
-makes a profile's configuration equal to a
-[definition file](docs/CONFIGURATION.md#declarative-configuration), creating
-the profile if needed; `--dry-run` shows the changes first.
+reserved for machine-readable responses. See [API](docs/API.md).
+
+## Declarative configuration
+
+Keep every setting of a profile in one file, and let `vm apply` make the
+profile match it. A file `work.yaml`:
+
+```yaml
+apiVersion: hamn/v1
+kind: Profile
+metadata:
+  name: work
+spec:
+  cpus: 6
+  memoryMiB: 8192
+  diskGiB: 80
+  rosetta: true
+  mounts:
+    - location: "/Users/<your-user>/project"
+      mountPoint: "/workspace/project"
+      writable: true
+```
+
+```sh
+hamn --headless vm apply --profile work --file work.yaml --dry-run
+hamn --headless vm apply --profile work --file work.yaml --yes
+hamn --headless vm start --profile work --yes
+```
+
+The first command reports what would change and writes nothing. The second
+creates the profile when it does not exist and replaces its configuration when
+the file differs. When nothing differs it writes nothing, so it can be run
+again at any time, also while the VM runs.
+
+- `metadata.name` must equal `--profile`.
+- `spec` takes the same keys as the profile's `~/.hamn/<profile>/config.yaml`.
+  The definition file is the whole configuration: a key that `spec` leaves out
+  returns to its default. A disk cannot shrink, so keep `diskGiB` in the file:
+  a value below the current size, also the default 60, is refused.
+- `vm apply` changes the configuration only. It does not start or stop the VM,
+  and a change needs a stopped VM: `vm stop`, `vm apply`, then `vm start`.
+- `vm apply` does not check the Mac; the next `vm start` does. Replace the
+  mount `location` with a directory that exists and that you own, inside your
+  home directory for a writable mount, and keep `rosetta: true` only where
+  Rosetta is available.
+
+See [Declarative configuration](docs/CONFIGURATION.md#declarative-configuration)
+for the rules, [YAML schema](docs/CONFIGURATION.md#yaml-schema) for every
+setting, and [Mounts](docs/CONFIGURATION.md#mounts) for the keys and rules of a
+mount.
 
 ## External tools
 
@@ -91,10 +136,6 @@ write semantics. Headless authentication remains noninteractive; native CLI
 authentication runs according to the installed CLI in the embedded terminal.
 
 ## Data
-
-Hamn no longer manages K3s. A profile that still has the removed `kubernetes`
-setting is refused until that mapping is deleted from its `config.yaml`; its
-old K3s data is not migrated.
 
 `vm delete` stops and hides a profile while preserving its disk and Docker data.
 `system uninstall --yes` permanently removes all Hamn profiles and managed
