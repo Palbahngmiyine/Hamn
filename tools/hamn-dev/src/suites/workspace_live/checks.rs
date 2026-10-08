@@ -7,6 +7,7 @@ use super::cancellation::read_line;
 use super::contexts::{Proxy, births, certificates, provider, roots, wrapper};
 use super::kubernetes::assert_deployment_preserved;
 use super::management::{OWNER, Row, assert_identity, assert_relations, choose, query, same_process};
+use super::ports::{UdpProbe, assert_forwarded, assert_reported, assert_unrecorded, tcp_echo};
 use super::processes::{Identity, Table, birth, gone};
 use super::terminal::Driver;
 use super::transport::owned_ssh;
@@ -24,14 +25,15 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, TcpStream};
+use std::net::{IpAddr, TcpListener, TcpStream, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub fn main(filters: &[String]) -> ExitCode {
     runner::run(
@@ -56,6 +58,8 @@ pub fn main(filters: &[String]) -> ExitCode {
             case("contexts/wrapper_executes_real_program_and_observes_its_exact_birth", witnessed_wrapper),
             case("kubernetes/controller_status_and_revision_do_not_imply_a_restart", controller_changes_pass),
             case("kubernetes/replacement_spec_change_or_lost_concurrent_edit_fails", lost_changes_fail),
+            case("ports/forward_and_report_oracles_accept_only_the_expected_state", port_oracles),
+            case("ports/echo_probes_accept_only_their_payload_and_end_at_their_deadline", echo_probes),
         ],
         filters,
     )
@@ -638,5 +642,176 @@ fn lost_changes_fail() {
         let mut after = before.clone();
         mutate(&mut after);
         assert!(assert_deployment_preserved(&before, &after).is_err(), "{name} was accepted");
+    }
+}
+
+fn port_oracles() {
+    let udp = "udp\t0.0.0.0\t24453\t5353\t4242\t1791450000\t17\tcommitted\t0\t0\t0";
+    let tcp = "tcp\t127.0.0.1\t24480\t5353\t0\t0\t0\tcommitted\t0\t0\t0";
+    let state = |lines: &[&str]| lines.iter().map(|line| format!("{line}\n")).collect::<String>();
+    let both = state(&[udp, tcp]);
+    assert_forwarded(&both, "udp", "0.0.0.0", 24453).unwrap();
+    assert_forwarded(&both, "tcp", "127.0.0.1", 24480).unwrap();
+    assert_unrecorded(&both, "udp", 24454).unwrap();
+    assert_unrecorded(&both, "tcp", 24453).unwrap();
+    assert_unrecorded("", "udp", 24453).unwrap();
+    assert!(assert_unrecorded(&both, "udp", 24453).is_err());
+    assert!(assert_unrecorded(&both, "tcp", 24480).is_err());
+
+    // Each state differs from a forwarded port in one respect.
+    for (difference, records) in [
+        ("no record", vec![tcp]),
+        ("two records", vec![udp, udp]),
+        ("the guest's loopback", vec!["udp\t127.0.0.1\t24453\t5353\t4242\t1791450000\t17\tcommitted\t0\t0\t0"]),
+        ("another container port", vec!["udp\t0.0.0.0\t24453\t53\t4242\t1791450000\t17\tcommitted\t0\t0\t0"]),
+        ("a reserved record", vec!["udp\t0.0.0.0\t24453\t5353\t4242\t1791450000\t17\tpending\t4243\t1791450001\t0"]),
+        ("no relay", vec!["udp\t0.0.0.0\t24453\t5353\t0\t0\t0\tcommitted\t0\t0\t0"]),
+    ] {
+        assert!(assert_forwarded(&state(&records), "udp", "0.0.0.0", 24453).is_err(), "{difference} was accepted");
+    }
+    for (difference, record) in [
+        ("an unanswered request", "tcp\t127.0.0.1\t24480\t5353\t0\t0\t0\tcontrol-locked\t4243\t1791450001\t0"),
+        ("all addresses", "tcp\t0.0.0.0\t24480\t5353\t0\t0\t0\tcommitted\t0\t0\t0"),
+        ("a relay", "tcp\t127.0.0.1\t24480\t5353\t4242\t1791450000\t17\tcommitted\t0\t0\t0"),
+    ] {
+        assert!(assert_forwarded(&state(&[record]), "tcp", "127.0.0.1", 24480).is_err(), "{difference} was accepted");
+    }
+    // A line that is not a record is never read as the absence of one.
+    for malformed in ["udp\t0.0.0.0\t24453\t5353\t4242", "udp\t0.0.0.0\tport\t5353\t4242\t1\t1\tcommitted\t0\t0\t0"] {
+        assert!(assert_forwarded(&state(&[udp, malformed]), "udp", "0.0.0.0", 24453).is_err(), "{malformed:?}");
+        assert!(assert_unrecorded(&state(&[malformed]), "tcp", 24480).is_err(), "{malformed:?}");
+    }
+
+    let entry = |address: &str, port: u16, protocol: &str, reason: &str| {
+        json!({"hostIp": address, "hostPort": port, "protocol": protocol, "reason": reason})
+    };
+    let unsupported = entry("127.0.0.1", 24454, "udp", "udpAddressUnsupported");
+    assert_reported(&json!({"portForwardFailures": [unsupported]}), &[("127.0.0.1", 24454)]).unwrap();
+    assert_reported(&json!({"portForwardFailures": []}), &[]).unwrap();
+    for (difference, reported) in [
+        ("nothing reported", json!([])),
+        ("a failed forward", json!([entry("127.0.0.1", 24454, "udp", "forwardFailed")])),
+        ("a held host port", json!([entry("127.0.0.1", 24454, "udp", "hostPortInUse")])),
+        ("another address", json!([entry("0.0.0.0", 24454, "udp", "udpAddressUnsupported")])),
+        ("another port", json!([entry("127.0.0.1", 24453, "udp", "udpAddressUnsupported")])),
+        ("a TCP port", json!([entry("127.0.0.1", 24454, "tcp", "udpAddressUnsupported")])),
+        ("a second port", json!([unsupported, entry("127.0.0.1", 24455, "udp", "udpAddressUnsupported")])),
+        ("no list", Value::Null),
+    ] {
+        let status = json!({"portForwardFailures": reported});
+        assert!(assert_reported(&status, &[("127.0.0.1", 24454)]).is_err(), "{difference} was accepted");
+    }
+    assert!(assert_reported(&json!({"portForwardFailures": [unsupported]}), &[]).is_err());
+    assert!(assert_reported(&json!({}), &[]).is_err(), "a status without the list was accepted");
+}
+
+/// A peer on 127.0.0.1:`port` for the echo probes, stopped and joined when
+/// dropped.
+struct Peer {
+    port: u16,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Peer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// What a peer answers to its `index`th request (from 0); `None` answers
+/// nothing.
+type Answer = fn(usize, &[u8]) -> Option<Vec<u8>>;
+
+fn udp_peer(answer: Answer) -> Peer {
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    socket.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
+    let port = socket.local_addr().unwrap().port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
+        let (mut buffer, mut index) = ([0u8; 2048], 0);
+        while !stopped.load(Ordering::SeqCst) {
+            if let Ok((length, client)) = socket.recv_from(&mut buffer) {
+                if let Some(reply) = answer(index, &buffer[..length]) {
+                    let _ = socket.send_to(&reply, client);
+                }
+                index += 1;
+            }
+        }
+    });
+    Peer { port, stop, thread: Some(thread) }
+}
+
+/// Answers the first read of each connection and closes it.
+fn tcp_peer(answer: Answer) -> Peer {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stopped = Arc::clone(&stop);
+    let thread = std::thread::spawn(move || {
+        let (mut buffer, mut index) = ([0u8; 2048], 0);
+        while !stopped.load(Ordering::SeqCst) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+            if let Ok(length) = stream.read(&mut buffer)
+                && let Some(reply) = answer(index, &buffer[..length])
+            {
+                let _ = stream.write_all(&reply);
+            }
+            index += 1;
+        }
+    });
+    Peer { port, stop, thread: Some(thread) }
+}
+
+fn echo_probes() {
+    let patient = Duration::from_secs(5);
+    let brief = Duration::from_millis(600);
+    // A probe that is refused ends at its deadline: not before, and without
+    // waiting much longer.
+    let ended_at_deadline = |started: Instant| (brief..brief + patient).contains(&started.elapsed());
+    let echo: Answer = |_, request| Some(request.to_vec());
+    let after_two_losses: Answer = |index, request| (index >= 2).then(|| request.to_vec());
+    let other_bytes: Answer = |_, _| Some(b"another".to_vec());
+    let nothing: Answer = |_, _| None;
+
+    UdpProbe::new(udp_peer(echo).port).unwrap().echo(b"payload", patient).unwrap();
+    // The container can start listening after the relay: the datagram is
+    // sent again.
+    UdpProbe::new(udp_peer(after_two_losses).port).unwrap().echo(b"payload", patient).unwrap();
+    for (peer, refusal) in [(udp_peer(other_bytes), "another reply"), (udp_peer(nothing), "no reply")] {
+        let started = Instant::now();
+        let error = UdpProbe::new(peer.port).unwrap().echo(b"payload", brief).unwrap_err();
+        assert!(error.contains("no echo from UDP") && error.contains(refusal), "{error}");
+        assert!(ended_at_deadline(started), "{refusal}: {:?}", started.elapsed());
+    }
+    let unbound = UdpSocket::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+    let started = Instant::now();
+    let error = UdpProbe::new(unbound).unwrap().echo(b"payload", brief).unwrap_err();
+    assert!(error.contains("no echo from UDP"), "{error}");
+    assert!(ended_at_deadline(started), "nothing listens: {:?}", started.elapsed());
+
+    tcp_echo(tcp_peer(echo).port, b"payload", patient).unwrap();
+    // The forward accepts connections before the container listens, and
+    // closes them: the connection is made again.
+    tcp_echo(tcp_peer(after_two_losses).port, b"payload", patient).unwrap();
+    let error = tcp_echo(tcp_peer(other_bytes).port, b"payload", patient).unwrap_err();
+    assert!(error.contains("not the payload"), "{error}");
+    let closing = tcp_peer(nothing);
+    let unbound = TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+    for (port, case) in [(closing.port, "a closed connection"), (unbound, "nothing listens")] {
+        let started = Instant::now();
+        let error = tcp_echo(port, b"payload", brief).unwrap_err();
+        assert!(error.contains("no echo from TCP"), "{case}: {error}");
+        assert!(ended_at_deadline(started), "{case}: {:?}", started.elapsed());
     }
 }
