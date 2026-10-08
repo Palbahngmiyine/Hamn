@@ -40,7 +40,8 @@ fn tls_target(kubectl: &Path) {
     );
     harness.send(format!(":{query}\r").as_bytes(), "tls-pod");
     harness.send(b"\r", "Exit code 0");
-    assert!(harness.text().contains("name: tls-pod"), "{}", harness.text());
+    // The exit footer can be drawn before the output of the command.
+    harness.until("name: tls-pod");
 }
 
 /// A self-signed CA certificate named only `api.review.internal`, made by

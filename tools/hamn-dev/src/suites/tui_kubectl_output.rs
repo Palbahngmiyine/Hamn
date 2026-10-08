@@ -166,8 +166,15 @@ fn kubectl_output(kubectl: &Path) {
         assert_eq!(last().0, expected, "{:?}", requests.lock().unwrap());
         harness.send(format!(":get pods {flags}\r").as_bytes(), &format!("scope-{index}-fixture"));
         assert_eq!(last().0, expected, "{:?}", requests.lock().unwrap());
-        assert_eq!(harness.text().contains("all namespaces"), *all_namespaces, "{}", harness.text());
-        assert!(!harness.text().contains("Exit code"), "consumed value changed query into PTY output");
+        let text = harness.text();
+        assert_eq!(text.contains("all namespaces"), *all_namespaces, "{text}");
+        // An embedded terminal has its header in every frame, while its exit
+        // footer comes only once the process is reaped: output with the
+        // awaited row could be on the screen before that.
+        assert!(
+            !text.contains("kubectl terminal") && !text.contains("Exit code"),
+            "consumed value changed query into PTY output\n{text}"
+        );
     }
     *label.lock().unwrap() = "format".to_owned();
     harness.send(b":get pods\r", "format-fixture");
@@ -178,8 +185,10 @@ fn kubectl_output(kubectl: &Path) {
     let output = direct(&[&["--context", "old-cluster"][..], &args[..]].concat());
     assert_eq!(output.returncode, 0, "{}", output.stderr());
     harness.send(format!(":{}\r", args.join(" ")).as_bytes(), "Exit code 0");
+    // The exit footer can be drawn before the output of the command.
+    let stdout = output.stdout();
+    harness.until_all(&splitlines(&stdout).into_iter().map(strip).collect::<Vec<_>>());
     let screen = harness.text();
-    assert!(splitlines(&output.stdout()).iter().all(|line| screen.contains(strip(line))), "{screen}");
     assert!(screen.contains("--namespace explicit"), "{screen}");
     harness.send(b"\r", "[Kubernetes]");
     harness.until("format-fixture");
@@ -188,11 +197,9 @@ fn kubectl_output(kubectl: &Path) {
         let output = direct(&args[..]);
         assert_eq!(output.returncode, 0, "{}", output.stderr());
         harness.send(format!(":{}\r", args.join(" ")).as_bytes(), "Exit code 0");
-        let screen = harness.text();
         // Complete line checks distinguish YAML from JSON and preserve values.
-        for line in splitlines(&output.stdout()) {
-            assert!(screen.contains(strip(line)), "{flags:?} {line:?}\n{screen}");
-        }
+        let stdout = output.stdout();
+        harness.until_all(&splitlines(&stdout).into_iter().map(strip).collect::<Vec<_>>());
         assert_eq!(last().0, "/api/v1/pods", "{:?}", requests.lock().unwrap());
         harness.send(b"\r", "[Kubernetes]");
         harness.until("format-fixture");
@@ -208,7 +215,7 @@ fn kubectl_output(kubectl: &Path) {
         harness.send(format!(":get pods {flag}\r").as_bytes(), "explicit-fixture");
         let header = harness.text();
         harness.send(b"\r", "Exit code 0");
-        assert!(harness.text().contains("name: explicit-fixture"), "{}", harness.text());
+        harness.until("name: explicit-fixture");
         let (path, _, served_by) = last();
         assert!(path.ends_with("/pods/explicit-fixture") && served_by == "explicit", "{:?}", requests.lock().unwrap());
         assert!(header.contains(&endpoint), "{header}");
