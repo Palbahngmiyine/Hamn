@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "cjson/cJSON.h"
 #include "core/control.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
@@ -590,6 +591,61 @@ static void apply_changes_the_settings_of_a_stopped_vm_only(const char *root)
     assert(profile_read_existing(&p, "applied") == 0 && p.cpus == 8);
 }
 
+/* A VM keeps running when its config.yaml is changed into one that cannot
+ * be read. The list shows that: the profile is there with the state of its
+ * VM and the reason, beside the profiles of the cases before, which read.
+ * Its status fails with the reason. */
+static void a_running_vm_is_listed_while_its_configuration_cannot_be_read(
+    const char *root)
+{
+    struct profile p;
+    home_profile(root, "unreadable", &p);
+    const enum reply replies[] = { REPLY_START_IDENTITY };
+    struct supervisor supervisor;
+    supervisor_start(&p, replies, 1, &supervisor);
+    write_identity(&p, &supervisor);
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_VERIFIED);
+    write_text(&p, "config.yaml", "kubernetes:\n  enabled: true\n");
+
+    char *json = NULL;
+    assert(hamn_control_query(NULL, &json) == 0);
+    cJSON *rows = cJSON_Parse(json);
+    assert(cJSON_IsArray(rows));
+    int unreadable = 0, readable = 0;
+    const cJSON *row;
+    cJSON_ArrayForEach(row, rows) {
+        const cJSON *name = cJSON_GetObjectItem(row, "name");
+        const cJSON *error = cJSON_GetObjectItem(row, "configurationError");
+        assert(cJSON_IsString(name));
+        if (strcmp(name->valuestring, "unreadable") != 0) {
+            assert(!error && cJSON_IsNumber(cJSON_GetObjectItem(row, "cpus")));
+            readable++;
+            continue;
+        }
+        const cJSON *state = cJSON_GetObjectItem(row, "state");
+        const cJSON *directory = cJSON_GetObjectItem(row, "directory");
+        assert(cJSON_IsString(state) &&
+               strcmp(state->valuestring, "running") == 0);
+        assert(cJSON_IsString(directory) &&
+               strcmp(directory->valuestring, p.dir) == 0);
+        assert(cJSON_IsString(error) &&
+               strcmp(error->valuestring,
+                      "unknown configuration key: kubernetes") == 0);
+        assert(cJSON_GetArraySize(row) == 4);
+        unreadable++;
+    }
+    assert(unreadable == 1 && readable >= 2);
+    cJSON_Delete(rows);
+    hamn_control_free(json);
+
+    assert(hamn_control_query("unreadable", &json) == -1 && json == NULL);
+    assert(strcmp(log_last_error(), "cannot read the configuration of "
+                  "profile unreadable: unknown configuration key: "
+                  "kubernetes") == 0);
+    assert(supervisor_running(&supervisor));
+    assert(!supervisor_kill(&supervisor));
+}
+
 /* The cases run in a child, so a failed assertion still leaves this process
  * to remove the profiles; supervisors exit when that child's end of their
  * alive pipe closes. */
@@ -608,6 +664,7 @@ int main(void)
         identity_without_uuid_of_a_gone_process_is_kept(root);
         configure_requires_a_stopped_vm(root);
         apply_changes_the_settings_of_a_stopped_vm_only(root);
+        a_running_vm_is_listed_while_its_configuration_cannot_be_read(root);
         _exit(0);
     }
     int status = 0;

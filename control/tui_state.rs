@@ -634,6 +634,28 @@ impl State {
         request.validate()?;
         Ok(request)
     }
+    /// `c` in the VM panel: a `vm configure` command with the settings of
+    /// the selected profile, to edit and run. A profile whose configuration
+    /// cannot be read has no settings to offer; its detail says why instead.
+    pub fn edit_settings(&mut self) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        if row["configurationError"].is_string() {
+            self.detail = Some(profile_detail(&row));
+            return;
+        }
+        self.input = Some((
+            ':',
+            format!(
+                "vm configure --profile {} --cpu {} --memory {} --disk {}",
+                row["name"].as_str().unwrap_or("default"),
+                row["cpus"],
+                row["memoryMiB"].as_u64().unwrap_or(4096) / 1024,
+                row["diskGiB"]
+            ),
+        ));
+    }
     pub fn accept(&mut self, result: Result<Value>) {
         if let Ok(value) = &result {
             if value["type"] == "runtimeStatus" {
@@ -718,15 +740,7 @@ impl State {
             "vm list" => {
                 self.discard_picker();
                 self.request.profile = row["name"].as_str().map(String::from);
-                self.detail = Some(format!(
-                    "Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers",
-                    row["name"],
-                    row["state"],
-                    row["dockerStatus"],
-                    row["cpus"],
-                    row["memoryMiB"],
-                    row["diskGiB"]
-                ));
+                self.detail = Some(profile_detail(&row));
                 Ok(None)
             }
             "docker images list" | "docker volumes list" | "docker networks list" => {
@@ -736,6 +750,29 @@ impl State {
             _ => self.action("inspect").map(Some),
         }
     }
+}
+
+/// The detail of a row of the VM panel. A profile whose configuration cannot
+/// be read has no settings to show: the detail says why and where the file
+/// is, because every operation on the profile is refused until it reads.
+fn profile_detail(row: &Value) -> String {
+    if let Some(error) = row["configurationError"].as_str() {
+        return format!(
+            "Hamn profile {}\nVM: {}\nConfiguration: cannot be read: {error}\nFile: {}/config.yaml\n\nStart, stop, delete and settings are refused until the file is corrected.\nEsc returns to containers",
+            row["name"],
+            row["state"],
+            row["directory"].as_str().unwrap_or("~/.hamn/<profile>")
+        );
+    }
+    format!(
+        "Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers",
+        row["name"],
+        row["state"],
+        row["dockerStatus"],
+        row["cpus"],
+        row["memoryMiB"],
+        row["diskGiB"]
+    )
 }
 
 // Identity is independent of row order and mutable status/resourceVersion.
@@ -794,6 +831,12 @@ fn label(value: &Value) -> String {
         })
         .unwrap_or("");
     let docker = value["dockerStatus"].as_str().unwrap_or("");
+    // A Hamn profile whose config.yaml cannot be read is listed with the
+    // state of its VM and this reason, in the VM panel and in the picker.
+    let status = match value["configurationError"].as_str() {
+        Some(error) => format!("{status}  unreadable configuration: {error}"),
+        None => status.to_owned(),
+    };
     if let Some(kind) = value["environmentKind"].as_str() {
         return clean(&match kind {
             "docker" => format!(
@@ -1437,6 +1480,51 @@ mod tests {
             failure.message.contains("not running (unknown)"),
             "{}",
             failure.message
+        );
+    }
+    #[test]
+    fn a_profile_whose_configuration_cannot_be_read_says_why_and_offers_no_settings() {
+        let readable = serde_json::json!({"name": "external", "state": "stopped", "dockerStatus": "unavailable",
+            "cpus": 2, "memoryMiB": 2048, "diskGiB": 60});
+        // What `vm list` holds for a profile it could not read: no settings.
+        let unreadable = serde_json::json!({"name": "old", "state": "running", "directory": "/Users/me/.hamn/old",
+            "configurationError": "unknown configuration key: kubernetes"});
+        let reason = "unreadable configuration: unknown configuration key: kubernetes";
+
+        // The row keeps the state of the VM and adds the reason, in the VM
+        // panel and, marked as a Hamn profile, in the environment picker.
+        assert_eq!(label(&unreadable).trim_end(), format!("old  running  {reason}"));
+        let mut picked = unreadable.clone();
+        picked["environmentKind"] = "hamn".into();
+        assert_eq!(label(&picked).trim_end(), format!("old  Hamn profile  running  {reason}"));
+        assert_eq!(label(&readable), "external  stopped  unavailable");
+
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        state.accept(Ok(serde_json::json!([readable, unreadable])));
+        assert!(state.vm_panel());
+
+        // Enter and `c` on the unreadable profile show why and where the
+        // file is, and offer no command made of settings that do not exist.
+        state.selected = Some(1);
+        assert!(state.enter().unwrap().is_none());
+        let detail = state.detail.take().unwrap();
+        assert!(detail.contains("Configuration: cannot be read: unknown configuration key: kubernetes"), "{detail}");
+        assert!(detail.contains("File: /Users/me/.hamn/old/config.yaml"), "{detail}");
+        assert!(!detail.contains("CPU") && !detail.contains("null"), "{detail}");
+        state.edit_settings();
+        assert_eq!(state.detail.take().as_deref(), Some(detail.as_str()));
+        assert!(state.input.is_none());
+
+        // A profile that reads keeps its detail and its prefilled command.
+        state.selected = Some(0);
+        assert!(state.enter().unwrap().is_none());
+        assert!(state.detail.take().unwrap().contains("CPU: 2\nMemory: 2048 MiB\nDisk: 60 GiB"));
+        state.edit_settings();
+        assert!(state.detail.is_none());
+        assert_eq!(
+            state.input,
+            Some((':', "vm configure --profile external --cpu 2 --memory 2 --disk 60".to_owned()))
         );
     }
     #[test]

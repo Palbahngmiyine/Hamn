@@ -16,7 +16,16 @@
  * log_last_error() holds the sentence above for a profile that cannot be
  * read and the complaint about a state file that cannot be read; for any
  * other failure it is empty and errno holds the error. The sentence is
- * recorded without being printed. */
+ * recorded without being printed.
+ *
+ * The list has one object per directory under ~/.hamn that holds a
+ * config.yaml and no marker of a deleted profile. A profile whose
+ * config.yaml cannot be read does not fail the list: its object holds only
+ * "name", "state" (of its VM, which can run), "directory" and
+ * "configurationError", the reason. The list still fails as a whole when
+ * ~/.hamn or a profile directory is not this user's alone, when a profile
+ * directory cannot be entered, when a state file or a deletion marker is
+ * not what it should be, and when memory or descriptors run out. */
 int hamn_control_query(const char *profile, char **result);
 void hamn_control_free(char *result);
 int hamn_control_start(const char *profile, unsigned cpus,

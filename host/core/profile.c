@@ -927,6 +927,19 @@ int profile_locate(struct profile *profile)
     return 0;
 }
 
+int profile_directory_private(const struct profile *profile)
+{
+    struct stat status;
+    if (!profile) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (lstat(profile->dir, &status) != 0)
+        return -1;
+    return S_ISDIR(status.st_mode) && status.st_uid == geteuid() &&
+           !(status.st_mode & 0022);
+}
+
 /* The profile cannot be read (-1), or with create its directory cannot be
  * made (PROFILE_UNCREATED): there was no configuration to read yet. reason,
  * when given, receives the cause of a refusal that errno alone does not name;
@@ -951,16 +964,14 @@ static int profile_read(struct profile *profile, const char *name, int create,
     }
     if (create && fs_mkdirs(profile->dir, 0700) != 0)
         return PROFILE_UNCREATED;
-    {
-        struct stat status;
-        if (lstat(profile->dir, &status) != 0)
-            return -1;
-        if (!S_ISDIR(status.st_mode) || status.st_uid != geteuid() || (status.st_mode & 0022)) {
-            reason_set(reason, "the profile directory is not a directory "
-                       "that only this user can write");
-            errno = EINVAL;
-            return -1;
-        }
+    int private = profile_directory_private(profile);
+    if (private < 0)
+        return -1;
+    if (!private) {
+        reason_set(reason, "the profile directory is not a directory "
+                   "that only this user can write");
+        errno = EINVAL;
+        return -1;
     }
     FILE *file = NULL;
     int opened = profile_open_config(profile, &file, reason);

@@ -66,44 +66,35 @@ fail:
     return NULL;
 }
 
-static cJSON *profile_snapshot(const char *name)
+/* The status of a profile whose configuration was read. */
+static cJSON *profile_status(const struct profile *profile)
 {
-    struct profile profile;
     struct vm_state state;
-    char failure[PROFILE_FAILURE_CAP];
-    if (profile_read_existing_explained(&profile, name, failure) != 0) {
-        /* Recorded, not printed: this query also follows a failed operation
-         * that has already printed the same sentence. */
-        int saved = errno;
-        log_set_error("%s", failure);
-        errno = saved;
-        return NULL;
-    }
-    if (state_load(&profile, &state) != 0)
+    if (state_load(profile, &state) != 0)
         return NULL;
     char live[32], socket[PROFILE_PATH_CAP];
-    vm_live_state(&profile, live, sizeof(live));
-    if (!profile_path(&profile, "docker.sock", socket, sizeof(socket)))
+    vm_live_state(profile, live, sizeof(live));
+    if (!profile_path(profile, "docker.sock", socket, sizeof(socket)))
         return NULL;
     cJSON *value = cJSON_CreateObject();
-    if (!value || !cJSON_AddStringToObject(value, "name", profile.name) ||
+    if (!value || !cJSON_AddStringToObject(value, "name", profile->name) ||
         !cJSON_AddStringToObject(value, "state", live) ||
-        !cJSON_AddStringToObject(value, "directory", profile.dir) ||
+        !cJSON_AddStringToObject(value, "directory", profile->dir) ||
         !cJSON_AddStringToObject(value, "dockerSocket", socket) ||
-        !cJSON_AddNumberToObject(value, "cpus", profile.cpus) ||
-        !cJSON_AddNumberToObject(value, "memoryMiB", profile.mem_mib) ||
-        !cJSON_AddNumberToObject(value, "diskGiB", profile.disk_gib) ||
-        !cJSON_AddBoolToObject(value, "mountHome", profile.mount_home) ||
-        !cJSON_AddBoolToObject(value, "homeReadOnly", profile.home_read_only) ||
-        !cJSON_AddBoolToObject(value, "mountInotify", profile.mount_inotify) ||
-        !cJSON_AddBoolToObject(value, "rosetta", profile.rosetta) ||
-        !cJSON_AddStringToObject(value, "fileEvents", profile.mount_inotify ?
+        !cJSON_AddNumberToObject(value, "cpus", profile->cpus) ||
+        !cJSON_AddNumberToObject(value, "memoryMiB", profile->mem_mib) ||
+        !cJSON_AddNumberToObject(value, "diskGiB", profile->disk_gib) ||
+        !cJSON_AddBoolToObject(value, "mountHome", profile->mount_home) ||
+        !cJSON_AddBoolToObject(value, "homeReadOnly", profile->home_read_only) ||
+        !cJSON_AddBoolToObject(value, "mountInotify", profile->mount_inotify) ||
+        !cJSON_AddBoolToObject(value, "rosetta", profile->rosetta) ||
+        !cJSON_AddStringToObject(value, "fileEvents", profile->mount_inotify ?
             "best-effort-existing-files" : "disabled") ||
         !cJSON_AddStringToObject(value, "ip", state.ip)) {
         cJSON_Delete(value);
         return NULL;
     }
-    cJSON *shares = shared_directories(&profile);
+    cJSON *shares = shared_directories(profile);
     if (!shares || !cJSON_AddItemToObject(value, "sharedDirectories", shares)) {
         cJSON_Delete(shares);
         cJSON_Delete(value);
@@ -111,13 +102,13 @@ static cJSON *profile_snapshot(const char *name)
     }
     /* The VM disk is a sparse file on this volume; null when unmeasurable. */
     unsigned long long host_free_mib = 0;
-    if (!(fs_free_mib(profile.dir, &host_free_mib) == 0 ?
+    if (!(fs_free_mib(profile->dir, &host_free_mib) == 0 ?
           cJSON_AddNumberToObject(value, "hostFreeMiB", (double)host_free_mib) :
           cJSON_AddNullToObject(value, "hostFreeMiB"))) {
         cJSON_Delete(value);
         return NULL;
     }
-    cJSON *operation = operation_snapshot(&profile);
+    cJSON *operation = operation_snapshot(profile);
     const char *docker_status = "unavailable";
     if (!operation) {
         operation = cJSON_CreateObject();
@@ -130,7 +121,7 @@ static cJSON *profile_snapshot(const char *name)
             cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(operation, "recoveryRequired")))
             docker_status = "recoveryRequired";
         else if (!strcmp(live, "running"))
-            docker_status = guest_deployment_docker_ready(&profile) ? "ready" :
+            docker_status = guest_deployment_docker_ready(profile) ? "ready" :
                 cJSON_IsString(status) && !strcmp(status->valuestring, "running") ?
                 "preparing" : "unavailable";
     }
@@ -139,7 +130,7 @@ static cJSON *profile_snapshot(const char *name)
     /* The record is the running VM's port observer's; a file left by a VM
      * that is not running says nothing about the present. */
     cJSON *failures = strcmp(live, "running") == 0 ?
-        port_forward_failures(&profile) : cJSON_CreateArray();
+        port_forward_failures(profile) : cJSON_CreateArray();
     if (!failures ||
         !cJSON_AddItemToObject(value, "portForwardFailures", failures)) {
         cJSON_Delete(failures);
@@ -147,6 +138,77 @@ static cJSON *profile_snapshot(const char *name)
         return NULL;
     }
     return value;
+}
+
+static cJSON *profile_snapshot(const char *name)
+{
+    struct profile profile;
+    char failure[PROFILE_FAILURE_CAP];
+    if (profile_read_existing_explained(&profile, name, failure) != 0) {
+        /* Recorded, not printed: this query also follows a failed operation
+         * that has already printed the same sentence. */
+        int saved = errno;
+        log_set_error("%s", failure);
+        errno = saved;
+        return NULL;
+    }
+    return profile_status(&profile);
+}
+
+/* The list row of a profile whose configuration cannot be read: what does
+ * not depend on the configuration. Its VM can run all the same, started
+ * before the file was changed, and the list is where that shows, because the
+ * status of such a profile fails. located holds the name and the directory. */
+static cJSON *unreadable_profile_row(const struct profile *located,
+                                     const char *reason)
+{
+    char live[32];
+    vm_live_state(located, live, sizeof(live));
+    cJSON *value = cJSON_CreateObject();
+    if (!value || !cJSON_AddStringToObject(value, "name", located->name) ||
+        !cJSON_AddStringToObject(value, "state", live) ||
+        !cJSON_AddStringToObject(value, "directory", located->dir) ||
+        !cJSON_AddStringToObject(value, "configurationError", reason)) {
+        cJSON_Delete(value);
+        return NULL;
+    }
+    return value;
+}
+
+/* One row of the list, for a directory that held a config.yaml a moment
+ * ago. Returns 1 with *row, 0 when the directory holds no profile after all,
+ * and -1 when the list fails.
+ *
+ * One profile whose configuration cannot be read must not hide the others,
+ * so it gets the short row above. Two failures of the read still fail the
+ * list, with the profile named in the recorded reason: a read that ran out
+ * of memory or descriptors learned nothing about the file, and the next
+ * profile would fare the same; and a profile directory that is not this
+ * user's alone is not looked into, not even for the state of a VM. */
+static int profile_list_row(const char *name, cJSON **row)
+{
+    struct profile profile;
+    char reason[PROFILE_REASON_CAP];
+    *row = NULL;
+    if (profile_read_existing_reason(&profile, name, reason) == 0) {
+        *row = profile_status(&profile);
+        return *row ? 1 : -1;
+    }
+    int error = errno;
+    if (error == ENOENT)
+        return 0;
+    struct profile located;
+    memset(&located, 0, sizeof(located));
+    snprintf(located.name, sizeof(located.name), "%s", name);
+    if (error == ENOMEM || error == EMFILE || error == ENFILE ||
+        profile_locate(&located) != 0 ||
+        profile_directory_private(&located) != 1) {
+        log_set_error(PROFILE_UNREADABLE_FORMAT, name, reason);
+        errno = error;
+        return -1;
+    }
+    *row = unreadable_profile_row(&located, reason);
+    return *row ? 1 : -1;
 }
 
 static cJSON *profiles_snapshot(void)
@@ -194,13 +256,17 @@ static cJSON *profiles_snapshot(void)
             continue;
         }
         if (errno != ENOENT) goto fail;
-        cJSON *value = profile_snapshot(entry->d_name);
-        if (!value)
+        cJSON *value = NULL;
+        int listed = profile_list_row(entry->d_name, &value);
+        if (listed < 0)
             goto fail;
-        if (!cJSON_AddItemToArray(values, value)) {
+        if (listed > 0 && !cJSON_AddItemToArray(values, value)) {
             cJSON_Delete(value);
             goto fail;
         }
+        /* What looking at a listed profile recorded, such as a complaint of
+         * its VM probe, is not the reason of a later failure of the list. */
+        log_clear_error();
     }
     if (closedir(directory) != 0) {
         cJSON_Delete(values);

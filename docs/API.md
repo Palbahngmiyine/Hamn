@@ -116,6 +116,21 @@ codes and a message that says so, except by `vm start`, which creates it, and
 by `vm delete`. Correct the file by hand:
 [YAML schema](CONFIGURATION.md#yaml-schema) lists what it can hold.
 
+`vm list` does not fail because of such a profile. It lists the profile with
+`name`, `state`, `directory` and `configurationError` only:
+
+```json
+{"name":"old","state":"running","directory":"/Users/me/.hamn/old","configurationError":"unknown configuration key: kubernetes"}
+```
+
+`state` is the state of its VM, which can run although the file was changed
+after the start. `configurationError` is the rule as diagnostic text; test for
+the key, which a profile that reads does not have. The settings and the other
+status fields are absent, not null: they were not observed. The list still
+fails as a whole when `~/.hamn` or a profile directory can be written by
+another user, when a profile directory cannot be entered, and when a state
+file or the marker of a deleted profile is not what it should be.
+
 `vm apply` takes `--file <path>`, a
 [profile definition](CONFIGURATION.md#declarative-configuration), and
 `--dry-run` (read-only, no `--yes` required). It makes the stored

@@ -105,6 +105,20 @@ VM 작업은 `vm list`를 제외하고 `--profile`이 필요합니다. Docker는
 다만 `vm start`는 없는 프로필을 만들고, `vm delete`도 거절하지 않습니다. 파일은 직접
 고쳐야 하며, 담을 수 있는 내용은 [YAML schema](CONFIGURATION.ko.md#yaml-schema)에 있습니다.
 
+`vm list`는 이런 프로필 때문에 실패하지 않습니다. 그 프로필은 `name`, `state`,
+`directory`, `configurationError`만 담아 표시합니다.
+
+```json
+{"name":"old","state":"running","directory":"/Users/me/.hamn/old","configurationError":"unknown configuration key: kubernetes"}
+```
+
+`state`는 그 프로필 VM의 상태입니다. 시작한 뒤에 파일이 바뀌었다면 VM은 실행 중일 수
+있습니다. `configurationError`는 어긴 규칙을 알리는 진단 문구입니다. 값이 아니라 키가
+있는지로 판단하세요. 읽을 수 있는 프로필에는 이 키가 없습니다. 설정과 그 밖의 상태
+필드는 `null`이 아니라 아예 없습니다. 관측하지 않았기 때문입니다. `~/.hamn`이나 프로필
+디렉터리를 다른 사용자가 쓸 수 있을 때, 프로필 디렉터리에 들어갈 수 없을 때, 상태 파일이나
+삭제 표식이 올바른 형태가 아닐 때는 여전히 목록 전체가 실패합니다.
+
 `vm apply`는 [프로필 정의 파일](CONFIGURATION.ko.md#선언적-설정)을 가리키는
 `--file <path>`와 `--dry-run`(조회 전용, `--yes` 불필요)을 받습니다. 저장된 설정을 정의
 파일과 같게 만들며 VM을 시작하거나 정지하지 않습니다. 적용과 dry run은 같은 형태의

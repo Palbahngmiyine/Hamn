@@ -26,7 +26,7 @@ their existing contract; only external Docker `--context` operations require Doc
 | `n` | Choose Kubernetes namespace |
 | `a` | Toggle all containers while preserving the current query filters |
 | `v` | Open the selected Hamn environment's VM panel |
-| `c` in VM panel | Edit CPU, memory (GiB), and disk (GiB) configuration command |
+| `c` in VM panel | Edit CPU, memory (GiB), and disk (GiB) configuration command; for a profile whose configuration cannot be read, show why |
 | `!` | Show the active lifecycle operation log |
 | Esc, `q` | Return; quit |
 
@@ -38,7 +38,11 @@ that would look current, and keeps polling at the normal interval, so rows appea
 once Docker is ready. Other CLI failures, such as usage errors, unknown commands or
 the output limit, keep their message, as does a profile whose status cannot be
 read. The VM panel
-shows VM state separately from Docker readiness. External Docker contexts have no
+shows VM state separately from Docker readiness. A profile whose `config.yaml`
+cannot be read stays in the VM panel and in the environment picker, with the
+state of its VM and the rule the file breaks. Enter and `c` then show where
+the file is instead of settings; start, stop, delete and configure are refused
+until the file is corrected. External Docker contexts have no
 Hamn VM controls.
 The `a` key toggles Docker's `--all` value, including grouped flags such as `-as`
 and repeated boolean options. It preserves filters, size, and `--last`/`--latest`;

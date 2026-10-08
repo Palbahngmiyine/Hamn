@@ -1,7 +1,9 @@
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -250,9 +252,9 @@ static size_t read_bytes(const char *path, char *data, size_t capacity)
 
 /* config.yaml cannot carry every character: the YAML reader refuses some
  * and folds others into a line break. A profile with such a setting is not
- * saved, because the file would no longer read as that profile, and one
- * unreadable profile fails the listing of all of them. The profile
- * `existing` is left as it was. */
+ * saved, because the file would no longer read as that profile: every
+ * operation on it would be refused until the file is corrected by hand. The
+ * profile `existing` is left as it was. */
 static void settings_that_would_not_read_back_are_not_saved(void)
 {
     static const char *const refused[] = {
@@ -434,6 +436,113 @@ static void operations_say_why_a_profile_cannot_be_read(const char *root,
     }
 }
 
+/* The list in a child that has one descriptor left: enough to read the
+ * directory of profiles, not to open a config.yaml. Exits 0 when the list
+ * fails as a whole and says that a configuration could not be read for want
+ * of descriptors, and 3 when it reports anything else, such as every
+ * profile as unreadable. */
+static int the_list_fails_without_descriptors(void)
+{
+    fflush(NULL);
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        alarm(20);
+        /* The lowest free descriptor: the limit below leaves it alone. */
+        int next = open("/dev/null", O_RDONLY);
+        struct rlimit limit;
+        if (next < 0 || close(next) != 0 ||
+            getrlimit(RLIMIT_NOFILE, &limit) != 0)
+            _exit(4);
+        limit.rlim_cur = (rlim_t)next + 1;
+        if (setrlimit(RLIMIT_NOFILE, &limit) != 0)
+            _exit(4);
+        char *json = NULL;
+        int rc = hamn_control_query(NULL, &json);
+        _exit(rc == -1 && !json &&
+              strstr(log_last_error(),
+                     "cannot read the configuration of profile ") ==
+                  log_last_error() &&
+              strstr(log_last_error(), ": Too many open files") ? 0 : 3);
+    }
+    int status = 0;
+    assert(waitpid(child, &status, 0) == child);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 1;
+    fprintf(stderr, "the list without descriptors: wait status %d\n", status);
+    return 0;
+}
+
+static const char *text_of(const cJSON *object, const char *key)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    return cJSON_IsString(item) ? item->valuestring : "";
+}
+
+/* One profile whose configuration cannot be read does not hide the others.
+ * The list names it with the state of its VM, its directory and the reason,
+ * and with nothing that comes from the file it could not read; the profile
+ * beside it is listed in full. `existing` is unreadable during the call,
+ * with the removed kubernetes mapping; `other` is created and removed. */
+static void an_unreadable_profile_is_listed_beside_the_others(const char *root)
+{
+    struct profile other;
+    char directory[1100], path[1200];
+    assert(profile_load(&other, "other") == 0 && profile_save(&other) == 0);
+    snprintf(directory, sizeof(directory), "%s/existing", root);
+
+    char *json = NULL;
+    log_set_error("the reason of an earlier call");
+    assert(hamn_control_query(NULL, &json) == 0);
+    /* A listed profile leaves no reason behind. */
+    assert(log_last_error()[0] == '\0');
+    cJSON *rows = cJSON_Parse(json);
+    assert(cJSON_IsArray(rows) && cJSON_GetArraySize(rows) == 2);
+    int seen = 0;
+    const cJSON *row;
+    cJSON_ArrayForEach(row, rows) {
+        if (strcmp(text_of(row, "name"), "existing") == 0) {
+            assert(cJSON_GetArraySize(row) == 4);
+            assert(strcmp(text_of(row, "state"), "stopped") == 0);
+            assert(strcmp(text_of(row, "directory"), directory) == 0);
+            assert(strcmp(text_of(row, "configurationError"),
+                          "unknown configuration key: kubernetes") == 0);
+            seen |= 1;
+        } else {
+            assert(strcmp(text_of(row, "name"), "other") == 0);
+            assert(cJSON_IsNumber(cJSON_GetObjectItem(row, "cpus")));
+            assert(cJSON_IsString(cJSON_GetObjectItem(row, "dockerSocket")));
+            assert(!cJSON_GetObjectItem(row, "configurationError"));
+            seen |= 2;
+        }
+    }
+    assert(seen == 3);
+    cJSON_Delete(rows);
+    hamn_control_free(json);
+
+    /* The list still fails as a whole, with the profile named, in the cases
+     * that are not about what a file says. A profile directory that others
+     * can write is not looked into: */
+    assert(chmod(directory, 0770) == 0);
+    assert(hamn_control_query(NULL, &json) == -1 && json == NULL);
+    assert(said("cannot read the configuration of profile existing: the "
+                "profile directory is not a directory that only this user "
+                "can write"));
+    assert(chmod(directory, 0700) == 0);
+    /* a read that ran out of descriptors learned nothing about the file: */
+    assert(the_list_fails_without_descriptors());
+    /* and a state file that is not one belongs to a profile that reads. */
+    assert(profile_path(&other, "state.json", path, sizeof(path)));
+    assert(fs_write_file_atomic(path, "{", 1, 0600) == 0);
+    assert(hamn_control_query(NULL, &json) == -1 && json == NULL);
+    assert(strstr(log_last_error(), "is not valid JSON"));
+    assert(hamn_control_query("other", &json) == -1 && json == NULL);
+    assert(unlink(path) == 0);
+
+    assert(profile_path(&other, "config.yaml", path, sizeof(path)));
+    assert(unlink(path) == 0 && rmdir(other.dir) == 0);
+}
+
 /* A query reports its own failure only. It forgets the reason an earlier
  * call recorded, so that a failure it has no sentence for is not reported
  * with the sentence of another operation. `existing` reads. */
@@ -507,6 +616,7 @@ int main(void)
     assert(legacy && fputs("kubernetes:\n  enabled: true\n", legacy) >= 0 && fclose(legacy) == 0);
     assert(profile_read_existing(&profile, "existing") == -1);
     operations_say_why_a_profile_cannot_be_read(root, path);
+    an_unreadable_profile_is_listed_beside_the_others(root);
     assert(fs_write_file_atomic(path, original, length, 0600) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
     a_query_forgets_the_reason_of_an_earlier_call();

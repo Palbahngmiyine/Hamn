@@ -138,6 +138,12 @@ int profile_definition_parse(const char *text, size_t length,
                              struct profile *profile,
                              char reason[PROFILE_REASON_CAP]);
 
+/* Whether profile->dir is a directory of this user that no one else can
+ * write: the only kind of directory in which Hamn reads a profile. Returns 1
+ * when it is, 0 when it is anything else, a symbolic link included, and -1
+ * with errno when it cannot be examined (ENOENT: it does not exist). */
+int profile_directory_private(const struct profile *profile);
+
 /* Set profile->dir to ~/.hamn/<profile->name>. Creates nothing. Returns -1
  * with errno EINVAL for an invalid name or when ~/.hamn is not a directory
  * that only this user can write, and ENAMETOOLONG for a path that does not

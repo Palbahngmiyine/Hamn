@@ -8,10 +8,10 @@
 use crate::runner::{self, case};
 use crate::support::api_fixtures::{self, MkdTemp};
 use crate::support::hamn;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Duration;
 
@@ -80,11 +80,16 @@ struct Profiles {
 }
 
 impl Profiles {
-    /// `hamn --headless ARGS`: its envelope, whose `ok` matches the exit status.
-    fn run(&self, arguments: &[&str]) -> Value {
+    /// `hamn --headless ARGS`, as it ended.
+    fn completed(&self, arguments: &[&str]) -> api_fixtures::Completed {
         let mut command = Command::new(&self.binary);
         command.arg("--headless").args(arguments).env("HOME", &self.root);
-        let result = api_fixtures::run(&mut command, None, Duration::from_secs(15));
+        api_fixtures::run(&mut command, None, Duration::from_secs(15))
+    }
+
+    /// `hamn --headless ARGS`: its envelope, whose `ok` matches the exit status.
+    fn run(&self, arguments: &[&str]) -> Value {
+        let result = self.completed(arguments);
         let value = result.json();
         assert_eq!(value["ok"].as_bool(), Some(result.success()), "{value}");
         value
@@ -117,7 +122,11 @@ impl Profiles {
 }
 
 fn strict_profiles_advanced_settings_preservation_and_soft_deletion() {
-    let directory = MkdTemp::new("hamn-yaml-");
+    // Under /tmp: the state of a profile's VM is read through a socket in the
+    // profile directory, and the path of a socket holds 103 bytes. Below
+    // $TMPDIR the longer case names would not fit, and the list would report
+    // the state of their VM as unknown.
+    let directory = MkdTemp::new_in(Path::new("/tmp"), "hamn-yaml-");
     let root = directory.path();
     let profiles = Profiles { binary: hamn(), root: root.to_path_buf() };
 
@@ -223,6 +232,33 @@ fn strict_profiles_advanced_settings_preservation_and_soft_deletion() {
         );
         assert!(!root.join(".hamn/absent").exists(), "{arguments:?}");
     }
+
+    // One profile that cannot be read does not hide the others. The list
+    // names each with the state of its VM, its directory and the rule, and
+    // with nothing that comes from the file; the profiles that read are
+    // listed in full. The reason is in the answer, not on stderr beside it.
+    let listed = profiles.completed(&["vm", "list"]);
+    assert!(listed.success() && listed.stderr.is_empty(), "{listed:?}");
+    let rows = listed.json();
+    let rows = rows["data"].as_array().unwrap_or_else(|| panic!("vm list rows: {rows}"));
+    let row = |name: &str| rows.iter().find(|row| row["name"] == name).unwrap_or_else(|| panic!("{name} {rows:?}"));
+    for (name, _, rule) in CASES {
+        assert_eq!(
+            *row(name),
+            json!({
+                "name": name,
+                "state": "stopped",
+                "directory": root.join(".hamn").join(name),
+                "configurationError": rule,
+            })
+        );
+    }
+    for name in ["test", "advanced"] {
+        assert!(row(name)["cpus"].is_u64() && row(name).get("configurationError").is_none(), "{}", row(name));
+    }
+    assert_eq!(rows.len(), CASES.len() + 2, "{rows:?}");
+    let status = profiles.completed(&["vm", "status", "--profile", CASES[0].0]);
+    assert!(!status.success() && status.stderr.is_empty(), "{status:?}");
 
     for (name, _, _) in CASES {
         fs::remove_file(root.join(".hamn").join(name).join("config.yaml")).unwrap();
