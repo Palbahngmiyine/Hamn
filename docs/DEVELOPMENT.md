@@ -157,8 +157,9 @@ creates an owned `/tmp` HOME, uses only its explicit Docker socket, and records
 binary/image hashes and results there. Its children, including the TUI under
 test, find only the Docker CLI, kubectl, and kind it resolved from `PATH`, then
 Homebrew and system directories. It checks backup/socket recovery, data
-preservation, cancellation/forced worker exit, native PTY commands, and Kubernetes
-apply/exec/port-forward. It deletes the kind cluster and stops its VMs; the test
+preservation, published TCP and UDP ports, cancellation/forced worker exit,
+native PTY commands, and Kubernetes apply/exec/port-forward. It deletes the
+kind cluster and stops its VMs; the test
 HOME remains available for inspection. `--root` resumes only an owned test root;
 `--keep-running` retains the main test VM for additional diagnosis. Remove that
 owned test directory after reviewing evidence. Never use a user profile as a fixture.

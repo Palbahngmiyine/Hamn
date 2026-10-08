@@ -1,7 +1,7 @@
 //! Opt-in Apple Silicon integration of a candidate executable with a real
-//! VM, Docker Engine, Compose/buildx and a disposable kind cluster
-//! (`workspace-live`), the Kubernetes management review against a kept
-//! root (`workspace-live-management`), and the VM-free checks of their
+//! VM, Docker Engine, published ports, Compose/buildx and a disposable kind
+//! cluster (`workspace-live`), the Kubernetes management review against a
+//! kept root (`workspace-live-management`), and the VM-free checks of their
 //! guards and fixtures (`workspace-live-checks`, run by `make test-control`).
 //!
 //! Ownership contract:
@@ -26,6 +26,7 @@ pub mod checks;
 mod contexts;
 mod kubernetes;
 mod management;
+mod ports;
 mod processes;
 mod terminal;
 mod transport;
@@ -94,6 +95,7 @@ pub fn main(args: &[String]) -> ExitCode {
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
         start_isolated(&live.runtime).must();
         recovery(&live);
+        ports::published_ports(&live);
         boundaries::cancellation_boundaries(&live);
         transport::transport_failure(&live);
         cli_extensions(&live);

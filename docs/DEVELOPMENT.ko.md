@@ -149,8 +149,9 @@ Compose/buildx 플러그인을 포함한 Docker CLI·kubectl·kind를 제공하�
 HOME을 만들고 그 환경의 명시적 Docker 소켓만 사용하며 실행 파일·이미지 해시와 결과를
 저장합니다. 검증 대상 TUI를 포함한 하위 프로세스는 검증기가 `PATH`에서 찾은
 Docker CLI·kubectl·kind와 Homebrew·시스템 디렉터리만 사용합니다.
-백업·소켓 복구, 데이터 보존, 취소·worker 강제 종료, 네이티브 PTY 명령,
-Kubernetes apply·exec·port-forward를 확인합니다. kind 클러스터를 삭제하고 테스트 VM을
+백업·소켓 복구, 데이터 보존, 게시한 TCP·UDP 포트의 전달, 취소·worker 강제 종료,
+네이티브 PTY 명령, Kubernetes apply·exec·port-forward를 확인합니다.
+kind 클러스터를 삭제하고 테스트 VM을
 정지하며 HOME은 검사할 수 있게 남깁니다. `--root`는 소유한 테스트 환경만 재사용하고
 `--keep-running`은 추가 진단을 위해 주 테스트 VM을 유지합니다. 증거 확인 후 해당
 테스트 디렉터리를 정리하세요. 사용자 프로필을 테스트 fixture로 쓰면 안 됩니다.
