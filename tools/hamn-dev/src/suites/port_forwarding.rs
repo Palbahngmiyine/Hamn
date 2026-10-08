@@ -87,10 +87,14 @@ const DRIVER_CASES: &[(&str, Test)] = &[
     ("reconcile_keeps_published_listeners_and_stops_stale_ones", reconcile_keeps_published_listeners_and_stops_stale_ones),
     ("reconcile_keeps_only_exact_grouped_and_ranged_pairs", reconcile_keeps_only_exact_grouped_and_ranged_pairs),
     ("cleanup_removes_mixed_tcp_and_udp_forwards", cleanup_removes_mixed_tcp_and_udp_forwards),
+    ("parallel_syncs_of_one_snapshot_create_each_listener_once", parallel_syncs_of_one_snapshot_create_each_listener_once),
     ("parallel_adds_and_removes_preserve_every_record", parallel_adds_and_removes_preserve_every_record),
     ("same_listener_race_has_exactly_one_winner", same_listener_race_has_exactly_one_winner),
     ("parallel_udp_adds_keep_every_relay_identity", parallel_udp_adds_keep_every_relay_identity),
-    ("state_capacity_rejects_one_more_add_and_an_oversized_file", state_capacity_rejects_one_more_add_and_an_oversized_file),
+    (
+        "state_capacity_rejects_one_more_published_port_and_an_oversized_file",
+        state_capacity_rejects_one_more_published_port_and_an_oversized_file,
+    ),
     ("corrupt_state_fails_every_mutation", corrupt_state_fails_every_mutation),
     ("malformed_records_are_rejected_whole", malformed_records_are_rejected_whole),
     ("pre_release_record_shapes_are_refused_without_side_effects", pre_release_record_shapes_are_refused_without_side_effects),
@@ -825,15 +829,36 @@ fn serialized_reconcile_keeps_a_live_foreign_generation(driver: &Driver) {
 }
 
 fn every_host_address_maps_to_one_guest_listener(driver: &Driver) {
-    // Every macOS address maps to the same guest protocol/port, so wildcard
-    // and distinct loopback addresses conflict before Docker can become
-    // ambiguous.
+    // Every macOS address maps to the same guest protocol/port, so one host
+    // port has one listener. A snapshot that publishes the port on another
+    // address replaces the listener. While the old listener cannot be
+    // stopped, the new address is refused instead of added beside it.
     let profile = Profile::new(driver);
-    profile.ok(&["add", "0.0.0.0:48102:80/tcp"]);
-    profile.fails(&["add", "127.0.0.1:48102:80/tcp"]);
-    profile.fails(&["add", "127.0.0.2:48102:80/tcp"]);
-    assert_eq!(profile.records().len(), 1);
-    profile.ok(&["cleanup"]);
+    profile.ok(&["sync", "0.0.0.0:48102:80/tcp"]);
+    profile.ok(&["sync", "127.0.0.1:48102:80/tcp"]);
+    assert_eq!(profile.lines(), [committed_tcp(48102, 80)]);
+    assert_eq!(profile.event_count("cancel\t0.0.0.0\t48102"), 1, "{}", profile.events());
+    assert_eq!(profile.event_count("add\t127.0.0.1\t48102"), 1, "{}", profile.events());
+
+    // The cancel fails while the master is alive and the port is still held.
+    let holder = std::net::TcpListener::bind("127.0.0.1:48102").expect("bind the host port of the old listener");
+    let moved = ["sync", "127.0.0.2:48102:80/tcp"];
+    let output = profile.fails_with(&[("FAIL_CANCEL_PORT", "48102")], &moved);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot stop TCP forward on 127.0.0.1:48102"), "{stderr}");
+    assert!(stderr.contains("host tcp port 127.0.0.2:48102 is already published"), "{stderr}");
+    assert_eq!(profile.lines(), [committed_tcp(48102, 80)]);
+    assert_eq!(profile.event_count("add\t127.0.0.2\t48102"), 0, "{}", profile.events());
+    assert_eq!(
+        failures(&profile),
+        serde_json::json!([{"hostIp": "127.0.0.2", "hostPort": 48102, "protocol": "tcp", "reason": "forwardFailed"}])
+    );
+    drop(holder);
+    profile.ok(&moved);
+    let record = profile.record(48102);
+    assert!(record.host_ip == "127.0.0.2" && record.ownership == "committed", "{record:?}");
+    assert_eq!(failures(&profile), serde_json::json!([]));
+    profile.ok(&["sync"]);
     profile.assert_no_state();
 }
 
@@ -842,11 +867,11 @@ fn listener_failures_leave_no_reservation(driver: &Driver) {
     // failure is detected before listener creation, so even an injected
     // cancel failure cannot leave a live untracked listener.
     let profile = Profile::new(driver);
-    profile.fails_with(&[("FAIL_FORWARD_PORT", "48103")], &["add", "127.0.0.1:48103:80/tcp"]);
+    profile.fails_with(&[("FAIL_FORWARD_PORT", "48103")], &["sync", "127.0.0.1:48103:80/tcp"]);
     profile.assert_no_state();
     profile.fails_with(
         &[("HAMN_TEST_FS_FAIL_BEFORE_RENAME", "1"), ("FAIL_CANCEL_PORT", "48104")],
-        &["add", "127.0.0.1:48104:80/tcp"],
+        &["sync", "127.0.0.1:48104:80/tcp"],
     );
     profile.assert_no_state();
     assert_eq!(profile.event_count("add\t127.0.0.1\t48104"), 0, "listener was touched before its state was reserved");
@@ -856,11 +881,27 @@ fn listener_failures_leave_no_reservation(driver: &Driver) {
 fn failed_cancel_of_a_free_port_removes_the_tcp_record(driver: &Driver) {
     // A failed TCP cancel with a free SO_REUSEADDR bind is idempotent
     // evidence that the listener is already absent, even while the SSH
-    // master remains alive.
+    // master remains alive. While the port is still held, the record stays
+    // until the cancel succeeds or the master, which owns every TCP
+    // listener, is gone.
     let profile = Profile::new(driver);
-    profile.ok(&["add", "127.0.0.1:48115:80/tcp"]);
-    profile.ok_with(&[("FAIL_CANCEL_PORT", "48115")], &["remove", "127.0.0.1:48115:80/tcp"]);
+    let published = ["sync", "127.0.0.1:48115:80/tcp"];
+    let unanswered = [("FAIL_CANCEL_PORT", "48115")];
+    profile.ok(&published);
+    profile.ok_with(&unanswered, &["sync"]);
     profile.assert_no_state();
+
+    profile.ok(&published);
+    let holder = std::net::TcpListener::bind("127.0.0.1:48115").expect("bind the host port in the master's place");
+    for args in [&["sync"][..], &["cleanup"]] {
+        let output = profile.fails_with(&unanswered, args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("cannot stop TCP forward on 127.0.0.1:48115"), "{args:?}: {stderr}");
+        assert_eq!(profile.lines(), [committed_tcp(48115, 80)], "{args:?}");
+    }
+    profile.ok_with(&[("FAIL_CANCEL_PORT", "48115"), ("SSH_MASTER_GONE", "1")], &["cleanup"]);
+    profile.assert_no_state();
+    drop(holder);
 }
 
 fn udp_relay_records_its_start_token_and_stops_on_remove(driver: &Driver) {
@@ -885,22 +926,25 @@ fn udp_pidfile_is_replaced_only_for_a_verified_gone_relay(driver: &Driver) {
     // A missing state file does not authorize replacing the only identity
     // evidence of a live relay.
     let profile = Profile::new(driver);
-    profile.ok(&["add", "127.0.0.1:48119:53/udp"]);
+    let published = ["sync", "127.0.0.1:48119:53/udp"];
+    profile.ok(&published);
     let relay = profile.relay(48119);
     let state = profile.state().unwrap();
     let pidfile = read(&profile.pidfile(48119));
     fs::remove_file(profile.state_path()).unwrap();
-    profile.fails(&["add", "127.0.0.1:48119:53/udp"]);
+    profile.fails(&published);
     assert!(relay.running(), "live UDP relay was replaced after state loss");
     assert_eq!(read(&profile.pidfile(48119)), pidfile);
     profile.assert_no_state();
     fs::write(profile.state_path(), state).unwrap();
-    profile.ok(&["remove", "127.0.0.1:48119:53/udp"]);
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
     relay.assert_gone();
 
     // An unverifiable (PID-only) pidfile is preserved fail-closed.
+    let published = ["sync", "127.0.0.1:48121:53/udp"];
     fs::write(profile.pidfile(48121), "4242\n").unwrap();
-    profile.fails(&["add", "127.0.0.1:48121:53/udp"]);
+    profile.fails(&published);
     assert_eq!(read(&profile.pidfile(48121)), "4242\n", "unverified UDP pidfile was replaced");
     profile.assert_no_state();
     fs::remove_file(profile.pidfile(48121)).unwrap();
@@ -908,10 +952,11 @@ fn udp_pidfile_is_replaced_only_for_a_verified_gone_relay(driver: &Driver) {
     // Only a complete token of a process that is definitely gone may be
     // replaced.
     fs::write(profile.pidfile(48121), format!("{IMPOSSIBLE_PID}\t1\t1\n")).unwrap();
-    profile.ok(&["add", "127.0.0.1:48121:53/udp"]);
+    profile.ok(&published);
     let relay = profile.relay(48121);
     assert_ne!(relay.pid, IMPOSSIBLE_PID);
-    profile.ok(&["remove", "127.0.0.1:48121:53/udp"]);
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
     relay.assert_gone();
 }
 
@@ -943,12 +988,14 @@ fn udp_state_save_failure_creates_no_listener(driver: &Driver) {
     // The reservation cannot be saved, so no relay starts; the port is then
     // immediately bindable by a new relay.
     let profile = Profile::new(driver);
-    profile.fails_with(&[("HAMN_TEST_FS_FAIL_BEFORE_RENAME", "1")], &["add", "127.0.0.1:48106:53/udp"]);
+    let published = ["sync", "127.0.0.1:48106:53/udp"];
+    profile.fails_with(&[("HAMN_TEST_FS_FAIL_BEFORE_RENAME", "1")], &published);
     profile.assert_no_state();
     assert!(!profile.pidfile(48106).exists());
-    profile.ok(&["add", "127.0.0.1:48106:53/udp"]);
+    profile.ok(&published);
     let relay = profile.relay(48106);
-    profile.ok(&["remove", "127.0.0.1:48106:53/udp"]);
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
     relay.assert_gone();
 }
 
@@ -959,10 +1006,12 @@ fn mismatched_udp_start_token_clears_without_signaling(driver: &Driver) {
     let profile = Profile::new(driver);
     let mut unrelated = Unrelated::start();
     let pid = unrelated.pid();
-    profile.write_state(&[format!("udp\t127.0.0.1\t48108\t53\t{pid}\t1\t1\tcommitted\t0\t0\t0")]);
-    fs::write(profile.pidfile(48108), format!("{pid}\n")).unwrap();
-    profile.ok(&["add", "127.0.0.1:48116:53/udp"]);
+    profile.ok(&["sync", "127.0.0.1:48116:53/udp"]);
     let verified = profile.relay(48116);
+    let mut lines = profile.lines();
+    lines.insert(0, format!("udp\t127.0.0.1\t48108\t53\t{pid}\t1\t1\tcommitted\t0\t0\t0"));
+    profile.write_state(&lines);
+    fs::write(profile.pidfile(48108), format!("{pid}\n")).unwrap();
     profile.ok(&["cleanup"]);
     unrelated.assert_running();
     verified.assert_gone();
@@ -986,12 +1035,11 @@ fn udp_record_without_a_start_token_is_preserved_fail_closed(driver: &Driver) {
         "{}",
         describe(&output)
     );
-    for args in [&["remove", "127.0.0.1:48109:53/udp"][..], &["reconcile", ""]] {
-        unrelated.assert_running();
-        assert_eq!(profile.lines(), [line.clone()]);
-        assert!(profile.pidfile(48109).exists());
-        profile.fails(args);
-    }
+    // A snapshot that no longer publishes the port cannot stop it either.
+    unrelated.assert_running();
+    assert_eq!(profile.lines(), [line.clone()]);
+    assert!(profile.pidfile(48109).exists());
+    profile.fails(&["sync"]);
     unrelated.assert_running();
     assert_eq!(profile.lines(), [line]);
     assert!(profile.pidfile(48109).exists());
@@ -1099,12 +1147,40 @@ fn reconcile_keeps_only_exact_grouped_and_ranged_pairs(driver: &Driver) {
 
 fn cleanup_removes_mixed_tcp_and_udp_forwards(driver: &Driver) {
     let profile = Profile::new(driver);
-    profile.ok(&["add", "127.0.0.1:48113:80/tcp"]);
-    profile.ok(&["add", "127.0.0.1:48114:53/udp"]);
+    profile.ok(&["sync", "127.0.0.1:48113:80/tcp", "127.0.0.1:48114:53/udp"]);
     let relay = profile.relay(48114);
     profile.ok(&["cleanup"]);
     profile.assert_no_state();
     relay.assert_gone();
+    assert_eq!(profile.event_count("cancel\t127.0.0.1\t48113"), 1, "{}", profile.events());
+}
+
+fn parallel_syncs_of_one_snapshot_create_each_listener_once(driver: &Driver) {
+    // Every synchronization holds the operation lock for its whole pass, so
+    // concurrent passes over one snapshot create each TCP listener and each
+    // UDP relay exactly once, and every pass ends with the committed state.
+    let profile = Profile::new(driver);
+    let tcp: Vec<u16> = (48200..=48215).collect();
+    let udp: Vec<u16> = (48225..=48228).collect();
+    let mut snapshot = vec!["sync".to_owned()];
+    snapshot.extend(tcp.iter().map(|port| format!("127.0.0.1:{port}:80/tcp")));
+    snapshot.extend(udp.iter().map(|port| format!("127.0.0.1:{port}:53/udp")));
+    let codes = profile.concurrently(&[], &vec![snapshot; 8]);
+    assert!(codes.iter().all(|code| *code == Some(0)), "parallel sync: {codes:?}");
+    let records = profile.records();
+    assert_eq!(records.len(), tcp.len() + udp.len(), "{records:?}");
+    assert!(records.iter().all(|record| record.ownership == "committed"), "{records:?}");
+    for port in &tcp {
+        assert_eq!(profile.event_count(&format!("add\t127.0.0.1\t{port}")), 1, "port {port}: {}", profile.events());
+    }
+    let relays: Vec<Relay> = udp.iter().map(|port| profile.relay(*port)).collect();
+    let pids: BTreeSet<i32> = relays.iter().map(|relay| relay.pid).collect();
+    assert_eq!(pids.len(), udp.len(), "relays share a PID: {relays:?}");
+    profile.ok(&["cleanup"]);
+    profile.assert_no_state();
+    for relay in relays {
+        relay.assert_gone();
+    }
 }
 
 fn parallel_adds_and_removes_preserve_every_record(driver: &Driver) {
@@ -1159,31 +1235,34 @@ fn parallel_udp_adds_keep_every_relay_identity(driver: &Driver) {
     }
 }
 
-fn state_capacity_rejects_one_more_add_and_an_oversized_file(driver: &Driver) {
-    // The fixed state capacity (128 records) rejects both one more add and an
-    // oversized file, which is never partially accepted or rewritten.
+fn state_capacity_rejects_one_more_published_port_and_an_oversized_file(driver: &Driver) {
+    // The fixed state capacity (128 records) holds a snapshot of 128
+    // published ports. One more port is refused whole, and an oversized
+    // file is never partially accepted or rewritten.
     let profile = Profile::new(driver);
     let mut lines: Vec<String> = (0..128).map(|offset| committed_tcp(49000 + offset, 80)).collect();
-    profile.write_state(&lines);
+    let mut snapshot = vec!["sync".to_owned()];
+    snapshot.extend((0..128).map(|offset| format!("127.0.0.1:{}:80/tcp", 49000 + offset)));
+    profile.ok(&snapshot.iter().map(String::as_str).collect::<Vec<_>>());
+    assert_eq!(profile.lines(), lines, "a full snapshot was not forwarded");
     let full = profile.state();
-    profile.fails(&["add", "127.0.0.1:49200:80/tcp"]);
+    let forwarded = profile.events();
+    snapshot.push("127.0.0.1:49200:80/tcp".to_owned());
+    profile.fails(&snapshot.iter().map(String::as_str).collect::<Vec<_>>());
     assert_eq!(profile.state(), full, "port forward state exceeded its fixed capacity");
+    assert_eq!(profile.events(), forwarded, "a snapshot over the capacity touched a listener");
     lines.push(committed_tcp(49201, 80));
     profile.write_state(&lines);
     let oversized = profile.state();
     profile.fails(&["cleanup"]);
     assert_eq!(profile.state(), oversized, "oversized port forward state was partially accepted");
-    assert_eq!(profile.events(), "", "an oversized state touched a listener");
+    assert_eq!(profile.events(), forwarded, "an oversized state touched a listener");
 }
 
-/// Every public mutation, with its arguments, against listener 49202.
-const MUTATIONS: &[&[&str]] = &[
-    &["add", "127.0.0.1:49202:80/tcp"],
-    &["commit", "127.0.0.1:49202:80/tcp"],
-    &["remove", "127.0.0.1:49202:80/tcp"],
-    &["reconcile", ""],
-    &["cleanup"],
-];
+/// Every state mutation that production code performs, against listener
+/// 49202: a snapshot that publishes it, one that publishes nothing, and the
+/// cleanup of a stopping VM.
+const MUTATIONS: &[&[&str]] = &[&["sync", "127.0.0.1:49202:80/tcp"], &["sync"], &["cleanup"]];
 
 fn corrupt_state_fails_every_mutation(driver: &Driver) {
     let profile = Profile::new(driver);
@@ -1247,15 +1326,8 @@ fn pre_release_record_shapes_are_refused_without_side_effects(driver: &Driver) {
         ("7-field UDP", format!("udp\t127.0.0.1\t49203\t53\t{pid}\t{sec}\t{usec}")),
         ("8-field UDP", format!("udp\t127.0.0.1\t49203\t53\t{pid}\t{sec}\t{usec}\tcommitted")),
     ];
-    let mutations: [&[&str]; 7] = [
-        &["cleanup"],
-        &["reconcile", ""],
-        &["remove", "127.0.0.1:49203:80/tcp"],
-        &["remove", "127.0.0.1:49203:53/udp"],
-        &["add", "127.0.0.1:49205:80/tcp"],
-        &["commit", "127.0.0.1:49204:80/tcp"],
-        &["sync"],
-    ];
+    let mutations: [&[&str]; 4] =
+        [&["cleanup"], &["sync"], &["sync", "127.0.0.1:49203:53/udp"], &["sync", "127.0.0.1:49205:80/tcp"]];
     for (shape, line) in shapes {
         for lines in [vec![line.clone()], vec![committed_tcp(49204, 80), line.clone()]] {
             profile.write_state(&lines);
