@@ -76,8 +76,9 @@ fn recorded_error() -> String {
 
 /// `vm status` of a profile, or `vm list` without one. The C call forgets
 /// the reason of an earlier call before it starts, so a recorded reason is
-/// this call's: a profile that does not exist, or a configuration that
-/// cannot be read and the rule it breaks. Without one, errno says why.
+/// this call's. core/control.h says which it records: a profile that does
+/// not exist, a configuration that cannot be read and why, or a state file
+/// that cannot be read. Without one, errno says why.
 fn query(profile: Option<&CString>) -> Result<Value> {
     let mut output = std::ptr::null_mut();
     let rc = unsafe {

@@ -112,8 +112,10 @@ key. `vm status`, `vm env` and Docker requests with `--profile` fail with
 `vm diagnostics` fail with `operationFailed`, as `vm apply` does. The refusal
 is a known failure, not `outcomeUnknown`: it comes before anything is started,
 stopped or written. A profile that does not exist is refused with the same
-codes and a message that says so, except by `vm start`, which creates it, and
-by `vm delete`. Correct the file by hand:
+codes and a message that says so, except by `vm start` and `vm apply`, which
+create it, and by `vm delete`, which succeeds and leaves `~/.hamn/<profile>/`
+marked as deleted: `vm create` and `vm apply` then answer `conflict` for that
+name. Correct a file that cannot be read by hand:
 [YAML schema](CONFIGURATION.md#yaml-schema) lists what it can hold.
 
 `vm list` does not fail because of such a profile. It lists the profile with
@@ -127,9 +129,10 @@ by `vm delete`. Correct the file by hand:
 after the start. `configurationError` is the rule as diagnostic text; test for
 the key, which a profile that reads does not have. The settings and the other
 status fields are absent, not null: they were not observed. The list still
-fails as a whole when `~/.hamn` or a profile directory can be written by
-another user, when a profile directory cannot be entered, and when a state
-file or the marker of a deleted profile is not what it should be.
+fails as a whole when `~/.hamn` or a profile directory is not a directory
+that only this user can write (a symbolic link is refused as well), when a
+profile directory cannot be entered, and when a state file or the marker of
+a deleted profile is not what it should be.
 
 `vm apply` takes `--file <path>`, a
 [profile definition](CONFIGURATION.md#declarative-configuration), and
