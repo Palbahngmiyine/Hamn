@@ -194,8 +194,22 @@ schema rejects `network`, and `configure` has no `--network` or
 address in 0.0.1.
 
 Published ports are forwarded by a per-profile port observer after the Docker
-daemon has accepted the container, so two conditions do not fail `docker run`:
+daemon has accepted the container, so three conditions do not fail
+`docker run`:
 
+- A UDP port is published on one address, as in
+  `-p 127.0.0.1:5353:5353/udp`. Docker in the guest then receives the port
+  only on that address of the guest, which for `127.0.0.1` is the guest's own
+  loopback, and the host relay cannot send there. Hamn starts no relay and no
+  host listener for such a port. VM status lists it in `portForwardFailures`
+  with the reason `udpAddressUnsupported`, and
+  `~/.hamn/<profile>/logs/port-observer.log` records `cannot forward published
+  udp port <address>:<port>: a UDP port is forwarded only when it is published
+  on all addresses` once. Publish the port on all addresses
+  (`-p 5353:5353/udp`) to have it forwarded; the host relay then listens on
+  every address of the Mac, and Hamn has no UDP forward that listens only on
+  the Mac's loopback. The limit does not apply to TCP: a port published as
+  `-p 127.0.0.1:8080:80` is forwarded.
 - A host process already listens on the published port. `docker ps` shows the
   mapping, but connections to the host port keep reaching that process. VM
   status lists the port in `portForwardFailures` with the reason

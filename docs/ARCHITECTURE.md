@@ -134,7 +134,10 @@ under `$HOME`, while external paths default to read-only.
 
 Every Hamn profile uses Virtualization.framework shared NAT. Published TCP
 ports use SSH ControlMaster forwards; published UDP ports use a bounded host
-relay. Forward creation and removal are transactionally reconciled. Network
+relay. The relay sends to the guest's NAT address, so a UDP port is forwarded
+only when it is published on all addresses; one published on a single address
+is reported instead (see [Configuration](CONFIGURATION.md#network)). Forward
+creation and removal are transactionally reconciled. Network
 attachment is not configurable per profile: there is no `network` YAML key or
 network-selection CLI option.
 `host.docker.internal` is served to guest Docker networks. The 0.0.1

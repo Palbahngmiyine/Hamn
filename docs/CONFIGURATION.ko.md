@@ -184,8 +184,18 @@ YAML schema는 `network`를 거부하고 `configure`에는 `--network` 또는
 address를 제공하지 않습니다.
 
 Published port는 Docker daemon이 container를 받아들인 뒤에 프로필별 port observer가
-전달합니다. 그래서 다음 두 경우에는 `docker run`이 실패하지 않습니다.
+전달합니다. 그래서 다음 세 경우에는 `docker run`이 실패하지 않습니다.
 
+- UDP port를 `-p 127.0.0.1:5353:5353/udp`처럼 한 주소에 publish한 경우. Guest의
+  Docker는 그 port를 guest의 그 주소에서만 받습니다. `127.0.0.1`이면 guest 자신의
+  loopback이며, host relay는 그곳으로 보낼 수 없습니다. Hamn은 이런 port에 relay도
+  host listener도 만들지 않습니다. VM 상태의 `portForwardFailures`에 그 port가
+  `udpAddressUnsupported`로 나타나고, `~/.hamn/<profile>/logs/port-observer.log`에
+  `cannot forward published udp port <address>:<port>: a UDP port is forwarded only when it is published on all addresses`가
+  한 번 기록됩니다. 전달되게 하려면 모든 주소에 publish하세요(`-p 5353:5353/udp`).
+  이때 host relay는 Mac의 모든 주소에서 listen하며, Mac의 loopback에서만 listen하는
+  UDP 전달은 Hamn에 없습니다. 이 한계는 TCP에는 해당하지 않습니다.
+  `-p 127.0.0.1:8080:80`으로 publish한 port는 전달됩니다.
 - Host process가 published port를 이미 listen하고 있는 경우. `docker ps`에는 mapping이
   보이지만 host port로 들어온 연결은 계속 그 process가 받습니다. VM 상태의
   `portForwardFailures`에 그 port가 `hostPortInUse`로 나타나고,
