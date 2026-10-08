@@ -6,7 +6,7 @@ use super::pty;
 use super::py_text;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
@@ -203,14 +203,93 @@ pub fn without_docker_variables(command: &mut Command) -> &mut Command {
     command.env("DOCKER_API_VERSION", "1.47")
 }
 
-/// Appends one line to `path`, creating it.
+/// Writes `line` and its newline to `out` as one buffer, so with one `write`
+/// call on a file that takes the whole of it.
+///
+/// A record file is appended to by several fixture processes at once: the
+/// program under test runs its CLIs concurrently. An append is atomic per
+/// `write` call only. `writeln!` on a `File` makes a call for each formatted
+/// piece (the text, then the newline; one per JSON token for a
+/// `serde_json::Value`), and two processes can interleave those pieces into a
+/// line that is no record.
+pub fn write_line(out: &mut impl Write, line: &str) -> io::Result<()> {
+    out.write_all(format!("{line}\n").as_bytes())
+}
+
+/// Appends one line to `path`, creating it, as `write_line` writes it: a
+/// reader, and a process appending at the same time, see whole lines only.
 pub fn append_line(path: &Path, line: &str) {
-    let mut file = OpenOptions::new().create(true).append(true).open(path).unwrap();
-    writeln!(file, "{line}").unwrap();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    write_line(&mut file, line).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 }
 
 /// The lines of `path` parsed as JSON string lists (a recorded argv log).
 pub fn recorded_argv(path: &Path) -> Vec<Vec<String>> {
     let text = fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     py_text::splitlines(&text).into_iter().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::support::tmp::TempDir;
+
+    /// Records each `write` call it receives.
+    struct Calls(Vec<Vec<u8>>);
+
+    impl Write for Calls {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_record_line_is_one_write() {
+        let mut calls = Calls(Vec::new());
+        let record = serde_json::json!(["docker", ["ps", "--format", "{{json .}}"]]).to_string();
+        write_line(&mut calls, &record).unwrap();
+        assert_eq!(calls.0, [format!("{record}\n").into_bytes()]);
+        // The hazard: the same text through `writeln!` arrives in pieces.
+        let mut pieces = Calls(Vec::new());
+        writeln!(pieces, "{record}").unwrap();
+        assert!(pieces.0.len() > 1, "{:?}", pieces.0);
+    }
+
+    #[test]
+    fn lines_appended_at_once_stay_whole() {
+        let directory = TempDir::new("hamn-record-");
+        let path = directory.path().join("calls");
+        const WRITERS: usize = 8;
+        const LINES: usize = 200;
+        std::thread::scope(|scope| {
+            for writer in 0..WRITERS {
+                let path = &path;
+                scope.spawn(move || {
+                    for line in 0..LINES {
+                        // Each call opens the file anew, as each fixture process does.
+                        let args = vec![format!("writer-{writer}"), format!("line-{line}"), "x".repeat(300)];
+                        append_line(path, &serde_json::json!(["docker", args]).to_string());
+                    }
+                });
+            }
+        });
+        let text = fs::read_to_string(&path).unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for line in text.lines() {
+            let (program, args): (String, Vec<String>) =
+                serde_json::from_str(line).unwrap_or_else(|error| panic!("{error}: {line:?}"));
+            assert_eq!(program, "docker");
+            assert_eq!(args[2], "x".repeat(300), "{line:?}");
+            assert!(seen.insert((args[0].clone(), args[1].clone())), "{line:?}");
+        }
+        assert_eq!(seen.len(), WRITERS * LINES);
+    }
 }

@@ -4,9 +4,9 @@
 //! `release-preflight-gh` fixture, which answers from recorded responses
 //! of `example/hamn`; the real GitHub API is never called.
 use crate::runner::{self, case};
+use crate::support::real_cli;
 use crate::support::release_driver::{Outcome, Repo, hamn_dev, pairs, private_bin, text, with};
 use std::fs;
-use std::io::Write;
 use std::process::ExitCode;
 
 pub fn main(filters: &[String]) -> ExitCode {
@@ -151,7 +151,7 @@ pub fn gh(_program: &str, args: &[String]) -> ExitCode {
     let toggle = |name: &str| std::env::var(name).is_ok_and(|value| value == "1");
     if let Ok(log) = std::env::var("HAMN_TEST_GH_LOG") {
         let mut file = fs::OpenOptions::new().append(true).open(log).expect("gh log");
-        writeln!(file, "{}", args.join("\t")).expect("gh log");
+        real_cli::write_line(&mut file, &args.join("\t")).expect("gh log");
     }
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let endpoint = match words.as_slice() {
