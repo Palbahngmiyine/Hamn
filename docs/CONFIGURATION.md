@@ -211,6 +211,14 @@ daemon has accepted the container, so two conditions do not fail `docker run`:
   `portForwardFailures` does not list ports for it. These limits belong to
   the observer, not to headless `docker containers list`.
 
+The observer also restores forwards that stop working while the VM runs. A
+published UDP port whose host relay process has ended gets a new relay at the
+observer's next synchronization. After `hamn start` has reconnected to a
+running VM, the observer requests every published TCP port again, because the
+new SSH connection holds none of the earlier forwards. A UDP port whose relay
+cannot be verified is left as it is and listed in `portForwardFailures` with
+the reason `forwardFailed`.
+
 Guest Docker networks resolve `host.docker.internal`. The 0.0.1
 `host.hamn.internal` alias has been removed; use `host.docker.internal`.
 Hamn does not touch host `/var/run/docker.sock`.

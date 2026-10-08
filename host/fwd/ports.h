@@ -37,10 +37,12 @@ void port_forward_operation_unlock(int lock_fd);
 
 /*
  * Stops every recorded forward of a stopping VM and removes its record. A
- * forward that cannot be stopped, or whose UDP relay cannot be identified,
+ * forward that cannot be stopped, or whose UDP relay cannot be verified,
  * keeps its record and makes the call return -1; the others are still
- * stopped. The call also returns -1, stopping nothing, when the state cannot
- * be locked or read.
+ * stopped. A UDP record that does not name its relay is resolved through the
+ * relay's pidfile as in the synchronization, so a record for which no relay
+ * was ever started is removed. The call also returns -1, stopping nothing,
+ * when the state cannot be locked or read.
  */
 int port_forward_cleanup(const struct profile *p, const char *guest_ip);
 
@@ -55,7 +57,15 @@ int port_forward_cleanup(const struct profile *p, const char *guest_ip);
  * was reserved or sent without such an answer, is not evidence of a listener:
  * every call sends its request again, which a master that already holds the
  * forward answers with success. Until then the call returns -1 and
- * port_forward_failures() lists the port.
+ * port_forward_failures() lists the port. A committed TCP record is trusted
+ * until port_forward_unconfirm_tcp_serialized() withdraws that trust.
+ *
+ * A published UDP port is judged by its relay process on every call. A relay
+ * that is gone is replaced by a new one. A record that does not name its
+ * relay takes the identity from the relay's pidfile, or counts as gone when
+ * there is no pidfile and the host port can be bound. A relay that cannot be
+ * verified is never signalled or replaced: the call returns -1 and
+ * port_forward_failures() lists the port as "forwardFailed".
  */
 int port_forward_sync_docker_serialized(const struct profile *p,
                                         const char *guest_ip,
@@ -63,13 +73,25 @@ int port_forward_sync_docker_serialized(const struct profile *p,
                                         int spec_count);
 
 /*
+ * Marks every committed TCP record as unconfirmed, for a caller that cannot
+ * tell whether the SSH master still holds their listeners: a new SSH master
+ * holds none of the forwards of the one it replaced. The next synchronization
+ * sends each request again, which costs one control request for each record
+ * and creates nothing that the master already holds. Caller must hold
+ * port_forward_operation_lock(). Returns -1, changing nothing, when the state
+ * cannot be locked, read or written.
+ */
+int port_forward_unconfirm_tcp_serialized(const struct profile *p);
+
+/*
  * The published ports that the last Docker synchronization could not forward,
  * as a new JSON array of {"hostIp","hostPort","protocol","reason"}. reason is
  * "hostPortInUse" when another process holds the host port and "forwardFailed"
  * otherwise, which includes a TCP port that cannot be bound while the SSH
- * master has not answered whether it holds that port itself. The array is
- * empty when there are none and when the profile has no valid record. The
- * caller deletes it; NULL means out of memory.
+ * master has not answered whether it holds that port itself, and a UDP port
+ * whose relay cannot be verified. The array is empty when there are none and
+ * when the profile has no valid record. The caller deletes it; NULL means out
+ * of memory.
  *
  * The synchronization writes the record only when the set changes, and logs
  * each change once. It describes the port observer's last pass, so it is

@@ -14,6 +14,7 @@
 #include <sys/file.h>
 #include <sys/proc_info.h>
 #include <sys/socket.h>
+#include <sys/sysctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -305,6 +306,19 @@ enum process_identity {
     PROCESS_IDENTITY_MATCH = 1,
 };
 
+/* A process that has ended and that its parent has not reaped. libproc
+ * reports it as absent while it still answers signals; it runs nothing and
+ * holds no socket. */
+static int process_is_zombie(int pid)
+{
+    int name[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, pid };
+    struct kinfo_proc info;
+    size_t size = sizeof(info);
+    return sysctl(name, 4, &info, &size, NULL, 0) == 0 &&
+           size == sizeof(info) && info.kp_proc.p_pid == pid &&
+           info.kp_proc.p_stat == SZOMB;
+}
+
 static enum process_identity process_identity_values(int pid,
                                                       uint64_t start_sec,
                                                       uint64_t start_usec)
@@ -318,6 +332,9 @@ static enum process_identity process_identity_values(int pid,
                PROCESS_IDENTITY_MATCH : PROCESS_IDENTITY_CHANGED;
     }
     if (kill(pid, 0) != 0 && errno == ESRCH)
+        return PROCESS_IDENTITY_CHANGED;
+    /* Whichever process the zombie was, the recorded one does not run. */
+    if (process_is_zombie(pid))
         return PROCESS_IDENTITY_CHANGED;
     return PROCESS_IDENTITY_UNKNOWN;
 }
@@ -685,6 +702,65 @@ static int tcp_listener_available(const struct port_spec *spec)
     return available;
 }
 
+/* Reaps `pid` when it is a child of this process that has ended. It does
+ * nothing to a child that runs or to a process that is not a child. */
+static void reap_ended_child(int pid)
+{
+    int status = 0;
+    while (waitpid(pid, &status, WNOHANG) < 0 && errno == EINTR)
+        ;
+}
+
+enum udp_relay {
+    UDP_RELAY_UNVERIFIED = -1, /* never signalled, replaced or reported ready */
+    UDP_RELAY_GONE = 0,
+    UDP_RELAY_RUNNING = 1,
+};
+
+/*
+ * Establishes whether the relay of a UDP record runs. The caller holds the
+ * operation lock, so no relay of the profile is being started meanwhile.
+ *
+ * The observer starts the relays and lives on, so a relay that ends stays its
+ * child until the observer reaps it, which it does here.
+ *
+ * A record that names its relay is judged by that process identity. A record
+ * without one was reserved by a process that ended before it recorded the
+ * relay it may have started. The relay's own pidfile then decides: a pidfile
+ * that identifies a live process is that relay, and its identity is copied
+ * into `record`; one that identifies a process that is gone leaves no relay;
+ * and without a pidfile, a host port that can be bound has no relay.
+ * Everything else cannot be verified.
+ */
+static enum udp_relay udp_relay_state(const struct profile *p,
+                                      struct forward_record *record)
+{
+    enum process_identity identity;
+    if (record->pid != 0) {
+        reap_ended_child(record->pid);
+        identity = process_identity(record);
+    } else {
+        char pidfile[1100];
+        int pid = 0;
+        uint64_t start_sec = 0, start_usec = 0;
+        if (udp_pidfile(p, &record->spec, pidfile, sizeof(pidfile)) != 0)
+            return UDP_RELAY_UNVERIFIED;
+        if (udp_pidfile_identity(pidfile, &pid, &start_sec, &start_usec) != 0)
+            return errno == ENOENT && udp_listener_available(&record->spec) ?
+                   UDP_RELAY_GONE : UDP_RELAY_UNVERIFIED;
+        reap_ended_child(pid);
+        identity = process_identity_values(pid, start_sec, start_usec);
+        if (identity == PROCESS_IDENTITY_MATCH) {
+            record->pid = pid;
+            record->start_sec = start_sec;
+            record->start_usec = start_usec;
+        }
+    }
+    return identity == PROCESS_IDENTITY_MATCH ? UDP_RELAY_RUNNING :
+           identity == PROCESS_IDENTITY_CHANGED ? UDP_RELAY_GONE :
+           UDP_RELAY_UNVERIFIED;
+}
+
 static int stop_record(const struct profile *p, const char *guest_ip,
                        const struct forward_record *record)
 {
@@ -703,19 +779,24 @@ static int stop_record(const struct profile *p, const char *guest_ip,
         return 0;
     }
 
-    enum process_identity identity = process_identity(record);
-    if (identity == PROCESS_IDENTITY_UNKNOWN) {
-        logerr("refusing to stop unverified UDP forward process %d",
-               record->pid);
+    struct forward_record relay = *record;
+    enum udp_relay state = udp_relay_state(p, &relay);
+    if (state == UDP_RELAY_UNVERIFIED) {
+        if (relay.pid != 0)
+            logerr("refusing to stop unverified UDP forward process %d",
+                   relay.pid);
+        else
+            logerr("refusing to stop the UDP forward on %s:%u: its relay "
+                   "cannot be identified", relay.spec.host_ip,
+                   relay.spec.host_port);
         return -1;
     }
-    if (identity == PROCESS_IDENTITY_MATCH &&
-        terminate_udp_process(record) != 0) {
-        logerr("cannot stop UDP forward process %d", record->pid);
+    if (state == UDP_RELAY_RUNNING && terminate_udp_process(&relay) != 0) {
+        logerr("cannot stop UDP forward process %d", relay.pid);
         return -1;
     }
-    if (remove_udp_pidfile(p, record) != 0) {
-        logerr("cannot remove UDP forward pidfile for %d", record->pid);
+    if (remove_udp_pidfile(p, &relay) != 0) {
+        logerr("cannot remove UDP forward pidfile for %d", relay.pid);
         return -1;
     }
     return 0;
@@ -755,6 +836,7 @@ static int complete_tcp_control(int rc, void *opaque)
 enum forward_failure {
     FORWARD_FAILURE_HOST_PORT_IN_USE,
     FORWARD_FAILURE_OTHER,
+    FORWARD_FAILURE_RELAY_UNVERIFIED, /* reported as FORWARD_FAILURE_OTHER */
 };
 
 #define FORWARD_DETAIL_CAP 256
@@ -1018,6 +1100,43 @@ out:
     return result;
 }
 
+int port_forward_unconfirm_tcp_serialized(const struct profile *p)
+{
+    if (!p) {
+        errno = EINVAL;
+        return -1;
+    }
+    int lock_fd = state_lock(p);
+    if (lock_fd < 0)
+        return -1;
+    struct forward_record records[MAX_FORWARD_RECORDS];
+    int count = 0;
+    int result = -1;
+    int owner_pid = (int)getpid();
+    uint64_t owner_start_sec = 0, owner_start_usec = 0;
+    if (records_load(p, records, &count) != 0 ||
+        process_start_token(owner_pid, &owner_start_sec,
+                            &owner_start_usec) != 0)
+        goto out;
+    int changed = 0;
+    for (int i = 0; i < count; i++) {
+        if (records[i].spec.protocol != PORT_TCP || records[i].pending)
+            continue;
+        /* The phase of a control request whose outcome is not known. */
+        records[i].pending = 1;
+        records[i].serialized = 1;
+        records[i].owner_pid = owner_pid;
+        records[i].owner_start_sec = owner_start_sec;
+        records[i].owner_start_usec = owner_start_usec;
+        changed = 1;
+    }
+    result = changed ? records_save(p, records, count) : 0;
+
+out:
+    close(lock_fd);
+    return result;
+}
+
 static int docker_specs_valid(const struct port_spec specs[], int spec_count)
 {
     if (spec_count < 0 || spec_count > MAX_FORWARD_RECORDS ||
@@ -1159,13 +1278,16 @@ static void failures_publish(const struct profile *p,
         goto out;
     }
     for (int i = 0; i < count; i++) {
-        int in_use = failures[i].reason == FORWARD_FAILURE_HOST_PORT_IN_USE;
-        int explained = !in_use && failures[i].detail[0];
+        enum forward_failure reason = failures[i].reason;
+        int explained = reason == FORWARD_FAILURE_OTHER &&
+            failures[i].detail[0];
         logerr("cannot forward published %s port %s:%u: %s%s%s",
                protocol_name(failures[i].spec.protocol),
                failures[i].spec.host_ip, failures[i].spec.host_port,
-               in_use ? "another process holds the host port" :
-               "the forward request failed",
+               reason == FORWARD_FAILURE_HOST_PORT_IN_USE ?
+               "another process holds the host port" :
+               reason == FORWARD_FAILURE_RELAY_UNVERIFIED ?
+               "its relay cannot be verified" : "the forward request failed",
                explained ? ": " : "", explained ? failures[i].detail : "");
     }
     if (count == 0)
@@ -1258,6 +1380,9 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     int count = 0;
     int kept = 0;
     int failed = 0;
+    /* At most one entry for each published port. */
+    struct failed_forward failures[MAX_FORWARD_RECORDS];
+    int failure_count = 0;
     if (records_load(p, records, &count) != 0) {
         close(lock_fd);
         return -1;
@@ -1270,6 +1395,32 @@ int port_forward_sync_docker_serialized(const struct profile *p,
                 desired = candidate;
                 break;
             }
+        }
+        if (desired >= 0 && records[i].spec.protocol == PORT_UDP) {
+            /*
+             * A UDP record says that a relay was started, not that it still
+             * runs. Once the relay is gone and its pidfile cleared, the
+             * record goes too, and the port is forwarded below like one that
+             * was never recorded.
+             */
+            enum udp_relay relay = udp_relay_state(p, &records[i]);
+            if (relay == UDP_RELAY_GONE &&
+                stop_record(p, guest_ip, &records[i]) == 0)
+                continue;
+            recorded[desired] = SPEC_FORWARDED;
+            if (relay == UDP_RELAY_RUNNING) {
+                if (records[i].pending)
+                    record_mark_committed(&records[i]);
+            } else {
+                /* Do not claim an unverified UDP relay is ready. */
+                failures[failure_count].spec = specs[desired];
+                failures[failure_count].detail[0] = '\0';
+                failures[failure_count++].reason = relay == UDP_RELAY_GONE ?
+                    FORWARD_FAILURE_OTHER : FORWARD_FAILURE_RELAY_UNVERIFIED;
+                failed = 1;
+            }
+            records[kept++] = records[i];
+            continue;
         }
         if (desired >= 0 && records[i].pending &&
             records[i].spec.protocol == PORT_TCP) {
@@ -1285,14 +1436,9 @@ int port_forward_sync_docker_serialized(const struct profile *p,
             continue;
         }
         if (desired >= 0) {
+            /* A committed TCP record: port_forward_unconfirm_tcp_serialized()
+             * is what withdraws the trust placed in it. */
             recorded[desired] = SPEC_FORWARDED;
-            if (records[i].pending &&
-                process_identity(&records[i]) == PROCESS_IDENTITY_MATCH)
-                record_mark_committed(&records[i]);
-            else if (records[i].pending) {
-                /* Do not claim an unverified UDP relay is ready. */
-                failed = 1;
-            }
             records[kept++] = records[i];
             continue;
         }
@@ -1307,8 +1453,6 @@ int port_forward_sync_docker_serialized(const struct profile *p,
     }
     close(lock_fd);
 
-    struct failed_forward failures[MAX_FORWARD_RECORDS];
-    int failure_count = 0;
     for (int i = 0; i < spec_count; i++) {
         if (recorded[i] == SPEC_FORWARDED)
             continue;

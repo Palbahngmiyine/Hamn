@@ -14,7 +14,7 @@ use crate::runner::{self, Case, case};
 use crate::suites::{observer_requests, udp_proxy};
 use crate::support::exec::{self, Session};
 use crate::support::{bounded_process, pty, tmp::TempDir};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::fmt::Debug;
 use std::fs;
@@ -62,6 +62,11 @@ const DRIVER_CASES: &[(&str, Test)] = &[
     ("sync_retries_an_unanswered_tcp_request_until_it_succeeds", sync_retries_an_unanswered_tcp_request_until_it_succeeds),
     ("sync_does_not_take_another_process_listener_for_its_own", sync_does_not_take_another_process_listener_for_its_own),
     ("sync_commits_a_pending_tcp_record_only_on_the_master_answer", sync_commits_a_pending_tcp_record_only_on_the_master_answer),
+    ("sync_restarts_a_udp_relay_that_is_gone", sync_restarts_a_udp_relay_that_is_gone),
+    ("udp_relay_that_ended_under_its_live_parent_counts_as_gone", udp_relay_that_ended_under_its_live_parent_counts_as_gone),
+    ("udp_record_without_a_relay_identity_is_recovered", udp_record_without_a_relay_identity_is_recovered),
+    ("unconfirmed_tcp_records_are_asked_about_again", unconfirmed_tcp_records_are_asked_about_again),
+    ("observer_asks_again_for_inherited_and_replaced_tcp_forwards", observer_asks_again_for_inherited_and_replaced_tcp_forwards),
     ("watch_names_an_unreadable_container_list_once", watch_names_an_unreadable_container_list_once),
     ("every_host_address_maps_to_one_guest_listener", every_host_address_maps_to_one_guest_listener),
     ("listener_failures_leave_no_reservation", listener_failures_leave_no_reservation),
@@ -448,6 +453,16 @@ impl Relay {
         running(self.pid, self.token)
     }
 
+    /// Kills the relay as a crash would and waits until it is gone.
+    fn kill(&self) {
+        pty::kill(self.pid as u32, libc::SIGKILL);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.running() {
+            assert!(Instant::now() < deadline, "UDP forward process {} survived SIGKILL for 5 s", self.pid);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// Requires the relay to be gone: the operation that stops it returns
     /// only after it exited.
     fn assert_gone(&self) {
@@ -483,6 +498,11 @@ fn failures(profile: &Profile) -> serde_json::Value {
 /// What `failures` reports for one unforwarded 127.0.0.1 TCP port.
 fn unforwarded_tcp(port: u16, reason: &str) -> serde_json::Value {
     serde_json::json!([{"hostIp": "127.0.0.1", "hostPort": port, "protocol": "tcp", "reason": reason}])
+}
+
+/// What `failures` reports for one unforwarded 127.0.0.1 UDP port.
+fn unforwarded_udp(port: u16, reason: &str) -> serde_json::Value {
+    serde_json::json!([{"hostIp": "127.0.0.1", "hostPort": port, "protocol": "udp", "reason": reason}])
 }
 
 fn docker_snapshot_sync_and_revocation(driver: &Driver) {
@@ -700,6 +720,298 @@ fn sync_commits_a_pending_tcp_record_only_on_the_master_answer(driver: &Driver) 
     }
 }
 
+fn sync_restarts_a_udp_relay_that_is_gone(driver: &Driver) {
+    // A committed UDP record says that a relay was started, not that it
+    // still runs. A pass that finds the recorded relay gone starts a new one
+    // for the published port instead of reporting the port as forwarded, and
+    // a pass that finds it running leaves it alone.
+    let profile = Profile::new(driver);
+    let published = ["sync", "127.0.0.1:48273:53/udp"];
+    profile.ok(&published);
+    let first = profile.relay(48273);
+    first.kill();
+    profile.ok(&published);
+    let second = profile.relay(48273);
+    assert_ne!((second.pid, second.token), (first.pid, first.token), "the record still names the relay that is gone");
+    assert_eq!(profile.record(48273).ownership, "committed");
+    assert_eq!(failures(&profile), serde_json::json!([]));
+    let recorded = profile.line(48273);
+    profile.ok(&published);
+    assert_eq!(profile.line(48273), recorded);
+    assert!(second.running(), "a running relay was replaced");
+
+    // Another process takes the port of a relay that ended. No relay can
+    // start: nothing stays recorded, the stale pidfile is cleared, and the
+    // port is reported until a later pass can forward it.
+    second.kill();
+    let holder = std::net::UdpSocket::bind("127.0.0.1:48273").expect("bind the host port of the relay that ended");
+    profile.fails(&published);
+    profile.assert_no_state();
+    assert!(!profile.pidfile(48273).exists());
+    assert_eq!(failures(&profile), unforwarded_udp(48273, "hostPortInUse"));
+    drop(holder);
+    profile.ok(&published);
+    let third = profile.relay(48273);
+    assert_eq!(failures(&profile), serde_json::json!([]));
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
+    third.assert_gone();
+
+    // The pidfile of a relay that is gone cannot be cleared: the record
+    // stays for the pass that can clear it, and the port is reported.
+    let gone = format!("udp\t127.0.0.1\t48273\t53\t{IMPOSSIBLE_PID}\t1\t1\tcommitted\t0\t0\t0");
+    profile.write_state(std::slice::from_ref(&gone));
+    fs::create_dir(profile.pidfile(48273)).unwrap();
+    let output = profile.fails(&published);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot remove UDP forward pidfile"), "{stderr}");
+    assert_eq!(profile.lines(), [gone]);
+    assert_eq!(failures(&profile), unforwarded_udp(48273, "forwardFailed"));
+    fs::remove_dir(profile.pidfile(48273)).unwrap();
+    profile.ok(&published);
+    let fourth = profile.relay(48273);
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
+    fourth.assert_gone();
+}
+
+/// Runs `snapshot` (`sync-again` and its ports) as two passes of one driver
+/// process and calls `after_first` and `after_second` while that process
+/// waits after each pass. Returns the process's output.
+fn two_passes(profile: &Profile, snapshot: &[&str], after_first: impl FnOnce(), after_second: impl FnOnce()) -> Output {
+    let ready_path = profile.path().join("pass-ready");
+    let release_path = profile.path().join("pass-release");
+    let ready = pty::fifo(&ready_path);
+    // Held open until the process ends: a FIFO drops what no one holds.
+    let mut release = fs::File::from(pty::fifo(&release_path));
+    let mut command = profile.command(snapshot);
+    command.env("PORT_TEST_READY_FIFO", &ready_path).env("PORT_TEST_RELEASE_FIFO", &release_path);
+    let process = std::thread::spawn(move || bounded_process::output(&mut command, TIMEOUT));
+    await_ready(&ready, "the first pass");
+    after_first();
+    release.write_all(b"\n").unwrap();
+    await_ready(&ready, "the second pass");
+    after_second();
+    release.write_all(b"\n").unwrap();
+    let output = process.join().expect("the two passes");
+    fs::remove_file(ready_path).unwrap();
+    fs::remove_file(release_path).unwrap();
+    output
+}
+
+/// Whether a process or an unreaped zombie has `pid`.
+fn answers_signals(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process can be signalled.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn udp_relay_that_ended_under_its_live_parent_counts_as_gone(driver: &Driver) {
+    // The observer starts the relays and lives on. A relay that ends stays
+    // its child, a zombie that still answers signals and that the process
+    // information no longer describes. That is a relay that is gone, to the
+    // observer and to any other process: it is not left as unverifiable.
+    let snapshot = ["sync-again", "127.0.0.1:48278:53/udp"];
+
+    // The parent's next pass reaps the relay and starts a new one.
+    let profile = Profile::new(driver);
+    let ended = Cell::new(None);
+    let output = two_passes(
+        &profile,
+        &snapshot,
+        || {
+            let relay = profile.relay(48278);
+            relay.kill();
+            assert!(answers_signals(relay.pid), "the relay that ended is not an unreaped child");
+            ended.set(Some(relay));
+        },
+        || {
+            let relay: Relay = ended.get().unwrap();
+            assert!(!answers_signals(relay.pid), "the relay that ended was not reaped");
+            let replacement = profile.relay(48278);
+            assert_ne!(replacement.pid, relay.pid);
+            assert_eq!(failures(&profile), serde_json::json!([]));
+        },
+    );
+    assert!(output.status.success(), "{}", describe(&output));
+    profile.ok(&["cleanup"]);
+    profile.assert_no_state();
+
+    // The cleanup of a stopping VM runs in another process while the parent
+    // has not reaped the relay: it removes the record and the pidfile
+    // instead of refusing an unverified process.
+    let profile = Profile::new(driver);
+    let output = two_passes(
+        &profile,
+        &snapshot,
+        || {
+            let relay = profile.relay(48278);
+            relay.kill();
+            assert!(answers_signals(relay.pid), "the relay that ended is not an unreaped child");
+            profile.ok(&["cleanup"]);
+            profile.assert_no_state();
+            assert!(!profile.pidfile(48278).exists());
+        },
+        || {
+            profile.relay(48278);
+        },
+    );
+    assert!(output.status.success(), "{}", describe(&output));
+    profile.ok(&["cleanup"]);
+    profile.assert_no_state();
+}
+
+fn udp_record_without_a_relay_identity_is_recovered(driver: &Driver) {
+    // An observer that dies between reserving a UDP record and recording its
+    // relay leaves a pending record without a relay identity. The relay's
+    // own pidfile then says what became of it, for a pass that publishes the
+    // port, for one that does not, and for the cleanup of a stopping VM.
+    let profile = Profile::new(driver);
+    let published = ["sync", "127.0.0.1:48274:53/udp"];
+    let abandoned = format!("udp\t127.0.0.1\t48274\t53\t0\t0\t0\tpending\t{IMPOSSIBLE_OWNER}\t1\t1");
+    let abandon = || profile.write_state(std::slice::from_ref(&abandoned));
+
+    // No relay was started: there is no pidfile and the port can be bound.
+    // The published port gets its relay, and a record that is not wanted any
+    // more is removed instead of refused for good.
+    abandon();
+    profile.ok(&published);
+    let relay = profile.relay(48274);
+    assert_eq!(profile.record(48274).ownership, "committed");
+    assert_eq!(failures(&profile), serde_json::json!([]));
+
+    // The relay was started and wrote its pidfile: the record takes its
+    // identity, and the relay is neither replaced nor left behind.
+    abandon();
+    profile.ok(&published);
+    let record = profile.record(48274);
+    assert!(record.ownership == "committed" && (record.pid, record.start) == (relay.pid, relay.token), "{record:?}");
+    assert!(relay.running(), "the relay named by the pidfile was replaced");
+    abandon();
+    profile.ok(&["cleanup"]);
+    profile.assert_no_state();
+    relay.assert_gone();
+    assert!(!profile.pidfile(48274).exists());
+    for stop in [&["sync"][..], &["cleanup"]] {
+        abandon();
+        profile.ok(stop);
+        profile.assert_no_state();
+    }
+
+    // The pidfile names a process that is gone: no relay is left.
+    abandon();
+    fs::write(profile.pidfile(48274), format!("{IMPOSSIBLE_PID}\t1\t1\n")).unwrap();
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
+    assert!(!profile.pidfile(48274).exists());
+
+    // A pidfile that identifies no process cannot be verified. Nothing is
+    // replaced, signalled or forgotten, and the published port is reported.
+    abandon();
+    fs::write(profile.pidfile(48274), "4242\n").unwrap();
+    let output = profile.fails(&published);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "cannot forward published udp port 127.0.0.1:48274: its relay cannot be verified\n"
+    );
+    assert_eq!(failures(&profile), unforwarded_udp(48274, "forwardFailed"));
+    for stop in [&["sync"][..], &["cleanup"]] {
+        let output = profile.fails(stop);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("refusing to stop the UDP forward on 127.0.0.1:48274: its relay cannot be identified"), "{stderr}");
+        assert_eq!(profile.lines(), [abandoned.clone()], "{stop:?}");
+        assert_eq!(read(&profile.pidfile(48274)), "4242\n", "{stop:?}");
+    }
+    fs::remove_file(profile.pidfile(48274)).unwrap();
+
+    // Without a pidfile, a port that another process holds may be held by
+    // the relay: the record stays until the port can be bound.
+    let holder = std::net::UdpSocket::bind("127.0.0.1:48274").expect("bind the host port of the abandoned record");
+    profile.fails(&published);
+    assert_eq!(profile.lines(), [abandoned.clone()]);
+    assert_eq!(failures(&profile), unforwarded_udp(48274, "forwardFailed"));
+    profile.fails(&["cleanup"]);
+    assert_eq!(profile.lines(), [abandoned.clone()]);
+    drop(holder);
+    profile.ok(&published);
+    let relay = profile.relay(48274);
+    assert_eq!(failures(&profile), serde_json::json!([]));
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
+    relay.assert_gone();
+}
+
+fn unconfirmed_tcp_records_are_asked_about_again(driver: &Driver) {
+    // Withdrawing the trust in committed TCP records makes them unconfirmed
+    // once: the next pass asks the master about each, and a master that
+    // holds the forward confirms it. UDP records and records that are
+    // already unconfirmed are not touched.
+    let profile = Profile::new(driver);
+    let added = "add\t127.0.0.1\t48275";
+    let snapshot = ["sync", "127.0.0.1:48275:80/tcp", "127.0.0.1:48276:53/udp"];
+    profile.ok(&["unconfirm"]);
+    profile.assert_no_state();
+    profile.ok(&snapshot);
+    let relay = profile.relay(48276);
+    let udp = profile.line(48276);
+    let committed = profile.lines();
+
+    profile.fails_with(&[("HAMN_TEST_FS_FAIL_BEFORE_RENAME", "1")], &["unconfirm"]);
+    assert_eq!(profile.lines(), committed, "a failed update changed the state");
+
+    profile.ok(&["unconfirm"]);
+    let record = profile.record(48275);
+    assert!(record.ownership == "control-locked" && record.owner_pid > 1, "{record:?}");
+    assert_eq!(profile.line(48276), udp);
+    let unconfirmed = profile.lines();
+    profile.ok(&["unconfirm"]);
+    assert_eq!(profile.lines(), unconfirmed, "an unconfirmed record was marked again");
+    assert_eq!(profile.event_count(added), 1, "{}", profile.events());
+
+    profile.ok(&snapshot);
+    assert_eq!(profile.lines(), committed);
+    assert_eq!(profile.event_count(added), 2, "{}", profile.events());
+    assert!(relay.running(), "the UDP relay was replaced");
+    profile.ok(&snapshot);
+    assert_eq!(profile.event_count(added), 2, "a confirmed record was asked about again: {}", profile.events());
+
+    // A record that is unconfirmed when its port is no longer published is
+    // cancelled, not asked about.
+    profile.ok(&["unconfirm"]);
+    profile.ok(&["sync"]);
+    profile.assert_no_state();
+    relay.assert_gone();
+    assert_eq!(profile.event_count(added), 2, "{}", profile.events());
+    assert_eq!(profile.event_count("cancel\t127.0.0.1\t48275"), 1, "{}", profile.events());
+}
+
+fn observer_asks_again_for_inherited_and_replaced_tcp_forwards(driver: &Driver) {
+    // The SSH master holds the TCP listeners, and a new master holds none of
+    // the one before it. An observer trusts a committed TCP record only for
+    // the master it saw confirm it: it asks again once for the records it
+    // inherits when it starts, and once when the control socket has been
+    // replaced. It does not ask on every pass. The fixture Engine publishes
+    // TCP 48250 and UDP 48251.
+    let added = "add\t127.0.0.1\t48250";
+    let observe = |inherited: &[String], cycles: &str, replace_at_cycle: &str| -> usize {
+        let profile = Profile::new(driver);
+        fs::write(profile.path().join("ssh.sock"), "").unwrap();
+        profile.write_state(inherited);
+        profile.ok(&["observe-fixture", profile.path().to_str().unwrap(), cycles, replace_at_cycle]);
+        assert_eq!(profile.record(48250).ownership, "committed");
+        assert_eq!(profile.record(48251).ownership, "committed");
+        let requests = profile.event_count(added);
+        // Before the next observer publishes the same ports.
+        profile.ok(&["cleanup"]);
+        profile.assert_no_state();
+        requests
+    };
+    let nothing: [String; 0] = [];
+    assert_eq!(observe(&[committed_tcp(48250, 80)], "1", "0"), 1, "an inherited record was trusted");
+    assert_eq!(observe(&nothing, "3", "0"), 1, "one master was asked on more than one pass");
+    assert_eq!(observe(&nothing, "2", "2"), 2, "a replaced master was not asked in the pass that saw it");
+    assert_eq!(observe(&nothing, "3", "2"), 2, "a replaced master was asked on a later pass too");
+}
+
 fn watch_names_an_unreadable_container_list_once(driver: &Driver) {
     // The watch loop retries twice a second. Three passes without a Docker
     // socket name the cause once.
@@ -879,6 +1191,9 @@ fn udp_record_without_a_start_token_is_preserved_fail_closed(driver: &Driver) {
         "{}",
         describe(&output)
     );
+    // A snapshot that publishes the port does not report it as forwarded.
+    profile.fails(&["sync", "127.0.0.1:48109:53/udp"]);
+    assert_eq!(failures(&profile), unforwarded_udp(48109, "forwardFailed"));
     // A snapshot that no longer publishes the port cannot stop it either.
     unrelated.assert_running();
     assert_eq!(profile.lines(), [line.clone()]);
@@ -1054,9 +1369,9 @@ fn state_capacity_rejects_one_more_published_port_and_an_oversized_file(driver: 
 }
 
 /// Every state mutation that production code performs, against listener
-/// 49202: a snapshot that publishes it, one that publishes nothing, and the
-/// cleanup of a stopping VM.
-const MUTATIONS: &[&[&str]] = &[&["sync", "127.0.0.1:49202:80/tcp"], &["sync"], &["cleanup"]];
+/// 49202: a snapshot that publishes it, one that publishes nothing, the
+/// withdrawal of trust in TCP records, and the cleanup of a stopping VM.
+const MUTATIONS: &[&[&str]] = &[&["sync", "127.0.0.1:49202:80/tcp"], &["sync"], &["unconfirm"], &["cleanup"]];
 
 fn corrupt_state_fails_every_mutation(driver: &Driver) {
     let profile = Profile::new(driver);
@@ -1120,8 +1435,8 @@ fn pre_release_record_shapes_are_refused_without_side_effects(driver: &Driver) {
         ("7-field UDP", format!("udp\t127.0.0.1\t49203\t53\t{pid}\t{sec}\t{usec}")),
         ("8-field UDP", format!("udp\t127.0.0.1\t49203\t53\t{pid}\t{sec}\t{usec}\tcommitted")),
     ];
-    let mutations: [&[&str]; 4] =
-        [&["cleanup"], &["sync"], &["sync", "127.0.0.1:49203:53/udp"], &["sync", "127.0.0.1:49205:80/tcp"]];
+    let mutations: [&[&str]; 5] =
+        [&["cleanup"], &["sync"], &["unconfirm"], &["sync", "127.0.0.1:49203:53/udp"], &["sync", "127.0.0.1:49205:80/tcp"]];
     for (shape, line) in shapes {
         for lines in [vec![line.clone()], vec![committed_tcp(49204, 80), line.clone()]] {
             profile.write_state(&lines);
