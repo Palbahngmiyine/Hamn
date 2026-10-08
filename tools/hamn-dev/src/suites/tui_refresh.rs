@@ -166,7 +166,7 @@ fn header_says_why_the_status_is_unavailable() {
     harness.write(b"R");
     harness.until("Status: profile default does not exist");
     let text = harness.text();
-    assert!(text.contains("VM: status unavailable | Docker: Connection unavailable"), "{text}");
+    assert!(text.contains("VM: status unavailable | Docker: status unavailable"), "{text}");
     assert!(!text.contains("not created"), "{text}");
 
     let profile = harness.root.join(".hamn/default");

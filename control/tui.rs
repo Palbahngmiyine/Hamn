@@ -200,8 +200,8 @@ impl Job {
                             let request = Request { words: vec!["vm".into(), "status".into()], profile: Some(profile.clone()), timeout: 30, ..Default::default() };
                             let (result, status) = tokio::join!(crate::native::query(&invocation), crate::core::call(&request));
                             let result = result.map_err(|error| tui_state::hamn_query_failure(profile, status.as_ref().ok(), error));
-                            // A status that failed is shown as that failure. It does not say that there is no VM.
-                            let data = status.unwrap_or_else(|error| serde_json::json!({"dockerStatus":"unavailable", "statusError":error.message}));
+                            // A status that failed is shown as that failure: neither the VM nor Docker was observed.
+                            let data = status.unwrap_or_else(|error| serde_json::json!({"statusError":error.message}));
                             let _ = sender.send((generation, false, Ok(serde_json::json!({"type":"runtimeStatus", "data":data})))).await;
                             result
                         } else { crate::native::query(&invocation).await }

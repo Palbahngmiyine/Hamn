@@ -984,36 +984,32 @@ pub fn draw(frame: &mut Frame, state: &State) {
             "recoveryRequired" => "Recovery required",
             _ => "Connection unavailable",
         };
-        // A status that could not be read has no VM state to show. Its
-        // reason gets a line of its own, cut to the width: the reason of a
-        // configuration that cannot be read can be longer than the header.
-        let failure = state.runtime["statusError"].as_str();
-        let line = format!(
-            "{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment",
-            if failure.is_some() {
-                "status unavailable"
-            } else {
-                state.runtime["state"].as_str().unwrap_or("not created")
-            }
-        );
-        match failure {
+        // A status that could not be read observed neither the VM nor
+        // Docker: the header says so and gives the reason below. The reason
+        // gets two lines before it is cut. The rule that a configuration
+        // breaks is the end of its sentence, after the name of the profile,
+        // and has to stay readable at 80 columns.
+        match state.runtime["statusError"].as_str() {
             Some(failure) => {
                 let width = frame.area().width.saturating_sub(2);
-                let reason = format!("Status: {failure}");
-                let lines = wrap_lines(&reason, width);
-                if lines.len() > 1 {
-                    format!(
-                        "{line}\n{} …",
-                        wrap_lines(&reason, width.saturating_sub(2))
-                            .first()
-                            .cloned()
-                            .unwrap_or_default()
-                    )
-                } else {
-                    format!("{line}\n{reason}")
+                let mut reason = wrap_lines(&format!("Status: {failure}"), width);
+                if reason.len() > 2 {
+                    let second = wrap_lines(&reason[1], width.saturating_sub(2))
+                        .first()
+                        .cloned()
+                        .unwrap_or_default();
+                    reason.truncate(1);
+                    reason.push(format!("{second} …"));
                 }
+                format!(
+                    "{header}\nVM: status unavailable | Docker: status unavailable | s starts / repairs this Hamn environment\n{}",
+                    reason.join("\n")
+                )
             }
-            None => line,
+            None => format!(
+                "{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment",
+                state.runtime["state"].as_str().unwrap_or("not created")
+            ),
         }
     } else {
         header
@@ -1568,18 +1564,25 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let unreadable = "cannot read the configuration of profile default: unknown configuration key: kubernetes";
-        // The failure of the status is what the header shows: no VM state
-        // was observed, and the VM of such a profile can be running.
-        let lines = header(serde_json::json!({"dockerStatus": "unavailable", "statusError": unreadable}), 120);
-        assert!(lines.iter().any(|line| line.contains("VM: status unavailable | Docker: Connection unavailable")), "{lines:?}");
+        // The failure of the status is what the header shows: neither the
+        // VM, which can be running, nor Docker was observed.
+        let lines = header(serde_json::json!({"statusError": unreadable}), 120);
+        assert!(lines.iter().any(|line| line.contains("VM: status unavailable | Docker: status unavailable")), "{lines:?}");
         assert!(lines.iter().any(|line| line.contains(&format!("Status: {unreadable}"))), "{lines:?}");
-        assert!(!lines.iter().any(|line| line.contains("not created")), "{lines:?}");
-        // The reason takes one line, also when it is longer than the screen
-        // is wide: the header must leave room for the rows.
-        let long = format!("{unreadable} {}", "x".repeat(200));
-        let lines = header(serde_json::json!({"dockerStatus": "unavailable", "statusError": long}), 80);
-        assert_eq!(lines.iter().filter(|line| line.contains("Status: ") || line.contains("xxxx")).count(), 1, "{lines:?}");
-        assert!(lines.iter().any(|line| line.contains("Status: cannot read the configuration") && line.contains('…')), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("not created") || line.contains("Connection unavailable")), "{lines:?}");
+        // At 80 columns the sentence takes a second line and keeps the rule,
+        // which is its end.
+        let lines = header(serde_json::json!({"statusError": unreadable}), 80);
+        let first = lines.iter().position(|line| line.contains("Status: cannot read the configuration")).unwrap();
+        assert!(lines[first + 1].contains("n key: kubernetes"), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains('…')), "{lines:?}");
+        // A longer reason is cut after its second line: the header must
+        // leave room for the rows.
+        let long = format!("{unreadable} {}", "x".repeat(300));
+        let lines = header(serde_json::json!({"statusError": long}), 80);
+        let reason: Vec<_> = lines.iter().filter(|line| line.contains("Status: ") || line.contains("xxxx") || line.contains("kubernetes")).collect();
+        assert_eq!(reason.len(), 2, "{lines:?}");
+        assert!(reason[1].contains("n key: kubernetes xxxx") && reason[1].contains('…'), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains("resize terminal")), "{lines:?}");
         // An observed status is shown as before.
         let lines = header(serde_json::json!({"state": "stopped", "dockerStatus": "unavailable"}), 120);

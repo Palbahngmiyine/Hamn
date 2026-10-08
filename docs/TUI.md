@@ -37,14 +37,15 @@ the VM state and the `s` start/repair key instead of the CLI error, clears rows
 that would look current, and keeps polling at the normal interval, so rows appear
 once Docker is ready. Other CLI failures, such as usage errors, unknown commands or
 the output limit, keep their message, as does a profile whose status cannot be
-read: its header shows `VM: status unavailable` and, on the next line, why:
-that the profile does not exist yet, or the rule its `config.yaml` breaks. The
-VM panel
+read: its header shows `VM: status unavailable` and, below it, why: that the
+profile does not exist yet, or the rule its `config.yaml` breaks. The reason
+takes up to two lines. The VM panel
 shows VM state separately from Docker readiness. A profile whose `config.yaml`
 cannot be read stays in the VM panel and in the environment picker, with the
-state of its VM and the rule the file breaks. Enter and `c` then show where
-the file is instead of settings; start, stop, delete and configure are refused
-until the file is corrected. External Docker contexts have no
+state of its VM and the rule the file breaks. In the VM panel, Enter and `c`
+then show the reason and where the file is instead of settings; in the picker,
+Enter selects the profile as it does any other. Start, stop, delete and
+configure are refused until the file is corrected. External Docker contexts have no
 Hamn VM controls.
 The `a` key toggles Docker's `--all` value, including grouped flags such as `-as`
 and repeated boolean options. It preserves filters, size, and `--last`/`--latest`;
