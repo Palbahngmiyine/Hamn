@@ -54,6 +54,7 @@ SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
 PROFILE_READ_TEST := $(BUILD)/tests/test_profile_read
 PROFILE_APPLY_TEST := $(BUILD)/tests/test_profile_apply
 PROFILE_APPLY_FAULTS_TEST := $(BUILD)/tests/test_profile_apply_faults
+PROFILE_YAML_FAULTS_TEST := $(BUILD)/tests/test_profile_yaml_faults
 START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retry
 RAW_CACHE_TEST := $(BUILD)/tests/test_raw_cache
 # HAMN_TEST_SANITIZERS=1 builds the raw cache test with ASan and UBSan.
@@ -211,6 +212,15 @@ $(PROFILE_APPLY_FAULTS_TEST): tests/host/test_profile_apply_faults.c host/core/a
 		-Dprofile_read_existing_reason=fault_profile_read_existing_reason \
 		tests/host/test_profile_apply_faults.c host/core/apply.c \
 		$(filter-out $(BUILD)/host/core/apply.o,$(HOST_TEST_OBJS)) $(LDFLAGS) -o $@
+
+# libyaml's allocator is compiled into this test a second time, with malloc
+# and realloc renamed to functions of the test that fail on request.
+$(PROFILE_YAML_FAULTS_TEST): tests/host/test_profile_yaml_faults.c vendor/libyaml/src/api.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) -Dmalloc=fault_malloc \
+		-Drealloc=fault_realloc \
+		tests/host/test_profile_yaml_faults.c vendor/libyaml/src/api.c \
+		$(filter-out $(BUILD)/vendor/libyaml/src/api.o,$(HOST_TEST_OBJS)) $(LDFLAGS) -o $@
 
 $(BUILD)/tests/test_docker_readiness: tests/host/test_docker_readiness.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
@@ -432,7 +442,8 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
-		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST)
+		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
+		$(PROFILE_YAML_FAULTS_TEST)
 	rm -rf $(BUILD)/tests/raw-cache-data && mkdir -p $(BUILD)/tests/raw-cache-data
 	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
 	rm -rf $(BUILD)/tests/raw-cache-data
@@ -448,6 +459,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(VMRUN_IDENTITY_TEST)
 	$(PROFILE_APPLY_TEST)
 	$(PROFILE_APPLY_FAULTS_TEST)
+	$(PROFILE_YAML_FAULTS_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-apply
 	bash guest/tests/test_guest_deployment_transaction.sh

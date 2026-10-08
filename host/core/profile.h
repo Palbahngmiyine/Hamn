@@ -131,7 +131,8 @@ int profile_load_explained(struct profile *profile, const char *name,
  * it leaves out takes its default. text holds length bytes, at most
  * PROFILE_DEFINITION_CAP, and need not be NUL-terminated. On 0 profile holds
  * the settings and the name; dir is empty until profile_locate. On -1 errno
- * is EINVAL (ENOMEM without a parser), profile must not be used, and reason
+ * is EINVAL (ENOMEM when the parser ran out of memory, which says nothing
+ * about the definition), profile must not be used, and reason
  * says why, as profile_read_existing_reason does. Reads no file and no
  * environment. */
 int profile_definition_parse(const char *text, size_t length,

@@ -777,7 +777,9 @@ typedef int (*profile_root_parser)(struct yaml_parse *parse,
 
 /* Parses the one document of the parser's input into profile with root,
  * which reads the document's root node, and releases the parser. On failure
- * errno is EINVAL and reason, when given, says why. */
+ * errno is EINVAL and reason, when given, says which rule the document
+ * breaks; or errno is ENOMEM and reason is left alone, when the parser ran
+ * out of memory: that says nothing about the document. */
 static int profile_parse_document(struct yaml_parse *parse,
                                   profile_root_parser root,
                                   struct profile *profile, char *reason)
@@ -805,11 +807,16 @@ static int profile_parse_document(struct yaml_parse *parse,
         goto out;
     yaml_event_delete(&event);
     rc = 0;
-out:
+out:;
+    /* libyaml reports an allocation that failed as this error, without a
+     * problem text. The document can be a valid one. */
+    int exhausted = rc != 0 && parse->parser.error == YAML_MEMORY_ERROR;
     if (rc != 0 && !parse->error[0])
         yaml_fail(parse, "expected exactly one YAML configuration document");
     yaml_parser_delete(&parse->parser);
-    if (rc != 0) {
+    if (exhausted) {
+        errno = ENOMEM;
+    } else if (rc != 0) {
         reason_set(reason, parse->error);
         errno = EINVAL;
     }
@@ -817,7 +824,7 @@ out:
 }
 
 /* The configuration in config.yaml, already open as file. On failure errno
- * is EINVAL, or ENOMEM without a parser. */
+ * is EINVAL, or ENOMEM when the parser cannot be made or runs out of memory. */
 static int profile_parse_yaml(FILE *file, struct profile *profile,
                               char *reason)
 {
