@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include "core/profile.h"
 #include "core/control.h"
@@ -327,6 +328,39 @@ static int said(const char *sentence)
     return 0;
 }
 
+static int start_with_a_smaller_disk(const char *profile)
+{
+    /* A start that got past the read would be refused here, before it saves
+     * the profile or prepares an image: the disk of a profile cannot shrink
+     * to 1 GiB. */
+    return hamn_control_start(profile, 0, 0, 1);
+}
+
+/* Whether call(profile) returns 1 and records sentence. It runs in a child:
+ * a call that ends the process instead of returning must fail this check
+ * and not end the test, and its exit status 1 must not pass for the result
+ * 1. The child gives up after 20 seconds. */
+static int refuses_with(int (*call)(const char *), const char *profile,
+                        const char *sentence)
+{
+    fflush(NULL);
+    pid_t child = fork();
+    assert(child >= 0);
+    if (child == 0) {
+        alarm(20);
+        log_clear_error();
+        int rc = call(profile);
+        _exit(rc == 1 && strcmp(log_last_error(), sentence) == 0 ? 0 : 3);
+    }
+    int status = 0;
+    assert(waitpid(child, &status, 0) == child);
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        return 1;
+    fprintf(stderr, "the call did not return 1 with \"%s\" (wait status %d)\n",
+            sentence, status);
+    return 0;
+}
+
 /* Each operation that needs the stored configuration says why it cannot
  * read it: the rule the file breaks, or that there is no such profile. The
  * configuration of `existing` is unreadable during the call, with the removed
@@ -357,6 +391,14 @@ static void operations_say_why_a_profile_cannot_be_read(const char *root,
     assert(hamn_control_diagnostics("existing", archive, &json) == 1);
     assert(json == NULL && said(unreadable));
     assert(access(archive, F_OK) == -1 && errno == ENOENT);
+    /* A start and a delete answer too, and leave the profile as it is: no
+     * operation record, and no marker of a deleted profile. */
+    assert(refuses_with(start_with_a_smaller_disk, "existing", unreadable));
+    assert(refuses_with(hamn_control_delete, "existing", unreadable));
+    snprintf(other, sizeof(other), "%s/existing/operation.json", root);
+    assert(access(other, F_OK) == -1 && errno == ENOENT);
+    snprintf(other, sizeof(other), "%s/existing/deleted", root);
+    assert(access(other, F_OK) == -1 && errno == ENOENT);
     assert(read_bytes(path, after, sizeof(after)) == length &&
            memcmp(before, after, length) == 0);
 

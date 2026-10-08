@@ -14,8 +14,13 @@
 static int delete_locked(const char *profile_name)
 {
     struct profile profile;
-    if (profile_load(&profile, profile_name) != 0)
-        die("cannot load profile");
+    char failure[PROFILE_FAILURE_CAP];
+    if (profile_load_explained(&profile, profile_name, failure) != 0) {
+        /* Before the VM is touched and the marker written: a refusal with a
+         * result, not the end of the process. */
+        logerr("%s", failure);
+        return 1;
+    }
     int mutation = profile_mutation_lock(&profile);
     if (mutation < 0) {
         logerr("another %s profile mutation is running", profile.name);

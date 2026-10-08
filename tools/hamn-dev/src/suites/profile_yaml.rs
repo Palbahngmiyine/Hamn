@@ -193,11 +193,21 @@ fn strict_profiles_advanced_settings_preservation_and_soft_deletion() {
             ("operationFailed", &["vm", "configure", "--profile", name, "--cpu", "4", "--yes"]),
             ("operationFailed", &["vm", "stop", "--profile", name, "--yes"]),
             ("operationFailed", &["vm", "diagnostics", "--profile", name, "--path", archive_text, "--yes"]),
+            // A known refusal, not the unknown outcome of a worker that
+            // ended. `--disk 1` stops a start that got past the read before
+            // it saves the profile or prepares an image.
+            ("operationFailed", &["vm", "start", "--profile", name, "--disk", "1", "--yes"]),
+            ("operationFailed", &["vm", "delete", "--profile", name, "--yes"]),
         ] {
             assert_eq!(profiles.refusal(arguments), (code.to_owned(), unreadable.clone()), "{arguments:?}");
             assert_eq!(fs::read(&path).unwrap(), before, "{arguments:?}");
         }
         assert!(!archive.exists(), "{name}");
+        // The refused start recorded no operation and the refused delete
+        // marked nothing: the directory holds the file alone.
+        let directory = path.parent().unwrap();
+        let entries: Vec<_> = fs::read_dir(directory).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(entries, ["config.yaml"], "{name}");
     }
     // A name that no profile has is told apart from a file that cannot be
     // read, and asking about it creates no profile.

@@ -141,7 +141,9 @@ provision: []
 The parser accepts exactly one YAML document. It rejects duplicate or unknown
 keys, aliases, anchors, tags, merge keys, non-plain booleans and integers,
 wrong collection types, and invalid paths. Do not depend on YAML implicit type
-coercion.
+coercion. A file that breaks a rule is not read in part: every operation that
+needs the configuration refuses the profile, reports the rule and leaves the
+file as it is (see [API](API.md#operations)).
 
 | Key | Type and default | Meaning |
 | --- | --- | --- |

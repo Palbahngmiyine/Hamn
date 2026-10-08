@@ -98,10 +98,12 @@ VM 작업은 `vm list`를 제외하고 `--profile`이 필요합니다. Docker는
 저장된 설정이 필요한 작업은 읽을 수 없는 `config.yaml`을 거절하며 프로필의 어떤 것도
 바꾸지 않습니다. 메시지는 프로필 이름과 파일이 어긴 규칙(예: 알 수 없는 키)을 알려
 줍니다. `vm status`, `vm env`, 그리고 `--profile`을 쓰는 Docker 요청은
-`profileUnavailable`로 실패하고, `vm configure`, `vm stop`, `vm diagnostics`는 `vm apply`와
-같이 `operationFailed`로 실패합니다. 없는 프로필은 같은 코드와 그 사실을 알리는 메시지로
-거절합니다. 파일은 직접 고쳐야 하며, 담을 수 있는 내용은
-[YAML schema](CONFIGURATION.ko.md#yaml-schema)에 있습니다.
+`profileUnavailable`로 실패하고, `vm configure`, `vm start`, `vm stop`, `vm delete`,
+`vm diagnostics`는 `vm apply`와 같이 `operationFailed`로 실패합니다. 이 거절은
+`outcomeUnknown`이 아닌 확정된 실패입니다. 무엇인가를 시작·정지하거나 쓰기 전에
+거절하기 때문입니다. 없는 프로필은 같은 코드와 그 사실을 알리는 메시지로 거절합니다.
+다만 `vm start`는 없는 프로필을 만들고, `vm delete`도 거절하지 않습니다. 파일은 직접
+고쳐야 하며, 담을 수 있는 내용은 [YAML schema](CONFIGURATION.ko.md#yaml-schema)에 있습니다.
 
 `vm apply`는 [프로필 정의 파일](CONFIGURATION.ko.md#선언적-설정)을 가리키는
 `--file <path>`와 `--dry-run`(조회 전용, `--yes` 불필요)을 받습니다. 저장된 설정을 정의

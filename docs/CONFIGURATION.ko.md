@@ -133,7 +133,9 @@ provision: []
 
 Parser는 정확히 하나의 YAML document만 허용합니다. Duplicate 또는 unknown key,
 alias, anchor, tag, merge key, plain이 아닌 boolean/integer, 잘못된 collection type,
-잘못된 path를 거부합니다. YAML implicit type coercion에 의존하지 마세요.
+잘못된 path를 거부합니다. YAML implicit type coercion에 의존하지 마세요. 규칙을 어긴
+파일은 일부만 읽지 않습니다. 설정이 필요한 모든 작업이 프로필을 거절하고 어긴 규칙을
+알려 주며 파일은 그대로 둡니다([API](API.ko.md#지원-작업) 참고).
 
 | Key | Type 및 기본값 | 의미 |
 | --- | --- | --- |

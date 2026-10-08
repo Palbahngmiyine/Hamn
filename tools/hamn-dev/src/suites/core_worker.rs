@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::mpsc;
@@ -218,6 +219,30 @@ fn core_worker_isolation_and_protocol() {
     let rows = rows["Ok"].as_array().unwrap_or_else(|| panic!("vm list rows: {rows}"));
     assert!(rows.iter().all(|row| *row.get("name").expect("row name") != "deleted"), "{rows:?}");
     assert!(home.join(".hamn/deleted/config.yaml").exists());
+    // A profile whose configuration cannot be read: the worker answers a
+    // start and a delete with the reason (`call` requires its exit status 0
+    // and a result) instead of ending without one, which the frontend can
+    // only report as an unknown outcome. `disk: 1` stops a start that got
+    // past the read before it saves the profile or prepares an image.
+    let broken = home.join(".hamn/broken");
+    fs::DirBuilder::new().mode(0o700).create(&broken).unwrap();
+    fs::write(broken.join("config.yaml"), "kubernetes:\n  enabled: true\n").unwrap();
+    for (words, arguments) in [
+        ("vm start", json!({"profile": "broken", "yes": true, "disk": 1})),
+        ("vm delete", json!({"profile": "broken", "yes": true})),
+    ] {
+        let refused = worker.call(words, arguments);
+        assert_eq!(
+            refused["Err"],
+            json!({
+                "code": "operationFailed",
+                "message": "cannot read the configuration of profile broken: unknown configuration key: kubernetes",
+            }),
+            "{words} {refused}"
+        );
+    }
+    assert!(!broken.join("deleted").exists() && !broken.join("operation.json").exists());
+    fs::remove_dir_all(&broken).unwrap();
     let result = worker.run(&[]);
     assert!(!result.success() && !result.stdout.contains('\x1b'), "{result:?}");
     let result = worker.run(&["vm", "start", "--profile", "test"]);

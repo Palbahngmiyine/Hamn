@@ -108,9 +108,12 @@ An operation that needs the stored configuration of a profile refuses a
 `config.yaml` that it cannot read, and changes nothing in the profile. The
 message names the profile and the rule the file breaks, such as an unknown
 key. `vm status`, `vm env` and Docker requests with `--profile` fail with
-`profileUnavailable`; `vm configure`, `vm stop` and `vm diagnostics` fail with
-`operationFailed`, as `vm apply` does. A profile that does not exist is refused
-with the same codes and a message that says so. Correct the file by hand:
+`profileUnavailable`; `vm configure`, `vm start`, `vm stop`, `vm delete` and
+`vm diagnostics` fail with `operationFailed`, as `vm apply` does. The refusal
+is a known failure, not `outcomeUnknown`: it comes before anything is started,
+stopped or written. A profile that does not exist is refused with the same
+codes and a message that says so, except by `vm start`, which creates it, and
+by `vm delete`. Correct the file by hand:
 [YAML schema](CONFIGURATION.md#yaml-schema) lists what it can hold.
 
 `vm apply` takes `--file <path>`, a
