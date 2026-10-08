@@ -68,6 +68,26 @@ int main(void)
     assert(profile_read_existing(&profile, "existing") == -1);
     assert(fs_write_file_atomic(path, original, length, 0600) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
+    /* A config.yaml that is a directory, or is over the size limit, is
+     * invalid. It is never reported as missing, whatever errno held before:
+     * ENOENT means that the profile has no configuration. */
+    assert(unlink(path) == 0 && mkdir(path, 0700) == 0);
+    errno = ENOENT;
+    assert(profile_read_existing(&profile, "existing") == -1);
+    assert(errno == EINVAL);
+    assert(rmdir(path) == 0);
+    static char oversized[64 * 1024 + 1];
+    memset(oversized, '#', sizeof(oversized));
+    assert(fs_write_file_atomic(path, oversized, sizeof(oversized), 0600) == 0);
+    errno = ENOENT;
+    assert(profile_read_existing(&profile, "existing") == -1);
+    assert(errno == EINVAL);
+    /* At the limit the file is read: a comment alone is no configuration. */
+    assert(fs_write_file_atomic(path, oversized, sizeof(oversized) - 1, 0600) == 0);
+    errno = 0;
+    assert(profile_read_existing(&profile, "existing") == -1 && errno == EINVAL);
+    assert(fs_write_file_atomic(path, original, length, 0600) == 0);
+    assert(profile_read_existing(&profile, "existing") == 0);
     assert(hamn_control_query("existing", &json) == 0);
     items = cJSON_Parse(json);
     assert(cJSON_IsObject(items));

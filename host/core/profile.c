@@ -197,6 +197,20 @@ static int yaml_next(struct yaml_parse *parse, yaml_event_t *event)
     return 0;
 }
 
+/* The next event, which must be of `type`. An event of another type is
+ * released here, so that a failed call leaves the caller nothing to free. */
+static int yaml_expect(struct yaml_parse *parse, yaml_event_t *event,
+                       yaml_event_type_t type)
+{
+    if (yaml_next(parse, event) != 0)
+        return -1;
+    if (event->type != type) {
+        yaml_event_delete(event);
+        return -1;
+    }
+    return 0;
+}
+
 static int yaml_scalar(struct yaml_parse *parse, yaml_event_t *event,
                        char *out, size_t cap, int plain_only)
 {
@@ -498,12 +512,13 @@ static int parse_hook(struct yaml_parse *parse, yaml_event_t *event,
         else if (strcmp(key, "mode") == 0) {
             char mode[16];
             rc = yaml_string(parse, &value, mode, sizeof(mode));
-            if (rc == 0 && strcmp(mode, "fail") != 0 &&
-                strcmp(mode, "warn") != 0) {
-                yaml_fail(parse, "provision mode must be fail or warn");
-                return -1;
+            if (rc == 0) {
+                if (strcmp(mode, "fail") != 0 && strcmp(mode, "warn") != 0) {
+                    yaml_fail(parse, "provision mode must be fail or warn");
+                    return -1;
+                }
+                hook->warn = strcmp(mode, "warn") == 0;
             }
-            hook->warn = strcmp(mode, "warn") == 0;
         } else {
             yaml_event_delete(&value);
             yaml_fail(parse, "unknown provision key: %s", key);
@@ -620,11 +635,10 @@ static int profile_parse_yaml(FILE *file, struct profile *profile)
     yaml_parser_set_input_file(&parse.parser, file);
     int rc = -1;
     yaml_event_t event;
-    if (yaml_next(&parse, &event) != 0 || event.type != YAML_STREAM_START_EVENT)
+    if (yaml_expect(&parse, &event, YAML_STREAM_START_EVENT) != 0)
         goto out;
     yaml_event_delete(&event);
-    if (yaml_next(&parse, &event) != 0 ||
-        event.type != YAML_DOCUMENT_START_EVENT)
+    if (yaml_expect(&parse, &event, YAML_DOCUMENT_START_EVENT) != 0)
         goto out;
     if (event.data.document_start.tag_directives.start !=
         event.data.document_start.tag_directives.end) {
@@ -635,10 +649,10 @@ static int profile_parse_yaml(FILE *file, struct profile *profile)
     yaml_event_delete(&event);
     if (yaml_next(&parse, &event) != 0 || parse_root(&parse, &event, profile) != 0)
         goto out;
-    if (yaml_next(&parse, &event) != 0 || event.type != YAML_DOCUMENT_END_EVENT)
+    if (yaml_expect(&parse, &event, YAML_DOCUMENT_END_EVENT) != 0)
         goto out;
     yaml_event_delete(&event);
-    if (yaml_next(&parse, &event) != 0 || event.type != YAML_STREAM_END_EVENT)
+    if (yaml_expect(&parse, &event, YAML_STREAM_END_EVENT) != 0)
         goto out;
     yaml_event_delete(&event);
     rc = 0;
@@ -660,11 +674,17 @@ static int profile_open_config(const struct profile *profile, FILE **file_out)
     if (fd < 0)
         return errno == ENOENT ? 0 : -1;
     struct stat status;
-    if (fstat(fd, &status) != 0 || !S_ISREG(status.st_mode) ||
-        status.st_size > PROFILE_YAML_CAP) {
-        int saved = errno ? errno : EINVAL;
+    if (fstat(fd, &status) != 0) {
+        int saved = errno;
         close(fd);
         errno = saved;
+        return -1;
+    }
+    /* Not a failed call: errno still holds whatever an earlier one left, and
+     * a leftover ENOENT would report this configuration as missing. */
+    if (!S_ISREG(status.st_mode) || status.st_size > PROFILE_YAML_CAP) {
+        close(fd);
+        errno = EINVAL;
         return -1;
     }
     FILE *file = fdopen(fd, "r");
