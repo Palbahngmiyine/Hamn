@@ -18,7 +18,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "core/control.h"
 #include "core/lifecycle.h"
+#include "core/log.h"
 #include "core/profile.h"
 #include "util/proc.h"
 
@@ -460,6 +462,60 @@ static void identity_without_uuid_of_a_gone_process_is_kept(const char *root)
     }
 }
 
+/* A profile with its default configuration stored under HOME, where the
+ * control calls look for it. */
+static void home_profile(const char *root, const char *name, struct profile *p)
+{
+    char home[256];
+    int n = snprintf(home, sizeof(home), "%s/home", root);
+    assert(n > 0 && n < (int)sizeof(home));
+    assert((mkdir(home, 0700) == 0 || errno == EEXIST) &&
+           setenv("HOME", home, 1) == 0);
+    assert(profile_load(p, name) == 0 && profile_save(p) == 0);
+}
+
+/* `vm configure` changes the settings of a stopped VM only. A running VM
+ * and a VM whose ownership cannot be verified are refused alike, also when
+ * the call would change nothing, and config.yaml keeps its bytes. */
+static void configure_requires_a_stopped_vm(const char *root)
+{
+    struct profile p;
+    home_profile(root, "configured", &p);
+    char before[4096], after[4096];
+    read_text(&p, "config.yaml", before, sizeof(before));
+
+    const enum reply replies[] = { REPLY_START_IDENTITY };
+    struct supervisor supervisor;
+    supervisor_start(&p, replies, 1, &supervisor);
+    write_identity(&p, &supervisor);
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_VERIFIED);
+    assert(hamn_control_configure("configured", 8, 0, 0, 0, -1) == 1);
+    assert(strcmp(log_last_error(),
+                  "VM must be stopped before changing settings") == 0);
+    assert(hamn_control_configure("configured", 0, 0, 0, 0, -1) == 1);
+    read_text(&p, "config.yaml", after, sizeof(after));
+    assert(strcmp(before, after) == 0);
+    assert(!supervisor_kill(&supervisor));
+
+    write_text(&p, "vmrun.identity", "not an identity\n");
+    write_text(&p, "vmrun.pid", "2147483646\n");
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_UNVERIFIED);
+    assert(hamn_control_configure("configured", 8, 0, 0, 0, -1) == 1);
+    assert(strcmp(log_last_error(),
+                  "VM must be stopped before changing settings") == 0);
+    read_text(&p, "config.yaml", after, sizeof(after));
+    assert(strcmp(before, after) == 0);
+
+    char path[1024];
+    assert(profile_path(&p, "vmrun.identity", path, sizeof(path)) &&
+           unlink(path) == 0);
+    assert(profile_path(&p, "vmrun.pid", path, sizeof(path)) &&
+           unlink(path) == 0);
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_STALE);
+    assert(hamn_control_configure("configured", 8, 0, 0, 0, -1) == 0);
+    assert(profile_read_existing(&p, "configured") == 0 && p.cpus == 8);
+}
+
 /* The cases run in a child, so a failed assertion still leaves this process
  * to remove the profiles; supervisors exit when that child's end of their
  * alive pipe closes. */
@@ -476,6 +532,7 @@ int main(void)
         identity_without_uuid_is_not_adopted_from_a_status(root);
         identity_without_uuid_is_unverified_before_the_control_socket(root);
         identity_without_uuid_of_a_gone_process_is_kept(root);
+        configure_requires_a_stopped_vm(root);
         _exit(0);
     }
     int status = 0;
