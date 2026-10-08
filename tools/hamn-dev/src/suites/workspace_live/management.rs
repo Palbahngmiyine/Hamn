@@ -233,11 +233,36 @@ pub(crate) fn choose(terminal: &mut impl Driver, title: &str, option: &str) {
 
 /// Queries `kind name` (in `namespace`) and waits until it is selected and
 /// loaded.
+///
+/// The view that the caller comes from can already show that heading and
+/// that row, as the list does to which an inspection returns. The command is
+/// therefore typed first and Enter sent once it is drawn: Enter clears the
+/// rows, so a later frame without the typed command that has the row and no
+/// `[loading]` was drawn from the result of this query.
 pub(crate) fn query(terminal: &mut impl Driver, kind: &str, name: &str, namespace: Option<&str>) {
     let suffix = namespace.map(|namespace| format!(" --namespace {namespace}")).unwrap_or_default();
-    terminal.send(format!(":kubectl get {kind} {name}{suffix}\r").as_bytes(), None);
+    let typed = format!(":kubectl get {kind}");
+    terminal.send(format!("{typed} {name}{suffix}").as_bytes(), Some(&typed));
+    terminal.write(b"\r");
     let (heading, selected) = (format!("kubectl {kind}"), format!("> {name}"));
-    terminal.wait_for(&|text| text.contains(&heading) && text.contains(&selected) && !text.contains("[loading]"));
+    terminal.wait_for(&|text| {
+        !text.contains(&typed) && text.contains(&heading) && text.contains(&selected) && !text.contains("[loading]")
+    });
+}
+
+/// Presses `d` on the selected row of a resource that has no delete action
+/// and requires that no confirmation opens.
+///
+/// A confirmation takes every key, so text typed after `d` is drawn only
+/// when none opened. The wait ends on either outcome: waiting for the typed
+/// text alone would end a regression in a timeout, not in this assertion.
+pub(crate) fn delete_is_not_offered(terminal: &mut impl Driver) {
+    terminal.write(b"d:READ_ONLY_BARRIER");
+    terminal.wait_for(&|text| text.contains(":READ_ONLY_BARRIER") || text.contains("Confirm delete"));
+    assert!(!terminal.text().contains("Confirm delete"), "{}", terminal.text());
+    // Esc is read by itself before a caller types on.
+    terminal.write(b"\x1b");
+    terminal.wait_for(&|text| !text.contains(":READ_ONLY_BARRIER"));
 }
 
 struct Review<'a> {
@@ -425,6 +450,15 @@ impl Review<'_> {
             ("crds".to_owned(), crd_name.clone(), None, &crd),
             (format!("probes.{group}"), "read-only".to_owned(), Some(namespace.as_str()), &custom),
         ] {
+            // The last line of the object's YAML, as kubectl prints it: the
+            // inspection below has drawn its output once it is on the screen.
+            let mut yaml = vec!["get", kind.as_str(), name.as_str()];
+            if let Some(namespace) = namespace_value {
+                yaml.extend(["--namespace", namespace]);
+            }
+            yaml.extend(["-o", "yaml"]);
+            let yaml = self.kubectl(&yaml);
+            let last_line = yaml.lines().map(str::trim).rfind(|line| !line.is_empty()).expect("YAML output").to_owned();
             let terminal = self.terminal.as_mut().expect("a running TUI");
             query(terminal, &kind, &name, namespace_value);
             terminal.send(b"m", Some("Resource actions"));
@@ -435,15 +469,16 @@ impl Review<'_> {
                 "{menu}"
             );
             terminal.send(b"\r", Some("Exit code 0"));
+            // The exit footer can be drawn before the output, and Page Up
+            // scrolls only output that has arrived.
+            terminal.until(&last_line);
             let expected_uid = expected["metadata"]["uid"].as_str().expect("UID").to_owned();
             if !terminal.text().contains(&expected_uid) {
                 terminal.send(b"\x1b[5~", Some(&expected_uid));
             }
             terminal.send(b"\r", None);
             query(terminal, &kind, &name, namespace_value);
-            terminal.send(b"d:READ_ONLY_BARRIER", Some(":READ_ONLY_BARRIER"));
-            assert!(!terminal.text().contains("Confirm delete"), "{}", terminal.text());
-            terminal.send(b"\x1b", None);
+            delete_is_not_offered(terminal);
             let observed = self.get(&kind, &name, namespace_value);
             assert!(
                 observed["metadata"]["uid"] == expected["metadata"]["uid"] && observed["spec"] == expected["spec"],

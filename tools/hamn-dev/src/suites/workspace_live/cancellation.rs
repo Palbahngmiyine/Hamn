@@ -200,10 +200,21 @@ pub(crate) fn cancellation(live: &Live) {
                 Duration::from_secs(30),
                 None,
             );
-            terminal.send(b"\x1b\t", Some("Kubernetes"));
+            // Esc and Tab in one write reach the TUI as Alt+Tab, so Esc is
+            // sent alone: the phase is shown only in the log that it closes.
+            terminal.write(b"\x1b");
+            terminal.wait_for(&|text| !text.contains("recovering-deployment"));
+            // The header names Kubernetes in both workspaces; the brackets
+            // are around the one that is shown.
+            terminal.send(b"\t", Some("[Kubernetes]"));
             let current = read_record(&path);
             assert_eq!(current["operationId"], active["operationId"], "navigation replaced the operation");
             assert_eq!(current["status"], "running", "navigation ended the operation");
+            // A cancelled start keeps the status while it fences; its phase
+            // is what changes. The worker may not have recorded a cancel yet
+            // when this is read: the quit below is the proof that the
+            // operation was still there to cancel.
+            assert_eq!(current["phase"], "recovering-deployment", "navigation cancelled the operation");
             terminal.send(b"q", Some("Cancel the active operation and exit?"));
             terminal.send(b"y", None);
             let fencing = |value: &Value| value["phase"] == "fencing-after-cancel";

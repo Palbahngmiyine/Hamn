@@ -6,7 +6,9 @@ use super::boundaries::{HELPERS, LOCK, Programs, gate_source, wait_source, wrapp
 use super::cancellation::read_line;
 use super::contexts::{Proxy, births, certificates, provider, roots, wrapper};
 use super::kubernetes::assert_deployment_preserved;
-use super::management::{OWNER, Row, assert_identity, assert_relations, choose, query, same_process};
+use super::management::{
+    OWNER, Row, assert_identity, assert_relations, choose, delete_is_not_offered, query, same_process,
+};
 use super::processes::{Identity, Table, birth, gone};
 use super::terminal::Driver;
 use super::transport::owned_ssh;
@@ -449,6 +451,11 @@ fn live_menu_helpers() {
         terminal.until("custom-uid");
         terminal.until("Exit code 0");
         terminal.send(b"\r", None);
+        // The same query again, from the list the inspection returned to:
+        // that list already shows the heading and the row. Then `d` on a
+        // resource without a delete action.
+        query(terminal, "probes.example.test", "read-only", Some("review"));
+        delete_is_not_offered(terminal);
         query(terminal, "deployments", "web", Some("review"));
         terminal.send(b"m", Some("related-pods"));
         choose(terminal, "Resource actions", "related-pods");
