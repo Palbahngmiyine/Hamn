@@ -237,6 +237,83 @@ static void differing_settings_are_named(void)
            (1u << PROFILE_SETTING_CPUS | 1u << PROFILE_SETTING_ROSETTA | mounts));
 }
 
+static size_t read_bytes(const char *path, char *data, size_t capacity)
+{
+    FILE *file = fopen(path, "r");
+    assert(file);
+    size_t length = fread(data, 1, capacity, file);
+    assert(length < capacity && fclose(file) == 0);
+    return length;
+}
+
+/* config.yaml cannot carry every character: the YAML reader refuses some
+ * and folds others into a line break. A profile with such a setting is not
+ * saved, because the file would no longer read as that profile, and one
+ * unreadable profile fails the listing of all of them. The profile
+ * `existing` is left as it was. */
+static void settings_that_would_not_read_back_are_not_saved(void)
+{
+    static const char *const refused[] = {
+        "\x7f",          /* DEL: refused by the reader */
+        "\xc2\x80",      /* U+0080, a C1 control: refused by the reader */
+        "\xef\xbf\xbe",  /* U+FFFE: refused by the reader */
+        "\xc2\x85",      /* U+0085: read back as a space */
+        "\xe2\x80\xa8 ", /* U+2028 and a space: read back without the space */
+    };
+    static const char *const saved[] = {
+        "printf 'a\\tb\\n' \"$HOME\"",
+        "tab\there, line\nbreak, carriage\rreturn",
+        "\xea\xb2\xbd\xeb\xa1\x9c /Volumes/\xed\x95\x9c\xea\xb8\x80",
+        "  spaces kept  ",
+        "# no comment, - no list, {no: map}",
+        /* U+2028 between two letters is read back as it is. */
+        "line\xe2\x80\xa8separator",
+    };
+    static struct profile stored, changed, check;
+    char path[1024], before[8192], after[8192];
+    assert(profile_read_existing(&stored, "existing") == 0);
+    assert(profile_path(&stored, "config.yaml", path, sizeof(path)));
+    size_t length = read_bytes(path, before, sizeof(before));
+    for (size_t index = 0; index < sizeof(refused) / sizeof(refused[0]); index++) {
+        char value[64];
+        snprintf(value, sizeof(value), "echo a%sb", refused[index]);
+        changed = with_hook(stored, "ready", value, 60, 0);
+        errno = 0;
+        assert(profile_save(&changed) == -1);
+        assert(errno == EILSEQ);
+        snprintf(value, sizeof(value), "/data/a%sb", refused[index]);
+        changed = with_mount(stored, 0, value, "/workspace", 0);
+        errno = 0;
+        assert(profile_save(&changed) == -1 && errno == EILSEQ);
+        assert(read_bytes(path, after, sizeof(after)) == length &&
+               memcmp(before, after, length) == 0);
+    }
+    for (size_t index = 0; index < sizeof(saved) / sizeof(saved[0]); index++) {
+        changed = with_hook(stored, "ready", saved[index], 60, 0);
+        assert(profile_save(&changed) == 0);
+        assert(profile_read_existing(&check, "existing") == 0);
+        assert(profile_diff(&changed, &check) == 0);
+        assert(strcmp(check.hooks[0].command, saved[index]) == 0);
+    }
+    /* A YAML escape names such a character in a hand-written file, which
+     * reads. `vm configure` saves what it read: it is refused, and the file
+     * that still reads is kept. */
+    const char *escaped = "provision:\n  - command: \"echo \\x7F\"\n";
+    assert(fs_write_file_atomic(path, escaped, strlen(escaped), 0600) == 0);
+    assert(profile_read_existing(&check, "existing") == 0);
+    assert(strcmp(check.hooks[0].command, "echo \x7f") == 0);
+    assert(hamn_control_configure("existing", 3, 0, 0, 0, -1) == 1);
+    assert(read_bytes(path, after, sizeof(after)) == strlen(escaped) &&
+           memcmp(after, escaped, strlen(escaped)) == 0);
+    assert(profile_read_existing(&check, "existing") == 0 && check.cpus == 4);
+    char *json = NULL;
+    assert(hamn_control_query(NULL, &json) == 0);
+    hamn_control_free(json);
+    assert(profile_save(&stored) == 0);
+    assert(read_bytes(path, after, sizeof(after)) == length &&
+           memcmp(before, after, length) == 0);
+}
+
 int main(void)
 {
     char temporary[] = "/tmp/hamn-profile-read-XXXXXX";
@@ -262,6 +339,7 @@ int main(void)
     assert(profile_read_existing(&profile, "existing") == 0);
     refused_configurations_say_why(root);
     differing_settings_are_named();
+    settings_that_would_not_read_back_are_not_saved();
     assert(hamn_control_start("../escape", 0, 0, 0) == 2);
     assert(hamn_control_configure("existing", 2, 2, 0, 0, -1) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);

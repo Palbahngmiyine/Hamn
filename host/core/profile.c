@@ -656,8 +656,48 @@ static int parse_root(struct yaml_parse *parse, yaml_event_t *event,
     return 0;
 }
 
-/* Parses the one document of config.yaml into profile. On failure errno is
- * EINVAL, or ENOMEM without a parser, and reason, when given, says why. */
+/* Parses the one document of the parser's input, a configuration, into
+ * profile, and releases the parser. On failure errno is EINVAL and reason,
+ * when given, says why. */
+static int profile_parse_document(struct yaml_parse *parse,
+                                  struct profile *profile, char *reason)
+{
+    int rc = -1;
+    yaml_event_t event;
+    if (yaml_expect(parse, &event, YAML_STREAM_START_EVENT) != 0)
+        goto out;
+    yaml_event_delete(&event);
+    if (yaml_expect(parse, &event, YAML_DOCUMENT_START_EVENT) != 0)
+        goto out;
+    if (event.data.document_start.tag_directives.start !=
+        event.data.document_start.tag_directives.end) {
+        yaml_fail(parse, "YAML tag directives are not supported");
+        yaml_event_delete(&event);
+        goto out;
+    }
+    yaml_event_delete(&event);
+    if (yaml_next(parse, &event) != 0 || parse_root(parse, &event, profile) != 0)
+        goto out;
+    if (yaml_expect(parse, &event, YAML_DOCUMENT_END_EVENT) != 0)
+        goto out;
+    yaml_event_delete(&event);
+    if (yaml_expect(parse, &event, YAML_STREAM_END_EVENT) != 0)
+        goto out;
+    yaml_event_delete(&event);
+    rc = 0;
+out:
+    if (rc != 0 && !parse->error[0])
+        yaml_fail(parse, "expected exactly one YAML configuration document");
+    yaml_parser_delete(&parse->parser);
+    if (rc != 0) {
+        reason_set(reason, parse->error);
+        errno = EINVAL;
+    }
+    return rc;
+}
+
+/* The configuration in config.yaml, already open as file. On failure errno
+ * is EINVAL, or ENOMEM without a parser. */
 static int profile_parse_yaml(FILE *file, struct profile *profile,
                               char *reason)
 {
@@ -668,38 +708,22 @@ static int profile_parse_yaml(FILE *file, struct profile *profile,
         return -1;
     }
     yaml_parser_set_input_file(&parse.parser, file);
-    int rc = -1;
-    yaml_event_t event;
-    if (yaml_expect(&parse, &event, YAML_STREAM_START_EVENT) != 0)
-        goto out;
-    yaml_event_delete(&event);
-    if (yaml_expect(&parse, &event, YAML_DOCUMENT_START_EVENT) != 0)
-        goto out;
-    if (event.data.document_start.tag_directives.start !=
-        event.data.document_start.tag_directives.end) {
-        yaml_fail(&parse, "YAML tag directives are not supported");
-        yaml_event_delete(&event);
-        goto out;
+    return profile_parse_document(&parse, profile, reason);
+}
+
+/* The same, from length bytes of text that stay valid during the call. */
+static int profile_parse_text(const char *text, size_t length,
+                              struct profile *profile, char *reason)
+{
+    struct yaml_parse parse;
+    memset(&parse, 0, sizeof(parse));
+    if (!yaml_parser_initialize(&parse.parser)) {
+        errno = ENOMEM;
+        return -1;
     }
-    yaml_event_delete(&event);
-    if (yaml_next(&parse, &event) != 0 || parse_root(&parse, &event, profile) != 0)
-        goto out;
-    if (yaml_expect(&parse, &event, YAML_DOCUMENT_END_EVENT) != 0)
-        goto out;
-    yaml_event_delete(&event);
-    if (yaml_expect(&parse, &event, YAML_STREAM_END_EVENT) != 0)
-        goto out;
-    yaml_event_delete(&event);
-    rc = 0;
-out:
-    if (rc != 0 && !parse.error[0])
-        yaml_fail(&parse, "expected exactly one YAML configuration document");
-    yaml_parser_delete(&parse.parser);
-    if (rc != 0) {
-        reason_set(reason, parse.error);
-        errno = EINVAL;
-    }
-    return rc;
+    yaml_parser_set_input_string(&parse.parser, (const unsigned char *)text,
+                                 length);
+    return profile_parse_document(&parse, profile, reason);
 }
 
 static int profile_open_config(const struct profile *profile, FILE **file_out,
@@ -990,6 +1014,19 @@ static int profile_serialize(const struct profile *profile,
     return 0;
 }
 
+/* Whether text, the serialized form of profile, reads as the same settings.
+ * text_quote writes every byte from 0x7f up as it is, and the YAML reader
+ * refuses some of those characters (DEL, the C1 controls) and treats others
+ * as a line break, which it folds together with the blanks around it. */
+static int profile_text_reads_back(const struct profile *profile,
+                                   const struct yaml_text *text)
+{
+    struct profile stored;
+    profile_defaults(&stored);
+    return profile_parse_text(text->data, text->length, &stored, NULL) == 0 &&
+           profile_diff(profile, &stored) == 0;
+}
+
 int profile_save(const struct profile *profile)
 {
     if (!profile || profile_validate(profile) != 0) {
@@ -999,6 +1036,10 @@ int profile_save(const struct profile *profile)
     struct yaml_text text;
     if (profile_serialize(profile, &text) != 0) {
         errno = EOVERFLOW;
+        return -1;
+    }
+    if (!profile_text_reads_back(profile, &text)) {
+        errno = EILSEQ;
         return -1;
     }
     char path[PROFILE_PATH_CAP];

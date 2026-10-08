@@ -98,7 +98,12 @@ const char *profile_setting_key(enum profile_setting setting);
  * of a hook is its place in the run order. Strings compare byte for byte. */
 unsigned profile_diff(const struct profile *a, const struct profile *b);
 
-/* Save config.yaml atomically. */
+/* Save config.yaml atomically. Nothing is written, and the result is -1, for
+ * settings that break the schema (EINVAL), whose text exceeds 64 KiB or holds
+ * a control character below 0x20 other than tab and the line breaks
+ * (EOVERFLOW), or whose text would not read back as the same settings
+ * (EILSEQ): for example a string with DEL, a C1 control or U+0085. Any other
+ * failure is that of the write, with its errno. */
 int profile_save(const struct profile *profile);
 
 /* p->dir/<file> path. Successful calls return buf. */

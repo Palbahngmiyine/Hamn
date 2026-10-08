@@ -409,7 +409,7 @@ static int cmd_start_execute(const struct start_options *options,
         goto out;
     }
     if (profile_save(&p) != 0)
-        die("cannot save profile config");
+        die("cannot save profile config: %s", strerror(errno));
 
     /* 1. 이미지 + 디스크 */
     char cache_img[1024];
