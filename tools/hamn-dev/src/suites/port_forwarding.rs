@@ -16,10 +16,10 @@ use crate::support::exec::{self, Session};
 use crate::support::{bounded_process, pty, tmp::TempDir};
 use std::cell::RefCell;
 use std::collections::BTreeSet;
-use std::ffi::CString;
 use std::fmt::Debug;
 use std::fs;
-use std::os::fd::AsRawFd;
+use std::io::Write;
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
@@ -54,7 +54,6 @@ type Test = fn(&Driver);
 /// The cases after the parser, observer and relay ones, in order.
 const DRIVER_CASES: &[(&str, Test)] = &[
     ("published_ports_accept_only_1_to_65535", published_ports_accept_only_1_to_65535),
-    ("tcp_reservation_reconcile_commit_and_remove", tcp_reservation_reconcile_commit_and_remove),
     (
         "docker_sync_commits_listeners_and_rejects_an_ambiguous_snapshot",
         docker_sync_commits_listeners_and_rejects_an_ambiguous_snapshot,
@@ -64,17 +63,10 @@ const DRIVER_CASES: &[(&str, Test)] = &[
     ("sync_does_not_take_another_process_listener_for_its_own", sync_does_not_take_another_process_listener_for_its_own),
     ("sync_commits_a_pending_tcp_record_only_on_the_master_answer", sync_commits_a_pending_tcp_record_only_on_the_master_answer),
     ("watch_names_an_unreadable_container_list_once", watch_names_an_unreadable_container_list_once),
-    ("late_owned_completion_leaves_the_replacement_record", late_owned_completion_leaves_the_replacement_record),
-    ("serialized_reconcile_keeps_a_live_foreign_generation", serialized_reconcile_keeps_a_live_foreign_generation),
     ("every_host_address_maps_to_one_guest_listener", every_host_address_maps_to_one_guest_listener),
     ("listener_failures_leave_no_reservation", listener_failures_leave_no_reservation),
     ("failed_cancel_of_a_free_port_removes_the_tcp_record", failed_cancel_of_a_free_port_removes_the_tcp_record),
-    ("udp_relay_records_its_start_token_and_stops_on_remove", udp_relay_records_its_start_token_and_stops_on_remove),
     ("udp_pidfile_is_replaced_only_for_a_verified_gone_relay", udp_pidfile_is_replaced_only_for_a_verified_gone_relay),
-    (
-        "dead_pending_udp_owner_is_removed_only_when_its_port_is_free",
-        dead_pending_udp_owner_is_removed_only_when_its_port_is_free,
-    ),
     ("udp_state_save_failure_creates_no_listener", udp_state_save_failure_creates_no_listener),
     ("mismatched_udp_start_token_clears_without_signaling", mismatched_udp_start_token_clears_without_signaling),
     ("udp_record_without_a_start_token_is_preserved_fail_closed", udp_record_without_a_start_token_is_preserved_fail_closed),
@@ -82,15 +74,12 @@ const DRIVER_CASES: &[(&str, Test)] = &[
         "sigterm_resistant_relay_is_killed_while_its_identity_matches",
         sigterm_resistant_relay_is_killed_while_its_identity_matches,
     ),
-    ("reconcile_matches_the_exact_guest_endpoint", reconcile_matches_the_exact_guest_endpoint),
-    ("published_udp_without_a_live_relay_is_not_ready", published_udp_without_a_live_relay_is_not_ready),
-    ("reconcile_keeps_published_listeners_and_stops_stale_ones", reconcile_keeps_published_listeners_and_stops_stale_ones),
-    ("reconcile_keeps_only_exact_grouped_and_ranged_pairs", reconcile_keeps_only_exact_grouped_and_ranged_pairs),
     ("cleanup_removes_mixed_tcp_and_udp_forwards", cleanup_removes_mixed_tcp_and_udp_forwards),
     ("parallel_syncs_of_one_snapshot_create_each_listener_once", parallel_syncs_of_one_snapshot_create_each_listener_once),
-    ("parallel_adds_and_removes_preserve_every_record", parallel_adds_and_removes_preserve_every_record),
-    ("same_listener_race_has_exactly_one_winner", same_listener_race_has_exactly_one_winner),
-    ("parallel_udp_adds_keep_every_relay_identity", parallel_udp_adds_keep_every_relay_identity),
+    (
+        "state_damaged_during_a_pass_fails_it_and_the_next_pass_recovers",
+        state_damaged_during_a_pass_fails_it_and_the_next_pass_recovers,
+    ),
     (
         "state_capacity_rejects_one_more_published_port_and_an_oversized_file",
         state_capacity_rejects_one_more_published_port_and_an_oversized_file,
@@ -248,7 +237,7 @@ fn running(pid: i32, token: (u64, u64)) -> bool {
 }
 
 /// An unrelated live process in its own process group, killed and reaped
-/// when dropped (or by `stop`).
+/// when dropped.
 struct Unrelated {
     session: Session,
     token: (u64, u64),
@@ -274,11 +263,6 @@ impl Unrelated {
 
     fn assert_running(&mut self) {
         assert!(self.session.running() && running(self.pid(), self.token), "unrelated process {} was stopped", self.pid());
-    }
-
-    /// Kills and reaps the process, so its identity is definitely gone.
-    fn stop(self) {
-        drop(self.session);
     }
 }
 
@@ -386,10 +370,6 @@ impl<'a> Profile<'a> {
         matching.into_iter().next().unwrap()
     }
 
-    fn ports(&self) -> BTreeSet<(u16, u16)> {
-        self.records().iter().map(|record| (record.host_port, record.container_port)).collect()
-    }
-
     fn events(&self) -> String {
         fs::read_to_string(self.path().join("events.tsv")).unwrap()
     }
@@ -475,39 +455,20 @@ impl Relay {
     }
 }
 
-/// The driver's rendezvous for unlocked read-modify-write regressions: a
-/// named semaphore, unlinked when dropped in case a failed run left it.
-struct Rendezvous {
-    name: String,
-    counter: PathBuf,
-    count: usize,
-}
-
-impl Rendezvous {
-    fn new(profile: &Profile, operation: &str, count: usize) -> Self {
-        let name = format!("/hamn-port-{operation}-{}", std::process::id());
-        Self { name, counter: profile.path().join(format!("{operation}-barrier-count")), count }
-    }
-
-    fn env(&self) -> [(&'static str, String); 3] {
-        [
-            ("PORT_TEST_BARRIER_NAME", self.name.clone()),
-            ("PORT_TEST_BARRIER_COUNTER", self.counter.to_string_lossy().into_owned()),
-            ("PORT_TEST_BARRIER_COUNT", self.count.to_string()),
-        ]
-    }
-}
-
-impl Drop for Rendezvous {
-    fn drop(&mut self) {
-        let name = CString::new(self.name.as_str()).unwrap();
-        // SAFETY: name is a valid C string; a missing semaphore is ENOENT.
-        unsafe { libc::sem_unlink(name.as_ptr()) };
-    }
-}
-
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// Waits up to 10 s for a fixture to write `ready` into the FIFO `ready`.
+fn await_ready(ready: &OwnedFd, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut signal = Vec::new();
+    while !signal.ends_with(b"ready\n") {
+        let remaining = deadline.checked_duration_since(Instant::now()).unwrap_or_else(|| panic!("no signal of {what}"));
+        if !pty::readable(&[ready.as_raw_fd()], remaining).is_empty() {
+            signal.extend(pty::read_some(ready.as_raw_fd()));
+        }
+    }
 }
 
 fn committed_tcp(port: u16, container_port: u16) -> String {
@@ -544,44 +505,6 @@ fn published_ports_accept_only_1_to_65535(driver: &Driver) {
         assert_eq!(output.status.code(), Some(2), "out-of-range port was accepted: {specification}: {}", describe(&output));
         assert!(String::from_utf8_lossy(&output.stderr).contains("invalid port number"), "{}", describe(&output));
     }
-}
-
-fn tcp_reservation_reconcile_commit_and_remove(driver: &Driver) {
-    // TCP add returns to pending host-listener ownership after its exact
-    // control request. The driver process then exits, so reconcile cancels
-    // and removes the stale host-only listener: no remote create was
-    // submitted.
-    let profile = Profile::new(driver);
-    profile.ok(&["add", "127.0.0.1:48101:80/tcp"]);
-    let records = profile.records();
-    assert_eq!(records.len(), 1, "{records:?}");
-    let record = &records[0];
-    assert!(
-        record.protocol == "tcp"
-            && record.host_port == 48101
-            && record.pid == 0
-            && record.ownership == "pending"
-            && record.owner_pid > 1
-            && record.owner_start.0 > 0,
-        "{record:?}"
-    );
-    // Pending recovery ownership reserves its listener.
-    profile.fails(&["add", "127.0.0.1:48101:80/tcp"]);
-    profile.ok(&["reconcile", ""]);
-    profile.assert_no_state();
-
-    profile.ok(&["add", "127.0.0.1:48101:80/tcp"]);
-    profile.ok(&["commit", "127.0.0.1:48101:80/tcp"]);
-    profile.ok(&["commit", "127.0.0.1:48101:80/tcp"]);
-    let record = profile.record(48101);
-    assert!(record.ownership == "committed" && record.has_no_owner(), "{record:?}");
-    profile.ok(&["remove", "127.0.0.1:48101:80/tcp"]);
-    profile.assert_no_state();
-    profile.ok(&["remove", "127.0.0.1:48101:80/tcp"]);
-    // A missing forward cannot be committed.
-    profile.fails(&["commit", "127.0.0.1:48101:80/tcp"]);
-    assert!(profile.event_count("add\t127.0.0.1\t48101") >= 1, "{}", profile.events());
-    assert!(profile.event_count("cancel\t127.0.0.1\t48101") >= 1, "{}", profile.events());
 }
 
 fn docker_sync_commits_listeners_and_rejects_an_ambiguous_snapshot(driver: &Driver) {
@@ -729,15 +652,17 @@ fn sync_does_not_take_another_process_listener_for_its_own(driver: &Driver) {
 }
 
 fn sync_commits_a_pending_tcp_record_only_on_the_master_answer(driver: &Driver) {
-    // An add that never returned leaves its record as reserved (pending) or
-    // as sent (control-locked), with an owner that is gone. Neither shape is
-    // committed as it stands. The synchronization sends the request once
-    // more: a master that already holds the forward answers with success,
-    // and that answer commits the record. The committed forward recorded
-    // after it is neither asked about nor changed.
+    // A request that never returned leaves its record as reserved (pending)
+    // or as sent (control-locked), with an owner that is gone. The two
+    // submitted shapes are read as pending records too, although nothing
+    // writes them any more. No shape is committed as it stands. The
+    // synchronization sends the request once more: a master that already
+    // holds the forward answers with success, and that answer commits the
+    // record. The committed forward recorded after it is neither asked about
+    // nor changed.
     let profile = Profile::new(driver);
     let neighbor = committed_tcp(48264, 81);
-    for (port, ownership) in [(48262_u16, "pending"), (48263, "control-locked")] {
+    for (port, ownership) in [(48262_u16, "pending"), (48263, "control-locked"), (48265, "submitted"), (48266, "submitted-locked")] {
         let specification = format!("127.0.0.1:{port}:80/tcp");
         let snapshot = ["sync", specification.as_str(), "127.0.0.1:48264:81/tcp"];
         let added = format!("add\t127.0.0.1\t{port}");
@@ -787,45 +712,6 @@ fn watch_names_an_unreadable_container_list_once(driver: &Driver) {
         ["cannot read a usable container list from the Docker socket; published ports stay as they are until it answers"],
         "{stderr}"
     );
-}
-
-fn late_owned_completion_leaves_the_replacement_record(driver: &Driver) {
-    // A late completion is scoped to its exact wrapper PID/start generation.
-    // Once an old reservation is removed and the same listener is claimed
-    // again, its stale commit and cleanup leave the new record untouched.
-    let profile = Profile::new(driver);
-    profile.ok(&["add", "127.0.0.1:48133:80/tcp"]);
-    let old = profile.record(48133);
-    let generation = [old.owner_pid.to_string(), old.owner_start.0.to_string(), old.owner_start.1.to_string()];
-    profile.ok(&["remove", "127.0.0.1:48133:80/tcp"]);
-    profile.ok(&["add", "127.0.0.1:48133:81/tcp"]);
-    let replacement = profile.line(48133);
-    let [pid, sec, usec] = generation.each_ref().map(String::as_str);
-    profile.ok(&["commit-owned", "127.0.0.1:48133:80/tcp", pid, sec, usec]);
-    assert_eq!(profile.line(48133), replacement);
-    profile.ok(&["remove-owned", "127.0.0.1:48133:80/tcp", pid, sec, usec]);
-    assert_eq!(profile.line(48133), replacement);
-    profile.ok(&["remove", "127.0.0.1:48133:81/tcp"]);
-    profile.assert_no_state();
-}
-
-fn serialized_reconcile_keeps_a_live_foreign_generation(driver: &Driver) {
-    // Serialized reconciliation resolves an in-flight record only when that
-    // record is itself serialized. An unrelated operation must not promote a
-    // live foreground generation merely because its guest mapping is visible.
-    let profile = Profile::new(driver);
-    let owner = Unrelated::start();
-    let (sec, usec) = owner.token;
-    profile.write_state(&[format!("tcp\t127.0.0.1\t48134\t80\t0\t0\t0\tsubmitted\t{}\t{sec}\t{usec}", owner.pid())]);
-    profile.ok(&["reconcile-serialized", "127.0.0.1:48134->80/tcp"]);
-    let record = profile.record(48134);
-    assert!(record.ownership == "submitted" && record.owner_pid == owner.pid(), "{record:?}");
-    owner.stop();
-    profile.ok(&["reconcile-serialized", "127.0.0.1:48134->80/tcp"]);
-    let record = profile.record(48134);
-    assert!(record.ownership == "committed" && record.has_no_owner(), "{record:?}");
-    profile.ok(&["cleanup"]);
-    profile.assert_no_state();
 }
 
 fn every_host_address_maps_to_one_guest_listener(driver: &Driver) {
@@ -904,24 +790,6 @@ fn failed_cancel_of_a_free_port_removes_the_tcp_record(driver: &Driver) {
     drop(holder);
 }
 
-fn udp_relay_records_its_start_token_and_stops_on_remove(driver: &Driver) {
-    let profile = Profile::new(driver);
-    profile.ok(&["add", "127.0.0.1:48105:53/udp"]);
-    let record = profile.record(48105);
-    assert!(
-        record.protocol == "udp"
-            && record.start.0 > 0
-            && record.ownership == "pending"
-            && record.owner_pid > 1
-            && record.owner_start.0 > 0,
-        "{record:?}"
-    );
-    let relay = profile.relay(48105);
-    profile.ok(&["remove", "127.0.0.1:48105:53/udp"]);
-    profile.assert_no_state();
-    relay.assert_gone();
-}
-
 fn udp_pidfile_is_replaced_only_for_a_verified_gone_relay(driver: &Driver) {
     // A missing state file does not authorize replacing the only identity
     // evidence of a live relay.
@@ -957,30 +825,6 @@ fn udp_pidfile_is_replaced_only_for_a_verified_gone_relay(driver: &Driver) {
     assert_ne!(relay.pid, IMPOSSIBLE_PID);
     profile.ok(&["sync"]);
     profile.assert_no_state();
-    relay.assert_gone();
-}
-
-fn dead_pending_udp_owner_is_removed_only_when_its_port_is_free(driver: &Driver) {
-    // A dead pending owner with no relay identity is removable only when a
-    // bind probe proves that no UDP listener exists. An occupied port stays
-    // tracked fail-closed until an exact process identity is available.
-    let profile = Profile::new(driver);
-    let dead_owner = |port: u16| format!("udp\t127.0.0.1\t{port}\t53\t0\t0\t0\tpending\t{IMPOSSIBLE_OWNER}\t1\t1");
-    profile.write_state(&[dead_owner(48117)]);
-    profile.ok(&["reconcile", ""]);
-    profile.assert_no_state();
-
-    profile.ok(&["add", "127.0.0.1:48118:53/udp"]);
-    let relay = profile.relay(48118);
-    let state = profile.state().unwrap();
-    let pidfile = read(&profile.pidfile(48118));
-    fs::remove_file(profile.pidfile(48118)).unwrap();
-    profile.write_state(&[dead_owner(48118)]);
-    profile.ok(&["reconcile", ""]);
-    assert_eq!(profile.lines(), [dead_owner(48118)], "an occupied port lost its tracking");
-    fs::write(profile.state_path(), state).unwrap();
-    fs::write(profile.pidfile(48118), pidfile).unwrap();
-    profile.ok(&["remove", "127.0.0.1:48118:53/udp"]);
     relay.assert_gone();
 }
 
@@ -1057,14 +901,7 @@ fn sigterm_resistant_relay_is_killed_while_its_identity_matches(driver: &Driver)
     // token dates from the spawn and does not change when it signals.
     let token = start_token(pid).expect("the start token of the SIGTERM-resistant relay");
     profile.track(pid, token);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let mut signal = Vec::new();
-    while !signal.ends_with(b"ready\n") {
-        let remaining = deadline.checked_duration_since(Instant::now()).expect("the SIGTERM-resistant relay's readiness");
-        if !pty::readable(&[ready.as_raw_fd()], remaining).is_empty() {
-            signal.extend(pty::read_some(ready.as_raw_fd()));
-        }
-    }
+    await_ready(&ready, "the SIGTERM-resistant relay's readiness");
     let relay = Relay { pid, token };
     assert!(relay.running(), "the SIGTERM-resistant relay exited");
     profile.write_state(&[format!("udp\t127.0.0.1\t48110\t53\t{pid}\t{}\t{}\tcommitted\t0\t0\t0", token.0, token.1)]);
@@ -1073,76 +910,6 @@ fn sigterm_resistant_relay_is_killed_while_its_identity_matches(driver: &Driver)
     profile.assert_no_state();
     assert!(!profile.pidfile(48110).exists());
     relay.assert_gone();
-}
-
-fn reconcile_matches_the_exact_guest_endpoint(driver: &Driver) {
-    // A same-port mapping on another loopback address cannot retain the
-    // macOS listener.
-    let profile = Profile::new(driver);
-    profile.ok(&["add", "127.0.0.1:48111:80/tcp"]);
-    profile.ok(&["commit", "127.0.0.1:48111:80/tcp"]);
-    profile.ok(&["reconcile", "127.0.0.2:48111->80/tcp"]);
-    profile.assert_no_state();
-}
-
-fn published_udp_without_a_live_relay_is_not_ready(driver: &Driver) {
-    // A published guest UDP mapping is not host-ready without a matching
-    // relay PID/start token. A dead pending relay is never promoted and a dead
-    // committed one never kept as healthy; the evidence stays and reconcile
-    // fails until absent inventory makes removal safe.
-    let profile = Profile::new(driver);
-    for (ownership, owner) in [("pending", format!("{IMPOSSIBLE_OWNER}\t1\t1")), ("committed", "0\t0\t0".to_owned())] {
-        let line = format!("udp\t127.0.0.1\t48129\t53\t{IMPOSSIBLE_PID}\t1\t1\t{ownership}\t{owner}");
-        profile.write_state(std::slice::from_ref(&line));
-        fs::write(profile.pidfile(48129), format!("{IMPOSSIBLE_PID}\t1\t1\n")).unwrap();
-        profile.fails(&["reconcile", "192.0.2.10:48129->53/udp"]);
-        assert_eq!(profile.lines(), [line], "a dead {ownership} relay was promoted or dropped");
-        profile.ok(&["reconcile", ""]);
-        profile.assert_no_state();
-        assert!(!profile.pidfile(48129).exists());
-    }
-}
-
-fn reconcile_keeps_published_listeners_and_stops_stale_ones(driver: &Driver) {
-    let profile = Profile::new(driver);
-    profile.ok(&["add", "127.0.0.1:48111:80/tcp"]);
-    profile.ok(&["add", "127.0.0.1:48112:53/udp"]);
-    profile.ok(&["commit", "127.0.0.1:48111:80/tcp"]);
-    profile.ok(&["commit", "127.0.0.1:48112:53/udp"]);
-    let relay = profile.relay(48112);
-    profile.ok(&["reconcile", "127.0.0.1:48111->80/tcp"]);
-    assert_eq!(profile.ports(), BTreeSet::from([(48111, 80)]));
-    assert_eq!(profile.record(48111).protocol, "tcp");
-    relay.assert_gone();
-    profile.ok(&["reconcile", ""]);
-    profile.assert_no_state();
-}
-
-fn reconcile_keeps_only_exact_grouped_and_ranged_pairs(driver: &Driver) {
-    // Docker groups mappings under one bind IP/protocol suffix and compresses
-    // consecutive ports into ranges. Only exact host/container pairs stay.
-    let profile = Profile::new(driver);
-    for (inventory, specifications, kept) in [
-        (
-            "127.0.0.1:48120->80, 48122->82, 48123->84/tcp",
-            ["127.0.0.1:48120:80/tcp", "127.0.0.1:48122:82/tcp", "127.0.0.1:48123:83/tcp"],
-            [(48120, 80), (48122, 82)],
-        ),
-        (
-            "127.0.0.1:48130-48132->90-92/tcp",
-            ["127.0.0.1:48130:90/tcp", "127.0.0.1:48131:91/tcp", "127.0.0.1:48132:91/tcp"],
-            [(48130, 90), (48131, 91)],
-        ),
-    ] {
-        for specification in specifications {
-            profile.ok(&["add", specification]);
-            profile.ok(&["commit", specification]);
-        }
-        profile.ok(&["reconcile", inventory]);
-        assert_eq!(profile.ports(), BTreeSet::from(kept), "inventory {inventory:?}");
-        profile.ok(&["cleanup"]);
-        profile.assert_no_state();
-    }
 }
 
 fn cleanup_removes_mixed_tcp_and_udp_forwards(driver: &Driver) {
@@ -1183,74 +950,101 @@ fn parallel_syncs_of_one_snapshot_create_each_listener_once(driver: &Driver) {
     }
 }
 
-fn parallel_adds_and_removes_preserve_every_record(driver: &Driver) {
-    // Concurrent processes' read-modify-write must preserve every
-    // independently added TCP record, and concurrent removes must not
-    // resurrect one. Were the SSH request made outside the state lock, the
-    // driver's rendezvous would line all 24 processes up inside it.
-    let profile = Profile::new(driver);
-    let ports: Vec<u16> = (48200..=48223).collect();
-    for operation in ["add", "remove"] {
-        let rendezvous = Rendezvous::new(&profile, operation, ports.len());
-        let env = rendezvous.env();
-        let env: Vec<(&str, &str)> = env.iter().map(|(name, value)| (*name, value.as_str())).collect();
-        let commands: Vec<Vec<String>> =
-            ports.iter().map(|port| vec![operation.to_owned(), format!("127.0.0.1:{port}:80/tcp")]).collect();
-        let codes = profile.concurrently(&env, &commands);
-        assert!(codes.iter().all(|code| *code == Some(0)), "parallel {operation}: {codes:?}");
-        if operation == "add" {
-            assert_eq!(profile.records().len(), ports.len());
-            assert_eq!(profile.ports(), ports.iter().map(|port| (*port, 80)).collect());
-        }
-    }
-    profile.assert_no_state();
+/// Runs the snapshot `sync` until its first TCP listener exists and its
+/// record is still pending, calls `damage`, and lets the pass finish.
+fn sync_damaged_after_the_first_request(profile: &Profile, snapshot: &[&str], damage: impl FnOnce()) -> Output {
+    let ready_path = profile.path().join("added-ready");
+    let release_path = profile.path().join("added-release");
+    let ready = pty::fifo(&ready_path);
+    // Held open until the pass ends: a FIFO drops what no one holds.
+    let mut release = fs::File::from(pty::fifo(&release_path));
+    let mut command = profile.command(snapshot);
+    command.env("HAMN_TEST_TCP_ADDED_READY_FIFO", &ready_path).env("HAMN_TEST_TCP_ADDED_RELEASE_FIFO", &release_path);
+    let pass = std::thread::spawn(move || bounded_process::output(&mut command, TIMEOUT));
+    await_ready(&ready, "the first TCP listener of the pass");
+    damage();
+    release.write_all(b"\n").unwrap();
+    let output = pass.join().expect("the synchronization pass");
+    fs::remove_file(ready_path).unwrap();
+    fs::remove_file(release_path).unwrap();
+    output
 }
 
-fn same_listener_race_has_exactly_one_winner(driver: &Driver) {
-    let profile = Profile::new(driver);
-    let add = vec!["add".to_owned(), "127.0.0.1:48224:80/tcp".to_owned()];
-    let mut codes = profile.concurrently(&[], &[add.clone(), add]);
-    codes.sort();
-    assert_eq!(codes, [Some(0), Some(1)], "exactly one add wins the listener");
-    assert_eq!(profile.records().len(), 1);
-    profile.ok(&["cleanup"]);
-    profile.assert_no_state();
-}
+fn state_damaged_during_a_pass_fails_it_and_the_next_pass_recovers(driver: &Driver) {
+    // A pass locks and reads the state again for each request and each
+    // commit. State that is damaged between the first request and its commit
+    // fails that commit, which alone fails the pass, and every later request
+    // of the pass: nothing is committed or requested on state that cannot be
+    // read or locked, and the damaged file is not rewritten. Once the damage
+    // is repaired, the next pass asks for the first forward again and
+    // forwards every port.
+    let one = ["sync", "127.0.0.1:48267:80/tcp"];
+    let two = ["sync", "127.0.0.1:48267:80/tcp", "127.0.0.1:48268:80/tcp"];
+    for snapshot in [&one[..], &two[..]] {
+        let committed: Vec<String> = [48267, 48268][..snapshot.len() - 1].iter().map(|port| committed_tcp(*port, 80)).collect();
+        let later_request = snapshot.len() > 2;
 
-fn parallel_udp_adds_keep_every_relay_identity(driver: &Driver) {
-    // UDP additions share the same process lock and keep every PID/token pair.
-    let profile = Profile::new(driver);
-    let ports: Vec<u16> = (48225..=48228).collect();
-    let commands: Vec<Vec<String>> =
-        ports.iter().map(|port| vec!["add".to_owned(), format!("127.0.0.1:{port}:53/udp")]).collect();
-    let codes = profile.concurrently(&[], &commands);
-    assert!(codes.iter().all(|code| *code == Some(0)), "parallel UDP add: {codes:?}");
-    assert_eq!(profile.records().len(), ports.len());
-    let relays: Vec<Relay> = ports.iter().map(|port| profile.relay(*port)).collect();
-    let pids: BTreeSet<i32> = relays.iter().map(|relay| relay.pid).collect();
-    assert_eq!(pids.len(), ports.len(), "relays share a PID: {relays:?}");
-    profile.ok(&["cleanup"]);
-    for relay in relays {
-        relay.assert_gone();
+        let profile = Profile::new(driver);
+        let output = sync_damaged_after_the_first_request(&profile, snapshot, || {
+            assert_eq!(profile.record(48267).ownership, "pending");
+            profile.write_state(&["malformed".to_owned()]);
+        });
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{snapshot:?}: {}", describe(&output));
+        assert_eq!(stderr.contains("cannot read port forward state"), later_request, "{snapshot:?}: {stderr}");
+        assert_eq!(profile.state().as_deref(), Some("malformed\n"), "unreadable state was rewritten");
+        assert_eq!(profile.event_count("add\t127.0.0.1\t48268"), 0, "{}", profile.events());
+        fs::remove_file(profile.state_path()).unwrap();
+        profile.ok(snapshot);
+        assert_eq!(profile.lines(), committed, "{snapshot:?}");
+
+        let profile = Profile::new(driver);
+        let lock = profile.path().join("port-forwards.lock");
+        let output = sync_damaged_after_the_first_request(&profile, snapshot, || {
+            fs::remove_file(&lock).unwrap();
+            fs::create_dir(&lock).unwrap();
+        });
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{snapshot:?}: {}", describe(&output));
+        assert_eq!(stderr.contains("cannot lock port forward state"), later_request, "{snapshot:?}: {stderr}");
+        assert_eq!(profile.record(48267).ownership, "pending", "a record was committed without the state lock");
+        assert_eq!(profile.event_count("add\t127.0.0.1\t48268"), 0, "{}", profile.events());
+        fs::remove_dir(&lock).unwrap();
+        profile.ok(snapshot);
+        assert_eq!(profile.lines(), committed, "{snapshot:?}");
+        assert_eq!(profile.event_count("add\t127.0.0.1\t48267"), 2, "the pending record was committed without asking: {}", profile.events());
     }
 }
 
 fn state_capacity_rejects_one_more_published_port_and_an_oversized_file(driver: &Driver) {
     // The fixed state capacity (128 records) holds a snapshot of 128
-    // published ports. One more port is refused whole, and an oversized
-    // file is never partially accepted or rewritten.
+    // published ports. A snapshot of one more port is refused whole, and an
+    // oversized file is never partially accepted or rewritten.
     let profile = Profile::new(driver);
     let mut lines: Vec<String> = (0..128).map(|offset| committed_tcp(49000 + offset, 80)).collect();
     let mut snapshot = vec!["sync".to_owned()];
     snapshot.extend((0..128).map(|offset| format!("127.0.0.1:{}:80/tcp", 49000 + offset)));
+    snapshot.push("127.0.0.1:49200:80/tcp".to_owned());
+    profile.fails(&snapshot.iter().map(String::as_str).collect::<Vec<_>>());
+    profile.assert_no_state();
+    assert_eq!(profile.events(), "", "a snapshot over the capacity touched a listener");
+    snapshot.pop();
     profile.ok(&snapshot.iter().map(String::as_str).collect::<Vec<_>>());
     assert_eq!(profile.lines(), lines, "a full snapshot was not forwarded");
     let full = profile.state();
-    let forwarded = profile.events();
+
+    // A snapshot within the capacity replaces 49127 by 49200, but the
+    // listener of 49127 cannot be stopped. Its record keeps the state full,
+    // so the new port is refused instead of recorded past the capacity.
+    let holder = std::net::TcpListener::bind("127.0.0.1:49127").expect("bind the host port of the listener that stays");
+    snapshot.pop();
     snapshot.push("127.0.0.1:49200:80/tcp".to_owned());
-    profile.fails(&snapshot.iter().map(String::as_str).collect::<Vec<_>>());
+    profile.fails_with(&[("FAIL_CANCEL_PORT", "49127")], &snapshot.iter().map(String::as_str).collect::<Vec<_>>());
+    drop(holder);
     assert_eq!(profile.state(), full, "port forward state exceeded its fixed capacity");
-    assert_eq!(profile.events(), forwarded, "a snapshot over the capacity touched a listener");
+    assert_eq!(profile.event_count("add\t127.0.0.1\t49200"), 0, "a port over the capacity was requested");
+    assert_eq!(failures(&profile), unforwarded_tcp(49200, "forwardFailed"));
+    let forwarded = profile.events();
     lines.push(committed_tcp(49201, 80));
     profile.write_state(&lines);
     let oversized = profile.state();
