@@ -516,6 +516,80 @@ static void configure_requires_a_stopped_vm(const char *root)
     assert(profile_read_existing(&p, "configured") == 0 && p.cpus == 8);
 }
 
+/* One hamn_control_apply of the definition `spec` for the profile `applied`;
+ * the action of its result, or "" when it has none. */
+static int apply(const char *root, const char *spec, int dry_run,
+                 const char **action)
+{
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/home/definition.yaml", root);
+    assert(n > 0 && n < (int)sizeof(path));
+    FILE *f = fopen(path, "w");
+    assert(f && fprintf(f, "apiVersion: hamn/v1\nkind: Profile\nmetadata:\n"
+                        "  name: applied\nspec:%s", spec) > 0 &&
+           fclose(f) == 0);
+    char *json = NULL;
+    int rc = hamn_control_apply("applied", path, dry_run, &json);
+    assert((rc == 0) == (json != NULL));
+    *action = !json ? "" :
+        strstr(json, "\"action\":\"none\"") ? "none" :
+        strstr(json, "\"action\":\"configure\"") ? "configure" : "other";
+    hamn_control_free(json);
+    return rc;
+}
+
+/* `vm apply` writes a change for a stopped VM only: a running VM is a
+ * conflict, and a VM whose ownership cannot be verified a failure that
+ * stopping would not resolve. Neither changes a byte. Equal settings and a
+ * dry run do not look at the VM at all. */
+static void apply_changes_the_settings_of_a_stopped_vm_only(const char *root)
+{
+    struct profile p;
+    home_profile(root, "applied", &p);
+    char before[4096], after[4096];
+    const char *action;
+    read_text(&p, "config.yaml", before, sizeof(before));
+
+    const enum reply replies[] = { REPLY_START_IDENTITY };
+    struct supervisor supervisor;
+    supervisor_start(&p, replies, 1, &supervisor);
+    write_identity(&p, &supervisor);
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_VERIFIED);
+    assert(apply(root, " {}\n", 0, &action) == 0 &&
+           strcmp(action, "none") == 0);
+    assert(apply(root, "\n  cpus: 8\n  rosetta: true\n", 0, &action) == 4);
+    assert(strcmp(log_last_error(), "VM must be stopped before changing "
+                  "settings: cpus, rosetta") == 0);
+    assert(apply(root, "\n  cpus: 8\n  rosetta: true\n", 1, &action) == 0 &&
+           strcmp(action, "configure") == 0);
+    read_text(&p, "config.yaml", after, sizeof(after));
+    assert(strcmp(before, after) == 0);
+    assert(supervisor_running(&supervisor));
+    assert(!supervisor_kill(&supervisor));
+
+    write_text(&p, "vmrun.identity", "not an identity\n");
+    write_text(&p, "vmrun.pid", "2147483646\n");
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_UNVERIFIED);
+    assert(apply(root, " {}\n", 0, &action) == 0 &&
+           strcmp(action, "none") == 0);
+    assert(apply(root, "\n  cpus: 8\n", 0, &action) == 1);
+    assert(strcmp(log_last_error(), "cannot verify the VM process of "
+                  "profile applied; settings were not changed") == 0);
+    assert(apply(root, "\n  cpus: 8\n", 1, &action) == 0 &&
+           strcmp(action, "configure") == 0);
+    read_text(&p, "config.yaml", after, sizeof(after));
+    assert(strcmp(before, after) == 0);
+
+    char path[1024];
+    assert(profile_path(&p, "vmrun.identity", path, sizeof(path)) &&
+           unlink(path) == 0);
+    assert(profile_path(&p, "vmrun.pid", path, sizeof(path)) &&
+           unlink(path) == 0);
+    assert(apply(root, "\n  cpus: 8\n", 0, &action) == 0 &&
+           strcmp(action, "configure") == 0);
+    assert(profile_read_existing(&p, "applied") == 0 && p.cpus == 8);
+}
+
 /* The cases run in a child, so a failed assertion still leaves this process
  * to remove the profiles; supervisors exit when that child's end of their
  * alive pipe closes. */
@@ -533,6 +607,7 @@ int main(void)
         identity_without_uuid_is_unverified_before_the_control_socket(root);
         identity_without_uuid_of_a_gone_process_is_kept(root);
         configure_requires_a_stopped_vm(root);
+        apply_changes_the_settings_of_a_stopped_vm_only(root);
         _exit(0);
     }
     int status = 0;

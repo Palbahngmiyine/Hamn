@@ -64,6 +64,9 @@ enum profile_setting {
 /* Capacity, with the terminating NUL, of the reason for a refused profile. */
 #define PROFILE_REASON_CAP 256
 
+/* The largest profile definition, in bytes: the limit of config.yaml. */
+#define PROFILE_DEFINITION_CAP (64 * 1024)
+
 int profile_name_valid(const char *name);
 int profile_parse_positive(const char *text, unsigned *value);
 /* Docker daemon settings are a strict JSON object that cannot replace
@@ -87,6 +90,37 @@ int profile_read_existing(struct profile *profile, const char *name);
 int profile_read_existing_reason(struct profile *profile, const char *name,
                                  char reason[PROFILE_REASON_CAP]);
 
+/* Parse a profile definition: the document that `vm apply` reads. It is one
+ * YAML mapping with exactly these keys, all required:
+ *
+ *     apiVersion: hamn/v1
+ *     kind: Profile
+ *     metadata:
+ *       name: <profile name>
+ *     spec: <the mapping of config.yaml>
+ *
+ * spec is read by the parser of config.yaml, with the same strictness: a key
+ * it leaves out takes its default. text holds length bytes, at most
+ * PROFILE_DEFINITION_CAP, and need not be NUL-terminated. On 0 profile holds
+ * the settings and the name; dir is empty until profile_locate. On -1 errno
+ * is EINVAL (ENOMEM without a parser), profile must not be used, and reason
+ * says why, as profile_read_existing_reason does. Reads no file and no
+ * environment. */
+int profile_definition_parse(const char *text, size_t length,
+                             struct profile *profile,
+                             char reason[PROFILE_REASON_CAP]);
+
+/* Set profile->dir to ~/.hamn/<profile->name>. Creates nothing. Returns -1
+ * with errno EINVAL for an invalid name or when ~/.hamn is not a directory
+ * that only this user can write, and ENAMETOOLONG for a path that does not
+ * fit. */
+int profile_locate(struct profile *profile);
+
+/* Whether profile_save would accept these settings. On 0 errno is the one
+ * profile_save would refuse them with: EINVAL, EOVERFLOW or EILSEQ. Reads
+ * and writes no file. */
+int profile_storable(const struct profile *profile);
+
 /* The config.yaml key of a setting, such as "memoryMiB" or
  * "docker.daemonJson"; NULL for a value that is not a setting. */
 const char *profile_setting_key(enum profile_setting setting);
@@ -99,11 +133,12 @@ const char *profile_setting_key(enum profile_setting setting);
 unsigned profile_diff(const struct profile *a, const struct profile *b);
 
 /* Save config.yaml atomically. Nothing is written, and the result is -1, for
- * settings that break the schema (EINVAL), whose text exceeds 64 KiB or holds
- * a control character below 0x20 other than tab and the line breaks
- * (EOVERFLOW), or whose text would not read back as the same settings
- * (EILSEQ): for example a string with DEL, a C1 control or U+0085. Any other
- * failure is that of the write, with its errno. */
+ * settings that break the schema (EINVAL), whose text exceeds 64 KiB
+ * (EOVERFLOW), or that hold a character config.yaml cannot carry (EILSEQ): a
+ * control character below 0x20 other than tab and the line breaks, or one
+ * with which the text would not read back as the same settings, such as
+ * DEL, a C1 control or U+0085. Any other failure is that of the write, with
+ * its errno. */
 int profile_save(const struct profile *profile);
 
 /* p->dir/<file> path. Successful calls return buf. */

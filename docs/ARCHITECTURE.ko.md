@@ -31,6 +31,9 @@ C 상태에서 직접 생성하며 기존 CLI 텍스트를 파싱하지 않습�
 
 C는 프로필 설정, VM 식별 검증, 수명주기·변경 잠금, SSH ControlMaster, 포트 관찰기,
 이미지 검증, 프로필 상태를 소유합니다. Objective-C 구현은 `host/vz/`에 유지합니다.
+`vm apply`도 이 소유 관계를 따릅니다. Rust는 프로필 정의 파일의 경로만 전달하고, C 호출
+하나(`host/core/apply.c`)가 `config.yaml`의 파서로 파일을 읽어 저장된 설정과 비교한 뒤
+`vm configure`와 같은 두 잠금 아래에서 씁니다. 설정이 같으면 잠금을 잡기 전에 반환합니다.
 
 프로필은 `~/.hamn/<profile>/` 아래의 디스크, SSH 키, vmrun 식별 기록, `vmrun.sock`,
 `ssh.sock`, `docker.sock`, `agent.sock`을 소유합니다. VM 소유자는 같은 실행 파일의

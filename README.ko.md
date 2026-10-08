@@ -58,6 +58,7 @@ macOS 기본 도구만 사용하므로 Python, Homebrew, Rust, Xcode Command Lin
 ```sh
 hamn --headless capabilities
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
+hamn --headless vm apply --profile work --file work.yaml --yes
 hamn --headless vm start --profile work --yes
 hamn --headless docker containers list --profile work
 hamn --headless docker containers list --context remote
@@ -70,7 +71,9 @@ hamn --headless vm stop --profile work --yes
 
 변경에는 명시적 대상과 `--yes`가 필요합니다. 일회성 작업은 JSON 응답 하나,
 `--follow` 로그와 `--watch` 조회는 NDJSON을 출력합니다. stdout에는 기계용 응답만
-출력합니다. 자세한 계약은 [API](docs/API.ko.md)를 참고하세요.
+출력합니다. 자세한 계약은 [API](docs/API.ko.md)를 참고하세요. `vm apply`는 프로필의
+설정을 [정의 파일](docs/CONFIGURATION.ko.md#선언적-설정)과 같게 만들고 프로필이 없으면
+만듭니다. `--dry-run`으로 달라질 내용을 먼저 확인할 수 있습니다.
 
 ## 외부 도구 연결
 

@@ -59,6 +59,7 @@ See [workspace and command guide](docs/TUI.md) for actions, settings, and cancel
 ```sh
 hamn --headless capabilities
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
+hamn --headless vm apply --profile work --file work.yaml --yes
 hamn --headless vm start --profile work --yes
 hamn --headless docker containers list --profile work
 hamn --headless docker containers list --context remote
@@ -71,7 +72,10 @@ hamn --headless vm stop --profile work --yes
 
 Mutations require `--yes` and explicit resource targets. One-shot commands emit
 one JSON response; `--follow` logs and `--watch` queries emit NDJSON. stdout is
-reserved for machine-readable responses. See [API](docs/API.md).
+reserved for machine-readable responses. See [API](docs/API.md). `vm apply`
+makes a profile's configuration equal to a
+[definition file](docs/CONFIGURATION.md#declarative-configuration), creating
+the profile if needed; `--dry-run` shows the changes first.
 
 ## External tools
 

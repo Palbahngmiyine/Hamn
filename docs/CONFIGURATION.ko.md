@@ -42,10 +42,74 @@ hamn --headless vm start --profile work --yes
 ```
 
 `configure`는 정지된 프로필만 변경하며 기존 VM 디스크를 축소하지 않습니다.
-`create`와 `configure`는 `--rosetta <true|false>`도 받습니다. 그 밖의 고급 설정은 VM이
-정지된 상태에서 `~/.hamn/<profile>/config.yaml`을 편집하세요. 설정 변경은 지정하지 않은
-항목(마운트·Docker daemon 설정·Rosetta·provisioning hook)을 보존합니다. TUI의 `v` → `c`로 리소스 설정 명령을 편집할 수 있습니다.
+`create`와 `configure`는 `--rosetta <true|false>`도 받습니다. 그 밖의 고급 설정은
+[프로필 정의 파일](#선언적-설정)을 적용하거나 VM이
+정지된 상태에서 `~/.hamn/<profile>/config.yaml`을 편집하세요. `configure`와 `start`는
+받은 설정만 바꾸고 나머지 항목(마운트·Docker daemon 설정·Rosetta·provisioning hook)을
+보존합니다. 프로필 정의 파일은 모든 설정을 교체합니다. TUI의 `v` → `c`로 리소스 설정 명령을 편집할 수 있습니다.
 네이티브 `kubectl edit`는 내부 터미널에서 설치된 편집기를 실행합니다.
+
+## 선언적 설정
+
+`vm apply`는 프로필에 저장된 설정을 프로필 정의 파일과 같게 만듭니다. 프로필이 없으면
+만들고, 설정이 다르면 `config.yaml`을 교체하며, 같으면 아무것도 하지 않습니다. VM을
+시작하거나 정지하지 않습니다.
+
+```sh
+hamn --headless vm apply --profile work --file work.yaml --dry-run
+hamn --headless vm apply --profile work --file work.yaml --yes
+```
+
+```yaml
+apiVersion: hamn/v1
+kind: Profile
+metadata:
+  name: work
+spec:
+  cpus: 6
+  memoryMiB: 8192
+  diskGiB: 80
+  rosetta: true
+  mounts:
+    - location: "/Users/<your-user>/project"
+      mountPoint: "/workspace/project"
+      writable: true
+```
+
+정의 파일은 YAML 문서 하나이며 키는 정확히 네 개이고 모두 필수입니다:
+`apiVersion: hamn/v1`, `kind: Profile`, `name` 키 하나만 가진 `metadata`, 그리고
+`spec`입니다. `metadata.name`은 `--profile`과 같아야 합니다. `spec`은
+[YAML schema](#yaml-schema)에서 설명하는 `config.yaml`의 매핑입니다. 키와 단위가 같고
+같은 엄격한 파서가 읽으므로, 기존 프로필의 `config.yaml`을 `spec:` 아래로 들여쓰면 그
+프로필의 정의 파일이 됩니다. 파일은 65536바이트 이하의 일반 파일이어야 하며 표준 입력은
+읽지 않습니다. 상대 경로는 명령을 실행한 디렉터리를 기준으로 합니다.
+
+정의 파일은 설정 전체입니다. `spec`에서 생략한 키는 기본값이 됩니다. 반면
+`vm configure`는 주지 않은 값을 유지합니다. `mounts`가 없는 정의 파일을 적용하면
+마운트가 제거됩니다. 저장된 값보다 작은 `diskGiB`는 `disk size cannot shrink`로
+거절하며, 키를 생략해 기본값 60이 더 작은 경우도 같습니다. 실제 크기를 적으세요.
+
+`--dry-run`은 적용했을 때 일어날 일을 알려 주며 아무것도 쓰지 않고 `--yes`가 필요
+없습니다. 결과의 `action`은 `create`, `configure`, `none` 중 하나이고, `changes`에는
+달라지는 설정마다 항목이 하나씩 있습니다. 숫자와 불리언은 `from`과 `to`를 함께
+보여 줍니다. `docker.daemonJson`, `mounts`, `provision`은 값에 자격 증명이 들어갈 수
+있으므로 값 없이 이름만 보여 줍니다. `config.yaml`은 사용자만 읽을 수 있지만, 정의
+파일의 공개 범위는 그 파일을 둔 위치가 정합니다.
+
+설정이 같으면 VM이 실행 중이어도 잠금 없이 성공합니다. 설정이 다르면 `vm configure`와
+같이 VM이 정지되어 있어야 합니다. VM을 정지하고, 적용한 뒤, 시작하세요. dry run은
+VM을 확인하지 않으므로 실행 중인 VM에 대해서도 답합니다. 설정은 `config.yaml`과
+비교하며, 실행 중인 VM이 시작할 때 쓴 값과 비교하지 않습니다. 이후의 `vm configure`나
+`--cpu`, `--memory`, `--disk`를 준 `vm start`는 `config.yaml`을 바꾸므로, 파일을
+고치거나 다시 적용할 때까지 정의 파일과 달라집니다.
+
+다음은 변경 없이 거절합니다. `vm delete`로 제거한 프로필(`vm start`만 디스크와 함께
+복원합니다), `~/.hamn` 아래에서 다른 파일은 있지만 `config.yaml`이 없는 디렉터리(디스크나
+`vm diagnostics`의 아카이브가 있는 경우이며, 중단되거나 거절된 생성이 남긴 것은 세지
+않습니다), 읽을 수 없는 기존 `config.yaml`(파서가 알려 준 이유를 보고합니다), 프로세스를
+확인할 수 없는 VM입니다. 손으로 편집한 `config.yaml`과 마찬가지로 호스트의 조건은 적용할 때가 아니라
+다음 시작에서 검사합니다. 마운트 디렉터리, 그리고 Rosetta와 중첩 가상화의 사용 가능
+여부가 그렇습니다.
 
 ## YAML schema
 

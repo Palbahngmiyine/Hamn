@@ -254,6 +254,8 @@ static size_t read_bytes(const char *path, char *data, size_t capacity)
 static void settings_that_would_not_read_back_are_not_saved(void)
 {
     static const char *const refused[] = {
+        "\x07",          /* BEL: a control character that is not written */
+        "\x1b",          /* ESC, likewise */
         "\x7f",          /* DEL: refused by the reader */
         "\xc2\x80",      /* U+0080, a C1 control: refused by the reader */
         "\xef\xbf\xbe",  /* U+FFFE: refused by the reader */
@@ -389,10 +391,19 @@ int main(void)
     errno = ENOENT;
     assert(profile_read_existing(&profile, "existing") == -1);
     assert(errno == EINVAL);
-    /* At the limit the file is read: a comment alone is no configuration. */
+    /* At the limit the file is read: its settings, then comment. */
+    memcpy(oversized, "cpus: 7\n", 8);
     assert(fs_write_file_atomic(path, oversized, sizeof(oversized) - 1, 0600) == 0);
-    errno = 0;
-    assert(profile_read_existing(&profile, "existing") == -1 && errno == EINVAL);
+    assert(profile_read_existing(&profile, "existing") == 0 && profile.cpus == 7);
+    /* A FIFO is no configuration either, and opening it does not wait for
+     * a writer: without one, a blocking open would never return. */
+    assert(unlink(path) == 0 && mkfifo(path, 0600) == 0);
+    alarm(10);
+    errno = ENOENT;
+    assert(profile_read_existing(&profile, "existing") == -1);
+    assert(errno == EINVAL);
+    alarm(0);
+    assert(unlink(path) == 0);
     assert(fs_write_file_atomic(path, original, length, 0600) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
     assert(hamn_control_query("existing", &json) == 0);

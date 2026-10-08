@@ -69,7 +69,7 @@ I/O 오류로 실패합니다.
 
 | 영역 | 작업 |
 | --- | --- |
-| VM | `vm list`, `status`, `create`, `configure`, `start`, `stop`, `delete`, `diagnostics`, `env` |
+| VM | `vm list`, `status`, `create`, `configure`, `apply`, `start`, `stop`, `delete`, `diagnostics`, `env` |
 | Docker 컨테이너 | `docker containers list`, `inspect`, `logs`, `stats`, `start`, `stop`, `restart`, `delete` |
 | Docker 목록 | `docker images list`, `docker volumes list`, `docker networks list` |
 | Kubernetes 선택 | `k8s contexts list`, `k8s namespaces list` |
@@ -94,6 +94,42 @@ VM 작업은 `vm list`를 제외하고 `--profile`이 필요합니다. Docker는
 `hamn --headless system upgrade --help`로 작업별 사용법과 복구 방법을 확인합니다.
 진행 안내와 호환성은 [설치와 업그레이드 경험](INSTALLATION.ko.md)을 참고하세요.
 `vm env`는 셸 코드 대신 Docker 접속 정보를 반환합니다.
+
+`vm apply`는 [프로필 정의 파일](CONFIGURATION.ko.md#선언적-설정)을 가리키는
+`--file <path>`와 `--dry-run`(조회 전용, `--yes` 불필요)을 받습니다. 저장된 설정을 정의
+파일과 같게 만들며 VM을 시작하거나 정지하지 않습니다. 적용과 dry run은 같은 형태의
+객체를 반환합니다.
+
+```json
+{"profile":"work","action":"configure","changes":[{"key":"cpus","from":4,"to":6},{"key":"mounts"}],"dryRun":false}
+```
+
+`action`은 `create`, `configure`, `none` 중 하나입니다. `changes`는 `configure`가
+교체하는 설정을 `config.yaml`의 키로 나열합니다. 숫자와 불리언은 `from`과 `to`를
+함께 싣고, `docker.daemonJson`, `mounts`, `provision`은 키만 싣습니다. `create`와
+`none`에서는 비어 있습니다. `action: none`인 적용은 아무것도 쓰지 않아 `config.yaml`의
+수정 시각이 그대로이고, 잠금을 잡지 않으며 VM이 실행 중이어도 성공합니다. dry run은
+VM을 확인하지 않습니다. dry run이 보고한 `configure`도 적용할 때는 VM이 정지되어
+있어야 합니다.
+
+실패한 적용은 남긴 상태에 따라 분류합니다.
+
+- `invalidRequest`: 인자, 파일 또는 정의 내용을 거절했습니다. `~/.hamn` 아래에
+  만들거나 바꾼 것이 없습니다.
+- `conflict`: 프로필의 상태가 변경을 막습니다. VM이 실행 중이거나, `vm delete`로
+  제거했거나, 디렉터리에 다른 파일은 있지만 `config.yaml`이 없거나, 디스크가 줄어드는
+  경우입니다. `config.yaml`은 그대로입니다.
+- `cancelled`: 같은 프로필의 다른 작업을 기다리는 동안 기한이 지났거나 요청이
+  취소되었습니다. 이 대기는 중단되지 않으며, 다른 작업이 끝나면 쓰지 않고 끝납니다.
+- `operationFailed`: 그 밖의 실패입니다. 프로세스를 확인할 수 없는 VM이 한 예입니다.
+  `config.yaml`은 그대로입니다.
+- `outcomeUnknown`: `config.yaml`에 무엇이 들어 있는지 적용이 답할 수 없습니다. 쓰기가
+  디스크에 반영됐는지 확인하지 못했거나, 실패한 쓰기 뒤에 파일을 다시 읽지 못했거나,
+  쓰기 뒤에 결과를 만들지 못한 경우입니다. 파일에 새 설정이 들어 있을 수 있습니다. 다시
+  적용하세요. 설정이 같으면 `none`을 보고합니다.
+
+정의 내용이나 저장된 프로필 때문에 적용이 실패할 경우에는 dry run도 같은 코드로
+실패합니다. VM의 상태만 적용 시점에 확인합니다.
 
 Kubernetes는 context 목록을 제외하고 `--context`가 필요합니다. 네임스페이스 변경
 작업에는 `--namespace`도 필요하며 목록은 `--all-namespaces`를 지원합니다.
@@ -135,7 +171,7 @@ ABI는 입력 문자열을 빌리고, 반환하는 UTF-8 JSON의 소유권은 �
 프로세스 식별 검증·수명주기 잠금은 C가 유지합니다.
 
 `__core-worker`, `vmrun`, 포워딩 프로세스 모드, 게스트 `hamnd` 엔드포인트는 내부
-구현입니다. 공개 containerd 소켓, 내장 Compose·exec·apply·port-forward,
+구현입니다. 공개 containerd 소켓, 내장 Compose·exec·Kubernetes apply·port-forward,
 MCP 서버는 제공하지 않습니다.
 
 구현에 적용한 상위 계약은 [Cargo 정적 링크](https://doc.rust-lang.org/cargo/reference/build-script-examples.html#building-a-native-library),

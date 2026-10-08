@@ -32,6 +32,10 @@ text. The caller frees C results with `hamn_control_free`.
 C owns profile configuration, VM identity checks, lifecycle and mutation locks,
 SSH ControlMaster, port observers, image validation, and profile state. The
 Objective-C Virtualization.framework boundary stays inside `host/vz/`.
+`vm apply` follows that ownership: Rust passes the path of the profile
+definition, and one C call (`host/core/apply.c`) reads it with the parser of
+`config.yaml`, compares it with the stored settings, and writes under the same
+two locks as `vm configure`. Equal settings return before any lock.
 
 Each profile owns its disk, SSH key, `vmrun` identity, `vmrun.sock`, `ssh.sock`,
 `docker.sock`, and `agent.sock` below `~/.hamn/<profile>/`. The long-lived VM

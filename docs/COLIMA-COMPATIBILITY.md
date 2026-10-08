@@ -16,6 +16,7 @@ Run `hamn` for the TUI. Automated operations use the following interface:
 | List profiles | `hamn --headless vm list` |
 | Inspect status | `hamn --headless vm status --profile work` |
 | Configure a stopped profile | `hamn --headless vm configure --profile work --cpu 6 --memory 8 --disk 80 --yes` |
+| Keep every setting of a profile in a file | `hamn --headless vm apply --profile work --file work.yaml --yes` |
 | Read Docker connection information | `hamn --headless vm env --profile work` |
 | List containers | `hamn --headless docker containers list --profile work` |
 | List external Kubernetes contexts | `hamn --headless k8s contexts list` |

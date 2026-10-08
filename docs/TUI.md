@@ -96,6 +96,15 @@ Docker `--digests`, `--no-trunc`, and `--tree` queries also use the terminal so 
 digest fields, full identifiers, and tree layout retain the CLI's output.
 
 Typed commands run once, with no additional Hamn confirmation or command deadline.
+A command that starts with `vm` is Hamn's own VM operation, not the installed
+CLI's: `:vm apply --file work.yaml` applies a
+[profile definition](CONFIGURATION.md#declarative-configuration) to the
+selected profile, which the definition must name, after the same confirmation
+as every VM change; the confirmation shows the file. With `--dry-run` it shows
+the changes, or why the apply would be refused, and changes nothing; that
+answer stays on screen until Esc. The file is read when the operation
+runs; `~` is not expanded, and a relative path is relative to the directory
+Hamn was started in. A bare `apply` remains the installed CLI's.
 Changes selected through the action menu retain confirmation. Kubernetes menu
 changes bind the selected UID and resource version: deletion sends server-side
 preconditions through kubectl, and restart uses an atomic guarded patch. If the

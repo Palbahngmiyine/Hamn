@@ -50,6 +50,17 @@ pub struct Request {
     pub replicas: Option<u32>,
     #[arg(long)]
     pub path: Option<String>,
+    // The two vm apply arguments are left out of the worker request unless
+    // they are set, so that every other request keeps its form.
+    #[arg(long, help = "Profile definition file for vm apply")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[arg(
+        long,
+        help = "Report what vm apply would change without writing; no --yes required"
+    )]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
     #[arg(
         long,
         help = "Release manifest URL for system upgrade (defaults to latest stable)"
@@ -99,6 +110,7 @@ pub const OPERATIONS: &[(&str, bool)] = &[
     ("vm status", false),
     ("vm create", true),
     ("vm configure", true),
+    ("vm apply", true),
     ("vm start", true),
     ("vm stop", true),
     ("vm delete", true),
@@ -173,6 +185,9 @@ impl Request {
         {
             return false;
         }
+        if self.dry_run && self.operation() == "vm apply" {
+            return false;
+        }
         OPERATIONS
             .iter()
             .any(|(op, mutation)| *op == self.operation() && *mutation)
@@ -181,6 +196,7 @@ impl Request {
         match self.operation().as_str() {
             "vm create" => "Create a profile and its VM configuration.".into(),
             "vm configure" => "Change the stopped VM's CPU, memory, disk or Rosetta settings.".into(),
+            "vm apply" => "Create the profile or replace its stopped VM's configuration with the definition file; settings the file omits return to their defaults. The VM is not started or stopped.".into(),
             "vm start" => "Start the VM.".into(),
             "vm stop" => "Stop the VM and interrupt its running containers.".into(),
             "vm delete" => "Stop and remove the profile from active listings. Its disk and Docker data are preserved.".into(),
@@ -207,7 +223,9 @@ impl Request {
                 && OPERATIONS
                     .iter()
                     .any(|(op, _)| *op == self.words[..2].join(" "));
-            return Err(invalid(if positional_profile {
+            return Err(invalid(if positional_profile && self.words[1] == "apply" {
+                "unknown operation; pass the profile definition with --file <path> and the profile with --profile <name>, not a positional word"
+            } else if positional_profile {
                 "unknown operation; select the VM profile with --profile <name>, not a positional word"
             } else {
                 "unknown operation; use --headless capabilities"
@@ -278,6 +296,35 @@ impl Request {
             return Err(invalid(
                 "--rosetta is only supported for vm create and vm configure",
             ));
+        }
+        let apply = self.operation() == "vm apply";
+        if !apply && (self.file.is_some() || self.dry_run) {
+            return Err(invalid(
+                "--file and --dry-run are only supported for vm apply",
+            ));
+        }
+        if apply {
+            match self.file.as_deref() {
+                None | Some("") => return Err(invalid("vm apply requires --file <path>")),
+                Some("-") => {
+                    return Err(invalid(
+                        "vm apply reads a regular file; standard input (-) is not supported",
+                    ));
+                }
+                Some(path) if path.contains('\0') => {
+                    return Err(invalid("invalid profile definition path"));
+                }
+                Some(_) => {}
+            }
+            if self.cpu.is_some() || self.memory.is_some() || self.disk.is_some() {
+                return Err(invalid(
+                    "--cpu, --memory and --disk cannot be combined with vm apply; the definition file holds every setting",
+                ));
+            }
+            // A dry run is not a mutation, and is still one answer.
+            if self.watch || self.follow {
+                return Err(invalid("vm apply cannot be repeated or streamed"));
+            }
         }
         if let Some(profile) = &self.profile {
             if profile.is_empty()
@@ -500,6 +547,114 @@ mod tests {
         }
         let unset = Request::try_parse_from(["hamn", "--headless", "vm", "list"]).unwrap();
         assert_eq!(unset.rosetta, None);
+    }
+    #[test]
+    fn vm_apply_takes_a_definition_file_and_a_dry_run_without_confirmation() {
+        let parse = |arguments: &[&str]| {
+            let mut request = Request::try_parse_from(
+                [
+                    &["hamn", "--headless", "vm", "apply", "--profile", "work"][..],
+                    arguments,
+                ]
+                .concat(),
+            )
+            .unwrap();
+            request.normalize().unwrap();
+            request
+        };
+        let apply = parse(&["--file", "work.yaml", "--yes"]);
+        assert!(apply.validate().is_ok() && apply.mutates());
+        assert_eq!(apply.file.as_deref(), Some("work.yaml"));
+        // A dry run changes nothing, so it is no mutation and needs no --yes.
+        let dry_run = parse(&["--file", "work.yaml", "--dry-run"]);
+        assert!(dry_run.dry_run && !dry_run.mutates() && dry_run.validate().is_ok());
+        for (arguments, message) in [
+            (&["--file", "work.yaml"][..], "mutation requires --yes"),
+            (&["--yes"], "vm apply requires --file <path>"),
+            (&["--dry-run"], "vm apply requires --file <path>"),
+            (&["--file", "", "--yes"], "vm apply requires --file <path>"),
+            (
+                &["--file", "-", "--yes"],
+                "vm apply reads a regular file; standard input (-) is not supported",
+            ),
+            (
+                &["--file", "work.yaml", "--yes", "--cpu", "2"],
+                "--cpu, --memory and --disk cannot be combined with vm apply; the definition file holds every setting",
+            ),
+            (
+                &["--file", "work.yaml", "--yes", "--memory", "8"],
+                "--cpu, --memory and --disk cannot be combined with vm apply; the definition file holds every setting",
+            ),
+            (
+                &["--file", "work.yaml", "--dry-run", "--disk", "80"],
+                "--cpu, --memory and --disk cannot be combined with vm apply; the definition file holds every setting",
+            ),
+            (
+                &["--file", "work.yaml", "--yes", "--rosetta", "true"],
+                "--rosetta is only supported for vm create and vm configure",
+            ),
+            (
+                &["--file", "work.yaml", "--yes", "--watch"],
+                "vm apply cannot be repeated or streamed",
+            ),
+            (
+                &["--file", "work.yaml", "--dry-run", "--watch"],
+                "vm apply cannot be repeated or streamed",
+            ),
+            (
+                &["--file", "work.yaml", "--dry-run", "--follow"],
+                "vm apply cannot be repeated or streamed",
+            ),
+        ] {
+            assert_eq!(
+                parse(arguments).validate().unwrap_err().message,
+                message,
+                "{arguments:?}"
+            );
+        }
+        // The profile is named by --profile, as for every VM operation, and
+        // the file by --file: neither is a positional word.
+        assert_eq!(
+            rejection(&["hamn", "--headless", "vm", "apply", "--file", "work.yaml", "--yes"]),
+            "an explicit --profile is required; list profiles with: hamn --headless vm list"
+        );
+        let positional = rejection(&[
+            "hamn", "--headless", "vm", "apply", "work.yaml", "--profile", "work", "--yes",
+        ]);
+        assert!(
+            positional.starts_with("unknown operation")
+                && positional.contains("--file <path>")
+                && positional.contains("--profile <name>"),
+            "{positional}"
+        );
+        // Both arguments belong to vm apply alone.
+        for arguments in [
+            &["hamn", "--headless", "vm", "status", "--profile", "work", "--file", "work.yaml"][..],
+            &["hamn", "--headless", "vm", "start", "--profile", "work", "--yes", "--dry-run"],
+            &["hamn", "--headless", "vm", "list", "--dry-run"],
+        ] {
+            assert_eq!(
+                rejection(arguments),
+                "--file and --dry-run are only supported for vm apply"
+            );
+        }
+    }
+    #[test]
+    fn only_vm_apply_adds_its_arguments_to_the_worker_request() {
+        let serialized = |arguments: &[&str]| {
+            serde_json::to_value(Request::try_parse_from(arguments).unwrap()).unwrap()
+        };
+        let start = serialized(&["hamn", "--headless", "vm", "start", "--profile", "work", "--yes"]);
+        assert!(start.get("file").is_none() && start.get("dry_run").is_none(), "{start}");
+        let apply = serialized(&[
+            "hamn", "--headless", "vm", "apply", "--profile", "work", "--file", "work.yaml",
+            "--dry-run",
+        ]);
+        assert!(apply["file"] == "work.yaml" && apply["dry_run"] == true, "{apply}");
+        // The worker reads the request back with every field it was given.
+        let read: Request = serde_json::from_value(apply).unwrap();
+        assert!(read.dry_run && read.file.as_deref() == Some("work.yaml"));
+        assert!(read.validate().is_ok());
     }
     #[test]
     fn failures_never_publish_success_data() {

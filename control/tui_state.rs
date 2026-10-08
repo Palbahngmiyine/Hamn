@@ -584,6 +584,9 @@ impl State {
                 self.request.previous = false;
                 self.request.follow = false;
                 self.request.watch = false;
+                // A dry run of vm apply: the list it returns to takes neither.
+                self.request.file = None;
+                self.request.dry_run = false;
             }
             self.data = Value::Null;
             self.stale = false;
@@ -814,6 +817,7 @@ fn confirmation(request: &Request, width: u16) -> Vec<String> {
         ("UID", &request.uid),
         ("Kubeconfig", &request.kubeconfig),
         ("Output path", &request.path),
+        ("Definition file", &request.file),
         ("Manifest", &request.manifest),
     ] {
         if let Some(value) = value {
@@ -2070,6 +2074,56 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Execution disabled"));
+    }
+    #[test]
+    fn a_typed_vm_apply_confirms_its_file_and_a_dry_run_returns_to_a_clean_list() {
+        let mut state = State::new(Request::default());
+        let selected = state.request.profile.clone();
+        assert!(selected.is_some());
+        // The selected profile is the target; the definition must name it.
+        let request = state.view("vm apply --file work.yaml").unwrap();
+        assert!(request.mutates() && request.yes && request.profile == selected);
+        // Wide enough that no line of the text is wrapped.
+        let text = confirmation(&request, 400).join("\n");
+        for line in [
+            "Confirm vm apply",
+            "Definition file: \"work.yaml\"",
+            "settings the file omits return to their defaults",
+            "The VM is not started or stopped.",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        assert!(text.contains(&format!("Profile: {:?}", selected.as_deref().unwrap())));
+        assert!(confirmation_visible(
+            &request,
+            ratatui::layout::Rect::new(0, 0, 100, 24)
+        ));
+        assert!(state.request.file.is_none());
+
+        // A dry run is a read. The list that Esc and the refresh return to
+        // must not carry its arguments, which no list accepts.
+        let dry_run = state.view("vm apply --file work.yaml --dry-run").unwrap();
+        assert!(!dry_run.mutates() && dry_run.dry_run);
+        assert_eq!(dry_run.file.as_deref(), Some("work.yaml"));
+        assert_eq!(state.request.operation(), "vm list");
+        assert!(state.request.file.is_none() && !state.request.dry_run);
+        state.request.validate().unwrap();
+
+        // The answer of the dry run is its result, shown as the detail,
+        // which outlives the next refresh of the list.
+        state.accept(Ok(serde_json::json!({"action":"none", "changes":[]})));
+        assert!(
+            state
+                .detail
+                .as_deref()
+                .is_some_and(|text| text.contains("\"action\": \"none\""))
+        );
+        state.accept(Ok(serde_json::json!([{"name":"default", "state":"stopped"}])));
+        assert!(state.detail.is_some() && state.message.is_empty());
+
+        // No terminal input is a definition file.
+        let refused = state.view("vm apply --file -").unwrap_err();
+        assert_eq!(refused.code, "invalidRequest");
     }
     #[test]
     fn failed_refresh_blocks_actions_and_view_switch_clears_old_rows() {

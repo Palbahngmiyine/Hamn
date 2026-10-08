@@ -28,6 +28,7 @@ struct yaml_parse {
 struct yaml_text {
     char data[PROFILE_YAML_CAP];
     size_t length;
+    int unwritable; /* a string held a character that text_quote refuses */
 };
 
 static void profile_defaults(struct profile *profile)
@@ -656,10 +657,129 @@ static int parse_root(struct yaml_parse *parse, yaml_event_t *event,
     return 0;
 }
 
-/* Parses the one document of the parser's input, a configuration, into
- * profile, and releases the parser. On failure errno is EINVAL and reason,
- * when given, says why. */
+#define PROFILE_DEFINITION_API_VERSION "hamn/v1"
+#define PROFILE_DEFINITION_KIND "Profile"
+
+/* A scalar of a profile definition that must be exactly `expected`. */
+static int parse_constant(struct yaml_parse *parse, yaml_event_t *event,
+                          const char *key, const char *expected)
+{
+    char value[64];
+    if (yaml_string(parse, event, value, sizeof(value)) != 0 ||
+        strcmp(value, expected) != 0) {
+        /* Not the value's own fault text: say what the key must be. */
+        parse->error[0] = '\0';
+        yaml_fail(parse, "%s must be %s", key, expected);
+        return -1;
+    }
+    return 0;
+}
+
+static int parse_metadata(struct yaml_parse *parse, yaml_event_t *event,
+                          struct profile *profile)
+{
+    if (yaml_mapping_start(parse, event) != 0)
+        return -1;
+    char seen[PROFILE_SEEN_KEY_CAP][64] = {{0}};
+    size_t count = 0;
+    for (;;) {
+        yaml_event_t key_event;
+        if (yaml_next(parse, &key_event) != 0)
+            return -1;
+        if (key_event.type == YAML_MAPPING_END_EVENT) {
+            yaml_event_delete(&key_event);
+            return 0;
+        }
+        char key[64];
+        if (yaml_string(parse, &key_event, key, sizeof(key)) != 0 ||
+            seen_key(seen, &count, key) != 0) {
+            yaml_fail(parse, "duplicate or invalid metadata key");
+            return -1;
+        }
+        yaml_event_t value;
+        if (yaml_next(parse, &value) != 0)
+            return -1;
+        if (strcmp(key, "name") != 0) {
+            yaml_event_delete(&value);
+            yaml_fail(parse, "unknown metadata key: %s", key);
+            return -1;
+        }
+        /* The name is not quoted in the reason: it is not a valid one. */
+        char name[PROFILE_NAME_CAP];
+        if (yaml_string(parse, &value, name, sizeof(name)) != 0 ||
+            !profile_name_valid(name)) {
+            parse->error[0] = '\0';
+            yaml_fail(parse, "metadata.name is not a valid profile name");
+            return -1;
+        }
+        snprintf(profile->name, sizeof(profile->name), "%s", name);
+    }
+}
+
+/* The root of a profile definition: its four keys, in any order. */
+static int parse_definition(struct yaml_parse *parse, yaml_event_t *event,
+                            struct profile *profile)
+{
+    if (yaml_mapping_start(parse, event) != 0)
+        return -1;
+    char seen[PROFILE_SEEN_KEY_CAP][64] = {{0}};
+    size_t count = 0;
+    int have_version = 0, have_kind = 0, have_spec = 0;
+    for (;;) {
+        yaml_event_t key_event;
+        if (yaml_next(parse, &key_event) != 0)
+            return -1;
+        if (key_event.type == YAML_MAPPING_END_EVENT) {
+            yaml_event_delete(&key_event);
+            break;
+        }
+        char key[64];
+        if (yaml_string(parse, &key_event, key, sizeof(key)) != 0 ||
+            seen_key(seen, &count, key) != 0) {
+            yaml_fail(parse, "duplicate or invalid definition key");
+            return -1;
+        }
+        yaml_event_t value;
+        if (yaml_next(parse, &value) != 0)
+            return -1;
+        int rc;
+        if (strcmp(key, "apiVersion") == 0) {
+            rc = parse_constant(parse, &value, key,
+                                PROFILE_DEFINITION_API_VERSION);
+            have_version = 1;
+        } else if (strcmp(key, "kind") == 0) {
+            rc = parse_constant(parse, &value, key, PROFILE_DEFINITION_KIND);
+            have_kind = 1;
+        } else if (strcmp(key, "metadata") == 0) {
+            rc = parse_metadata(parse, &value, profile);
+        } else if (strcmp(key, "spec") == 0) {
+            rc = parse_root(parse, &value, profile);
+            have_spec = 1;
+        } else {
+            yaml_event_delete(&value);
+            yaml_fail(parse, "unknown definition key: %s", key);
+            return -1;
+        }
+        if (rc != 0)
+            return -1;
+    }
+    if (!have_version || !have_kind || !have_spec || !profile->name[0]) {
+        yaml_fail(parse, "a profile definition requires apiVersion, kind, "
+                  "metadata.name and spec");
+        return -1;
+    }
+    return 0;
+}
+
+typedef int (*profile_root_parser)(struct yaml_parse *parse,
+                                   yaml_event_t *event,
+                                   struct profile *profile);
+
+/* Parses the one document of the parser's input into profile with root,
+ * which reads the document's root node, and releases the parser. On failure
+ * errno is EINVAL and reason, when given, says why. */
 static int profile_parse_document(struct yaml_parse *parse,
+                                  profile_root_parser root,
                                   struct profile *profile, char *reason)
 {
     int rc = -1;
@@ -676,7 +796,7 @@ static int profile_parse_document(struct yaml_parse *parse,
         goto out;
     }
     yaml_event_delete(&event);
-    if (yaml_next(parse, &event) != 0 || parse_root(parse, &event, profile) != 0)
+    if (yaml_next(parse, &event) != 0 || root(parse, &event, profile) != 0)
         goto out;
     if (yaml_expect(parse, &event, YAML_DOCUMENT_END_EVENT) != 0)
         goto out;
@@ -708,11 +828,14 @@ static int profile_parse_yaml(FILE *file, struct profile *profile,
         return -1;
     }
     yaml_parser_set_input_file(&parse.parser, file);
-    return profile_parse_document(&parse, profile, reason);
+    return profile_parse_document(&parse, parse_root, profile, reason);
 }
 
-/* The same, from length bytes of text that stay valid during the call. */
+/* The document in length bytes of text, which stay valid during the call:
+ * a configuration for parse_root, a profile definition for
+ * parse_definition. */
 static int profile_parse_text(const char *text, size_t length,
+                              profile_root_parser root,
                               struct profile *profile, char *reason)
 {
     struct yaml_parse parse;
@@ -723,7 +846,28 @@ static int profile_parse_text(const char *text, size_t length,
     }
     yaml_parser_set_input_string(&parse.parser, (const unsigned char *)text,
                                  length);
-    return profile_parse_document(&parse, profile, reason);
+    return profile_parse_document(&parse, root, profile, reason);
+}
+
+int profile_definition_parse(const char *text, size_t length,
+                             struct profile *profile,
+                             char reason[PROFILE_REASON_CAP])
+{
+    reason[0] = '\0';
+    if (!text || !profile || length > PROFILE_DEFINITION_CAP) {
+        reason_set(reason, "a profile definition holds at most 65536 bytes");
+        errno = EINVAL;
+        return -1;
+    }
+    profile_defaults(profile);
+    int rc = profile_parse_text(text, length, parse_definition, profile,
+                                reason);
+    if (rc != 0 && !reason[0]) {
+        int saved = errno;
+        reason_set(reason, strerror(saved));
+        errno = saved;
+    }
+    return rc;
 }
 
 static int profile_open_config(const struct profile *profile, FILE **file_out,
@@ -732,7 +876,9 @@ static int profile_open_config(const struct profile *profile, FILE **file_out,
     char path[PROFILE_PATH_CAP];
     if (!profile_path(profile, PROFILE_CONFIG_FILE, path, sizeof(path)))
         return -1;
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    /* O_NONBLOCK: a FIFO in place of the file must not make the open wait for
+     * a writer; it is refused below as not a regular file. */
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd < 0)
         return errno == ENOENT ? 0 : -1;
     struct stat status;
@@ -763,6 +909,22 @@ static int profile_open_config(const struct profile *profile, FILE **file_out,
     return 1;
 }
 
+int profile_locate(struct profile *profile)
+{
+    char root[PROFILE_PATH_CAP];
+    if (!profile || !profile_name_valid(profile->name) ||
+        !hamn_home(root, sizeof(root))) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (snprintf(profile->dir, sizeof(profile->dir), "%s/%s", root,
+                 profile->name) >= (int)sizeof(profile->dir)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
 /* reason, when given, receives the cause of a refusal that errno alone does
  * not name; it is left untouched otherwise. */
 static int profile_read(struct profile *profile, const char *name, int create,
@@ -774,17 +936,11 @@ static int profile_read(struct profile *profile, const char *name, int create,
         return -1;
     }
     profile_defaults(profile);
-    char root[PROFILE_PATH_CAP];
-    if (!hamn_home(root, sizeof(root))) {
-        reason_set(reason, "~/.hamn is not a directory that only this user "
-                   "can write");
-        errno = EINVAL;
-        return -1;
-    }
     snprintf(profile->name, sizeof(profile->name), "%s", name);
-    if (snprintf(profile->dir, sizeof(profile->dir), "%s/%s", root, name) >=
-        (int)sizeof(profile->dir)) {
-        errno = ENAMETOOLONG;
+    if (profile_locate(profile) != 0) {
+        if (errno == EINVAL)
+            reason_set(reason, "~/.hamn is not a directory that only this "
+                       "user can write");
         return -1;
     }
     if (create && fs_mkdirs(profile->dir, 0700) != 0)
@@ -950,7 +1106,11 @@ static int text_quote(struct yaml_text *text, const char *value)
         case '\r': if (text_append(text, "\\r") != 0) return -1; break;
         case '\t': if (text_append(text, "\\t") != 0) return -1; break;
         default:
-            if (*cursor < 0x20 || text_append(text, "%c", *cursor) != 0)
+            if (*cursor < 0x20) {
+                text->unwritable = 1;
+                return -1;
+            }
+            if (text_append(text, "%c", *cursor) != 0)
                 return -1;
         }
     }
@@ -1023,25 +1183,43 @@ static int profile_text_reads_back(const struct profile *profile,
 {
     struct profile stored;
     profile_defaults(&stored);
-    return profile_parse_text(text->data, text->length, &stored, NULL) == 0 &&
+    return profile_parse_text(text->data, text->length, parse_root, &stored,
+                              NULL) == 0 &&
            profile_diff(profile, &stored) == 0;
 }
 
-int profile_save(const struct profile *profile)
+/* The text that profile_save writes for profile. On -1 nothing may be
+ * written and errno says why: EINVAL for settings that break the schema,
+ * EOVERFLOW for text beyond 64 KiB, EILSEQ for a string with a character
+ * that config.yaml cannot carry. */
+static int profile_text(const struct profile *profile, struct yaml_text *text)
 {
     if (!profile || profile_validate(profile) != 0) {
         errno = EINVAL;
         return -1;
     }
-    struct yaml_text text;
-    if (profile_serialize(profile, &text) != 0) {
-        errno = EOVERFLOW;
+    if (profile_serialize(profile, text) != 0) {
+        errno = text->unwritable ? EILSEQ : EOVERFLOW;
         return -1;
     }
-    if (!profile_text_reads_back(profile, &text)) {
+    if (!profile_text_reads_back(profile, text)) {
         errno = EILSEQ;
         return -1;
     }
+    return 0;
+}
+
+int profile_storable(const struct profile *profile)
+{
+    struct yaml_text text;
+    return profile_text(profile, &text) == 0;
+}
+
+int profile_save(const struct profile *profile)
+{
+    struct yaml_text text;
+    if (profile_text(profile, &text) != 0)
+        return -1;
     char path[PROFILE_PATH_CAP];
     if (!profile_path(profile, PROFILE_CONFIG_FILE, path, sizeof(path))) {
         errno = ENAMETOOLONG;
