@@ -3,7 +3,8 @@
 //! them. A Hamn profile whose Docker CLI cannot reach the daemon while its VM
 //! is observed not running shows how to start the VM instead of the CLI
 //! error, then shows rows without retry backoff. CLI failures that starting
-//! the VM cannot fix, and an unreadable profile, keep the CLI error. When
+//! the VM cannot fix, and an unreadable profile, keep the CLI error; the
+//! header then says why the status of the profile is unavailable. When
 //! Docker is installed, its own connection messages are checked as well.
 use super::tui_native_regressions::{self as native, record};
 use crate::runner::{self, Case, case};
@@ -31,6 +32,7 @@ pub fn main(filters: &[String]) -> ExitCode {
         case("automatic_refresh_keeps_the_screen", automatic_refresh_keeps_the_screen),
         case("stopped_vm_shows_start_guidance", stopped_vm_shows_start_guidance),
         case("stopped_vm_keeps_errors_that_starting_it_cannot_fix", stopped_vm_keeps_errors_that_starting_it_cannot_fix),
+        case("header_says_why_the_status_is_unavailable", header_says_why_the_status_is_unavailable),
     ];
     match real_cli::which("docker") {
         Some(docker) => cases.push(case("installed_docker_connection_failures", move || installed_docker_connection_failures(&docker))),
@@ -148,6 +150,39 @@ fn stopped_vm_keeps_errors_that_starting_it_cannot_fix() {
     fail_queries(&harness.root, "unreachable");
     harness.write(b"R");
     harness.until(GUIDANCE);
+}
+
+/// The header of a Hamn profile whose status cannot be read shows that
+/// failure and not a state of a VM. It tells a profile that does not exist
+/// from one whose configuration cannot be read, and shows the state again
+/// once the file reads. The rows of the Docker CLI are not touched.
+fn header_says_why_the_status_is_unavailable() {
+    let mut harness = Harness::new("containers");
+    harness.until("old-target-row");
+    // Only R queries from here, so each header belongs to the profile as it
+    // was left before that key.
+    harness.send(b"p", "Paused");
+    select_peer(&harness.root, "docker", "tui-refresh");
+    harness.write(b"R");
+    harness.until("Status: profile default does not exist");
+    let text = harness.text();
+    assert!(text.contains("VM: status unavailable | Docker: Connection unavailable"), "{text}");
+    assert!(!text.contains("not created"), "{text}");
+
+    let profile = harness.root.join(".hamn/default");
+    fs::DirBuilder::new().mode(0o700).create(&profile).unwrap();
+    let config = profile.join("config.yaml");
+    fs::write(&config, "kubernetes:\n  enabled: true\n").unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    harness.write(b"R");
+    harness.until("Status: cannot read the configuration of profile default: unknown configuration key: kubernetes");
+    let text = harness.text();
+    assert!(text.contains("VM: status unavailable") && text.contains("old-target-row"), "{text}");
+
+    fs::write(&config, "cpus: 2\nmemoryMiB: 2048\ndiskGiB: 60\n").unwrap();
+    harness.write(b"R");
+    harness.until("VM: stopped | Docker: Connection unavailable");
+    assert!(!harness.text().contains("Status:"), "{}", harness.text());
 }
 
 /// A Unix socket that accepts each connection and closes it at once, like a

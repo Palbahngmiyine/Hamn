@@ -37,7 +37,9 @@ the VM state and the `s` start/repair key instead of the CLI error, clears rows
 that would look current, and keeps polling at the normal interval, so rows appear
 once Docker is ready. Other CLI failures, such as usage errors, unknown commands or
 the output limit, keep their message, as does a profile whose status cannot be
-read. The VM panel
+read: its header shows `VM: status unavailable` and, on the next line, why:
+that the profile does not exist yet, or the rule its `config.yaml` breaks. The
+VM panel
 shows VM state separately from Docker readiness. A profile whose `config.yaml`
 cannot be read stays in the VM panel and in the environment picker, with the
 state of its VM and the rule the file breaks. Enter and `c` then show where
