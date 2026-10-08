@@ -142,7 +142,13 @@ fn create_plugins(kubectl: &Path) {
         let args = ["create", name, "--help"];
         let output = direct(&args, &kubeconfig);
         assert!(output.returncode == 0 && !output.stdout().contains("UNEXPECTED_SHADOW_PLUGIN"));
+        assert!(output.stdout().contains("Usage:"), "{output:?}");
         harness.send(format!(":{}\r", args.join(" ")).as_bytes(), "Exit code 0");
+        // The exit footer can be drawn before the output, and a terminal
+        // without output would pass the check below. The help of the built-in
+        // ends with its usage: with that on the screen, what is absent is the
+        // output of a plugin that ran in its place.
+        harness.until("Usage:");
         let screen = harness.text();
         assert!(!screen.contains("UNEXPECTED_SHADOW_PLUGIN") && !screen.contains("Plugin-defined"), "{screen}");
         harness.send(b"\r", "[Kubernetes]");

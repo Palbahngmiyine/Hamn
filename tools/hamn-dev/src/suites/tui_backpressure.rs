@@ -138,7 +138,20 @@ fn run(harness: &mut Harness, mode: &str, workers: &mut Vec<Worker>) {
         harness.pty.resize(32, 150);
         pty::kill(harness.child.id(), libc::SIGWINCH);
         harness.until("RESIZED:150x29");
-        assert!(!harness.text().contains("CLI_INTERRUPTED"), "{}", harness.text());
+        // Nothing in the TUI's contract orders a resize after earlier input.
+        // Keys are handled in the order typed, so the session list, opened
+        // by a key typed after the paste, shows that the pasted Ctrl-C was
+        // handled.
+        harness.send(b"\x1b\x13", "Sessions: Enter resumes"); // Ctrl+Alt+S
+        harness.send(b"\r", "RESIZED:150x29");
+        // A signal sent while that byte was handled reaches the CLI before
+        // its main flow goes on: only a CLI that was not interrupted answers
+        // the release of the gate. An absent line alone would say nothing,
+        // because an interrupt is drawn some time after it is sent.
+        harness.release_gate();
+        harness.until("RELEASED");
+        let text = harness.text();
+        assert!(!text.contains("CLI_INTERRUPTED") && !text.contains("Exit code"), "{text}");
         if mode == "terminate" {
             let pid = harness.child.id();
             let notice = harness.notice.try_clone().expect("duplicate notice FIFO");
@@ -170,7 +183,8 @@ fn hex(bytes: &[u8]) -> String {
 
 /// `docker`: lists one row, or for `stdin-proof` puts its terminal in raw
 /// mode, reports signals, waits for the gate and then digests exactly the
-/// ordered paste (or reports the release).
+/// ordered paste, or reports the release and stays until it is signalled or
+/// the gate is written or closed again.
 pub fn fixture(_program: &str, args: &[String]) -> ExitCode {
     let has = |value: &str| args.iter().any(|arg| arg == value);
     if !has("stdin-proof") {
@@ -206,6 +220,9 @@ pub fn fixture(_program: &str, args: &[String]) -> ExitCode {
         println!("DIGEST:{}", hex(&Sha256::digest(&data)));
     } else {
         println!("RELEASED");
+        // Still there for the explicit interrupt and for the frontend's
+        // termination, which are what the test does next.
+        wait_gate(&root);
     }
     ExitCode::SUCCESS
 }

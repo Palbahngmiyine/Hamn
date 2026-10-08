@@ -35,10 +35,21 @@ fn exercise(workspace: &str) {
     // The completed newer invocation is an observable cancellation barrier.
     // Releasing the old response must not apply its external context later.
     harness.release_gate();
-    let query: &[u8] = if containers { b":ps\r" } else { b":get pods\r" };
-    harness.send(query, "old-target-row");
+    // A query that runs after the release shows what target is in use then.
+    // "old-target-row" is on the screen already and cannot show that the
+    // query ran. The typed command can: it is drawn until Enter, Enter clears
+    // the rows, and a later frame with a row and without the command or
+    // [loading] was drawn from the result of this query.
+    let query = if containers { ":ps" } else { ":get pods" };
+    harness.send(query.as_bytes(), query);
+    harness.write(b"\r");
+    harness.wait(|harness| {
+        let text = harness.text();
+        !text.contains(query) && text.contains("-target-row") && !text.contains("[loading]")
+    });
     let target = if containers { "external" } else { "new-cluster" };
-    assert!(!harness.text().contains(target), "{}", harness.text());
+    let text = harness.text();
+    assert!(text.contains("old-target-row") && !text.contains(target), "{text}");
     let calls = harness.calls();
     let queried = calls.iter().any(|(_, args)| {
         let query = args.iter().any(|arg| arg == "ps" || arg == "get");
