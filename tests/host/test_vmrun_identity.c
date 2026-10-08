@@ -646,6 +646,33 @@ static void a_running_vm_is_listed_while_its_configuration_cannot_be_read(
     assert(!supervisor_kill(&supervisor));
 }
 
+/* A profile that is listed can record a complaint on the way: here the probe
+ * of a VM whose state file is not one, for a profile whose configuration
+ * cannot be read. The complaint is not the reason of the list. A list that
+ * then failed for a cause without a sentence would otherwise be reported with
+ * it. */
+static void the_list_forgets_the_complaint_of_a_listed_profile(const char *root)
+{
+    struct profile p;
+    home_profile(root, "complaining", &p);
+    struct supervisor supervisor;
+    supervisor_start(&p, NULL, 0, &supervisor);
+    write_identity(&p, &supervisor);
+    write_text(&p, "state.json", "{");
+    write_text(&p, "config.yaml", "kubernetes:\n  enabled: true\n");
+    /* The probe that the list makes for this profile does complain. */
+    log_clear_error();
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_UNVERIFIED);
+    assert(strstr(log_last_error(), "is not valid JSON"));
+
+    char *json = NULL;
+    assert(hamn_control_query(NULL, &json) == 0);
+    assert(strstr(json, "\"name\":\"complaining\""));
+    assert(log_last_error()[0] == '\0');
+    hamn_control_free(json);
+    assert(!supervisor_kill(&supervisor));
+}
+
 /* The cases run in a child, so a failed assertion still leaves this process
  * to remove the profiles; supervisors exit when that child's end of their
  * alive pipe closes. */
@@ -665,6 +692,7 @@ int main(void)
         configure_requires_a_stopped_vm(root);
         apply_changes_the_settings_of_a_stopped_vm_only(root);
         a_running_vm_is_listed_while_its_configuration_cannot_be_read(root);
+        the_list_forgets_the_complaint_of_a_listed_profile(root);
         _exit(0);
     }
     int status = 0;

@@ -436,6 +436,64 @@ static void operations_say_why_a_profile_cannot_be_read(const char *root,
     }
 }
 
+/* A config.yaml whose path does not fit is an error with an errno of its
+ * own. The reader used to leave errno as an earlier call had set it, and a
+ * leftover ENOENT reported the profile as one that does not exist. HOME is
+ * as long as it can be with the profile directory still fitting: 1004 bytes,
+ * for the profile `p` and paths of PROFILE_PATH_CAP bytes. */
+static void a_configuration_path_that_does_not_fit_says_so(const char *base)
+{
+    enum { HOME_LENGTH = PROFILE_PATH_CAP - (sizeof("/.hamn/p/config.yaml") - 1) };
+    static char home[PROFILE_PATH_CAP], saved[PROFILE_PATH_CAP];
+    const char *previous = getenv("HOME");
+    assert(previous && strlen(previous) < sizeof(saved));
+    strcpy(saved, previous);
+    /* Nested directories of at most 200 bytes each, the last one shorter. */
+    size_t length = (size_t)snprintf(home, sizeof(home), "%s/long", base);
+    assert(mkdir(home, 0700) == 0);
+    while (length < HOME_LENGTH) {
+        size_t part = HOME_LENGTH - length - 1;
+        if (part > 200)
+            part = 200;
+        if (part == 0)
+            break;
+        home[length++] = '/';
+        memset(home + length, 'd', part);
+        length += part;
+        home[length] = '\0';
+        assert(mkdir(home, 0700) == 0);
+    }
+    assert(strlen(home) == HOME_LENGTH);
+    assert(setenv("HOME", home, 1) == 0);
+
+    struct profile located, profile;
+    char path[PROFILE_PATH_CAP], reason[PROFILE_REASON_CAP];
+    assert(hamn_home(path, sizeof(path)) && mkdir(path, 0700) == 0);
+    memset(&located, 0, sizeof(located));
+    snprintf(located.name, sizeof(located.name), "p");
+    assert(profile_locate(&located) == 0 && mkdir(located.dir, 0700) == 0);
+    /* The directory is found and is private; only the file's path is one
+     * byte too long. */
+    assert(profile_directory_private(&located) == 1);
+    assert(!profile_path(&located, "config.yaml", path, sizeof(path)));
+    errno = ENOENT;
+    assert(profile_read_existing_reason(&profile, "p", reason) == -1);
+    assert(errno == ENAMETOOLONG);
+    assert(strcmp(reason, strerror(ENAMETOOLONG)) == 0);
+
+    assert(rmdir(located.dir) == 0);
+    assert(hamn_home(path, sizeof(path)) && rmdir(path) == 0);
+    assert(setenv("HOME", saved, 1) == 0);
+    /* Innermost first, down to the directory this case made in base. */
+    size_t stop = strlen(base) + sizeof("/long") - 1;
+    for (;;) {
+        assert(rmdir(home) == 0);
+        if (strlen(home) <= stop)
+            break;
+        *strrchr(home, '/') = '\0';
+    }
+}
+
 /* The list in a child that has one descriptor left: enough to read the
  * directory of profiles, not to open a config.yaml. Exits 0 when the list
  * fails as a whole and says that a configuration could not be read for want
@@ -494,7 +552,7 @@ static void an_unreadable_profile_is_listed_beside_the_others(const char *root)
     char *json = NULL;
     log_set_error("the reason of an earlier call");
     assert(hamn_control_query(NULL, &json) == 0);
-    /* A listed profile leaves no reason behind. */
+    /* The list forgets the reason of an earlier call. */
     assert(log_last_error()[0] == '\0');
     cJSON *rows = cJSON_Parse(json);
     assert(cJSON_IsArray(rows) && cJSON_GetArraySize(rows) == 2);
@@ -580,6 +638,7 @@ int main(void)
     assert(profile_save(&profile) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
     refused_configurations_say_why(root);
+    a_configuration_path_that_does_not_fit_says_so(temporary);
     differing_settings_are_named();
     settings_that_would_not_read_back_are_not_saved();
     assert(hamn_control_start("../escape", 0, 0, 0) == 2);
