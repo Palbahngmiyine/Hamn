@@ -27,6 +27,7 @@ mod contexts;
 mod kubernetes;
 mod management;
 mod ports;
+mod profile_apply;
 mod processes;
 mod terminal;
 mod transport;
@@ -94,6 +95,7 @@ pub fn main(args: &[String]) -> ExitCode {
     println!("Evidence and owned runtime: {}", live.root.display());
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
         start_isolated(&live.runtime).must();
+        profile_apply::verify(&live);
         recovery(&live);
         ports::published_ports(&live);
         boundaries::cancellation_boundaries(&live);

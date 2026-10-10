@@ -7,6 +7,7 @@ VERSION    ?= 0.2.1
 VERSION_STAMP := $(BUILD)/.hamn-version
 # tools/hamn-dev publishes build/hamn and runs the host regression suites.
 HAMN_DEV := $(or $(CARGO_TARGET_DIR),target)/$(if $(filter dev,$(CARGO_PROFILE)),debug,$(CARGO_PROFILE))/hamn-dev
+WORKSPACE_LIVE_CACHE ?= $(HOME)/.hamn/cache
 PREFIX     ?= $(HOME)/.local
 BINDIR     ?= $(PREFIX)/bin
 DATADIR    ?= $(PREFIX)/share/hamn/src
@@ -74,7 +75,7 @@ RAW_CACHE_TEST_CFLAGS := -std=c11 -Wall -Wextra -Werror=implicit-function-declar
 	test-kubernetes-cli test-core-quality test-public-export test-release-repository-preflight \
 	test-port-forwarding test-workflows test-local-macos \
 	$(test-control_PARTS) $(test-install_PARTS) $(test-update_PARTS) \
-	check-ci-macos-shards print-ci-macos-shards test-control-tui \
+	check-ci-macos-shards print-ci-macos-shards test-control-tui test-workspace-live \
 	test-update-ux-redirected test-update-ux-pty \
 	release-candidate release-gate release-hosted-validation
 
@@ -580,3 +581,12 @@ test-core-quality: host
 
 clean:
 	rm -rf $(BUILD)
+
+# Opt-in physical Apple Silicon gate. Deliberately excluded from hosted CI
+# and test-local-macos: those successes do not establish real VM success.
+test-workspace-live:
+	@test "$$(uname -s)/$$(uname -m)" = Darwin/arm64 || { \
+		echo "test-workspace-live requires an Apple Silicon macOS host" >&2; exit 2; \
+	}
+	$(MAKE) -j1 host
+	$(HAMN_DEV) test workspace-live --binary $(HOST_BIN) --cache "$(WORKSPACE_LIVE_CACHE)"
