@@ -26,7 +26,7 @@ their existing contract; only external Docker `--context` operations require Doc
 | `n` | Choose Kubernetes namespace |
 | `a` | Toggle all containers while preserving the current query filters |
 | `v` | Open the selected Hamn environment's VM panel |
-| `c` in VM panel | Edit CPU, memory (GiB), and disk (GiB) configuration command |
+| `c` in VM panel | Edit CPU, memory (GiB), and disk (GiB) configuration command; for a profile whose configuration cannot be read, show why |
 | `!` | Show the active lifecycle operation log |
 | Esc, `q` | Return; quit |
 
@@ -37,8 +37,15 @@ the VM state and the `s` start/repair key instead of the CLI error, clears rows
 that would look current, and keeps polling at the normal interval, so rows appear
 once Docker is ready. Other CLI failures, such as usage errors, unknown commands or
 the output limit, keep their message, as does a profile whose status cannot be
-read. The VM panel
-shows VM state separately from Docker readiness. External Docker contexts have no
+read: its header shows `VM: status unavailable` and, below it, why: that the
+profile does not exist yet, or the rule its `config.yaml` breaks. The reason
+takes up to two lines. The VM panel
+shows VM state separately from Docker readiness. A profile whose `config.yaml`
+cannot be read stays in the VM panel and in the environment picker, with the
+state of its VM and the rule the file breaks. In the VM panel, Enter and `c`
+then show the reason and where the file is instead of settings; in the picker,
+Enter selects the profile as it does any other. Start, stop, delete and
+configure are refused until the file is corrected. External Docker contexts have no
 Hamn VM controls.
 The `a` key toggles Docker's `--all` value, including grouped flags such as `-as`
 and repeated boolean options. It preserves filters, size, and `--last`/`--latest`;
@@ -96,6 +103,15 @@ Docker `--digests`, `--no-trunc`, and `--tree` queries also use the terminal so 
 digest fields, full identifiers, and tree layout retain the CLI's output.
 
 Typed commands run once, with no additional Hamn confirmation or command deadline.
+A command that starts with `vm` is Hamn's own VM operation, not the installed
+CLI's: `:vm apply --file work.yaml` applies a
+[profile definition](CONFIGURATION.md#declarative-configuration) to the
+selected profile, which the definition must name, after the same confirmation
+as every VM change; the confirmation shows the file. With `--dry-run` it shows
+the changes, or why the apply would be refused, and changes nothing; that
+answer stays on screen until Esc. The file is read when the operation
+runs; `~` is not expanded, and a relative path is relative to the directory
+Hamn was started in. A bare `apply` remains the installed CLI's.
 Changes selected through the action menu retain confirmation. Kubernetes menu
 changes bind the selected UID and resource version: deletion sends server-side
 preconditions through kubectl, and restart uses an atomic guarded patch. If the

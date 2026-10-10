@@ -128,7 +128,8 @@ impl Guarded<'_> {
                 change();
                 terminal.send(b"y", Some(&format!("Exit code {code}")));
                 if action == "delete" && code == 1 {
-                    assert!(terminal.text().contains("Conflict"), "{}", terminal.text());
+                    // The exit footer can be drawn before kubectl's message.
+                    terminal.until("Conflict");
                 }
                 terminal.send(b"\r", None);
             },

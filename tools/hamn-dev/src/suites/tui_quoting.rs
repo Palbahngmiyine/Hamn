@@ -51,10 +51,8 @@ fn quoted_template_matches_direct_argv(kubectl: &PathBuf) {
         r#"--dry-run=client --validate=false -o "jsonpath={.data.pattern}{'\n'}QUOTE_END""#
     );
     harness.send(format!(":{command}\r").as_bytes(), "Exit code 0");
-    let screen = harness.text();
-    for line in stdout.lines() {
-        assert!(screen.contains(line), "{line:?}\n{screen}");
-    }
+    // The exit footer can be drawn before the output of the command.
+    harness.until_all(&stdout.lines().collect::<Vec<_>>());
 }
 
 /// `kubectl` that execs the installed kubectl named in `installed-kubectl`.

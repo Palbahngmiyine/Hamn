@@ -16,6 +16,7 @@ Colima의 프로필·디스크·소켓·설정을 재사용하지 않습니다.
 | 프로필 목록 | `hamn --headless vm list` |
 | 상태 조회 | `hamn --headless vm status --profile work` |
 | 정지한 프로필 설정 | `hamn --headless vm configure --profile work --cpu 6 --memory 8 --disk 80 --yes` |
+| 프로필의 모든 설정을 파일로 관리 | `hamn --headless vm apply --profile work --file work.yaml --yes` |
 | Docker 연결 정보 | `hamn --headless vm env --profile work` |
 | 컨테이너 목록 | `hamn --headless docker containers list --profile work` |
 | 외부 Kubernetes context 목록 | `hamn --headless k8s contexts list` |

@@ -1,16 +1,17 @@
 //! Strict C profile parsing through the public headless contract: private
 //! atomic creation, rejected configuration leaves files unchanged, advanced
 //! settings survive resource-only edits, malformed profiles (including the
-//! removed managed-K3s `kubernetes` key) are refused, and deletion is soft.
+//! removed managed-K3s `kubernetes` key) are refused by every operation with
+//! the rule they break, and deletion is soft.
 //!
 //! One flow, as in the script it replaces.
 use crate::runner::{self, case};
 use crate::support::api_fixtures::{self, MkdTemp};
 use crate::support::hamn;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Duration;
 
@@ -26,26 +27,52 @@ pub fn main(filters: &[String]) -> ExitCode {
     )
 }
 
-/// Malformed profiles, each refused by `vm status` and `vm configure`
-/// without a change to its file.
-const CASES: &[(&str, &str)] = &[
-    ("unknown-key", "cpus: 4\nunknown: true\n"),
-    ("duplicate-key", "cpus: 4\ncpus: 5\n"),
-    ("yaml-anchor", "cpus: &cpu 4\n"),
-    ("yaml-alias", "cpus: *cpu\n"),
-    ("yaml-tag", "cpus: !!int 4\n"),
-    ("yaml-merge", "base: &base { cpus: 4 }\n<<: *base\n"),
-    ("quoted-bool", "mountHome: \"true\"\n"),
-    ("wrong-type", "mounts: true\n"),
-    ("invalid-mount", "mounts:\n  - location: relative\n    mountPoint: /workspace\n    writable: false\n"),
-    ("invalid-hook", "provision:\n  - command: echo ready\n    stage: invalid\n    timeoutSeconds: 60\n    mode: fail\n"),
-    ("removed-network-key", "network:\n  mode: shared\n"),
-    ("removed-kubernetes-key", "kubernetes:\n  enabled: true\n  version: v1.36.2+k3s1\n"),
-    ("quoted-mount-inotify", "mountInotify: \"true\"\n"),
-    ("no-writable-mount-inotify", "mountHome: false\nmountInotify: true\n"),
-    ("invalid-docker-json", "docker:\n  daemonJson: \"[\"\n"),
-    ("invalid-docker-key", "docker:\n  daemonJson: \"{\\\"containerd\\\":\\\"/other.sock\\\"}\"\n"),
+/// Malformed profiles: name, `config.yaml`, and the rule of the parser that
+/// the file breaks. Every operation that needs the stored configuration
+/// refuses each of them with that rule and without a change to the file.
+const CASES: &[(&str, &str, &str)] = &[
+    ("unknown-key", "cpus: 4\nunknown: true\n", "unknown configuration key: unknown"),
+    ("duplicate-key", "cpus: 4\ncpus: 5\n", "duplicate or invalid configuration key"),
+    ("yaml-anchor", "cpus: &cpu 4\n", "YAML anchors and tags are not supported"),
+    ("yaml-alias", "cpus: *cpu\n", "YAML aliases are not supported"),
+    ("yaml-tag", "cpus: !!int 4\n", "YAML anchors and tags are not supported"),
+    // The file breaks three rules. The parser reads a value before it looks
+    // at its key, so the anchor is what it meets first.
+    ("yaml-merge", "base: &base { cpus: 4 }\n<<: *base\n", "YAML anchors and tags are not supported"),
+    ("quoted-bool", "mountHome: \"true\"\n", "invalid scalar value"),
+    ("wrong-type", "mounts: true\n", "expected a sequence"),
+    (
+        "invalid-mount",
+        "mounts:\n  - location: relative\n    mountPoint: /workspace\n    writable: false\n",
+        "a mount location must be a normalized absolute path",
+    ),
+    (
+        "invalid-hook",
+        "provision:\n  - command: echo ready\n    stage: invalid\n    timeoutSeconds: 60\n    mode: fail\n",
+        "a provision stage must be system, user, after-boot or ready",
+    ),
+    ("removed-network-key", "network:\n  mode: shared\n", "unknown configuration key: network"),
+    (
+        "removed-kubernetes-key",
+        "kubernetes:\n  enabled: true\n  version: v1.36.2+k3s1\n",
+        "unknown configuration key: kubernetes",
+    ),
+    ("quoted-mount-inotify", "mountInotify: \"true\"\n", "invalid scalar value"),
+    (
+        "no-writable-mount-inotify",
+        "mountHome: false\nmountInotify: true\n",
+        "mountInotify requires a writable share",
+    ),
+    ("invalid-docker-json", "docker:\n  daemonJson: \"[\"\n", DAEMON_JSON_RULE),
+    (
+        "invalid-docker-key",
+        "docker:\n  daemonJson: \"{\\\"containerd\\\":\\\"/other.sock\\\"}\"\n",
+        DAEMON_JSON_RULE,
+    ),
 ];
+
+const DAEMON_JSON_RULE: &str =
+    "docker.daemonJson must be one JSON object that leaves the settings Hamn manages alone";
 
 struct Profiles {
     binary: PathBuf,
@@ -53,11 +80,16 @@ struct Profiles {
 }
 
 impl Profiles {
-    /// `hamn --headless ARGS`: its envelope, whose `ok` matches the exit status.
-    fn run(&self, arguments: &[&str]) -> Value {
+    /// `hamn --headless ARGS`, as it ended.
+    fn completed(&self, arguments: &[&str]) -> api_fixtures::Completed {
         let mut command = Command::new(&self.binary);
         command.arg("--headless").args(arguments).env("HOME", &self.root);
-        let result = api_fixtures::run(&mut command, None, Duration::from_secs(15));
+        api_fixtures::run(&mut command, None, Duration::from_secs(15))
+    }
+
+    /// `hamn --headless ARGS`: its envelope, whose `ok` matches the exit status.
+    fn run(&self, arguments: &[&str]) -> Value {
+        let result = self.completed(arguments);
         let value = result.json();
         assert_eq!(value["ok"].as_bool(), Some(result.success()), "{value}");
         value
@@ -67,16 +99,34 @@ impl Profiles {
         self.run(arguments)["ok"].as_bool().unwrap()
     }
 
+    /// The error of a refused `hamn --headless ARGS`: its code and message.
+    fn refusal(&self, arguments: &[&str]) -> (String, String) {
+        let value = self.run(arguments);
+        assert_eq!(value["ok"], false, "{arguments:?} {value}");
+        assert!(value["data"].is_null(), "{arguments:?} {value}");
+        let field = |key: &str| {
+            value["error"][key].as_str().unwrap_or_else(|| panic!("{arguments:?} {value}")).to_owned()
+        };
+        (field("code"), field("message"))
+    }
+
+    /// The profile directory is private, as the profiles Hamn creates are:
+    /// the parser looks at the file only in such a directory, whatever the
+    /// umask of the test run.
     fn write(&self, name: &str, text: &str) -> PathBuf {
         let path = self.root.join(".hamn").join(name).join("config.yaml");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(path.parent().unwrap()).unwrap();
         fs::write(&path, text).unwrap();
         path
     }
 }
 
 fn strict_profiles_advanced_settings_preservation_and_soft_deletion() {
-    let directory = MkdTemp::new("hamn-yaml-");
+    // Under /tmp: the state of a profile's VM is read through a socket in the
+    // profile directory, and the path of a socket holds 103 bytes. Below
+    // $TMPDIR the longer case names would not fit, and the list would report
+    // the state of their VM as unknown.
+    let directory = MkdTemp::new_in(Path::new("/tmp"), "hamn-yaml-");
     let root = directory.path();
     let profiles = Profiles { binary: hamn(), root: root.to_path_buf() };
 
@@ -135,17 +185,82 @@ fn strict_profiles_advanced_settings_preservation_and_soft_deletion() {
     }
 
     // CASES are populated from the existing strict-parser regression fixtures.
-    for (name, text) in CASES {
+    // An operation that reads the stored configuration says which rule the
+    // file breaks: the code is the one of its kind of request, the message
+    // names the profile and the rule, and the file keeps its bytes.
+    let archive = root.join("diagnostics.tar");
+    let archive_text = api_fixtures::utf8(&archive);
+    for (name, text, rule) in CASES {
         let path = profiles.write(name, text);
         let before = fs::read(&path).unwrap();
-        let value = profiles.run(&["vm", "status", "--profile", name]);
-        assert_eq!(value["ok"], false, "{name} {value}");
-        assert_eq!(fs::read(&path).unwrap(), before, "{name}");
-        assert!(!profiles.ok(&["vm", "configure", "--profile", name, "--cpu", "4", "--yes"]), "{name}");
-        assert_eq!(fs::read(&path).unwrap(), before, "{name}");
+        let unreadable = format!("cannot read the configuration of profile {name}: {rule}");
+        for (code, arguments) in [
+            ("profileUnavailable", &["vm", "status", "--profile", name][..]),
+            ("profileUnavailable", &["vm", "env", "--profile", name]),
+            // A Docker request finds its socket through the profile's status.
+            ("profileUnavailable", &["docker", "containers", "list", "--profile", name]),
+            ("operationFailed", &["vm", "configure", "--profile", name, "--cpu", "4", "--yes"]),
+            ("operationFailed", &["vm", "stop", "--profile", name, "--yes"]),
+            ("operationFailed", &["vm", "diagnostics", "--profile", name, "--path", archive_text, "--yes"]),
+            // A known refusal, not the unknown outcome of a worker that
+            // ended. `--disk 1` stops a start that got past the read before
+            // it saves the profile or prepares an image.
+            ("operationFailed", &["vm", "start", "--profile", name, "--disk", "1", "--yes"]),
+            ("operationFailed", &["vm", "delete", "--profile", name, "--yes"]),
+        ] {
+            assert_eq!(profiles.refusal(arguments), (code.to_owned(), unreadable.clone()), "{arguments:?}");
+            assert_eq!(fs::read(&path).unwrap(), before, "{arguments:?}");
+        }
+        assert!(!archive.exists(), "{name}");
+        // The refused start recorded no operation and the refused delete
+        // marked nothing: the directory holds the file alone.
+        let directory = path.parent().unwrap();
+        let entries: Vec<_> = fs::read_dir(directory).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(entries, ["config.yaml"], "{name}");
+    }
+    // A name that no profile has is told apart from a file that cannot be
+    // read, and asking about it creates no profile.
+    for (code, arguments) in [
+        ("profileUnavailable", &["vm", "status", "--profile", "absent"][..]),
+        ("operationFailed", &["vm", "configure", "--profile", "absent", "--cpu", "4", "--yes"]),
+        ("operationFailed", &["vm", "stop", "--profile", "absent", "--yes"]),
+    ] {
+        assert_eq!(
+            profiles.refusal(arguments),
+            (code.to_owned(), "profile absent does not exist".to_owned()),
+            "{arguments:?}"
+        );
+        assert!(!root.join(".hamn/absent").exists(), "{arguments:?}");
     }
 
-    for (name, _) in CASES {
+    // One profile that cannot be read does not hide the others. The list
+    // names each with the state of its VM, its directory and the rule, and
+    // with nothing that comes from the file; the profiles that read are
+    // listed in full. The reason is in the answer, not on stderr beside it.
+    let listed = profiles.completed(&["vm", "list"]);
+    assert!(listed.success() && listed.stderr.is_empty(), "{listed:?}");
+    let rows = listed.json();
+    let rows = rows["data"].as_array().unwrap_or_else(|| panic!("vm list rows: {rows}"));
+    let row = |name: &str| rows.iter().find(|row| row["name"] == name).unwrap_or_else(|| panic!("{name} {rows:?}"));
+    for (name, _, rule) in CASES {
+        assert_eq!(
+            *row(name),
+            json!({
+                "name": name,
+                "state": "stopped",
+                "directory": root.join(".hamn").join(name),
+                "configurationError": rule,
+            })
+        );
+    }
+    for name in ["test", "advanced"] {
+        assert!(row(name)["cpus"].is_u64() && row(name).get("configurationError").is_none(), "{}", row(name));
+    }
+    assert_eq!(rows.len(), CASES.len() + 2, "{rows:?}");
+    let status = profiles.completed(&["vm", "status", "--profile", CASES[0].0]);
+    assert!(!status.success() && status.stderr.is_empty(), "{status:?}");
+
+    for (name, _, _) in CASES {
         fs::remove_file(root.join(".hamn").join(name).join("config.yaml")).unwrap();
     }
     assert!(profiles.ok(&["vm", "create", "--profile", "deleted", "--yes"]));

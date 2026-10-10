@@ -720,8 +720,10 @@ int hamn_control_diagnostics(const char *profile_name, const char *requested_pat
     if (!output || !profile_name) { errno = EINVAL; return 1; }
     *output = NULL;
     struct profile profile;
-    if (profile_read_existing(&profile, profile_name) != 0) {
-        logerr("cannot load profile");
+    char failure[PROFILE_FAILURE_CAP];
+    if (profile_read_existing_explained(&profile, profile_name,
+                                        failure) != 0) {
+        logerr("%s", failure);
         return 1;
     }
 

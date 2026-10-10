@@ -8,10 +8,9 @@
 //! before VM work.
 use crate::runner::{self, Case, case};
 use crate::support::api_fixtures::{self, MkdTemp, py_json, truthy, utf8};
-use crate::support::{hamn, tui::install_fixture};
+use crate::support::{hamn, real_cli, tui::install_fixture};
 use serde_json::{Value, json};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -90,8 +89,7 @@ fn public_start_retries_the_installed_binary_once(previous_unknown: bool) {
 /// `$HOME/calls`.
 pub fn updater_fixture(_program: &str, args: &[String]) -> ExitCode {
     let root = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
-    let mut calls = OpenOptions::new().create(true).append(true).open(root.join("calls")).unwrap();
-    writeln!(calls, "{}", py_json(&args)).unwrap();
+    real_cli::append_line(&root.join("calls"), &py_json(&args));
     if args == ["--headless", "system", "upgrade", "--yes"] {
         let cache = root.join(".hamn/cache");
         fs::create_dir_all(&cache).unwrap();

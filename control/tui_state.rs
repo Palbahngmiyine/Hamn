@@ -584,6 +584,9 @@ impl State {
                 self.request.previous = false;
                 self.request.follow = false;
                 self.request.watch = false;
+                // A dry run of vm apply: the list it returns to takes neither.
+                self.request.file = None;
+                self.request.dry_run = false;
             }
             self.data = Value::Null;
             self.stale = false;
@@ -630,6 +633,28 @@ impl State {
         request.all_namespaces = false;
         request.validate()?;
         Ok(request)
+    }
+    /// `c` in the VM panel: a `vm configure` command with the settings of
+    /// the selected profile, to edit and run. A profile whose configuration
+    /// cannot be read has no settings to offer; its detail says why instead.
+    pub fn edit_settings(&mut self) {
+        let Some(row) = self.selected() else {
+            return;
+        };
+        if row["configurationError"].is_string() {
+            self.detail = Some(profile_detail(&row));
+            return;
+        }
+        self.input = Some((
+            ':',
+            format!(
+                "vm configure --profile {} --cpu {} --memory {} --disk {}",
+                row["name"].as_str().unwrap_or("default"),
+                row["cpus"],
+                row["memoryMiB"].as_u64().unwrap_or(4096) / 1024,
+                row["diskGiB"]
+            ),
+        ));
     }
     pub fn accept(&mut self, result: Result<Value>) {
         if let Ok(value) = &result {
@@ -715,15 +740,7 @@ impl State {
             "vm list" => {
                 self.discard_picker();
                 self.request.profile = row["name"].as_str().map(String::from);
-                self.detail = Some(format!(
-                    "Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers",
-                    row["name"],
-                    row["state"],
-                    row["dockerStatus"],
-                    row["cpus"],
-                    row["memoryMiB"],
-                    row["diskGiB"]
-                ));
+                self.detail = Some(profile_detail(&row));
                 Ok(None)
             }
             "docker images list" | "docker volumes list" | "docker networks list" => {
@@ -733,6 +750,29 @@ impl State {
             _ => self.action("inspect").map(Some),
         }
     }
+}
+
+/// The detail of a row of the VM panel. A profile whose configuration cannot
+/// be read has no settings to show: the detail says why and where the file
+/// is, because every operation on the profile is refused until it reads.
+fn profile_detail(row: &Value) -> String {
+    if let Some(error) = row["configurationError"].as_str() {
+        return format!(
+            "Hamn profile {}\nVM: {}\nConfiguration: cannot be read: {error}\nFile: {}/config.yaml\n\nStart, stop, delete and settings are refused until the file is corrected.\nEsc returns to containers",
+            row["name"],
+            row["state"],
+            row["directory"].as_str().unwrap_or("~/.hamn/<profile>")
+        );
+    }
+    format!(
+        "Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers",
+        row["name"],
+        row["state"],
+        row["dockerStatus"],
+        row["cpus"],
+        row["memoryMiB"],
+        row["diskGiB"]
+    )
 }
 
 // Identity is independent of row order and mutable status/resourceVersion.
@@ -791,6 +831,12 @@ fn label(value: &Value) -> String {
         })
         .unwrap_or("");
     let docker = value["dockerStatus"].as_str().unwrap_or("");
+    // A Hamn profile whose config.yaml cannot be read is listed with the
+    // state of its VM and this reason, in the VM panel and in the picker.
+    let status = match value["configurationError"].as_str() {
+        Some(error) => format!("{status}  unreadable configuration: {error}"),
+        None => status.to_owned(),
+    };
     if let Some(kind) = value["environmentKind"].as_str() {
         return clean(&match kind {
             "docker" => format!(
@@ -814,6 +860,7 @@ fn confirmation(request: &Request, width: u16) -> Vec<String> {
         ("UID", &request.uid),
         ("Kubeconfig", &request.kubeconfig),
         ("Output path", &request.path),
+        ("Definition file", &request.file),
         ("Manifest", &request.manifest),
     ] {
         if let Some(value) = value {
@@ -937,10 +984,33 @@ pub fn draw(frame: &mut Frame, state: &State) {
             "recoveryRequired" => "Recovery required",
             _ => "Connection unavailable",
         };
-        format!(
-            "{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment",
-            state.runtime["state"].as_str().unwrap_or("not created")
-        )
+        // A status that could not be read observed neither the VM nor
+        // Docker: the header says so and gives the reason below. The reason
+        // gets two lines before it is cut. The rule that a configuration
+        // breaks is the end of its sentence, after the name of the profile,
+        // and has to stay readable at 80 columns.
+        match state.runtime["statusError"].as_str() {
+            Some(failure) => {
+                let width = frame.area().width.saturating_sub(2);
+                let mut reason = wrap_lines(&format!("Status: {failure}"), width);
+                if reason.len() > 2 {
+                    let second = wrap_lines(&reason[1], width.saturating_sub(2))
+                        .first()
+                        .cloned()
+                        .unwrap_or_default();
+                    reason.truncate(1);
+                    reason.push(format!("{second} …"));
+                }
+                format!(
+                    "{header}\nVM: status unavailable | Docker: status unavailable | s starts / repairs this Hamn environment\n{}",
+                    reason.join("\n")
+                )
+            }
+            None => format!(
+                "{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment",
+                state.runtime["state"].as_str().unwrap_or("not created")
+            ),
+        }
     } else {
         header
     };
@@ -1434,6 +1504,90 @@ mod tests {
             "{}",
             failure.message
         );
+    }
+    #[test]
+    fn a_profile_whose_configuration_cannot_be_read_says_why_and_offers_no_settings() {
+        let readable = serde_json::json!({"name": "external", "state": "stopped", "dockerStatus": "unavailable",
+            "cpus": 2, "memoryMiB": 2048, "diskGiB": 60});
+        // What `vm list` holds for a profile it could not read: no settings.
+        let unreadable = serde_json::json!({"name": "old", "state": "running", "directory": "/Users/me/.hamn/old",
+            "configurationError": "unknown configuration key: kubernetes"});
+        let reason = "unreadable configuration: unknown configuration key: kubernetes";
+
+        // The row keeps the state of the VM and adds the reason, in the VM
+        // panel and, marked as a Hamn profile, in the environment picker.
+        assert_eq!(label(&unreadable).trim_end(), format!("old  running  {reason}"));
+        let mut picked = unreadable.clone();
+        picked["environmentKind"] = "hamn".into();
+        assert_eq!(label(&picked).trim_end(), format!("old  Hamn profile  running  {reason}"));
+        assert_eq!(label(&readable), "external  stopped  unavailable");
+
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        state.accept(Ok(serde_json::json!([readable, unreadable])));
+        assert!(state.vm_panel());
+
+        // Enter and `c` on the unreadable profile show why and where the
+        // file is, and offer no command made of settings that do not exist.
+        state.selected = Some(1);
+        assert!(state.enter().unwrap().is_none());
+        let detail = state.detail.take().unwrap();
+        assert!(detail.contains("Configuration: cannot be read: unknown configuration key: kubernetes"), "{detail}");
+        assert!(detail.contains("File: /Users/me/.hamn/old/config.yaml"), "{detail}");
+        assert!(!detail.contains("CPU") && !detail.contains("null"), "{detail}");
+        state.edit_settings();
+        assert_eq!(state.detail.take().as_deref(), Some(detail.as_str()));
+        assert!(state.input.is_none());
+
+        // A profile that reads keeps its detail and its prefilled command.
+        state.selected = Some(0);
+        assert!(state.enter().unwrap().is_none());
+        assert!(state.detail.take().unwrap().contains("CPU: 2\nMemory: 2048 MiB\nDisk: 60 GiB"));
+        state.edit_settings();
+        assert!(state.detail.is_none());
+        assert_eq!(
+            state.input,
+            Some((':', "vm configure --profile external --cpu 2 --memory 2 --disk 60".to_owned()))
+        );
+    }
+    #[test]
+    fn the_header_says_why_the_status_of_a_profile_is_unavailable() {
+        let header = |runtime: Value, width: u16| {
+            let mut state = State::new(Request::default());
+            state.native = Some(crate::native::parse("ps", &state).unwrap());
+            state.runtime = runtime;
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|f| draw(f, &state)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+        };
+        let unreadable = "cannot read the configuration of profile default: unknown configuration key: kubernetes";
+        // The failure of the status is what the header shows: neither the
+        // VM, which can be running, nor Docker was observed.
+        let lines = header(serde_json::json!({"statusError": unreadable}), 120);
+        assert!(lines.iter().any(|line| line.contains("VM: status unavailable | Docker: status unavailable")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains(&format!("Status: {unreadable}"))), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("not created") || line.contains("Connection unavailable")), "{lines:?}");
+        // At 80 columns the sentence takes a second line and keeps the rule,
+        // which is its end.
+        let lines = header(serde_json::json!({"statusError": unreadable}), 80);
+        let first = lines.iter().position(|line| line.contains("Status: cannot read the configuration")).unwrap();
+        assert!(lines[first + 1].contains("n key: kubernetes"), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains('…')), "{lines:?}");
+        // A longer reason is cut after its second line: the header must
+        // leave room for the rows.
+        let long = format!("{unreadable} {}", "x".repeat(300));
+        let lines = header(serde_json::json!({"statusError": long}), 80);
+        let reason: Vec<_> = lines.iter().filter(|line| line.contains("Status: ") || line.contains("xxxx") || line.contains("kubernetes")).collect();
+        assert_eq!(reason.len(), 2, "{lines:?}");
+        assert!(reason[1].contains("n key: kubernetes xxxx") && reason[1].contains('…'), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("resize terminal")), "{lines:?}");
+        // An observed status is shown as before.
+        let lines = header(serde_json::json!({"state": "stopped", "dockerStatus": "unavailable"}), 120);
+        assert!(lines.iter().any(|line| line.contains("VM: stopped | Docker: Connection unavailable")), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("Status:")), "{lines:?}");
     }
     #[test]
     fn failed_hamn_query_keeps_errors_that_starting_the_vm_cannot_fix() {
@@ -2070,6 +2224,56 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Execution disabled"));
+    }
+    #[test]
+    fn a_typed_vm_apply_confirms_its_file_and_a_dry_run_returns_to_a_clean_list() {
+        let mut state = State::new(Request::default());
+        let selected = state.request.profile.clone();
+        assert!(selected.is_some());
+        // The selected profile is the target; the definition must name it.
+        let request = state.view("vm apply --file work.yaml").unwrap();
+        assert!(request.mutates() && request.yes && request.profile == selected);
+        // Wide enough that no line of the text is wrapped.
+        let text = confirmation(&request, 400).join("\n");
+        for line in [
+            "Confirm vm apply",
+            "Definition file: \"work.yaml\"",
+            "settings the file omits return to their defaults",
+            "The VM is not started or stopped.",
+        ] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        assert!(text.contains(&format!("Profile: {:?}", selected.as_deref().unwrap())));
+        assert!(confirmation_visible(
+            &request,
+            ratatui::layout::Rect::new(0, 0, 100, 24)
+        ));
+        assert!(state.request.file.is_none());
+
+        // A dry run is a read. The list that Esc and the refresh return to
+        // must not carry its arguments, which no list accepts.
+        let dry_run = state.view("vm apply --file work.yaml --dry-run").unwrap();
+        assert!(!dry_run.mutates() && dry_run.dry_run);
+        assert_eq!(dry_run.file.as_deref(), Some("work.yaml"));
+        assert_eq!(state.request.operation(), "vm list");
+        assert!(state.request.file.is_none() && !state.request.dry_run);
+        state.request.validate().unwrap();
+
+        // The answer of the dry run is its result, shown as the detail,
+        // which outlives the next refresh of the list.
+        state.accept(Ok(serde_json::json!({"action":"none", "changes":[]})));
+        assert!(
+            state
+                .detail
+                .as_deref()
+                .is_some_and(|text| text.contains("\"action\": \"none\""))
+        );
+        state.accept(Ok(serde_json::json!([{"name":"default", "state":"stopped"}])));
+        assert!(state.detail.is_some() && state.message.is_empty());
+
+        // No terminal input is a definition file.
+        let refused = state.view("vm apply --file -").unwrap_err();
+        assert_eq!(refused.code, "invalidRequest");
     }
     #[test]
     fn failed_refresh_blocks_actions_and_view_switch_clears_old_rows() {

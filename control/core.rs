@@ -21,6 +21,15 @@ unsafe extern "C" {
         create: i32,
         rosetta: i32,
     ) -> i32;
+    // C borrows profile and path for this call. On 0 it returns owned UTF-8
+    // JSON through result; release only with hamn_control_free. On any other
+    // value result stays null and the value alone classifies the failure.
+    fn hamn_control_apply(
+        profile: *const libc::c_char,
+        path: *const libc::c_char,
+        dry_run: i32,
+        result: *mut *mut libc::c_char,
+    ) -> i32;
     fn hamn_control_stop(profile: *const libc::c_char) -> i32;
     fn hamn_control_delete(profile: *const libc::c_char) -> i32;
     fn hamn_control_diagnostics(
@@ -55,6 +64,21 @@ pub fn version() -> &'static str {
     version
 }
 
+/// The reason the C core recorded for its latest failure in this worker,
+/// empty when it recorded none. An owned copy: the buffer is C's, and the
+/// next C call can clear or rewrite it.
+fn recorded_error() -> String {
+    // SAFETY: log_last_error returns a static NUL-terminated buffer.
+    unsafe { CStr::from_ptr(log_last_error()) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// `vm status` of a profile, or `vm list` without one. The C call forgets
+/// the reason of an earlier call before it starts, so a recorded reason is
+/// this call's. core/control.h says which it records: a profile that does
+/// not exist, a configuration that cannot be read and why, or a state file
+/// that cannot be read. Without one, errno says why.
 fn query(profile: Option<&CString>) -> Result<Value> {
     let mut output = std::ptr::null_mut();
     let rc = unsafe {
@@ -64,10 +88,14 @@ fn query(profile: Option<&CString>) -> Result<Value> {
         )
     };
     if rc != 0 {
-        return Err(Failure::new(
-            "profileUnavailable",
-            std::io::Error::last_os_error(),
-        ));
+        // errno first: it is only meaningful right after the failed call.
+        let os_error = std::io::Error::last_os_error();
+        let reason = recorded_error();
+        return Err(if reason.is_empty() {
+            Failure::new("profileUnavailable", os_error)
+        } else {
+            Failure::new("profileUnavailable", reason)
+        });
     }
     if output.is_null() {
         return Err(Failure::new("coreProtocol", "missing C result"));
@@ -75,6 +103,62 @@ fn query(profile: Option<&CString>) -> Result<Value> {
     let value = serde_json::from_slice(unsafe { CStr::from_ptr(output) }.to_bytes());
     unsafe { hamn_control_free(output) };
     value.map_err(|e| Failure::new("coreProtocol", e))
+}
+
+/// `vm apply`: the C core reads the definition file, compares it with the
+/// stored configuration and writes. Its return value alone classifies a
+/// failure. The profile's last operation record is not consulted: it belongs
+/// to starts and stops and says nothing about a configuration write.
+fn apply(request: &Request, profile: *const libc::c_char) -> Result<Value> {
+    let file = CString::new(request.file.as_deref().unwrap_or_default())
+        .map_err(|e| Failure::new("invalidRequest", e))?;
+    let mut output = std::ptr::null_mut();
+    // SAFETY: profile is null or a NUL-terminated string that outlives the
+    // call, file is NUL-terminated, and output is a valid place for the
+    // result pointer.
+    let rc = unsafe {
+        hamn_control_apply(
+            profile,
+            file.as_ptr(),
+            i32::from(request.dry_run),
+            &mut output,
+        )
+    };
+    let result = if output.is_null() {
+        None
+    } else {
+        // SAFETY: a non-null result is NUL-terminated JSON owned by this
+        // call until hamn_control_free.
+        let value = serde_json::from_slice(unsafe { CStr::from_ptr(output) }.to_bytes());
+        unsafe { hamn_control_free(output) };
+        Some(value)
+    };
+    if rc == 0 {
+        return result
+            .ok_or_else(|| Failure::new("coreProtocol", "missing C result"))?
+            .map_err(|e| Failure::new("coreProtocol", e));
+    }
+    let message = recorded_error();
+    Err(Failure::new(
+        apply_failure_code(rc),
+        if message.is_empty() {
+            "C core operation failed"
+        } else {
+            &message
+        },
+    ))
+}
+
+/// The error code of a failed hamn_control_apply, by its return value.
+fn apply_failure_code(rc: i32) -> &'static str {
+    match rc {
+        2 => "invalidRequest",
+        4 => "conflict",
+        // The call cannot say what config.yaml holds; the caller must look.
+        5 => "outcomeUnknown",
+        130 => "cancelled",
+        _ => "operationFailed",
+    }
 }
 
 fn execute(request: &Request) -> Result<Value> {
@@ -86,6 +170,9 @@ fn execute(request: &Request) -> Result<Value> {
         .transpose()
         .map_err(|e| Failure::new("invalidRequest", e))?;
     let pointer = profile.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
+    if request.operation() == "vm apply" {
+        return apply(request, pointer);
+    }
     let cpu = request.cpu.unwrap_or(0);
     let memory = request.memory.unwrap_or(0);
     let disk = request.disk.unwrap_or(0);
@@ -151,10 +238,12 @@ fn execute(request: &Request) -> Result<Value> {
         }
     }
     if rc != 0 {
+        // The operation's reason, taken before the status query below: that
+        // query forgets it and can record a reason of its own.
+        let message = recorded_error();
         let unknown = operation.starts_with("vm ")
             && query(profile.as_ref())
                 .is_ok_and(|v| v["lastOperation"]["status"] == "outcomeUnknown");
-        let message = unsafe { CStr::from_ptr(log_last_error()) }.to_string_lossy();
         return Err(Failure::new(
             if unknown {
                 "outcomeUnknown"
@@ -444,6 +533,24 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.unwrap()["cleanup"], "completed");
+    }
+
+    #[test]
+    fn a_failed_apply_is_classified_by_what_it_left() {
+        // 1 and every value without a meaning of its own leave config.yaml
+        // as it was; only 5 leaves the outcome open.
+        for (rc, code) in [
+            (2, "invalidRequest"),
+            (4, "conflict"),
+            (5, "outcomeUnknown"),
+            (130, "cancelled"),
+            (1, "operationFailed"),
+            (3, "operationFailed"),
+            (-1, "operationFailed"),
+            (131, "operationFailed"),
+        ] {
+            assert_eq!(apply_failure_code(rc), code, "{rc}");
+        }
     }
 
     #[test]

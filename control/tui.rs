@@ -154,7 +154,9 @@ impl Job {
                     return;
                 }
             }
-            let _ = sender.send((generation, true, result)).await;
+            let _ = sender
+                .send((generation, true, dry_run_answer(&request, result)))
+                .await;
         }));
     }
     fn refresh(&mut self, state: &mut State) {
@@ -198,7 +200,8 @@ impl Job {
                             let request = Request { words: vec!["vm".into(), "status".into()], profile: Some(profile.clone()), timeout: 30, ..Default::default() };
                             let (result, status) = tokio::join!(crate::native::query(&invocation), crate::core::call(&request));
                             let result = result.map_err(|error| tui_state::hamn_query_failure(profile, status.as_ref().ok(), error));
-                            let data = status.unwrap_or_else(|_| serde_json::json!({"state":"not created", "dockerStatus":"unavailable"}));
+                            // A status that failed is shown as that failure: neither the VM nor Docker was observed.
+                            let data = status.unwrap_or_else(|error| serde_json::json!({"statusError":error.message}));
                             let _ = sender.send((generation, false, Ok(serde_json::json!({"type":"runtimeStatus", "data":data})))).await;
                             result
                         } else { crate::native::query(&invocation).await }
@@ -215,6 +218,21 @@ impl Job {
             Ok(request) => self.start(request, state),
             Err(error) => state.message = format!("{}: {}", error.code, error.message),
         }
+    }
+}
+
+/// The result of a typed read, as the screen takes it. A dry run of
+/// `vm apply` asks what the apply would do, and why it would be refused is
+/// that answer: it is shown like one, as text of the detail that stays until
+/// Esc, and not as a failed refresh of the list behind it. Made here, where
+/// the result still belongs to its request; a dry run that was cancelled or
+/// replaced never reaches the screen.
+fn dry_run_answer(request: &Request, result: Result<Value>) -> Result<Value> {
+    match result {
+        Err(error) if request.dry_run => Ok(serde_json::json!({
+            "yaml": format!("{}: {}", error.code, error.message)
+        })),
+        result => result,
     }
 }
 
@@ -938,11 +956,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             crate::native::toggle_all(invocation); state.selected = Some(0); job.refresh(&mut state);
                         }
                     },
-                    KeyCode::Char('c') if state.vm_panel() => {
-                        if let Some(row) = state.selected() {
-                            state.input = Some((':', format!("vm configure --profile {} --cpu {} --memory {} --disk {}", row["name"].as_str().unwrap_or("default"), row["cpus"], row["memoryMiB"].as_u64().unwrap_or(4096) / 1024, row["diskGiB"])));
-                        }
-                    },
+                    KeyCode::Char('c') if state.vm_panel() => state.edit_settings(),
                     KeyCode::Char('v') if !state.environment_picker && state.hamn_environment() => {
                         state.save_browser(); state.native = None; state.environment_picker = false;
                         let request = state.view("vm"); job.dispatch(request, &mut state);
@@ -1212,6 +1226,39 @@ mod tests {
                     if code == "outcomeUnknown" { 2 } else { 1 }
                 );
             }
+        }
+    }
+
+    #[test]
+    fn the_refusal_of_a_dry_run_is_its_answer_and_no_other_failure_is() {
+        let refusal = || Err(crate::model::Failure::new("conflict", "disk size cannot shrink"));
+        let dry_run = Request {
+            words: vec!["vm".into(), "apply".into()],
+            dry_run: true,
+            ..Default::default()
+        };
+        let answer = dry_run_answer(&dry_run, refusal()).unwrap();
+        assert_eq!(answer["yaml"], "conflict: disk size cannot shrink");
+        // The screen shows that text as the detail, which stays until Esc,
+        // and counts no failed read.
+        let mut state = State::new(Request::default());
+        state.accept(Ok(answer));
+        assert_eq!(
+            state.detail.as_deref(),
+            Some("conflict: disk size cannot shrink")
+        );
+        assert!(state.message.is_empty() && !state.stale);
+        // What the dry run reports is passed on as it is.
+        let plan = serde_json::json!({"action":"none", "changes":[]});
+        assert_eq!(dry_run_answer(&dry_run, Ok(plan.clone())).unwrap(), plan);
+        // Every other read keeps its failure: a list that cannot be read is
+        // stale, and a VM that is not ready is handled as that.
+        for words in [&["vm", "status"][..], &["vm", "list"], &["docker", "containers", "list"]] {
+            let read = Request {
+                words: words.iter().map(|word| (*word).into()).collect(),
+                ..Default::default()
+            };
+            assert_eq!(dry_run_answer(&read, refusal()).unwrap_err().code, "conflict");
         }
     }
 

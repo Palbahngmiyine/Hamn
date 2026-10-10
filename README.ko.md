@@ -72,6 +72,53 @@ hamn --headless vm stop --profile work --yes
 `--follow` 로그와 `--watch` 조회는 NDJSON을 출력합니다. stdout에는 기계용 응답만
 출력합니다. 자세한 계약은 [API](docs/API.ko.md)를 참고하세요.
 
+## 선언적 설정
+
+프로필의 모든 설정을 파일 하나에 적어 두고, `vm apply`로 프로필을 그 파일과 같게
+만듭니다. 파일 `work.yaml`의 예입니다.
+
+```yaml
+apiVersion: hamn/v1
+kind: Profile
+metadata:
+  name: work
+spec:
+  cpus: 6
+  memoryMiB: 8192
+  diskGiB: 80
+  rosetta: true
+  mounts:
+    - location: "/Users/<your-user>/project"
+      mountPoint: "/workspace/project"
+      writable: true
+```
+
+```sh
+hamn --headless vm apply --profile work --file work.yaml --dry-run
+hamn --headless vm apply --profile work --file work.yaml --yes
+hamn --headless vm start --profile work --yes
+```
+
+첫 번째 명령은 달라질 내용을 알려 주며 아무것도 쓰지 않습니다. 두 번째 명령은
+프로필이 없으면 만들고, 파일과 설정이 다르면 설정을 교체합니다. 다른 점이 없으면
+아무것도 쓰지 않으므로 VM이 실행 중일 때를 포함해 언제든 다시 실행할 수 있습니다.
+
+- `metadata.name`은 `--profile`과 같아야 합니다.
+- `spec`에는 프로필의 `~/.hamn/<profile>/config.yaml`과 같은 키를 적습니다. 정의 파일이
+  설정 전체이므로 `spec`에서 생략한 키는 기본값으로 돌아갑니다. 디스크는 줄일 수
+  없으므로 `diskGiB`는 파일에 계속 적어 두세요. 현재 크기보다 작은 값은 키를 생략했을
+  때의 기본값 60을 포함해 거절합니다.
+- `vm apply`는 설정만 바꿉니다. VM을 시작하거나 정지하지 않으며, 설정을 바꾸려면
+  VM이 정지되어 있어야 합니다. `vm stop`, `vm apply`, `vm start` 순서로 실행하세요.
+- `vm apply`는 Mac의 조건을 검사하지 않으며 다음 `vm start`가 검사합니다. 마운트의
+  `location`은 실제로 있는 본인 소유 디렉터리로 바꾸고, 쓰기 가능한 마운트라면 홈
+  디렉터리 안의 디렉터리를 쓰세요. `rosetta: true`는 Rosetta를 쓸 수 있는 Mac에서만
+  두세요.
+
+규칙은 [선언적 설정](docs/CONFIGURATION.ko.md#선언적-설정), 모든 설정 항목은
+[YAML schema](docs/CONFIGURATION.ko.md#yaml-schema), 마운트의 키와 조건은
+[Mount](docs/CONFIGURATION.ko.md#mount)를 참고하세요.
+
 ## 외부 도구 연결
 
 ```sh
@@ -85,10 +132,6 @@ UI 선택은 Docker의 현재 context나 kubeconfig의 `current-context`를 바�
 헤드리스 인증은 비대화형이며, 네이티브 CLI 인증은 내부 터미널에서 해당 CLI 규칙을 따릅니다.
 
 ## 데이터
-
-Hamn은 더 이상 K3s를 관리하지 않습니다. 제거된 `kubernetes` 설정이 남은 프로필은
-`config.yaml`에서 해당 항목을 삭제할 때까지 거부하며, 이전 K3s 데이터는 이전하지
-않습니다.
 
 `vm delete`는 VM을 멈추고 목록에서 숨기며 디스크·Docker 데이터를 보존합니다.
 `system uninstall --yes`는 모든 Hamn 프로필과 관리 설치 파일을 영구 삭제합니다.

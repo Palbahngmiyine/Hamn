@@ -98,7 +98,8 @@ fn create_plugins(kubectl: &Path) {
                 assert_eq!(output.returncode, 7, "{output:?}");
                 let before = splitlines(&plugin_calls()).len();
                 harness.send(format!(":{prefix}{}\r", args.join(" ")).as_bytes(), "Exit code 7");
-                assert!(harness.text().contains(strip(&output.stdout())), "{}", harness.text());
+                // The exit footer can be drawn before the plugin's output.
+                harness.until(strip(&output.stdout()));
                 let text = plugin_calls();
                 let calls = splitlines(&text);
                 assert!(
@@ -126,7 +127,7 @@ fn create_plugins(kubectl: &Path) {
         assert_eq!(output.returncode, 7, "{output:?}");
         let before = splitlines(&plugin_calls()).len();
         harness.send(format!(":{prefix}{}\r", args.join(" ")).as_bytes(), "Exit code 7");
-        assert!(harness.text().contains(strip(&output.stdout())), "{}", harness.text());
+        harness.until(strip(&output.stdout()));
         let text = plugin_calls();
         let calls = splitlines(&text);
         assert!(
@@ -141,7 +142,13 @@ fn create_plugins(kubectl: &Path) {
         let args = ["create", name, "--help"];
         let output = direct(&args, &kubeconfig);
         assert!(output.returncode == 0 && !output.stdout().contains("UNEXPECTED_SHADOW_PLUGIN"));
+        assert!(output.stdout().contains("Usage:"), "{output:?}");
         harness.send(format!(":{}\r", args.join(" ")).as_bytes(), "Exit code 0");
+        // The exit footer can be drawn before the output, and a terminal
+        // without output would pass the check below. The help of the built-in
+        // ends with its usage: with that on the screen, what is absent is the
+        // output of a plugin that ran in its place.
+        harness.until("Usage:");
         let screen = harness.text();
         assert!(!screen.contains("UNEXPECTED_SHADOW_PLUGIN") && !screen.contains("Plugin-defined"), "{screen}");
         harness.send(b"\r", "[Kubernetes]");
@@ -149,7 +156,7 @@ fn create_plugins(kubectl: &Path) {
     // The ordinary built-in still uses UI namespace defaults. This dry run
     // creates only stdout and cannot create a Kubernetes resource.
     harness.send(b":create configmap example --dry-run=client --validate=false -o yaml\r", "Exit code 0");
-    assert!(harness.text().contains("namespace: ui-ns"), "{}", harness.text());
+    harness.until("namespace: ui-ns");
     harness.send(b"\r", "[Kubernetes]");
     let config_before = fs::read(&kubeconfig).unwrap();
     for value in ["--namespace=value", "--context=value", "--kubeconfig=value"] {
@@ -170,9 +177,9 @@ fn create_plugins(kubectl: &Path) {
             };
             let before = creates().len();
             harness.send(format!(":{}\r", args.join(" ")).as_bytes(), "Exit code 0");
-            let screen = harness.text();
             let stdout = output.stdout();
-            assert!(splitlines(&stdout).iter().all(|line| screen.contains(strip(line))), "{screen}");
+            harness.until_all(&splitlines(&stdout).into_iter().map(strip).collect::<Vec<_>>());
+            let screen = harness.text();
             assert!(!screen.split("apiVersion:").next().unwrap().contains(value), "{screen}");
             let created = creates();
             assert!(
@@ -201,8 +208,9 @@ fn create_plugins(kubectl: &Path) {
         let output = direct(&[&["--context", "old-cluster", "--namespace", "ui-ns"][..], &args].concat(), &kubeconfig);
         assert!(output.returncode == 0 && output.stdout().contains("namespace: explicit"), "{output:?}");
         harness.send(format!(":{}\r", args.join(" ")).as_bytes(), "Exit code 0");
+        let stdout = output.stdout();
+        harness.until_all(&splitlines(&stdout).into_iter().map(strip).collect::<Vec<_>>());
         let screen = harness.text();
-        assert!(splitlines(&output.stdout()).iter().all(|line| screen.contains(strip(line))), "{screen}");
         assert!(screen.split("apiVersion:").next().unwrap().contains("--namespace explicit"), "{screen}");
         harness.send(b"\r", "[Kubernetes]");
     }
@@ -221,7 +229,8 @@ fn create_plugins(kubectl: &Path) {
     let output = direct(&args, &direct_config);
     assert_eq!(output.returncode, 0, "{}", output.stderr());
     harness.send(format!(":{}\r", args.join(" ")).as_bytes(), "Exit code 0");
-    assert!(harness.text().contains(strip(&output.stdout())), "{}", harness.text());
+    // Before Enter: leaving the terminal drops output that has not arrived.
+    harness.until(strip(&output.stdout()));
     harness.send(b"\r", "Namespace: test");
     assert!(harness.text().contains("Context: old-cluster"), "{}", harness.text());
     assert_eq!(fs::read(&kubeconfig).unwrap(), fs::read(&direct_config).unwrap());

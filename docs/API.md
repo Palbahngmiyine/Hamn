@@ -78,7 +78,7 @@ and waits for cleanup. Unknown outcomes require inspection before retry.
 
 | Family | Operations |
 | --- | --- |
-| VM | `vm list`, `status`, `create`, `configure`, `start`, `stop`, `delete`, `diagnostics`, `env` |
+| VM | `vm list`, `status`, `create`, `configure`, `apply`, `start`, `stop`, `delete`, `diagnostics`, `env` |
 | Docker containers | `docker containers list`, `inspect`, `logs`, `stats`, `start`, `stop`, `restart`, `delete` |
 | Docker inventory | `docker images list`, `docker volumes list`, `docker networks list` |
 | Kubernetes selection | `k8s contexts list`, `k8s namespaces list` |
@@ -106,6 +106,74 @@ tails of `logs/serial.log`, `logs/serial.previous.log`, `logs/vmrun.log` and
 Use `hamn --headless system upgrade --help` for upgrade-specific usage and recovery.
 See [installation and upgrade experience](INSTALLATION.md) for progress and compatibility.
 `vm env` returns Docker connection information, not shell text.
+
+An operation that needs the stored configuration of a profile refuses a
+`config.yaml` that it cannot read, and changes nothing in the profile. The
+message names the profile and the rule the file breaks, such as an unknown
+key. `vm status`, `vm env` and Docker requests with `--profile` fail with
+`profileUnavailable`; `vm configure`, `vm start`, `vm stop`, `vm delete` and
+`vm diagnostics` fail with `operationFailed`, as `vm apply` does. The refusal
+is a known failure, not `outcomeUnknown`: it comes before anything is started,
+stopped or written. A profile that does not exist is refused with the same
+codes and a message that says so, except by `vm start` and `vm apply`, which
+create it, and by `vm delete`, which succeeds and leaves `~/.hamn/<profile>/`
+marked as deleted: `vm create` and `vm apply` then answer `conflict` for that
+name. Correct a file that cannot be read by hand:
+[YAML schema](CONFIGURATION.md#yaml-schema) lists what it can hold.
+
+`vm list` does not fail because of such a profile. It lists the profile with
+`name`, `state`, `directory` and `configurationError` only:
+
+```json
+{"name":"old","state":"running","directory":"/Users/me/.hamn/old","configurationError":"unknown configuration key: kubernetes"}
+```
+
+`state` is the state of its VM, which can run although the file was changed
+after the start. `configurationError` is the rule as diagnostic text; test for
+the key, which a profile that reads does not have. The settings and the other
+status fields are absent, not null: they were not observed. The list still
+fails as a whole when `~/.hamn` or a profile directory is not a directory
+that only this user can write (a symbolic link is refused as well), when a
+profile directory cannot be entered, and when a state file or the marker of
+a deleted profile is not what it should be.
+
+`vm apply` takes `--file <path>`, a
+[profile definition](CONFIGURATION.md#declarative-configuration), and
+`--dry-run` (read-only, no `--yes` required). It makes the stored
+configuration equal to the definition and does not start or stop the VM. An
+apply and its dry run return the same object:
+
+```json
+{"profile":"work","action":"configure","changes":[{"key":"cpus","from":4,"to":6},{"key":"mounts"}],"dryRun":false}
+```
+
+`action` is `create`, `configure` or `none`. `changes` lists the settings that
+`configure` replaces, by their `config.yaml` keys: numbers and booleans with
+`from` and `to`, and `docker.daemonJson`, `mounts` and `provision` by key
+alone. It is empty for `create` and `none`. An apply with `action: none`
+writes nothing and leaves `config.yaml` with its modification time; it takes
+no lock and succeeds while the VM runs. A dry run does not look at the VM: a
+`configure` it reports still needs a stopped VM.
+
+A failed apply is classified by what it left:
+
+- `invalidRequest`: the arguments, the file or the definition are refused.
+  Nothing under `~/.hamn` was created or changed.
+- `conflict`: the state of the profile forbids the change. Its VM is running,
+  `vm delete` removed it, its directory holds other files but no
+  `config.yaml`, or the disk would shrink. `config.yaml` is unchanged.
+- `cancelled`: the deadline passed or the request was cancelled while the
+  apply waited for another operation on the profile. That wait is not
+  interrupted; the apply ends when the other operation does, without writing.
+- `operationFailed`: any other failure, such as a VM whose process cannot be
+  verified. `config.yaml` is unchanged.
+- `outcomeUnknown`: the apply cannot say what `config.yaml` holds. The write
+  was not confirmed durable, the file could not be read back after a failed
+  write, or the result could not be built after the write. The file can hold
+  the new settings. Apply again: equal settings report `none`.
+
+A dry run fails with the same code when the definition or the stored profile
+would make the apply fail; only the state of the VM is left to the apply.
 
 Kubernetes requests require `--context`, except context listing. Namespaced
 mutations additionally require `--namespace`. Lists support `--all-namespaces`.
@@ -160,8 +228,8 @@ worker protocol. Process identity checks and lifecycle locks remain in C.
 
 `__core-worker`, `vmrun`, forwarding process modes, and guest `hamnd` endpoints
 are private implementation details, not public automation interfaces. There is
-no public containerd socket, built-in Compose/exec/apply/port-forward, or MCP
-server in this interface.
+no public containerd socket, built-in Compose, exec, Kubernetes apply or
+port-forward, or MCP server in this interface.
 
 See [Cargo static linking](https://doc.rust-lang.org/cargo/reference/build-script-examples.html#building-a-native-library),
 [Ratatui backends](https://ratatui.rs/concepts/backends/), and

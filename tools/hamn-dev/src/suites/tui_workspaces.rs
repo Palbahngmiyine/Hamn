@@ -4,13 +4,13 @@
 use crate::runner::{self, case};
 use crate::support::exec::{self, Session};
 use crate::support::pty::{self, Pty};
+use crate::support::real_cli;
 use crate::support::screen::RatatuiScreen;
 use crate::support::termios;
 use crate::support::tui::install_fixture;
 use crate::support::{hamn, tmp::TempDir};
 use serde_json::{Value, json};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -210,10 +210,10 @@ pub fn fixture(program: &str, args: &[String]) -> ExitCode {
         if program == "kubectl-hamnfixture" {
             return ExitCode::SUCCESS;
         }
+        // The TUI runs `docker` and `kubectl` at the same time, and both
+        // append here: one write per call keeps every line a record.
         let record = std::env::var_os("CLI_RECORD").expect("CLI_RECORD");
-        let mut out = OpenOptions::new().create(true).append(true).open(record).unwrap();
-        writeln!(out, "{}", json!([program, args])).unwrap();
-        drop(out);
+        real_cli::append_line(Path::new(&record), &json!([program, args]).to_string());
         let has = |value: &str| args.iter().any(|arg| arg == value);
         if has("ps") {
             if has("-q") {

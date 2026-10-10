@@ -140,6 +140,20 @@ impl Harness {
         self.wait(|harness| harness.screen.text().contains(text));
     }
 
+    /// Waits until every one of `texts` is on the screen.
+    ///
+    /// For the output of a CLI in the embedded terminal. The terminal draws
+    /// its exit footer when the process is reaped and its output when the
+    /// bytes arrive, as two events in either order: a test that waited for
+    /// the footer has not seen the output yet. This keeps the requirement
+    /// that the output appears, and output that never comes fails here.
+    pub fn until_all(&mut self, texts: &[&str]) {
+        self.wait(|harness| {
+            let screen = harness.screen.text();
+            texts.iter().all(|text| screen.contains(text))
+        });
+    }
+
     pub fn noticed(&mut self, text: &str) {
         let text = text.as_bytes().to_vec();
         self.wait(move |harness| harness.notices.windows(text.len()).any(|window| window == text));

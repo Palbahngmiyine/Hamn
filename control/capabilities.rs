@@ -15,6 +15,7 @@ fn operation(name: &str, mutation: bool) -> Value {
     let action = *words.last().unwrap();
     let resource = words.get(1).copied().unwrap_or("");
     let upgrade = matches!(name, "system upgrade");
+    let apply = name == "vm apply";
     let namespaced = domain == "k8s" && !matches!(resource, "contexts" | "namespaces" | "nodes");
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
@@ -30,7 +31,11 @@ fn operation(name: &str, mutation: bool) -> Value {
         false,
     );
     if mutation {
-        add("yes", json!({"type":"boolean", "const":true}), !upgrade);
+        add(
+            "yes",
+            json!({"type":"boolean", "const":true}),
+            !upgrade && !apply,
+        );
     }
     if matches!(domain, "vm" | "docker") && name != "vm list" {
         add(
@@ -109,6 +114,18 @@ fn operation(name: &str, mutation: bool) -> Value {
             false,
         );
     }
+    if apply {
+        add(
+            "file",
+            json!({"type":"string", "minLength":1, "description":"Profile definition file: one YAML document with apiVersion hamn/v1, kind Profile, metadata.name equal to profile, and spec holding the config.yaml settings (omitted keys take their defaults); a regular file of at most 65536 bytes, standard input is not read"}),
+            true,
+        );
+        add(
+            "dry-run",
+            json!({"type":"boolean", "default":false, "description":"Report the action and the changes without writing; no --yes required; the VM is not looked at"}),
+            false,
+        );
+    }
     if name == "vm diagnostics" {
         add(
             "path",
@@ -177,6 +194,10 @@ fn operation(name: &str, mutation: bool) -> Value {
         arguments["then"] = json!({"properties":{"force":{"const":false}}});
         arguments["else"] = json!({"required":["yes"]});
     }
+    if apply {
+        arguments["if"] = json!({"required":["dry-run"],"properties":{"dry-run":{"const":true}}});
+        arguments["else"] = json!({"required":["yes"]});
+    }
     json!({"name":name, "mutates":mutation, "impact":request.impact(),
         "arguments":arguments,
         "output": if action == "logs" {"ndjson log events followed by a result"} else {"json result; ndjson snapshots with --watch"}})
@@ -217,13 +238,29 @@ mod tests {
                 op["name"].as_str(),
                 Some("system upgrade")
             );
+            // Both have a variant that reads only and needs no confirmation.
+            let apply = op["name"] == "vm apply";
             assert_eq!(
                 required.contains(&json!("yes")),
-                op["mutates"] == true && !upgrade
+                op["mutates"] == true && !upgrade && !apply
             );
             if upgrade {
                 assert_eq!(op["arguments"]["else"]["required"], json!(["yes"]));
                 assert_eq!(op["arguments"]["if"]["properties"]["check"]["const"], true);
+            }
+            if apply {
+                assert_eq!(op["arguments"]["else"]["required"], json!(["yes"]));
+                assert_eq!(op["arguments"]["if"]["properties"]["dry-run"]["const"], true);
+                assert_eq!(required, &[json!("profile"), json!("file")]);
+            }
+            // The definition file and the dry run belong to vm apply alone.
+            for flag in ["file", "dry-run"] {
+                assert_eq!(
+                    !op["arguments"]["properties"][flag].is_null(),
+                    apply,
+                    "{flag} on {}",
+                    op["name"]
+                );
             }
             for flag in required {
                 assert!(!op["arguments"]["properties"][flag.as_str().unwrap()].is_null());

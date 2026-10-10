@@ -18,7 +18,10 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "cjson/cJSON.h"
+#include "core/control.h"
 #include "core/lifecycle.h"
+#include "core/log.h"
 #include "core/profile.h"
 #include "util/proc.h"
 
@@ -460,6 +463,216 @@ static void identity_without_uuid_of_a_gone_process_is_kept(const char *root)
     }
 }
 
+/* A profile with its default configuration stored under HOME, where the
+ * control calls look for it. */
+static void home_profile(const char *root, const char *name, struct profile *p)
+{
+    char home[256];
+    int n = snprintf(home, sizeof(home), "%s/home", root);
+    assert(n > 0 && n < (int)sizeof(home));
+    assert((mkdir(home, 0700) == 0 || errno == EEXIST) &&
+           setenv("HOME", home, 1) == 0);
+    assert(profile_load(p, name) == 0 && profile_save(p) == 0);
+}
+
+/* `vm configure` changes the settings of a stopped VM only. A running VM
+ * and a VM whose ownership cannot be verified are refused alike, also when
+ * the call would change nothing, and config.yaml keeps its bytes. */
+static void configure_requires_a_stopped_vm(const char *root)
+{
+    struct profile p;
+    home_profile(root, "configured", &p);
+    char before[4096], after[4096];
+    read_text(&p, "config.yaml", before, sizeof(before));
+
+    const enum reply replies[] = { REPLY_START_IDENTITY };
+    struct supervisor supervisor;
+    supervisor_start(&p, replies, 1, &supervisor);
+    write_identity(&p, &supervisor);
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_VERIFIED);
+    assert(hamn_control_configure("configured", 8, 0, 0, 0, -1) == 1);
+    assert(strcmp(log_last_error(),
+                  "VM must be stopped before changing settings") == 0);
+    assert(hamn_control_configure("configured", 0, 0, 0, 0, -1) == 1);
+    read_text(&p, "config.yaml", after, sizeof(after));
+    assert(strcmp(before, after) == 0);
+    assert(!supervisor_kill(&supervisor));
+
+    write_text(&p, "vmrun.identity", "not an identity\n");
+    write_text(&p, "vmrun.pid", "2147483646\n");
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_UNVERIFIED);
+    assert(hamn_control_configure("configured", 8, 0, 0, 0, -1) == 1);
+    assert(strcmp(log_last_error(),
+                  "VM must be stopped before changing settings") == 0);
+    read_text(&p, "config.yaml", after, sizeof(after));
+    assert(strcmp(before, after) == 0);
+
+    char path[1024];
+    assert(profile_path(&p, "vmrun.identity", path, sizeof(path)) &&
+           unlink(path) == 0);
+    assert(profile_path(&p, "vmrun.pid", path, sizeof(path)) &&
+           unlink(path) == 0);
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_STALE);
+    assert(hamn_control_configure("configured", 8, 0, 0, 0, -1) == 0);
+    assert(profile_read_existing(&p, "configured") == 0 && p.cpus == 8);
+}
+
+/* One hamn_control_apply of the definition `spec` for the profile `applied`;
+ * the action of its result, or "" when it has none. */
+static int apply(const char *root, const char *spec, int dry_run,
+                 const char **action)
+{
+    char path[512];
+    int n = snprintf(path, sizeof(path), "%s/home/definition.yaml", root);
+    assert(n > 0 && n < (int)sizeof(path));
+    FILE *f = fopen(path, "w");
+    assert(f && fprintf(f, "apiVersion: hamn/v1\nkind: Profile\nmetadata:\n"
+                        "  name: applied\nspec:%s", spec) > 0 &&
+           fclose(f) == 0);
+    char *json = NULL;
+    int rc = hamn_control_apply("applied", path, dry_run, &json);
+    assert((rc == 0) == (json != NULL));
+    *action = !json ? "" :
+        strstr(json, "\"action\":\"none\"") ? "none" :
+        strstr(json, "\"action\":\"configure\"") ? "configure" : "other";
+    hamn_control_free(json);
+    return rc;
+}
+
+/* `vm apply` writes a change for a stopped VM only: a running VM is a
+ * conflict, and a VM whose ownership cannot be verified a failure that
+ * stopping would not resolve. Neither changes a byte. Equal settings and a
+ * dry run do not look at the VM at all. */
+static void apply_changes_the_settings_of_a_stopped_vm_only(const char *root)
+{
+    struct profile p;
+    home_profile(root, "applied", &p);
+    char before[4096], after[4096];
+    const char *action;
+    read_text(&p, "config.yaml", before, sizeof(before));
+
+    const enum reply replies[] = { REPLY_START_IDENTITY };
+    struct supervisor supervisor;
+    supervisor_start(&p, replies, 1, &supervisor);
+    write_identity(&p, &supervisor);
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_VERIFIED);
+    assert(apply(root, " {}\n", 0, &action) == 0 &&
+           strcmp(action, "none") == 0);
+    assert(apply(root, "\n  cpus: 8\n  rosetta: true\n", 0, &action) == 4);
+    assert(strcmp(log_last_error(), "VM must be stopped before changing "
+                  "settings: cpus, rosetta") == 0);
+    assert(apply(root, "\n  cpus: 8\n  rosetta: true\n", 1, &action) == 0 &&
+           strcmp(action, "configure") == 0);
+    read_text(&p, "config.yaml", after, sizeof(after));
+    assert(strcmp(before, after) == 0);
+    assert(supervisor_running(&supervisor));
+    assert(!supervisor_kill(&supervisor));
+
+    write_text(&p, "vmrun.identity", "not an identity\n");
+    write_text(&p, "vmrun.pid", "2147483646\n");
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_UNVERIFIED);
+    assert(apply(root, " {}\n", 0, &action) == 0 &&
+           strcmp(action, "none") == 0);
+    assert(apply(root, "\n  cpus: 8\n", 0, &action) == 1);
+    assert(strcmp(log_last_error(), "cannot verify the VM process of "
+                  "profile applied; settings were not changed") == 0);
+    assert(apply(root, "\n  cpus: 8\n", 1, &action) == 0 &&
+           strcmp(action, "configure") == 0);
+    read_text(&p, "config.yaml", after, sizeof(after));
+    assert(strcmp(before, after) == 0);
+
+    char path[1024];
+    assert(profile_path(&p, "vmrun.identity", path, sizeof(path)) &&
+           unlink(path) == 0);
+    assert(profile_path(&p, "vmrun.pid", path, sizeof(path)) &&
+           unlink(path) == 0);
+    assert(apply(root, "\n  cpus: 8\n", 0, &action) == 0 &&
+           strcmp(action, "configure") == 0);
+    assert(profile_read_existing(&p, "applied") == 0 && p.cpus == 8);
+}
+
+/* A VM keeps running when its config.yaml is changed into one that cannot
+ * be read. The list shows that: the profile is there with the state of its
+ * VM and the reason, beside the profiles of the cases before, which read.
+ * Its status fails with the reason. */
+static void a_running_vm_is_listed_while_its_configuration_cannot_be_read(
+    const char *root)
+{
+    struct profile p;
+    home_profile(root, "unreadable", &p);
+    const enum reply replies[] = { REPLY_START_IDENTITY };
+    struct supervisor supervisor;
+    supervisor_start(&p, replies, 1, &supervisor);
+    write_identity(&p, &supervisor);
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_VERIFIED);
+    write_text(&p, "config.yaml", "kubernetes:\n  enabled: true\n");
+
+    char *json = NULL;
+    assert(hamn_control_query(NULL, &json) == 0);
+    cJSON *rows = cJSON_Parse(json);
+    assert(cJSON_IsArray(rows));
+    int unreadable = 0, readable = 0;
+    const cJSON *row;
+    cJSON_ArrayForEach(row, rows) {
+        const cJSON *name = cJSON_GetObjectItem(row, "name");
+        const cJSON *error = cJSON_GetObjectItem(row, "configurationError");
+        assert(cJSON_IsString(name));
+        if (strcmp(name->valuestring, "unreadable") != 0) {
+            assert(!error && cJSON_IsNumber(cJSON_GetObjectItem(row, "cpus")));
+            readable++;
+            continue;
+        }
+        const cJSON *state = cJSON_GetObjectItem(row, "state");
+        const cJSON *directory = cJSON_GetObjectItem(row, "directory");
+        assert(cJSON_IsString(state) &&
+               strcmp(state->valuestring, "running") == 0);
+        assert(cJSON_IsString(directory) &&
+               strcmp(directory->valuestring, p.dir) == 0);
+        assert(cJSON_IsString(error) &&
+               strcmp(error->valuestring,
+                      "unknown configuration key: kubernetes") == 0);
+        assert(cJSON_GetArraySize(row) == 4);
+        unreadable++;
+    }
+    assert(unreadable == 1 && readable >= 2);
+    cJSON_Delete(rows);
+    hamn_control_free(json);
+
+    assert(hamn_control_query("unreadable", &json) == -1 && json == NULL);
+    assert(strcmp(log_last_error(), "cannot read the configuration of "
+                  "profile unreadable: unknown configuration key: "
+                  "kubernetes") == 0);
+    assert(supervisor_running(&supervisor));
+    assert(!supervisor_kill(&supervisor));
+}
+
+/* A profile that is listed can record a complaint on the way: here the probe
+ * of a VM whose state file is not one, for a profile whose configuration
+ * cannot be read. The complaint is not the reason of the list. A list that
+ * then failed for a cause without a sentence would otherwise be reported with
+ * it. */
+static void the_list_forgets_the_complaint_of_a_listed_profile(const char *root)
+{
+    struct profile p;
+    home_profile(root, "complaining", &p);
+    struct supervisor supervisor;
+    supervisor_start(&p, NULL, 0, &supervisor);
+    write_identity(&p, &supervisor);
+    write_text(&p, "state.json", "{");
+    write_text(&p, "config.yaml", "kubernetes:\n  enabled: true\n");
+    /* The probe that the list makes for this profile does complain. */
+    log_clear_error();
+    assert(vm_process_probe(&p, NULL) == VM_PROCESS_UNVERIFIED);
+    assert(strstr(log_last_error(), "is not valid JSON"));
+
+    char *json = NULL;
+    assert(hamn_control_query(NULL, &json) == 0);
+    assert(strstr(json, "\"name\":\"complaining\""));
+    assert(log_last_error()[0] == '\0');
+    hamn_control_free(json);
+    assert(!supervisor_kill(&supervisor));
+}
+
 /* The cases run in a child, so a failed assertion still leaves this process
  * to remove the profiles; supervisors exit when that child's end of their
  * alive pipe closes. */
@@ -476,6 +689,10 @@ int main(void)
         identity_without_uuid_is_not_adopted_from_a_status(root);
         identity_without_uuid_is_unverified_before_the_control_socket(root);
         identity_without_uuid_of_a_gone_process_is_kept(root);
+        configure_requires_a_stopped_vm(root);
+        apply_changes_the_settings_of_a_stopped_vm_only(root);
+        a_running_vm_is_listed_while_its_configuration_cannot_be_read(root);
+        the_list_forgets_the_complaint_of_a_listed_profile(root);
         _exit(0);
     }
     int status = 0;

@@ -10,8 +10,10 @@
 static int cmd_stop_locked(const char *profile_name)
 {
     struct profile profile;
-    if (profile_read_existing(&profile, profile_name) != 0) {
-        logerr("cannot load profile");
+    char failure[PROFILE_FAILURE_CAP];
+    if (profile_read_existing_explained(&profile, profile_name,
+                                        failure) != 0) {
+        logerr("%s", failure);
         return 1;
     }
     int mutation_fd = profile_mutation_lock(&profile);

@@ -107,12 +107,22 @@ impl Terminal {
         true
     }
 
-    /// Runs `:command`, waits for `marker` and `Exit code CODE`, and returns
-    /// to the resource view.
+    /// Runs `:command`, waits until `marker` and `Exit code CODE` are on the
+    /// screen together, and returns to the resource view.
+    ///
+    /// Only the terminal view of a CLI has the exit line, so `marker` beside
+    /// it is output of that CLI. Waited for by itself it can be a row of the
+    /// list or the typed command, which hold the same text before anything
+    /// ran. The exit line and the output are drawn in either order. The
+    /// return is waited for as well: the output stays on this screen until
+    /// the list is drawn, and would satisfy a caller that waits for a row
+    /// with the same text.
     pub(crate) fn command(&mut self, command: &str, marker: &str, code: i32) {
-        self.send(format!(":{command}\r").as_bytes(), Some(marker));
-        self.until(&format!("Exit code {code}"));
-        self.send(b"\r", None);
+        self.write(format!(":{command}\r").as_bytes());
+        let exit = format!("Exit code {code}");
+        self.wait_for(&|text| text.contains(&exit) && text.contains(marker));
+        self.write(b"\r");
+        self.wait_for(&|text| !text.contains(&exit));
     }
 
     /// Quits with `q` and requires a zero exit with the terminal settings

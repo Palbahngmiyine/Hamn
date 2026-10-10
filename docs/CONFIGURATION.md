@@ -43,10 +43,80 @@ hamn --headless vm start --profile work --yes
 
 `configure` changes stopped profiles only. Existing VM disks are not shrunk.
 `create` and `configure` also take `--rosetta <true|false>`. For the other
-advanced settings, edit `~/.hamn/<profile>/config.yaml` while the VM is
-stopped. An update preserves the settings it does not name: mounts, Docker
-daemon settings, Rosetta, and existing provisioning hooks. In the TUI, `v` then `c` opens the resource
+advanced settings, apply a [profile definition](#declarative-configuration) or
+edit `~/.hamn/<profile>/config.yaml` while the VM is
+stopped. `configure` and `start` change only the settings they are given and
+keep the rest: mounts, Docker daemon settings, Rosetta, and existing
+provisioning hooks. A profile definition replaces every setting. In the TUI, `v` then `c` opens the resource
 configuration command. Native `kubectl edit` uses the installed editor in the PTY.
+
+## Declarative configuration
+
+`vm apply` makes the stored configuration of a profile equal to a profile
+definition file. It creates the profile when it does not exist, replaces
+`config.yaml` when its settings differ, and does nothing when they are equal.
+It never starts or stops a VM.
+
+```sh
+hamn --headless vm apply --profile work --file work.yaml --dry-run
+hamn --headless vm apply --profile work --file work.yaml --yes
+```
+
+```yaml
+apiVersion: hamn/v1
+kind: Profile
+metadata:
+  name: work
+spec:
+  cpus: 6
+  memoryMiB: 8192
+  diskGiB: 80
+  rosetta: true
+  mounts:
+    - location: "/Users/<your-user>/project"
+      mountPoint: "/workspace/project"
+      writable: true
+```
+
+A definition is one YAML document with exactly four keys, all required:
+`apiVersion: hamn/v1`, `kind: Profile`, `metadata` with the single key `name`,
+and `spec`. `metadata.name` must equal `--profile`. `spec` is the mapping of
+`config.yaml` described in [YAML schema](#yaml-schema): the same keys and
+units, read by the same strict parser, so the `config.yaml` of an existing
+profile, indented below `spec:`, is its definition. The file must be a regular
+file of at most 65536 bytes; standard input is not read. A relative path is
+relative to the directory the command runs in.
+
+The definition is the whole configuration. A key that `spec` leaves out takes
+its default; `vm configure` instead keeps what it is not given. Applying a
+definition without `mounts` removes the mounts. A `diskGiB` below the stored
+value is refused with `disk size cannot shrink`, also when the key is left out
+and the default 60 is smaller: state the real size.
+
+`--dry-run` reports what an apply would do, writes nothing and needs no
+`--yes`. The result names the `action` (`create`, `configure` or `none`) and
+one entry in `changes` for each setting that differs. Numbers and booleans
+carry `from` and `to`; `docker.daemonJson`, `mounts` and `provision` are named
+without their values, which can hold credentials. `config.yaml` is private to
+the user; a definition file is as private as the place it is kept in.
+
+Equal settings succeed while the VM runs, without a lock. Differing settings
+need a stopped VM, as for `vm configure`: stop the VM, apply, and start it. A
+dry run does not look at the VM, so it also answers for a running one.
+Settings are compared with `config.yaml`, not with what a running VM was
+started with. A later `vm configure`, or `vm start` with `--cpu`, `--memory`
+or `--disk`, changes `config.yaml` and so differs from the definition until
+the file follows or is applied again.
+
+These are refused without a change: a profile that `vm delete` removed (only
+`vm start` restores it, with its disk), a directory under `~/.hamn` that holds
+other files but no `config.yaml` (a disk, or the archives of `vm diagnostics`;
+what an interrupted or refused creation left does not count), a stored
+`config.yaml` that cannot be read (the
+parser's reason is reported), and a VM whose process cannot be verified. As
+for a hand-edited `config.yaml`, the conditions of the host are checked by the
+next start, not by the apply: the mount directories, and whether Rosetta and
+nested virtualization are available.
 
 ## YAML schema
 
@@ -71,7 +141,9 @@ provision: []
 The parser accepts exactly one YAML document. It rejects duplicate or unknown
 keys, aliases, anchors, tags, merge keys, non-plain booleans and integers,
 wrong collection types, and invalid paths. Do not depend on YAML implicit type
-coercion.
+coercion. A file that breaks a rule is not read in part: every operation that
+needs the configuration refuses the profile, reports the rule and leaves the
+file as it is (see [API](API.md#operations)).
 
 | Key | Type and default | Meaning |
 | --- | --- | --- |

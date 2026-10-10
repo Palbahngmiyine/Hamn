@@ -308,8 +308,13 @@ static int cmd_start_execute(const struct start_options *options,
     struct start_trace trace;
     start_trace_init(&trace);
     struct profile p;
-    if (profile_load(&p, profile_name) != 0)
-        die("cannot initialize profile directory");
+    char failure[PROFILE_FAILURE_CAP];
+    if (profile_load_explained(&p, profile_name, failure) != 0) {
+        /* Nothing of the profile was changed yet: the caller is told so
+         * with a result, which a process that ends here could not give. */
+        logerr("%s", failure);
+        return 1;
+    }
     char deleted_marker[1024];
     if (!profile_path(&p, "deleted", deleted_marker, sizeof(deleted_marker)) ||
         fs_unlink_if_exists(deleted_marker) != 0)
@@ -409,7 +414,7 @@ static int cmd_start_execute(const struct start_options *options,
         goto out;
     }
     if (profile_save(&p) != 0)
-        die("cannot save profile config");
+        die("cannot save profile config: %s", strerror(errno));
 
     /* 1. 이미지 + 디스크 */
     char cache_img[1024];
