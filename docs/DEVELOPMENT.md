@@ -147,8 +147,7 @@ bind the candidate to the source tree at their start.
 For real VM, Docker, Compose, buildx, and disposable kind/Kubernetes validation:
 
 ```sh
-make hamn-dev
-target/release/hamn-dev test workspace-live --binary build/hamn --cache "$HOME/.hamn/cache"
+make -j1 test-workspace-live WORKSPACE_LIVE_CACHE="$HOME/.hamn/cache"
 ```
 
 Run it inside `nix develop .#live`, which provides Docker CLI with its
@@ -175,3 +174,91 @@ fixtures without a VM.
 The local control suite requires Docker CLI for the external-context transport
 fixture. It connects only to the test-owned Unix socket; no Docker daemon or VM
 is started. Every Nix shell includes `docker-client`.
+
+
+### PR #65: validation boundaries and exact revision replay
+
+PR #65's head is `58d76aae987ba834e026703c0681a771c3b33292`.
+Actions run [37835838338](https://github.com/Palbahngmiyine/Hamn/actions/runs/37835838338)
+passed its portable job and five macOS shards. The PR records `workspace-live`
+on `9f4b501`, declarative VM checks on `dcf5838`, and unreadable running-profile
+checks on `b4d13fd`. None establishes live success on `58d76aa`. The PR is now
+merged; this follow-up does not alter its reported historical evidence.
+
+| Path | Automated scope | Not proved |
+|---|---|---|
+| Portable job / `test-portable` | Repository and guest-script contracts | macOS host or booted guest |
+| Shard 3 / `test-profile-state` | Real headless apply, semantic no-op, locks, fake supervisor identity, write/read-back/allocator failures, explicit corrupt/permission repair | Actual Virtualization.framework VM or guest settings |
+| Shard 4 / `test-control-tui` / `workspace-live-checks` | Harness guards, oracles, PTY and transport fixtures | Real VM, Docker Engine or kind cluster |
+| Opt-in `test-workspace-live` / `workspace-live` | Actual VM/guest, Docker, Compose/buildx, kind; includes live declarative checks | Success without an executed run and its evidence |
+
+The new repair case is in the existing `vm-apply` suite and therefore shard 3;
+no additional CI job is needed. Hosted CI continues to check harness compilation
+and VM-free regressions. Keep physical runs separate: a dedicated Apple Silicon
+host can run the opt-in Make target on a pinned checkout. A future manually
+triggered workflow should use a dedicated runner label, trusted refs only,
+serialized VM access, and always retain the log, source SHA/diff, binary SHA-256,
+image SHA-256 and ownership root. Do not schedule untrusted PR code on a personal
+self-hosted machine or mark a skipped physical job as physical success.
+
+Requirements: physical Apple Silicon macOS 13+, an unprivileged account, Apple
+command-line developer tools, Nix with flakes and the locked `.#live` shell
+(pinned Rust, Docker CLI, Compose/buildx, kubectl, kind), a verified signed guest
+image in the cache, Internet access for container images, and sufficient disk/RAM
+for a 60 GiB sparse disk, a 6 GiB VM and kind. The harness verifies the selected
+image digest and marker and copies the cache into its own HOME. No unsigned image
+fallback is permitted. Do not run other gates concurrently in this checkout.
+
+To replay the **unmodified historical head** in a fresh checkout:
+
+```sh
+git clone https://github.com/Palbahngmiyine/Hamn.git Hamn-pr65-live
+cd Hamn-pr65-live
+git checkout --detach 58d76aae987ba834e026703c0681a771c3b33292
+nix develop .#live --command make -j1 host
+set -o pipefail
+nix develop .#live --command target/release/hamn-dev test workspace-live \
+  --binary build/hamn --cache "$HOME/.hamn/cache" 2>&1 | tee workspace-live.log
+```
+
+This reproduces the old workspace suite; it does **not** contain the new apply
+assertions. On the follow-up checkout, record the candidate and run:
+
+```sh
+git rev-parse HEAD > workspace-live-source.txt
+git diff --binary > workspace-live-source.patch
+set -o pipefail
+nix develop .#live --command make -j1 test-profile-state test-control
+nix develop .#live --command make -j1 test-workspace-live \
+  WORKSPACE_LIVE_CACHE="$HOME/.hamn/cache" 2>&1 | tee workspace-live.log
+shasum -a 256 build/hamn > workspace-live-binary.sha256
+```
+
+The new live stage repeats apply while running (no write, same PID), rejects a
+changed definition (`conflict`, same file/PID and guest), applies CPU/RAM changes
+while stopped, and checks CPU count, Linux MemTotal and a writable virtiofs share
+inside the guest after restart. It also verifies that corrupt running-profile
+status/stop/apply refuse without stopping Docker, and that malformed YAML or
+permission denial never triggers automatic replacement. Repair explicitly restores
+known-good bytes or mode 0600; reapply is then a no-op and the guest boots again.
+Only the test-owned configuration is restored in cleanup; no disk is removed.
+
+The printed ownership root contains `binary-sha256.txt`, `ownership.json`
+(including guest image digest), and `vm-apply-results.json`. A stage result alone
+is not success of the full suite: require exit 0, including VM/cluster cleanup,
+and keep the log. Fresh candidates need fresh roots. Docker daemon JSON, Rosetta,
+SSH agent and provision hooks are not exercised by this new apply stage; it does
+not claim to validate every profile setting.
+
+If a real profile is unreadable, retain its disk, keys, PID/identity and a copy of
+its configuration. Restore a known-good configuration with private permissions,
+then re-observe status before stop or apply. `vm apply` is not a force-repair or
+force-stop command, and its omitted fields reset to defaults. `outcomeUnknown`
+after a durability failure requires re-observation; a retry may be a no-op.
+
+Validation of this follow-up in the Linux editing environment: shard partition
+and `git diff --check` passed. Five portable scripts passed (containerd, Rosetta,
+install targets, image contract, image builder). Docker fixture failed because
+socket creation is prohibited; deployment transaction fixture refused root, and
+an unprivileged retry was blocked by process permissions. Rust/Nix are unavailable.
+New Rust regressions, macOS gates and real VM/kind checks were **not run** here.

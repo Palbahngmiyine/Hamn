@@ -113,6 +113,7 @@ release profile and run `test-local-macos` serially.
 - `make test-profile-state`: verify profile/state persistence without starting a VM.
 - `make test-guest-deployment`: verify the immutable guest contract and guest scripts.
 - `make -C guest test-agent`: build and test the guest agent in a Linux environment.
+- `make test-workspace-live`: opt-in physical Apple Silicon VM/Docker/kind checks; never infer its success from hosted CI. See Development for cache and tool prerequisites.
 - `make test-local-macos`: run static, portable, host, profile, deployment, release,
   and workflow gates that do not need a physical VM.
 - `make release-candidate` and `make release-gate`: assemble a candidate and run the

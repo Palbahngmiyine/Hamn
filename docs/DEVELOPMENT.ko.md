@@ -139,8 +139,7 @@ fork/exit 동작은 worker에 격리합니다. TUI 종료가 별도 소유 VM su
 실제 VM·Docker·Compose·buildx·폐기용 kind/Kubernetes 검증 명령입니다.
 
 ```sh
-make hamn-dev
-target/release/hamn-dev test workspace-live --binary build/hamn --cache "$HOME/.hamn/cache"
+make -j1 test-workspace-live WORKSPACE_LIVE_CACHE="$HOME/.hamn/cache"
 ```
 
 Compose/buildx 플러그인을 포함한 Docker CLI·kubectl·kind를 제공하는
@@ -166,3 +165,56 @@ kind 클러스터를 삭제하고 테스트 VM을
 외부 context 전송을 검증하는 로컬 control 테스트에는 Docker CLI가 필요합니다.
 테스트 소유 Unix 소켓만 사용하며 Docker daemon·VM은 시작하지 않습니다.
 모든 Nix 셸은 `docker-client`를 포함합니다.
+
+
+### PR #65 후속 검증
+
+기준 HEAD는 `58d76aae987ba834e026703c0681a771c3b33292`입니다. PR은 현재
+병합되었습니다. Actions #37835838338의 성공은 실제 VM 성공의 증거가 아닙니다.
+PR의 `workspace-live` 기록은 `9f4b501`, apply 실VM 기록은 `dcf5838`,
+읽을 수 없는 실행 중 프로파일 기록은 `b4d13fd`에 해당합니다.
+
+| 검증 경로 | 자동 확인 범위 | 실VM 검증 여부 |
+|---|---|---|
+| Portable / `test-portable` | 소스·게스트 스크립트 계약 | 없음 |
+| Shard 3 / `test-profile-state` | apply CLI, 멱등성, 잠금, 가짜 supervisor, 쓰기 실패, 설정 복원 | 없음 |
+| Shard 4 / `workspace-live-checks` | 하네스 가드·PTY·전송 fixture | 없음 |
+| `test-workspace-live` | 실제 VM·게스트·Docker·kind | 실행 결과가 있을 때만 확인 |
+
+새 복구 회귀 테스트는 기존 `vm-apply` suite를 통해 shard 3에 포함됩니다.
+실VM 검증은 CI와 `test-local-macos`에 포함하지 않은 opt-in Make 타깃입니다.
+Apple Silicon macOS 13+, 일반 사용자 계정, Apple 개발 도구, Nix의 `.#live`
+환경, 검증된 서명 게스트 이미지 캐시, 컨테이너 이미지 다운로드 접근,
+60 GiB sparse disk 및 6 GiB VM/kind를 위한 여유 자원이 필요합니다.
+동일 체크아웃에서 다른 테스트 게이트를 동시에 실행하지 마세요.
+
+후속 변경이 적용된 체크아웃에서:
+
+```sh
+git rev-parse HEAD > workspace-live-source.txt
+git diff --binary > workspace-live-source.patch
+set -o pipefail
+nix develop .#live --command make -j1 test-profile-state test-control
+nix develop .#live --command make -j1 test-workspace-live \
+  WORKSPACE_LIVE_CACHE="$HOME/.hamn/cache" 2>&1 | tee workspace-live.log
+shasum -a 256 build/hamn > workspace-live-binary.sha256
+```
+
+추가 단계는 실행 중 동일 정의의 no-op 및 PID/파일 보존, 변경 정의의 conflict,
+정지 후 변경과 재시작, 게스트 CPU·RAM·쓰기 가능한 virtiofs 공유를 확인합니다.
+설정이 손상된 실행 중 VM에서 status/stop/apply가 거부되고 Docker가 계속 응답하는지,
+문법 오류와 권한 오류 후 정상 파일/권한을 복원하면 다시 적용·부팅되는지도 확인합니다.
+자동 덮어쓰기는 복구로 취급하지 않습니다. 테스트 소유 설정만 정리 시 복원하며,
+디스크는 삭제하지 않습니다. Docker daemon JSON, Rosetta, SSH agent, provision hook은
+이번 apply 단계의 검증 범위가 아닙니다.
+
+출력된 소유 root의 `binary-sha256.txt`, `ownership.json`, `vm-apply-results.json`과
+전체 로그를 보존하세요. 개별 단계 PASS만으로 전체 suite 성공을 표시하지 마세요.
+VM/kind 정리까지 종료 코드 0이어야 합니다. 다른 바이너리는 새 root가 필요합니다.
+원본 HEAD 재현 명령과 전용 실호스트 CI 제안은
+[영문 검증 절차](DEVELOPMENT.md#pr-65-validation-boundaries-and-exact-revision-replay)에 있습니다.
+
+이 Linux 환경에서는 shard 구성과 diff 검증, portable 스크립트 5개가 통과했습니다.
+Docker fixture는 소켓 생성 제한, deployment fixture는 root 실행 제한으로 실패했고,
+일반 사용자 재시도도 프로세스 권한 제한으로 막혔습니다. Rust/Nix가 없어 새 회귀
+테스트와 macOS 게이트를 실행하지 못했습니다. 실제 VM/kind 시험도 **미실행**입니다.

@@ -25,6 +25,7 @@ pub fn main(filters: &[String]) -> ExitCode {
             case("a_dry_run_needs_no_confirmation_and_writes_nothing", a_dry_run_needs_no_confirmation_and_writes_nothing),
             case("refused_requests_and_definitions_create_nothing", refused_requests_and_definitions_create_nothing),
             case("states_that_forbid_a_change_leave_the_configuration", states_that_forbid_a_change_leave_the_configuration),
+            case("an_unreadable_profile_recovers_only_after_its_configuration_is_restored", an_unreadable_profile_recovers_only_after_its_configuration_is_restored),
             case("a_failed_write_is_reported_by_what_it_left", a_failed_write_is_reported_by_what_it_left),
             case("a_first_start_cut_short_does_not_block_the_profile", a_first_start_cut_short_does_not_block_the_profile),
         ],
@@ -440,4 +441,43 @@ fn a_first_start_cut_short_does_not_block_the_profile() {
     fs::write(home.profile("disk").join("disk.img"), b"data").unwrap();
     home.refused("disk", &definition("disk", ""), &["--yes"], "conflict", "holds files but no config.yaml");
     assert!(!home.config("disk").exists());
+}
+
+/// Apply cannot reconstruct a corrupt profile without losing settings or
+/// adopting its disk. Restore the known-good configuration explicitly; a
+/// subsequent apply observes it and preserves existing data.
+fn an_unreadable_profile_recovers_only_after_its_configuration_is_restored() {
+    let home = Home::new();
+    let text = definition("repair", "cpus: 2");
+    home.applied("repair", &text, &["--yes"]);
+    let config = home.config("repair");
+    let good = fs::read(&config).unwrap();
+    let disk = home.profile("repair").join("disk.img");
+    fs::write(&disk, b"existing disk sentinel").unwrap();
+    for corrupt in ["unknown: true\n", "cpus: [\n"] {
+        fs::write(&config, corrupt).unwrap();
+        for extra in [&["--yes"][..], &["--dry-run"]] {
+            home.refused("repair", &text, extra, "operationFailed", "cannot read the configuration");
+            assert_eq!(fs::read(&config).unwrap(), corrupt.as_bytes());
+            assert_eq!(fs::read(&disk).unwrap(), b"existing disk sentinel");
+        }
+        fs::write(&config, &good).unwrap();
+        assert_eq!(home.applied("repair", &text, &["--yes"])["action"], "none");
+        assert_eq!(fs::read(&config).unwrap(), good);
+        assert_eq!(home.status("repair")["cpus"], 2);
+        assert_eq!(fs::read(&disk).unwrap(), b"existing disk sentinel");
+    }
+    // A permission failure is a different read failure, not corruption.
+    // Root bypasses mode bits; refuse to call that case a pass under root.
+    assert_ne!(unsafe { libc::geteuid() }, 0, "permission regression requires an unprivileged user");
+    fs::set_permissions(&config, fs::Permissions::from_mode(0)).unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        home.refused("repair", &text, &["--yes"], "operationFailed", "cannot read the configuration");
+        home.refused("repair", &text, &["--dry-run"], "operationFailed", "cannot read the configuration");
+    }));
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+    outcome.unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    assert_eq!(fs::read(&config).unwrap(), good);
+    assert_eq!(home.applied("repair", &text, &["--yes"])["action"], "none");
+    assert_eq!(fs::read(&disk).unwrap(), b"existing disk sentinel");
 }
