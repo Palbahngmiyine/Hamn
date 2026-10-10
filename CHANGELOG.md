@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.2 (2026-10-10)
+
+## What's Changed
+* fix: keep the TUI still during refresh and explain a stopped Hamn VM by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/60
+* fix: answer a control request that arrives after its connection is accepted by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/62
+* fix: keep published ports forwarded after failed requests, ended relays and a new SSH master by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/63
+* fix: report a UDP port that is published on one address by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/64
+* feat: apply a profile definition with vm apply and say why a profile cannot be read by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/65
+
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.2.1...v0.2.2
+
 ## 0.2.1 (2026-09-29)
 
 ## What's Changed
