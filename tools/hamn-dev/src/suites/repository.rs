@@ -83,8 +83,7 @@ fn desktop_sources_stay_removed() {
 
 /// Apple documents `isNestedVirtualizationSupported` as available only on
 /// Macs with an M3 chip or later. The capability query, not model-name
-/// parsing, guards future supported hardware; both documentation languages
-/// state the boundary.
+/// parsing, guards future supported hardware.
 fn nested_virtualization_is_capability_gated() {
     let config = read("host/vz/vz_config.m");
     for (text, meaning) in [
@@ -94,14 +93,6 @@ fn nested_virtualization_is_capability_gated() {
         ("M3 or later", "an unsupported-hardware error naming the M3 boundary"),
     ] {
         assert!(config.contains(text), "host/vz/vz_config.m lacks {meaning}");
-    }
-    for (file, text) in [
-        ("docs/ARCHITECTURE.md", "M3 chip or"),
-        ("docs/ARCHITECTURE.ko.md", "M3 칩 이상"),
-        ("docs/CONFIGURATION.md", "M3-or-later Mac"),
-        ("docs/CONFIGURATION.ko.md", "M3 칩 이상 Mac"),
-    ] {
-        assert!(read(file).contains(text), "{file} omits the M3 boundary");
     }
 }
 

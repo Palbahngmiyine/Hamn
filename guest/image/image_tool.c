@@ -1,7 +1,7 @@
 /*
  * hamn-image-tool: guest image evidence and size gates for the Linux image
  * builder and release publication. Built from guest/Makefile with only a C
- * compiler and libc (no Python, Rust or zlib); see docs/RELEASE-SETUP.md.
+ * compiler and libc (no Python, Rust or zlib).
  *
  *   evidence check DESTINATION [RESERVED...]
  *   evidence publish SOURCE DESTINATION SIZE_REPORT

@@ -38,11 +38,7 @@ Run hamn to get started. Update later with hamn upgrade.
 `~/.local/bin`이 PATH에 없으면 사용 중인 shell에 추가할 한 줄을 알려 줍니다.
 macOS 기본 도구만 사용하므로 Python, Homebrew, Rust, Xcode Command Line Tools를
 따로 설치할 필요가 없습니다. Hamn 0.1.2 이하는 스스로 이 릴리스로 업데이트할 수
-없으므로 위 설치기를 한 번 실행합니다. 설치기가 기존 설치를 제자리에서 이전합니다
-([설치 문서](docs/INSTALLATION.ko.md#설치-배치와-이전-설치) 참고).
-
-소스 빌드는 [개발 문서](docs/DEVELOPMENT.ko.md)를 참고하세요.
-서명된 릴리스 설치는 [릴리스 설정](docs/RELEASE-SETUP.ko.md)을 참고하세요.
+없으므로 위 설치기를 한 번 실행합니다. 설치기가 기존 설치를 제자리에서 이전합니다.
 
 ## 터미널 화면
 
@@ -51,7 +47,6 @@ macOS 기본 도구만 사용하므로 Python, Homebrew, Rust, Xcode Command Lin
 `:kubectl get deployments -n dev`를 입력할 수 있습니다. 일반 목록은 선택 가능한
 표로 표시하고 나머지는 내부 터미널에서 원래 CLI 의미대로 실행합니다.
 `e`는 환경·context 선택, `v`는 Hamn 프로필의 VM 제어입니다.
-작업·설정·취소는 [작업 영역과 명령 안내](docs/TUI.ko.md)를 참고하세요.
 
 ## 헤드리스 인터페이스
 
@@ -70,7 +65,7 @@ hamn --headless vm stop --profile work --yes
 
 변경에는 명시적 대상과 `--yes`가 필요합니다. 일회성 작업은 JSON 응답 하나,
 `--follow` 로그와 `--watch` 조회는 NDJSON을 출력합니다. stdout에는 기계용 응답만
-출력합니다. 자세한 계약은 [API](docs/API.ko.md)를 참고하세요.
+출력합니다.
 
 ## 선언적 설정
 
@@ -115,10 +110,6 @@ hamn --headless vm start --profile work --yes
   디렉터리 안의 디렉터리를 쓰세요. `rosetta: true`는 Rosetta를 쓸 수 있는 Mac에서만
   두세요.
 
-규칙은 [선언적 설정](docs/CONFIGURATION.ko.md#선언적-설정), 모든 설정 항목은
-[YAML schema](docs/CONFIGURATION.ko.md#yaml-schema), 마운트의 키와 조건은
-[Mount](docs/CONFIGURATION.ko.md#mount)를 참고하세요.
-
 ## 외부 도구 연결
 
 ```sh
@@ -135,7 +126,6 @@ UI 선택은 Docker의 현재 context나 kubeconfig의 `current-context`를 바�
 
 `vm delete`는 VM을 멈추고 목록에서 숨기며 디스크·Docker 데이터를 보존합니다.
 `system uninstall --yes`는 모든 Hamn 프로필과 관리 설치 파일을 영구 삭제합니다.
-저장 형식은 [설정](docs/CONFIGURATION.ko.md)을 참고하세요.
 
 컨테이너 생성·Compose·exec·Kubernetes apply·port-forward는 TUI에서 외부 CLI로
 실행하며 헤드리스 SDK 작업 집합에는 추가하지 않습니다. MCP 서버는 제공하지 않습니다.
@@ -168,5 +158,4 @@ Hamn 0.1.2 is up to date.
 표시합니다. 자동화에는 `hamn upgrade --output json`이나
 `hamn --headless system upgrade --yes`를 사용합니다. TUI를 정상 종료한 뒤 새
 릴리스를 안내할 수 있지만 스스로 설치하지는 않습니다. 이 확인은
-`HAMN_NO_UPDATE_CHECK=1`로 끌 수 있습니다. 무결성, 복구, `--force`는
-[설치](docs/INSTALLATION.ko.md)를 참고하세요.
+`HAMN_NO_UPDATE_CHECK=1`로 끌 수 있습니다.

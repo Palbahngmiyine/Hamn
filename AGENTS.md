@@ -32,7 +32,7 @@
 - Keep tightly coupled state and invariants together. Start with private Rust modules/functions or narrow C headers; add traits, function tables, or crates only when a concrete boundary requires them.
 - Keep dependencies explicit and avoid cycles. Callers use the module contract rather than reaching into its state. Do not impose a universal untyped module interface.
 - Separate policy and state-transition decisions from OS, network, clock, and process effects where this enables independent testing. Provide narrow seams for controlled events and dependency failures.
-- Record each changed module's contract beside its public declarations or in existing architecture/API documentation: valid inputs and units, size limits, outputs and errors, ownership and lifetime, side effects, deadlines and cancellation, concurrency, and compatibility.
+- Keep each changed module's contract beside its public declarations: valid inputs and units, size limits, outputs and errors, ownership and lifetime, side effects, deadlines and cancellation, concurrency, and compatibility.
 - Recursively narrow a problem to the smallest meaningful change, then verify upward through every affected caller and shared resource. Modules form a dependency graph; passing one child's tests is not proof that the combined system works.
 - Improve implementations through normal source changes, rebuilds, and validation. Preserve the single executable; this principle does not require runtime code replacement or an autonomous improvement framework.
 
@@ -62,7 +62,6 @@
   promotion, and repository preflight. Promotion must not rebuild an already
   validated RC.
 - `tests/host/`, `guest/tests/`, and inline Rust tests: host, guest, and control-plane regressions. `tools/hamn-dev` suites cover release evidence, release drivers, and runtime validation.
-- `docs/`: English source documentation and corresponding Korean Markdown translations.
 - `vendor/`: vendored C dependencies. Avoid replacing these casually.
 
 Tracked source deliberately excludes Desktop/XPC/Cask/DMG/notarization, the legacy
@@ -85,7 +84,7 @@ Host builds require Apple Silicon macOS 13+, Apple command-line developer tools,
 and the Rust toolchain in `rust-toolchain.toml`. The locked `flake.nix`
 shells provide the test toolchain, including that Rust release and `actionlint`:
 `nix develop .#ci --command make -j1 test-local-macos` runs the local gates, and
-`.#live` adds kubectl and kind. See [Development](docs/DEVELOPMENT.md) for setup.
+`.#live` adds kubectl and kind.
 
 Run Make test gates serially in the same checkout, for example
 `make -j1 test-local-macos`. Packaging/update fixtures replace the shared
@@ -113,7 +112,7 @@ release profile and run `test-local-macos` serially.
 - `make test-profile-state`: verify profile/state persistence without starting a VM.
 - `make test-guest-deployment`: verify the immutable guest contract and guest scripts.
 - `make -C guest test-agent`: build and test the guest agent in a Linux environment.
-- `make test-workspace-live`: opt-in physical Apple Silicon VM/Docker/kind checks; never infer its success from hosted CI. See Development for cache and tool prerequisites.
+- `make test-workspace-live`: opt-in physical Apple Silicon VM/Docker/kind checks; never infer its success from hosted CI.
 - `make test-local-macos`: run static, portable, host, profile, deployment, release,
   and workflow gates that do not need a physical VM.
 - `make release-candidate` and `make release-gate`: assemble a candidate and run the
@@ -123,14 +122,13 @@ release profile and run `test-local-macos` serially.
 - `make clean` and `make -C guest clean`: remove host or guest build outputs.
 
 `test-local-macos` does not include `make -C guest test-agent`; run the Linux
-agent tests separately when changing agent behavior. Release inputs and exact
-candidate requirements are in [Release setup](docs/RELEASE-SETUP.md).
+agent tests separately when changing agent behavior.
 
 After `make install`, `hamn` opens the TUI in a terminal. Use
 `hamn --headless vm status --profile <name>` and
 `hamn --headless vm start --profile <name> --yes` for automation; VM operations
 require an explicit `--profile` and headless mutations require `--yes`. Consult
-`control/model.rs` and `docs/API.md`
+`control/model.rs` and `control/capabilities.rs`
 for current operations. Hamn's structured Docker operations coexist with the
 separately installed Docker CLI/API; they do not implement arbitrary Docker CLI
 passthrough. Docker uses guest containerd's `moby` namespace. The guest containerd
@@ -217,4 +215,4 @@ and retries. Do not claim improvement when it has not been demonstrated.
 
 ## Source References
 
-- Check current structure against `control/main.rs`, `control/service.rs`, `control/core.rs`, `host/core/control.h`, `build.rs`, `Makefile`, and `guest/Makefile`; keep [architecture](docs/ARCHITECTURE.md) and [API documentation](docs/API.md) consistent with those sources.
+- Check current structure against `control/main.rs`, `control/service.rs`, `control/core.rs`, `host/core/control.h`, `build.rs`, `Makefile`, and `guest/Makefile`.

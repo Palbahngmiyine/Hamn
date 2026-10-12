@@ -69,7 +69,7 @@ struct variations_options {
 };
 
 /*
- * Runs the whole Linux-only generation; see docs/RELEASE-SETUP.md. External
+ * Runs the whole Linux-only generation. External
  * commands run in their own session with stdin from /dev/null; each has a
  * deadline (20 minutes, 5 for the package query, 5 s for git) after which,
  * or on SIGINT/SIGTERM/SIGHUP, its whole process group is terminated and

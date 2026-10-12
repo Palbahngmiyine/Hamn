@@ -28,7 +28,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CHUNK: usize = 64 * 1024;
 /// An interrupted transfer that persisted new bytes is resumed with Range
-/// up to three more times in the same command (docs/INSTALLATION.md).
+/// up to three more times in the same command.
 const AUTOMATIC_RESUMPTIONS: u64 = 3;
 const USAGE: &str = "usage: hamn-dev test measure-upgrade-download --binary PATH --image LABEL=PATH [--image LABEL=PATH]... \
                      [--partial-bytes N] --output EVIDENCE.json";

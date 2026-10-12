@@ -1,6 +1,5 @@
 //! The private native upgrade operations (`hamn __install-support upgrade
-//! ...`) against expectations derived from the documented manifest and
-//! result contracts (docs/INSTALLATION.md), not from a second implementation.
+//! ...`) against the schema v3 manifest and result contracts.
 //! No release network, shared build or VM operation; local artifacts are
 //! allowed only for these child processes and their private files.
 use crate::runner::{self, case};
