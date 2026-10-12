@@ -1,8 +1,8 @@
 # Hamn
 
 Hamn manages a Linux VM, its Docker Engine, and external Kubernetes clusters
-from one macOS executable. Run `hamn` for the Ratatui terminal interface or
-use `hamn --headless` for JSON and NDJSON automation.
+from one macOS executable. Run `hamn` for the terminal interface or
+use `hamn --headless` for headless automation.
 
 ## Requirements
 
@@ -132,8 +132,7 @@ authentication runs according to the installed CLI in the embedded terminal.
 installation files.
 
 Container creation, Compose, exec, Kubernetes apply, and port-forward use the
-installed native CLIs in the TUI. They are not added to the headless SDK operation
-set. Hamn does not provide an MCP server.
+installed native CLIs in the TUI.
 
 
 ## Upgrade
