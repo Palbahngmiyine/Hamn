@@ -51,7 +51,7 @@ impl Artifact {
     }
 }
 
-/// A valid stable schema v3 release manifest (`docs/INSTALLATION.md`).
+/// A valid stable schema v3 release manifest.
 pub fn manifest(version: &str, host: &Artifact, guest: &Artifact) -> Value {
     json!({
         "schemaVersion": 3, "channel": "stable", "version": version, "commit": "a".repeat(40),

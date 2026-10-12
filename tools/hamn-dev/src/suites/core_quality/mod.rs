@@ -43,7 +43,6 @@ pub fn main(filters: &[String]) -> ExitCode {
                 "release_workflow_is_keyless_and_least_privilege",
                 workflows::release_workflow_is_keyless_and_least_privilege,
             ),
-            case("architecture_docs_describe_shared_nat_only", architecture_docs_describe_shared_nat_only),
             case("runtime_persists_no_guest_registry_credentials", runtime_persists_no_guest_registry_credentials),
             case("mutable_guest_installer_stays_removed", mutable_guest_installer_stays_removed),
             case("nix_flake_pins_inputs_and_integrations", nix::nix_flake_pins_inputs_and_integrations),
@@ -80,12 +79,12 @@ pub fn main(filters: &[String]) -> ExitCode {
             case("release_path_uses_no_long_lived_signature", release::release_path_uses_no_long_lived_signature),
             case("release_workflow_needs_no_manual_tag", workflows::release_workflow_needs_no_manual_tag),
             case("colima_benchmark_gate_stays_removed", release::colima_benchmark_gate_stays_removed),
-            case("docker_only_documentation_is_present", docker_only_documentation_is_present),
+            case("security_policy_is_present", security_policy_is_present),
             case("readmes_direct_users_to_the_release_installer", readmes_direct_users_to_the_release_installer),
             case("tracked_files_hold_no_private_keys_or_tokens", tracked_files_hold_no_private_keys_or_tokens),
             case(
-                "public_documentation_has_no_release_internal_messaging",
-                public_documentation_has_no_release_internal_messaging,
+                "readmes_have_no_release_internal_messaging",
+                readmes_have_no_release_internal_messaging,
             ),
             case("guest_containerd_socket_stays_private", guest_containerd_socket_stays_private),
             case("virtualization_entitlement_is_granted", virtualization_entitlement_is_granted),
@@ -131,14 +130,6 @@ const UNTRACKED_LEGACY: &[&str] = &[
     "packaging/homebrew",
     "packaging/release/colima-benchmark.sh",
     "packaging/release/verify-macos-release.sh",
-    "docs/COLIMA-EVALUATION.md",
-    "docs/DOGFOODING.md",
-    "docs/HACKING.md",
-    "docs/OCI-CONFORMANCE.md",
-    "docs/RELEASE-CHECKLIST.md",
-    "docs/RELEASE.md",
-    "docs/RELEASE.ko.md",
-    "docs/ROADMAP.md",
     "packaging/release/README.md",
     "tests/ci/test_desktop_xcode.sh",
     "tests/e2e/test_installed_cli.sh",
@@ -269,24 +260,6 @@ fn c_builds_use_the_selected_system_sdk() {
     );
 }
 
-fn architecture_docs_describe_shared_nat_only() {
-    for document in ["docs/ARCHITECTURE.md", "docs/ARCHITECTURE.ko.md"] {
-        assert_absent(
-            "(?i)non-shared.*(path|virtio|경로)|bounded virtio socket.*guest",
-            &[document],
-            "architecture documentation still describes a removed non-shared path",
-        );
-    }
-    assert!(
-        contains("docs/ARCHITECTURE.md", "Every Hamn profile uses Virtualization.framework shared NAT."),
-        "English architecture documentation does not state shared NAT-only networking"
-    );
-    assert!(
-        contains("docs/ARCHITECTURE.ko.md", "모든 Hamn profile은 Virtualization.framework shared NAT를 사용합니다."),
-        "Korean architecture documentation does not state shared NAT-only networking"
-    );
-}
-
 fn runtime_persists_no_guest_registry_credentials() {
     assert_absent(
         r"docker[[:space:]]+login|/home/hamn/\.docker",
@@ -305,23 +278,8 @@ fn mutable_guest_installer_stays_removed() {
     );
 }
 
-fn docker_only_documentation_is_present() {
-    for document in [
-        "SECURITY.md",
-        "docs/ARCHITECTURE.md",
-        "docs/ARCHITECTURE.ko.md",
-        "docs/CONFIGURATION.md",
-        "docs/CONFIGURATION.ko.md",
-        "docs/COLIMA-COMPATIBILITY.md",
-        "docs/COLIMA-COMPATIBILITY.ko.md",
-        "docs/DEVELOPMENT.md",
-        "docs/DEVELOPMENT.ko.md",
-        "docs/RELEASE-SETUP.md",
-        "docs/RELEASE-SETUP.ko.md",
-        "docs/SECURITY.ko.md",
-    ] {
-        assert!(is_regular_file(document), "required Docker-only documentation is missing: {document}");
-    }
+fn security_policy_is_present() {
+    assert!(is_regular_file("SECURITY.md"), "security policy is missing or unsafe");
 }
 
 fn readmes_direct_users_to_the_release_installer() {
@@ -358,11 +316,11 @@ fn tracked_files_hold_no_private_keys_or_tokens() {
     assert!(tokens.is_empty(), "tracked source contains a token-shaped credential: {}", tokens.join(", "));
 }
 
-fn public_documentation_has_no_release_internal_messaging() {
+fn readmes_have_no_release_internal_messaging() {
     assert_absent(
         "(?i)source tree is not a release claim|passing local source tests does not replace|release claim boundary|evidence boundary|source-only test or a fixture",
-        &["README.md", "README.ko.md", "docs"],
-        "public documentation still contains release-internal evidence messaging",
+        &["README.md", "README.ko.md"],
+        "README still contains release-internal evidence messaging",
     );
 }
 

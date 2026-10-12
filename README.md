@@ -39,11 +39,7 @@ If `~/.local/bin` is not on your PATH, the installer prints the one line to add
 for your shell. It needs only macOS system tools; Python, Homebrew, Rust, and
 Xcode Command Line Tools are not required for installation or updates.
 Hamn 0.1.2 and earlier cannot update themselves to this release: run the
-installer above once, which migrates the existing installation in place (see
-[installation](docs/INSTALLATION.md#installed-layout-and-earlier-installations)).
-
-For source builds, see [Development](docs/DEVELOPMENT.md).
-Signed release installation is described in [release setup](docs/RELEASE-SETUP.md).
+installer above once, which migrates the existing installation in place.
 
 ## Terminal interface
 
@@ -52,7 +48,6 @@ changes the saved default. Enter `:ps`, `:docker ps -a`, `:images`, `:get pods -
 or `:kubectl get deployments -n dev`. Ordinary lists become selectable tables;
 other commands run in the embedded terminal with their original CLI semantics.
 `e` selects the environment/context; `v` opens VM controls only for Hamn profiles.
-See [workspace and command guide](docs/TUI.md) for actions, settings, and cancellation.
 
 ## Headless interface
 
@@ -71,7 +66,7 @@ hamn --headless vm stop --profile work --yes
 
 Mutations require `--yes` and explicit resource targets. One-shot commands emit
 one JSON response; `--follow` logs and `--watch` queries emit NDJSON. stdout is
-reserved for machine-readable responses. See [API](docs/API.md).
+reserved for machine-readable responses.
 
 ## Declarative configuration
 
@@ -117,11 +112,6 @@ again at any time, also while the VM runs.
   home directory for a writable mount, and keep `rosetta: true` only where
   Rosetta is available.
 
-See [Declarative configuration](docs/CONFIGURATION.md#declarative-configuration)
-for the rules, [YAML schema](docs/CONFIGURATION.md#yaml-schema) for every
-setting, and [Mounts](docs/CONFIGURATION.md#mounts) for the keys and rules of a
-mount.
-
 ## External tools
 
 ```sh
@@ -139,7 +129,7 @@ authentication runs according to the installed CLI in the embedded terminal.
 
 `vm delete` stops and hides a profile while preserving its disk and Docker data.
 `system uninstall --yes` permanently removes all Hamn profiles and managed
-installation files. [Configuration](docs/CONFIGURATION.md) describes persistence.
+installation files.
 
 Container creation, Compose, exec, Kubernetes apply, and port-forward use the
 installed native CLIs in the TUI. They are not added to the headless SDK operation
@@ -173,5 +163,4 @@ automatically, or on the next `hamn upgrade`. Failures print one line with the
 reason and what to do next. Automation can use `hamn upgrade --output json` or
 `hamn --headless system upgrade --yes`. After a successful TUI session Hamn may
 mention a newer release; it never installs one by itself. Set
-`HAMN_NO_UPDATE_CHECK=1` to disable that check. See
-[installation](docs/INSTALLATION.md) for integrity, recovery and `--force`.
+`HAMN_NO_UPDATE_CHECK=1` to disable that check.
