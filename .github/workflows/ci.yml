@@ -52,6 +52,26 @@ jobs:
     env:
       CARGO_PROFILE: ci
     steps:
+      # A runner can start its job unable to resolve github.com. In run
+      # 38319967795 (attempt 2) one shard downloaded its actions and, a
+      # second later, failed every fetch of actions/checkout with "Could not
+      # resolve host: github.com"; checkout gives up at most 40 seconds
+      # after its first fetch. So probe github.com first, 36 times: that is
+      # 3 minutes when each probe fails at once, as those fetches did, and
+      # 9 minutes when each probe runs into its 10-second limit.
+      - name: Wait for the runner to reach github.com
+        shell: bash
+        run: |
+          set -euo pipefail
+          for probe in {1..36}; do
+            if curl --silent --show-error --head --output /dev/null --max-time 10 https://github.com; then
+              exit 0
+            fi
+            echo "Probe $probe of 36 did not reach https://github.com."
+            sleep 5
+          done
+          echo "::error::The runner could not reach https://github.com in 36 probes."
+          exit 1
       # Full history: the installer migration tests install Hamn 0.1.2 with
       # the 0.1.2 installer read from its release commit.
       - name: Check out source

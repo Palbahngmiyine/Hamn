@@ -4,11 +4,13 @@
 //! GitHub-hosted, keyless and immutable promotion.
 use super::search::{any_line_matches, assert_absent, has_line, lines, read};
 use crate::support::exec::output_within;
+use crate::support::tmp::TempDir;
+use crate::support::upgrade::write_executable;
 use regex::Regex;
 use serde_yaml::{Mapping, Value};
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus, Output};
 use std::time::Duration;
 
 const WORKFLOWS: &str = ".github/workflows";
@@ -225,6 +227,113 @@ pub fn ci_workflow_runs_gates_in_nix_shells() {
     );
 }
 
+/// What one run of the macOS shards' network wait did.
+struct NetworkWait {
+    status: ExitStatus,
+    stdout: String,
+    /// The arguments of each `curl` call, in order.
+    probes: Vec<String>,
+    /// The argument of each `sleep` call, in order.
+    sleeps: Vec<String>,
+}
+
+/// Runs `script` as a runner runs a `shell: bash` step, with a `curl` that
+/// cannot resolve the host in its first `unreachable_probes` calls and a
+/// `sleep` that returns at once.
+fn network_wait(script: &str, unreachable_probes: u32) -> NetworkWait {
+    let work = TempDir::new("hamn-network-wait.");
+    let (bin, probes, sleeps) = (work.path().join("bin"), work.path().join("probes"), work.path().join("sleeps"));
+    fs::create_dir(&bin).unwrap();
+    fs::write(&probes, "").unwrap();
+    fs::write(&sleeps, "").unwrap();
+    write_executable(
+        &bin.join("curl"),
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >>'{probes}'\n[ \"$(($(wc -l <'{probes}')))\" -gt {unreachable_probes} ] && exit 0\necho 'curl: (6) Could not resolve host: github.com' >&2\nexit 6\n",
+            probes = probes.display()
+        ),
+    );
+    write_executable(&bin.join("sleep"), &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >>'{}'\n", sleeps.display()));
+    let step = work.path().join("step.sh");
+    fs::write(&step, script).unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"));
+    let output = output_within(
+        Command::new("/bin/bash").args(["--noprofile", "--norc", "-e", "-o", "pipefail"]).arg(&step).env("PATH", path),
+        Duration::from_secs(60),
+    );
+    let calls = |path: &Path| lines(&fs::read_to_string(path).unwrap()).into_iter().map(str::to_owned).collect();
+    NetworkWait {
+        status: output.status,
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        probes: calls(&probes),
+        sleeps: calls(&sleeps),
+    }
+}
+
+/// The `--max-time` seconds of a `curl` call that probes https://github.com.
+fn probe_limit(arguments: &str) -> u64 {
+    let arguments: Vec<&str> = arguments.split(' ').collect();
+    assert_eq!(
+        arguments.last(),
+        Some(&"https://github.com"),
+        "the wait must probe the host that checkout fetches from"
+    );
+    let limit = arguments.iter().position(|argument| *argument == "--max-time").and_then(|at| arguments.get(at + 1));
+    limit.and_then(|limit| limit.parse().ok()).expect("every probe must be bounded by --max-time SECONDS")
+}
+
+/// A macOS shard waits until it reaches github.com and only then checks
+/// out: actions/checkout gives up at most 40 seconds after its first fetch,
+/// and in run 38319967795 (attempt 2) a runner could not resolve github.com
+/// for that long. The wait is bounded, so a runner that stays cut off fails
+/// its job and leaves most of the job's 30 minutes to the gates.
+pub fn ci_macos_shards_wait_for_github_before_checkout() {
+    let workflow: Value = serde_yaml::from_str(&read(CI)).unwrap_or_else(|error| panic!("{CI}: {error}"));
+    let steps = workflow["jobs"]["macos-shard"]["steps"].as_sequence().expect("macos-shard steps");
+    assert!(
+        steps.len() > 1
+            && steps[0]["name"] == "Wait for the runner to reach github.com"
+            && steps[0]["shell"] == "bash"
+            && steps[1]["uses"].as_str().is_some_and(|uses| uses.starts_with("actions/checkout@")),
+        "a macOS shard must wait for github.com immediately before it checks out"
+    );
+    let script = steps[0]["run"].as_str().expect("the network wait runs a script");
+
+    let reachable = network_wait(script, 0);
+    assert!(
+        reachable.status.success() && reachable.probes.len() == 1 && reachable.sleeps.is_empty(),
+        "a runner that reaches github.com must check out at once: {:?}, {} probes, {} sleeps",
+        reachable.status,
+        reachable.probes.len(),
+        reachable.sleeps.len()
+    );
+    // The failed run: three fetches in a row could not resolve the host.
+    let recovered = network_wait(script, 3);
+    assert!(
+        recovered.status.success() && recovered.probes.len() == 4 && recovered.sleeps.len() == 3,
+        "the wait must end at the first probe that reaches github.com: {:?}, {} probes, {} sleeps",
+        recovered.status,
+        recovered.probes.len(),
+        recovered.sleeps.len()
+    );
+    let unreachable = network_wait(script, u32::MAX);
+    assert!(
+        unreachable.status.code() == Some(1) && unreachable.stdout.contains("::error::"),
+        "a runner that never reaches github.com must fail the step with an error annotation: {:?}: {}",
+        unreachable.status,
+        unreachable.stdout
+    );
+    let probing: u64 = unreachable.probes.iter().map(|probe| probe_limit(probe)).sum();
+    let sleeping: u64 = unreachable.sleeps.iter().map(|sleep| sleep.parse::<u64>().expect("sleep SECONDS")).sum();
+    // Three times the checkout's own 40 seconds when every probe fails at
+    // once, and a third of the job's 30 minutes when every probe times out.
+    assert!(
+        sleeping >= 120 && probing + sleeping <= 600,
+        "the wait must last between 120 and 600 seconds: {sleeping} to {} seconds",
+        probing + sleeping
+    );
+}
+
 /// The Darwin shells, not per-workflow scripts, own the Apple SDK boundary.
 pub fn workflows_leave_sdk_selection_to_the_flake() {
     for file in workflow_files() {
@@ -437,6 +546,23 @@ mod tests {
         assert_eq!(section(text, "  job:", Some("  next:")), ["  job:", "x", "  job:", "z"]);
         assert_eq!(section(text, "  next:", None), ["  next:", "y", "  job:", "z"]);
         assert!(section(text, "  missing:", None).is_empty());
+    }
+
+    #[test]
+    fn probe_limits_are_the_max_time_seconds_of_a_github_probe() {
+        assert_eq!(probe_limit("--silent --head --max-time 10 https://github.com"), 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "bounded by --max-time")]
+    fn probes_without_a_time_limit_are_rejected() {
+        probe_limit("--silent --head https://github.com");
+    }
+
+    #[test]
+    #[should_panic(expected = "the host that checkout fetches from")]
+    fn probes_of_another_host_are_rejected() {
+        probe_limit("--head --max-time 10 https://example.com");
     }
 
     #[test]

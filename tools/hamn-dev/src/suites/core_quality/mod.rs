@@ -55,6 +55,10 @@ pub fn main(filters: &[String]) -> ExitCode {
             case("ci_macos_shards_partition_local_gates", workflows::ci_macos_shards_partition_local_gates),
             case("ci_workflow_requires_every_shard", workflows::ci_workflow_requires_every_shard),
             case("ci_workflow_runs_gates_in_nix_shells", workflows::ci_workflow_runs_gates_in_nix_shells),
+            case(
+                "ci_macos_shards_wait_for_github_before_checkout",
+                workflows::ci_macos_shards_wait_for_github_before_checkout,
+            ),
             case("darwin_shells_own_the_system_sdk_boundary", nix::darwin_shells_own_the_system_sdk_boundary),
             case("workflows_leave_sdk_selection_to_the_flake", workflows::workflows_leave_sdk_selection_to_the_flake),
             case("nix_shell_resolves_the_pinned_toolchain", nix::nix_shell_resolves_the_pinned_toolchain),
