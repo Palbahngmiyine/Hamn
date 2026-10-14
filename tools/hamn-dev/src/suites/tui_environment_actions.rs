@@ -111,8 +111,8 @@ fn check_environment_actions(kind: &str) {
     assert!(text.contains("external  Hamn profile"), "{text}");
     assert!(text.contains("external  Docker context"), "{text}");
     assert!(text.contains("unix:///external/docker.sock"), "{text}");
-    assert!(!text.contains("t stop"), "{text}");
-    assert!(!text.contains("v VM settings"), "{text}");
+    assert!(!text.contains("<t> stop"), "{text}");
+    assert!(!text.contains("<v> VM settings"), "{text}");
     harness.send(b"\r", if kind == "docker" { "new-target-row" } else { "old-target-row" });
     harness.wait(|harness| !harness.text().contains("[loading]"));
     if kind == "docker" {
@@ -121,7 +121,7 @@ fn check_environment_actions(kind: &str) {
         // must not enable the configure shortcut either.
         harness.send(b"c:EXTERNAL_BARRIER", ":EXTERNAL_BARRIER");
         assert!(!harness.text().contains("vm configure"), "{}", harness.text());
-        assert!(!harness.text().contains("v VM settings"), "{}", harness.text());
+        assert!(!harness.text().contains("<v> VM settings"), "{}", harness.text());
         close_input(&mut harness, ":EXTERNAL_BARRIER");
     } else {
         harness.send(b"v", "vm list");

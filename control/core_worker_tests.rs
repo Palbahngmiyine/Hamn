@@ -55,10 +55,17 @@ HELPER void prepare(const char *argv0, const char *socket_name) {
     char request[4096];
     while (read(0, request, sizeof(request)) > 0) {}
 }
+/* Like the real worker: installs the handler, then unblocks the cancellation
+ * signals that the frontend blocked at spawn. A SIGTERM pending since then
+ * runs the handler before this returns. */
 HELPER void on_term(void (*handler)(int)) {
     struct sigaction action = {0};
     action.sa_handler = handler;
     if (sigaction(SIGTERM, &action, NULL) != 0) _exit(93);
+    sigset_t signals;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGINT); sigaddset(&signals, SIGTERM); sigaddset(&signals, SIGHUP);
+    if (sigprocmask(SIG_UNBLOCK, &signals, NULL) != 0) _exit(93);
 }
 
 #if defined(INHERITED_STDERR)
@@ -110,6 +117,30 @@ int main(int argc, char **argv) {
     on_term(cleanup);
     put(2, "ready\n");
     for (;;) pause();
+}
+#elif defined(EARLY_CANCEL)
+/* The frontend's SIGTERM arrives before this worker has a handler: it waits
+ * until SIGTERM is pending first. Then it installs the handler like the real
+ * worker and reports what the handler saw. */
+static volatile sig_atomic_t cancelled;
+static void note_cancel(int signal_number) { (void)signal_number; cancelled = 1; }
+int main(int argc, char **argv) {
+    (void)argc; prepare(argv[0], "unused.sock");
+    sigset_t pending, blocked;
+    for (int polls = 0;; polls++) {
+        if (sigpending(&pending) != 0) _exit(98);
+        if (sigismember(&pending, SIGTERM)) break;
+        if (polls == 10000) { put(2, "no SIGTERM arrived\n"); return 99; }
+        usleep(1000);
+    }
+    if (sigprocmask(SIG_BLOCK, NULL, &blocked) != 0) _exit(98);
+    if (!sigismember(&blocked, SIGINT) || !sigismember(&blocked, SIGHUP)) {
+        put(2, "SIGINT or SIGHUP is not blocked\n"); return 99;
+    }
+    on_term(note_cancel);
+    if (!cancelled) { put(2, "the pending SIGTERM did not reach the handler\n"); return 99; }
+    put(1, "{\"Err\":{\"code\":\"cancelled\",\"message\":\"cancelled before the request started\"}}\n");
+    return 0;
 }
 #elif defined(FAILED_WORKER)
 int main(int argc, char **argv) {
@@ -202,6 +233,24 @@ async fn cancellation_keeps_streaming_and_waits_for_owned_worker_cleanup_gate() 
     };
     let (result, _) = tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(call, cleanup) }).await.unwrap();
     assert_eq!(result.unwrap()["cleanup"], "completed");
+}
+
+#[tokio::test]
+async fn a_cancellation_sent_right_after_spawn_reaches_the_workers_handler() {
+    // A token cancelled beforehand makes the call send SIGTERM as soon as the
+    // request is written. The fixture installs its handler only once that
+    // SIGTERM is pending, so the signal precedes the handler every time.
+    let fixture = Fixture::new("early-cancel", "EARLY_CANCEL");
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cancel.cancel();
+    let request = Request { timeout: 20, ..Default::default() };
+    let call = call_executable(&request, fixture.worker.as_os_str(), Some(&cancel), None);
+    let failure = tokio::time::timeout(std::time::Duration::from_secs(30), call).await.unwrap().unwrap_err();
+    assert_eq!(
+        (failure.code.as_str(), failure.message.as_str()),
+        ("cancelled", "cancelled before the request started"),
+        "{failure:?}"
+    );
 }
 
 #[tokio::test]

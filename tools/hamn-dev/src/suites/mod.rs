@@ -179,6 +179,7 @@ const SUITES: &[Suite] = &[
 const FIXTURES: &[(&str, Fixture)] = &[
     ("control-signed-bootstrap", control_signed_bootstrap::updater_fixture),
     ("core-worker-external-cli", core_worker::external_cli_fixture),
+    ("core-worker-signal-mask", core_worker::signal_mask_fixture),
     ("docker-context-failing-transport", docker_context::failing_transport),
     ("exec-auth", exec_auth::fixture),
     ("native-regressions", tui_native_regressions::fixture),

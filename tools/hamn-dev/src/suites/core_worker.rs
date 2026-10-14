@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::mpsc;
@@ -24,7 +25,11 @@ pub fn main(filters: &[String]) -> ExitCode {
     runner::run(
         "core-worker",
         "core worker isolation and protocol",
-        vec![case("core_worker_isolation_and_protocol", core_worker_isolation_and_protocol)],
+        vec![
+            case("core_worker_isolation_and_protocol", core_worker_isolation_and_protocol),
+            case("a_sigterm_before_the_handler_cancels_the_request", a_sigterm_before_the_handler_cancels_the_request),
+            case("commands_the_worker_starts_can_be_cancelled", commands_the_worker_starts_can_be_cancelled),
+        ],
         filters,
     )
 }
@@ -313,6 +318,98 @@ fn watch_is_cancelled_by_sigterm(worker: &Worker) {
         last["sequence"].as_u64().zip(snapshot["sequence"].as_u64()).is_some_and(|(last, first)| last > first),
         "{last} {snapshot}"
     );
+}
+
+/// Starts `command` as the frontend starts a worker (control/core.rs): with
+/// SIGINT, SIGTERM and SIGHUP blocked. With `cancelled`, SIGTERM is already
+/// pending at exec, as a frontend's cancellation leaves it when it arrives
+/// before the worker has installed its handler.
+fn start_like_the_frontend(command: &mut Command, cancelled: bool) {
+    // SAFETY: sigemptyset and sigaddset only write this local set.
+    let signals = unsafe {
+        let mut signals = std::mem::zeroed();
+        libc::sigemptyset(&mut signals);
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::sigaddset(&mut signals, signal);
+        }
+        signals
+    };
+    // SAFETY: the closure runs in the child between fork and exec and calls
+    // only sigprocmask, getpid and kill, which are async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::sigprocmask(libc::SIG_BLOCK, &signals, std::ptr::null_mut()) != 0
+                || (cancelled && libc::kill(libc::getpid(), libc::SIGTERM) != 0)
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// A SIGTERM that reached the worker before its cancellation handler
+/// existed cancels the request: it neither kills the worker nor is lost.
+/// `vm apply` looks for a cancellation before it writes a new profile.
+fn a_sigterm_before_the_handler_cancels_the_request() {
+    let directory = MkdTemp::new("hamn-worker-");
+    let home = directory.path().to_path_buf();
+    let worker = Worker { binary: hamn(), home: home.clone(), env: vec![("HOME", home.clone().into())] };
+    let definition = home.join("definition.yaml");
+    fs::write(&definition, "apiVersion: hamn/v1\nkind: Profile\nmetadata:\n  name: early\nspec: {}\n").unwrap();
+    let request = json!({"words": ["vm", "apply"], "timeout": 30, "tail": 200, "profile": "early", "file": utf8(&definition), "yes": true});
+    let mut command = worker.command(&["__core-worker"]);
+    start_like_the_frontend(&mut command, true);
+    let completed = api_fixtures::run(&mut command, Some(api_fixtures::py_json(&request).as_bytes()), Duration::from_secs(10));
+    assert!(completed.success(), "{completed:?}");
+    assert_eq!(
+        completed.json(),
+        json!({"Err": {"code": "cancelled", "message": "cancelled before changing settings"}}),
+        "{completed:?}"
+    );
+    assert!(!worker.hamn_dir().join("early/config.yaml").exists());
+}
+
+/// A command the worker starts receives SIGINT, SIGTERM and SIGHUP, although
+/// the frontend started the worker with them blocked. A first `vm start`
+/// without a guest image runs `<invocation> --headless system upgrade --yes`;
+/// here the invocation is `signal_mask_fixture`, whose failure ends the start.
+fn commands_the_worker_starts_can_be_cancelled() {
+    let directory = MkdTemp::new("hamn-worker-");
+    let home = directory.path().to_path_buf();
+    install_fixture(&home, "hamn");
+    let env = vec![("HOME", home.clone().into()), ("HAMN_DEV_FIXTURE", "core-worker-signal-mask".into())];
+    let worker = Worker { binary: hamn(), home: home.clone(), env };
+    let invocation = home.join("hamn");
+    let mut command = worker.command(&["__core-worker", utf8(&invocation)]);
+    start_like_the_frontend(&mut command, false);
+    let request = json!({"words": ["vm", "start"], "timeout": 30, "tail": 200, "profile": "mask", "yes": true});
+    let completed = api_fixtures::run(&mut command, Some(api_fixtures::py_json(&request).as_bytes()), Duration::from_secs(20));
+    assert!(completed.success() && has(&completed.json(), "Err"), "{completed:?}");
+    let recorded = fs::read_to_string(home.join("blocked-signals")).unwrap_or_else(|error| panic!("{error}: {completed:?}"));
+    let recorded: Vec<Value> = recorded.lines().map(parse).collect();
+    assert_eq!(recorded, [json!([["--headless", "system", "upgrade", "--yes"], []])], "{completed:?}");
+}
+
+/// The invocation of `commands_the_worker_starts_can_be_cancelled`: appends
+/// its arguments and which of SIGINT, SIGTERM and SIGHUP are blocked in it to
+/// `$HOME/blocked-signals`, then fails.
+pub fn signal_mask_fixture(_program: &str, args: &[String]) -> ExitCode {
+    let root = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    // SAFETY: with a null new set, sigprocmask only writes the current mask.
+    let blocked = unsafe {
+        let mut blocked = std::mem::zeroed();
+        assert_eq!(libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut blocked), 0);
+        blocked
+    };
+    let names: Vec<&str> = [(libc::SIGINT, "SIGINT"), (libc::SIGTERM, "SIGTERM"), (libc::SIGHUP, "SIGHUP")]
+        .into_iter()
+        // SAFETY: blocked is an initialized set and each number is a valid signal.
+        .filter(|(signal, _)| unsafe { libc::sigismember(&blocked, *signal) } == 1)
+        .map(|(_, name)| name)
+        .collect();
+    crate::support::real_cli::append_line(&root.join("blocked-signals"), &api_fixtures::py_json(&json!([args, names])));
+    ExitCode::from(1)
 }
 
 /// Kills and reaps a child that is still running when dropped, like the

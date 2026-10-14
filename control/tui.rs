@@ -125,7 +125,7 @@ impl Job {
     }
     fn start(&mut self, request: Request, state: &mut State) {
         if self.mutation.is_some() {
-            state.message = "A change is already running; ! shows its log".into();
+            state.warn("A change is already running; ! shows its log");
             return;
         }
         self.cancel(state);
@@ -216,7 +216,7 @@ impl Job {
         match request {
             Ok(request) if request.mutates() => state.pending = Some(request),
             Ok(request) => self.start(request, state),
-            Err(error) => state.message = format!("{}: {}", error.code, error.message),
+            Err(error) => state.fail(error),
         }
     }
 }
@@ -251,7 +251,7 @@ fn resource_action(
                 .is_some_and(|invocation| invocation.resource.as_deref() == Some("projects")))
     {
         if state.stale || state.loading {
-            state.message = "Refresh before opening related resources".into();
+            state.warn("Refresh before opening related resources");
             return;
         }
         let result = state
@@ -267,7 +267,7 @@ fn resource_action(
                 state.native = Some(invocation);
                 job.refresh(state);
             }
-            Err(error) => state.message = error.message,
+            Err(error) => state.fail(error),
         }
         return;
     }
@@ -288,12 +288,38 @@ fn resource_action(
         Ok(action) if action.changes => state.pending_native = Some(action),
         Ok(action) => {
             job.cancel(state);
-            match Session::start(action.invocation, area.width, area.height) {
-                Ok(session) => *cli = Some(session),
-                Err(error) => state.message = error.to_string(),
+            if let Some(session) = open_cli(action.invocation, area, state) {
+                *cli = Some(session);
             }
         }
-        Err(error) => state.message = error.message,
+        Err(error) => state.fail(error),
+    }
+}
+
+/// Runs a CLI in the internal terminal. A program that is not installed
+/// and a terminal that cannot be opened are reported as different failures.
+fn open_cli(
+    invocation: crate::native::Invocation,
+    area: ratatui::layout::Rect,
+    state: &mut State,
+) -> Option<Session> {
+    let program = invocation.program();
+    match Session::start(invocation, area.width, area.height) {
+        Ok(session) => Some(session),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            state.fail(crate::model::Failure::new(
+                "cliUnavailable",
+                format!("{program}: {error}"),
+            ));
+            None
+        }
+        Err(error) => {
+            state.fail(crate::model::Failure::new(
+                "terminalUnavailable",
+                format!("Cannot open a terminal for {program}: {error}"),
+            ));
+            None
+        }
     }
 }
 
@@ -396,7 +422,8 @@ fn terminal_output(session: &mut Session, event: TerminalEvent) {
         }
     }
 }
-fn draw_sessions(frame: &mut ratatui::Frame, sessions: &[Session], selected: usize) {
+fn draw_sessions(frame: &mut ratatui::Frame, sessions: &[Session], selected: usize, workspace: Workspace) {
+    use crate::tui_theme as theme;
     use ratatui::widgets::{Block, List, ListItem, ListState};
     let rows: Vec<_> = sessions
         .iter()
@@ -414,9 +441,15 @@ fn draw_sessions(frame: &mut ratatui::Frame, sessions: &[Session], selected: usi
         .collect();
     frame.render_stateful_widget(
         List::new(rows)
-            .block(Block::bordered().title(
-                "Sessions: Enter resumes | d terminates owned CLI and helpers | Esc browser",
-            ))
+            .block(
+                Block::bordered()
+                    .border_style(theme::border(workspace))
+                    .title(ratatui::text::Line::styled(
+                        " Sessions: Enter resumes | d terminates owned CLI and helpers | Esc browser ",
+                        theme::key(workspace),
+                    )),
+            )
+            .highlight_style(theme::badge(workspace))
             .highlight_symbol("> "),
         frame.area(),
         &mut ListState::default().with_selected((!sessions.is_empty()).then_some(selected)),
@@ -492,7 +525,8 @@ impl Menu {
             selected: 0,
         })
     }
-    fn draw(&self, frame: &mut ratatui::Frame) {
+    fn draw(&self, frame: &mut ratatui::Frame, workspace: Workspace) {
+        use crate::tui_theme as theme;
         use ratatui::widgets::{Block, List, ListItem, ListState};
         let rows: Vec<_> = self
             .items
@@ -501,7 +535,15 @@ impl Menu {
             .collect();
         frame.render_stateful_widget(
             List::new(rows)
-                .block(Block::bordered().title(self.title.as_str()))
+                .block(
+                    Block::bordered()
+                        .border_style(theme::border(workspace))
+                        .title(ratatui::text::Line::styled(
+                            format!(" {} ", self.title),
+                            theme::key(workspace),
+                        )),
+                )
+                .highlight_style(theme::badge(workspace))
                 .highlight_symbol("> "),
             frame.area(),
             &mut ListState::default().with_selected(Some(self.selected)),
@@ -580,9 +622,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
             if let Some(session) = &cli {
                 session.draw(frame);
             } else if sessions_open {
-                draw_sessions(frame, &sessions, session_selected);
+                draw_sessions(frame, &sessions, session_selected, state.workspace);
             } else if let Some(menu) = &menu {
-                menu.draw(frame);
+                menu.draw(frame, state.workspace);
             } else if choosing {
                 tui_state::draw_choice(frame, choice, settings, &settings_error)
             } else {
@@ -608,7 +650,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
             (index, event) = background_event(&mut sessions) => {
                 match event {
                     Ok(event) => terminal_output(&mut sessions[index], event),
-                    Err(error) => { state.message = format!("Session #{}: {error}", sessions[index].id); sessions.remove(index); session_selected = session_selected.min(sessions.len().saturating_sub(1)); },
+                    Err(error) => { state.fail(crate::model::Failure::new("terminalUnavailable", format!("Session #{}: {error}", sessions[index].id))); sessions.remove(index); session_selected = session_selected.min(sessions.len().saturating_sub(1)); },
                 }
             },
             event = async { match cli.as_mut() { Some(session) => session.next().await, None => std::future::pending().await } } => {
@@ -623,10 +665,11 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             cli.take();
                             if mutation_job.mutation.is_none() { break; }
                         }
-                        state.message = format!("CLI exit code {code}; Enter returns to the list");
+                        let text = format!("CLI exit code {code}; Enter returns to the list");
+                        if code == 0 { state.notify(text) } else { state.warn(text) }
                     },
                     Ok(TerminalEvent::Ended | TerminalEvent::InputProgress) => {},
-                    Err(error) => { state.message = error.to_string(); cli.take(); job.refresh(&mut state); },
+                    Err(error) => { state.fail(crate::model::Failure::new("terminalUnavailable", error)); cli.take(); job.refresh(&mut state); },
                 }
             },
             _ = terminate.recv() => {
@@ -682,7 +725,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     }
                     let vm_not_ready = result.as_ref().is_err_and(|error| error.code == tui_state::VM_NOT_READY);
                     if finished && state.native.is_some() {
-                        state.connection_status = if result.is_ok() { "Available" } else if vm_not_ready { "Waiting for the Hamn VM" } else if state.hamn_environment() { "Connection failed; e environments, v VM controls" } else { "Connection failed; verify CLI installation, credentials and target; e selects target" }.into();
+                        state.connection_status = if result.is_ok() { "Available" } else if vm_not_ready { "Waiting for the Hamn VM" } else { "Connection failed" }.into();
                     }
                     if finished && result.is_ok() && !state.environment_picker {
                         if let Some(target) = current_target(&state).filter(|target| Some(target) != remembered_target.as_ref()) {
@@ -712,7 +755,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     }
                 }
                 if let Event::Resize(width, height) = event {
-                    for session in &mut sessions { if let Err(error) = session.resize(width, height) { state.message = error.to_string(); } }
+                    for session in &mut sessions { if let Err(error) = session.resize(width, height) { state.fail(crate::model::Failure::new("terminalUnavailable", error)); } }
                 }
                 if sessions_open {
                     if let Event::Key(key) = event {
@@ -731,7 +774,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 }
                 if let Some(session) = &mut cli {
                     match event {
-                        Event::Resize(width, height) => { if let Err(e) = session.resize(width, height) { state.message = e.to_string(); } },
+                        Event::Resize(width, height) => { if let Err(error) = session.resize(width, height) { state.fail(crate::model::Failure::new("terminalUnavailable", error)); } },
                         Event::Paste(text) if session.exit.is_none() => {
                             let bytes = if session.parser.screen().bracketed_paste() { format!("\x1b[200~{text}\x1b[201~").into_bytes() } else { text.into_bytes() };
                             let _ = session.input(&bytes);
@@ -778,7 +821,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             match chosen.items.remove(chosen.selected).1 {
                                 MenuAction::Target(target) => {
                                     job.cancel(&mut state);
-                                    match apply_target(target, &mut state, &mut other) { Ok(()) => job.refresh(&mut state), Err(error) => state.message = error.message }
+                                    match apply_target(target, &mut state, &mut other) { Ok(()) => job.refresh(&mut state), Err(error) => state.fail(error) }
                                 },
                                 MenuAction::Native("logs") => menu = Menu::logs(&state),
                                 MenuAction::Native(action) => resource_action(action, &mut state, &mut job, &mut cli, terminal.get_frame().area()),
@@ -788,10 +831,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                     match result {
                                         Ok(action) if !state.stale && !state.loading => {
                                             job.cancel(&mut state); let area = terminal.get_frame().area();
-                                            match Session::start(action.invocation, area.width, area.height) { Ok(session) => cli = Some(session), Err(error) => state.message = error.to_string() }
+                                            if let Some(session) = open_cli(action.invocation, area, &mut state) { cli = Some(session) }
                                         },
-                                        Ok(_) => state.message = "Refresh before reading previous data".into(),
-                                        Err(error) => state.message = error.message,
+                                        Ok(_) => state.warn("Refresh before reading previous data"),
+                                        Err(error) => state.fail(error),
                                     }
                                 },
                             }
@@ -845,9 +888,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     match key.code {
                         KeyCode::Char('y') if tui_state::native_confirmation_visible(action, area) => {
                             let action = state.pending_native.take().unwrap(); job.cancel(&mut state);
-                            match Session::start(action.invocation, area.width, area.height) {
-                                Ok(session) => cli = Some(session), Err(error) => state.message = error.to_string(),
-                            }
+                            if let Some(session) = open_cli(action.invocation, area, &mut state) { cli = Some(session) }
                         },
                         KeyCode::Esc | KeyCode::Char('n') => state.pending_native = None,
                         _ => {},
@@ -862,7 +903,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                 state.operation_log.clear();
                                 state.operation_status = format!("{} in progress; ! shows logs", request.operation());
                                 mutation_job.start(request, &mut state);
-                            } else { state.message = "A change is already running".into(); }
+                            } else { state.warn("A change is already running"); }
                         },
                         KeyCode::Esc | KeyCode::Char('n') => state.pending = None,
                         _ => {}
@@ -887,7 +928,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                 if let Some(seconds) = input.strip_prefix("refresh-timeout ") {
                                     match seconds.parse::<u64>() {
                                         Ok(seconds @ 1..=300) => state.refresh.timeout = std::time::Duration::from_secs(seconds),
-                                        _ => state.message = "refresh-timeout requires 1..300 seconds".into(),
+                                        _ => state.warn("refresh-timeout requires 1..300 seconds"),
                                     }
                                     continue;
                                 }
@@ -911,11 +952,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                         Ok(invocation) => {
                                             job.cancel(&mut state);
                                             let area = terminal.get_frame().area();
-                                            match Session::start(invocation, area.width, area.height) {
-                                                Ok(session) => cli = Some(session), Err(error) => state.message = format!("CLI unavailable: {error}"),
-                                            }
+                                            if let Some(session) = open_cli(invocation, area, &mut state) { cli = Some(session) }
                                         },
-                                        Err(error) => state.message = error.message,
+                                        Err(error) => state.fail(error),
                                     }
                                 }
                             }
@@ -937,11 +976,11 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         let favorites = key.code == KeyCode::Char('F');
                         match preferences::targets(&preferences_path, favorites) {
                             Ok(targets) => menu = Some(Menu { title: if favorites { "Favorite targets" } else { "Recent targets" }.into(), selected: 0, items: targets.into_iter().map(|target| (target.label(), MenuAction::Target(target))).collect() }),
-                            Err(error) => state.message = error.to_string(),
+                            Err(error) => state.fail(crate::model::Failure::new("preferencesUnavailable", error)),
                         }
                     },
                     KeyCode::Char('f') => if let Some(target) = current_target(&state) {
-                        state.message = match preferences::remember_target(&preferences_path, target, true) { Ok(()) => "Favorite toggled; F lists favorites".into(), Err(error) => error.to_string() };
+                        match preferences::remember_target(&preferences_path, target, true) { Ok(()) => state.notify("Favorite toggled; F lists favorites"), Err(error) => state.fail(crate::model::Failure::new("preferencesUnavailable", error)) }
                     },
                     KeyCode::Char('p') => state.refresh.paused = !state.refresh.paused,
                     KeyCode::Char('R') => job.refresh(&mut state),
@@ -979,6 +1018,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     },
                     KeyCode::Char(':') => { state.history_index = None; state.input = Some((':', String::new())); },
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
+                    KeyCode::Esc if state.help => { state.help = false; state.scroll = 0; },
                     KeyCode::Esc => {
                         state.show_operation = false; state.detail = None; job.cancel(&mut state);
                         if state.cancel_picker() { job.refresh(&mut state); }
@@ -1007,12 +1047,12 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                             state.native = crate::native::parse("", &state).ok(); job.refresh(&mut state);
                         },
                         Ok(Some(request)) => job.dispatch(Ok(request), &mut state),
-                        Err(error) => state.message = error.message,
+                        Err(error) => state.fail(error),
                         _ => {}
                     },
-                    KeyCode::Char('!') => state.show_operation = !state.show_operation,
-                    KeyCode::Char('m') => { menu = Menu::actions(&state); if menu.is_none() { state.message = "Select a resource to see available actions".into(); } },
-                    KeyCode::Char('?') => state.detail = Some("Commands: use : to enter Docker or kubectl commands.\nContainers: ps, ps -a, images, volume ls, network ls\nKubernetes: pods, deployments, services, get pods -A\nExplicit docker / kubectl prefixes are also accepted.\nOutput options are preserved; other commands run in the internal terminal.\n\nSelected resource: Enter detail, l logs, g stats, s start, t stop, r restart, d delete.\nChanges from this menu require confirmation; typed CLI commands run directly.\n\nTab switches workspace; , changes the default workspace.\nCtrl+Alt+B returns to the browser with the CLI running.\nCtrl+Alt+S opens sessions; Enter resumes, d terminates owned processes.\np pauses refresh; [/] change its interval; R refreshes now.\nb recent targets; f toggles favorite; F favorite targets.\n:refresh-timeout 30 sets a 1..300 second query deadline.\nCommand input: Up/Down recall this session history.\ne chooses the environment/context; n chooses a namespace.\nv opens Hamn VM controls for a Hamn environment; there x resets a VM disk.\n! shows active operation logs. Esc returns. q exits.\nCLI terminal: Ctrl-C interrupts, Docker Ctrl-P Ctrl-Q detaches.\nAfter CLI exit, Enter returns and refreshes the list.\nShell pipelines, redirections and aliases are not interpreted.".into()),
+                    KeyCode::Char('!') => { state.show_operation = !state.show_operation; state.help = false; },
+                    KeyCode::Char('m') => { menu = Menu::actions(&state); if menu.is_none() { state.warn("Select a resource to see available actions"); } },
+                    KeyCode::Char('?') => { state.help = !state.help; state.scroll = 0; },
                     KeyCode::Char(c) if "strdlg".contains(c) => {
                         let action = match c { 's'=>"start", 't'=>"stop", 'r'=>"restart", 'd'=>"delete", 'l'=>"logs", _=>"stats" };
                         if action == "start" && state.native.as_ref().is_some_and(|i| i.hamn_profile.is_some()) && state.runtime["dockerStatus"] != "ready" {
