@@ -276,8 +276,31 @@ fn protocol_descriptor(fd: i32) -> i32 {
     unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) }
 }
 
+/// The signals that cancel a worker (util/proc.h): SIGINT, SIGTERM and
+/// SIGHUP. call_executable starts a worker with them blocked; worker()
+/// unblocks them once its handler is installed.
+fn cancellation_signals() -> libc::sigset_t {
+    // SAFETY: sigemptyset and sigaddset only write this local set, and each
+    // number is a valid signal.
+    unsafe {
+        let mut signals = std::mem::zeroed();
+        libc::sigemptyset(&mut signals);
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+            libc::sigaddset(&mut signals, signal);
+        }
+        signals
+    }
+}
+
 pub fn worker() -> i32 {
-    if unsafe { proc_cancel_install() } != 0 {
+    // A cancellation signal that arrived during startup is pending, blocked
+    // since exec. Unblocking only after the handler exists delivers it to the
+    // handler: a cancellation, not a death by the default action. Commands the
+    // C core starts later inherit the unblocked mask.
+    let signals = cancellation_signals();
+    if unsafe { proc_cancel_install() } != 0
+        || unsafe { libc::sigprocmask(libc::SIG_UNBLOCK, &signals, std::ptr::null_mut()) } != 0
+    {
         return 1;
     }
     let mut input = Vec::new();
@@ -438,7 +461,8 @@ async fn call_executable(
     // The child stderr is a pipe even in a terminal. TUI logs and redirected
     // headless output stay line-oriented; only interactive headless uses bars.
     use std::io::IsTerminal;
-    let mut child = tokio::process::Command::new(executable)
+    let mut command = tokio::process::Command::new(executable);
+    command
         .env(
             "HAMN_UPDATE_PROGRESS",
             if request.headless && std::io::stderr().is_terminal() {
@@ -452,7 +476,22 @@ async fn call_executable(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(cancel.is_none())
+        .kill_on_drop(cancel.is_none());
+    // Until worker() installs its handler, the SIGTERM below (which can follow
+    // spawn at once) or a terminal's SIGINT would end the worker by default
+    // action. Blocked from exec on, such a signal waits for that handler.
+    let blocked = cancellation_signals();
+    // SAFETY: the closure runs in the child between fork and exec and calls
+    // only sigprocmask, which is async-signal-safe.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::sigprocmask(libc::SIG_BLOCK, &blocked, std::ptr::null_mut()) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| Failure::new("coreUnavailable", e))?;
     let mut input = child.stdin.take().unwrap();
