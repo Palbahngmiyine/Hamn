@@ -293,7 +293,7 @@ impl Session {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(vec![
-                    Span::styled(" Hamn ", theme::badge(workspace).add_modifier(ratatui::style::Modifier::REVERSED)),
+                    Span::styled(" Hamn ", ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD | ratatui::style::Modifier::REVERSED)),
                     Span::raw(" "),
                     Span::styled(format!(" {} terminal ", self.invocation.program()), theme::badge(workspace)),
                 ]),

@@ -49,12 +49,13 @@ pub fn border(workspace: Workspace) -> Style {
 }
 
 /// Highlighted text on the accent color: the active tab, the selected row
-/// and the crumbs.
+/// and the crumbs. The accent is reversed rather than paired with a fixed
+/// text color, so the text takes the terminal's own background color and
+/// stays readable on light and dark themes alike.
 pub fn badge(workspace: Workspace) -> Style {
     Style::default()
-        .fg(Color::Black)
-        .bg(accent(workspace))
-        .add_modifier(Modifier::BOLD)
+        .fg(accent(workspace))
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
 }
 
 pub fn level(level: Level) -> Style {
@@ -244,7 +245,9 @@ pub fn crumbs(names: &[String], workspace: Workspace) -> Vec<Span<'static>> {
             let style = if index == last {
                 badge(workspace)
             } else {
-                Style::default().fg(Color::Black).bg(Color::Gray)
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::REVERSED)
             };
             [Span::styled(format!(" {name} "), style), Span::raw(" ")]
         })
@@ -295,7 +298,10 @@ mod tests {
                 .iter()
                 .find(|span| span.content.contains('['))
                 .unwrap();
-            assert_eq!(tab.style.bg, Some(accent(active)));
+            assert_eq!(tab.style.fg, Some(accent(active)));
+            assert!(tab.style.add_modifier.contains(Modifier::REVERSED));
+            // No fixed text color: the terminal's background shows through.
+            assert_eq!(tab.style.bg, None);
         }
         assert_ne!(accent(Workspace::Containers), accent(Workspace::Kubernetes));
     }
@@ -369,7 +375,8 @@ mod tests {
         let spans = crumbs(&["pods".into(), "detail".into()], Workspace::Kubernetes);
         let shown: String = spans.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(shown, " pods   detail  ");
-        assert_eq!(spans[2].style.bg, Some(accent(Workspace::Kubernetes)));
-        assert_ne!(spans[0].style.bg, spans[2].style.bg);
+        assert_eq!(spans[2].style.fg, Some(accent(Workspace::Kubernetes)));
+        assert!(spans[0].style.add_modifier.contains(Modifier::REVERSED));
+        assert_ne!(spans[0].style.fg, spans[2].style.fg);
     }
 }
