@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "cjson/cJSON.h"
+#include "core/guest_filesystem.h"
 #include "core/guest_status.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
@@ -134,6 +135,15 @@ static cJSON *profile_status(const struct profile *profile)
     if (!failures ||
         !cJSON_AddItemToObject(value, "portForwardFailures", failures)) {
         cJSON_Delete(failures);
+        cJSON_Delete(value);
+        return NULL;
+    }
+    /* What the latest start found on this disk; whether or not the VM runs,
+     * a damaged disk stays damaged until it is repaired or replaced. */
+    cJSON *filesystem = guest_filesystem_snapshot(profile);
+    if (!filesystem ||
+        !cJSON_AddItemToObject(value, "guestFilesystem", filesystem)) {
+        cJSON_Delete(filesystem);
         cJSON_Delete(value);
         return NULL;
     }

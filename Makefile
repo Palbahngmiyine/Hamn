@@ -50,6 +50,7 @@ SEED_MOUNTS_TEST := $(BUILD)/tests/test_cloudinit_mounts
 PROVISION_TEST := $(BUILD)/tests/test_provision
 DEPLOYMENT_FINGERPRINT_TEST := $(BUILD)/tests/test_guest_deployment_fingerprint
 DEPLOYMENT_RECOVERY_TEST := $(BUILD)/tests/test_deployment_recovery
+GUEST_FILESYSTEM_TEST := $(BUILD)/tests/test_guest_filesystem
 MANAGED_GUEST_IMAGE_TEST := $(BUILD)/tests/test_managed_guest_image
 SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
 PROFILE_READ_TEST := $(BUILD)/tests/test_profile_read
@@ -175,6 +176,11 @@ $(MANAGED_GUEST_IMAGE_TEST): tests/host/test_managed_guest_image.c \
 		$(LDFLAGS) -o $@
 
 $(SSH_OPTIONS_TEST): tests/host/test_ssh_options.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
+		$(LDFLAGS) -o $@
+
+$(GUEST_FILESYSTEM_TEST): tests/host/test_guest_filesystem.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
 		$(LDFLAGS) -o $@
@@ -442,6 +448,7 @@ test-qcow2: host
 test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
+		$(GUEST_FILESYSTEM_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
 		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
 		$(PROFILE_YAML_FAULTS_TEST)
@@ -455,6 +462,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(DEPLOYMENT_FINGERPRINT_TEST)
 	$(MANAGED_GUEST_IMAGE_TEST)
 	$(SSH_OPTIONS_TEST)
+	$(GUEST_FILESYSTEM_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
 	$(LIFECYCLE_LOCK_TEST)
 	$(VMRUN_IDENTITY_TEST)

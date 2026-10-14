@@ -28,6 +28,18 @@
  * not what it should be, and when memory or descriptors run out. */
 int hamn_control_query(const char *profile, char **result);
 void hamn_control_free(char *result);
+/* Start the VM of profile, or bring a running one back to ready. A zero
+ * resource keeps the profile's value. Returns 0; 2 for invalid arguments;
+ * HAMN_CONTROL_GUEST_FILESYSTEM_DAMAGED when the guest root filesystem is
+ * damaged (core/guest_filesystem.h): the start wrote nothing in the guest,
+ * stopped again a VM it booted and left a VM that was running as it was,
+ * and the status reports the damage as guestFilesystem; 130 when cancelled
+ * with the VM restored; and 1 or -1 for any other failure, after which the
+ * operation record says whether the outcome is known. A damage found while
+ * the VM this start booted could not be stopped is such a failure. An
+ * earlier operation whose outcome is unknown stays unknown in the record
+ * after any failure. */
+#define HAMN_CONTROL_GUEST_FILESYSTEM_DAMAGED 6
 int hamn_control_start(const char *profile, unsigned cpus,
                        unsigned memory_gib, unsigned disk_gib);
 /* A zero resource keeps the profile's value. rosetta is 1 or 0 to set Apple

@@ -121,6 +121,25 @@ impl Refresh {
 /// The failure code of a Hamn profile Docker query while its VM is not ready.
 pub const VM_NOT_READY: &str = "vmNotReady";
 
+/// What the latest start found wrong with a Hamn profile's guest disk, from
+/// `guestFilesystem` of `vm status` (core/guest_filesystem.h): Some((damaged,
+/// line)), or None when that start found nothing wrong or the status does
+/// not say. damaged is false for a record that cannot be validated: it is no
+/// evidence, and the next start checks the disk again. The line carries the
+/// evidence, which already says what failed.
+fn guest_disk_problem(status: &Value) -> Option<(bool, String)> {
+    let record = status.get("guestFilesystem").filter(|v| v.is_object())?;
+    let detail = record["detail"].as_str().unwrap_or("");
+    Some(
+        match record["state"].as_str() {
+            Some("errorsRecorded" | "unreadable" | "readOnly") => {
+                (true, format!("Guest disk damaged: {detail}"))
+            }
+            _ => (false, format!("Guest disk not known to be damaged: {detail}")),
+        },
+    )
+}
+
 /// A Hamn profile's Docker socket answers only once its VM runs and guest
 /// Docker is ready. The Docker CLI proves that it could not reach the daemon
 /// (`DOCKER_UNREACHABLE`); the VM status observed by the same refresh then
@@ -129,7 +148,8 @@ pub const VM_NOT_READY: &str = "vmNotReady";
 /// Docker check. Every other failure, such as a usage error, an unknown
 /// command or the output limit, keeps its message because starting the VM
 /// cannot fix it. Without an observed status (the profile could not be read),
-/// or while Docker reports ready, the failure also stays unchanged.
+/// or while Docker reports ready, the failure also stays unchanged. A guest
+/// disk that a start found damaged comes first: starting cannot repair it.
 pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure) -> Failure {
     let Some(status) = status else {
         return error;
@@ -137,6 +157,12 @@ pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure)
     let docker = status["dockerStatus"].as_str().unwrap_or("unavailable");
     if error.code != crate::native::DOCKER_UNREACHABLE || docker == "ready" {
         return error;
+    }
+    if let Some((true, problem)) = guest_disk_problem(status) {
+        return Failure::new(
+            VM_NOT_READY,
+            format!("Hamn VM {profile} cannot run Docker, and starting it cannot repair that. {problem}"),
+        );
     }
     let vm = status["state"].as_str().unwrap_or("unknown");
     let message = match (vm, docker) {
@@ -764,8 +790,16 @@ fn profile_detail(row: &Value) -> String {
             row["directory"].as_str().unwrap_or("~/.hamn/<profile>")
         );
     }
+    let (disk, start) = match guest_disk_problem(row) {
+        Some((true, problem)) => (
+            format!("\n{problem}\nStarting the VM cannot repair this disk."),
+            "s start",
+        ),
+        Some((false, problem)) => (format!("\n{problem}"), "s start / repair"),
+        None => (String::new(), "s start / repair"),
+    };
     format!(
-        "Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers",
+        "Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB{disk}\n\n{start}   t stop   c edit CPU, memory and disk\nEsc returns to containers",
         row["name"],
         row["state"],
         row["dockerStatus"],
@@ -830,7 +864,13 @@ fn label(value: &Value) -> String {
                 .or_else(|| value["status"]["phase"].as_str())
         })
         .unwrap_or("");
-    let docker = value["dockerStatus"].as_str().unwrap_or("");
+    let docker = match guest_disk_problem(value) {
+        Some((true, _)) => format!(
+            "{}  guest disk damaged",
+            value["dockerStatus"].as_str().unwrap_or("")
+        ),
+        _ => value["dockerStatus"].as_str().unwrap_or("").to_owned(),
+    };
     // A Hamn profile whose config.yaml cannot be read is listed with the
     // state of its VM and this reason, in the VM panel and in the picker.
     let status = match value["configurationError"].as_str() {
@@ -1006,10 +1046,37 @@ pub fn draw(frame: &mut Frame, state: &State) {
                     reason.join("\n")
                 )
             }
-            None => format!(
-                "{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment",
-                state.runtime["state"].as_str().unwrap_or("not created")
-            ),
+            None => {
+                let vm = state.runtime["state"].as_str().unwrap_or("not created");
+                // A damaged guest disk is why Docker is unavailable, and a
+                // start cannot change that: the header says so instead of
+                // offering the repair, and gives the evidence on one line.
+                match guest_disk_problem(&state.runtime) {
+                    Some((damaged, problem)) => {
+                        let width = frame.area().width.saturating_sub(2);
+                        let problem = if wrap_lines(&problem, width).len() > 1 {
+                            let first = wrap_lines(&problem, width.saturating_sub(2))
+                                .first()
+                                .cloned()
+                                .unwrap_or_default();
+                            format!("{first} …")
+                        } else {
+                            problem
+                        };
+                        format!(
+                            "{header}\nVM: {vm} | Docker: {ready} | {}\n{problem}",
+                            if damaged {
+                                "s cannot repair the guest disk"
+                            } else {
+                                "s starts / repairs this Hamn environment"
+                            }
+                        )
+                    }
+                    None => format!(
+                        "{header}\nVM: {vm} | Docker: {ready} | s starts / repairs this Hamn environment"
+                    ),
+                }
+            }
         }
     } else {
         header
@@ -1588,6 +1655,73 @@ mod tests {
         let lines = header(serde_json::json!({"state": "stopped", "dockerStatus": "unavailable"}), 120);
         assert!(lines.iter().any(|line| line.contains("VM: stopped | Docker: Connection unavailable")), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains("Status:")), "{lines:?}");
+    }
+    #[test]
+    fn a_damaged_guest_disk_is_shown_instead_of_the_repair_offer() {
+        let header = |runtime: Value, width: u16| {
+            let mut state = State::new(Request::default());
+            state.native = Some(crate::native::parse("ps", &state).unwrap());
+            state.runtime = runtime;
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|f| draw(f, &state)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+        };
+        let evidence = "the guest cannot read its disk: /bin/bash: Input/output error";
+        let damaged = serde_json::json!({"state": "running", "dockerStatus": "recoveryRequired",
+            "guestFilesystem": {"state": "unreadable", "detail": evidence, "observedAt": 1}});
+        let lines = header(damaged.clone(), 120);
+        assert!(lines.iter().any(|line| line.contains("VM: running | Docker: Recovery required | s cannot repair the guest disk")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains(&format!("Guest disk damaged: {evidence}"))), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("s starts / repairs")), "{lines:?}");
+        // Each damaged state is evidence; at 80 columns the line is cut.
+        for state in ["errorsRecorded", "readOnly"] {
+            let mut status = damaged.clone();
+            status["guestFilesystem"]["state"] = state.into();
+            status["guestFilesystem"]["detail"] = "ext4 recorded 3 errors since its last complete check, the first at 2026-10-01T01:43:12Z and the last at 2026-10-14T09:00:00Z".into();
+            let lines = header(status, 80);
+            assert!(lines.iter().any(|line| line.contains("s cannot repair the guest disk")), "{state}: {lines:?}");
+            let evidence = lines.iter().find(|line| line.contains("Guest disk damaged: ext4 recorded 3")).unwrap();
+            assert!(evidence.contains('…') && !lines.iter().any(|line| line.contains("2026-10-14")), "{state}: {lines:?}");
+        }
+        // A record that cannot be validated is no evidence: a start checks
+        // the disk again, so the header keeps offering it.
+        let mut unknown = damaged.clone();
+        unknown["guestFilesystem"] = serde_json::json!({"state": "unknown",
+            "detail": "cannot validate guest-filesystem.json: Invalid argument", "observedAt": null});
+        let lines = header(unknown, 120);
+        assert!(lines.iter().any(|line| line.contains("| s starts / repairs this Hamn environment")), "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains("Guest disk not known to be damaged: cannot validate guest-filesystem.json")), "{lines:?}");
+        // Without a record, the header is as it was.
+        let mut clean = damaged.clone();
+        clean["guestFilesystem"] = Value::Null;
+        let lines = header(clean, 120);
+        assert!(lines.iter().any(|line| line.contains("VM: running | Docker: Recovery required | s starts / repairs this Hamn environment")), "{lines:?}");
+        assert!(!lines.iter().any(|line| line.contains("Guest disk")), "{lines:?}");
+
+        // A Docker list that fails names the damage instead of `s`.
+        let failure = hamn_query_failure("work", Some(&damaged), Failure::new(crate::native::DOCKER_UNREACHABLE, "docker exited 1: Cannot connect"));
+        assert_eq!(failure.code, VM_NOT_READY);
+        assert_eq!(failure.message, format!("Hamn VM work cannot run Docker, and starting it cannot repair that. Guest disk damaged: {evidence}"));
+        // Errors that a start could not fix anyway keep their message.
+        let usage = hamn_query_failure("work", Some(&damaged), Failure::new("cliError", "docker exited 125: unknown flag"));
+        assert_eq!(usage.message, "docker exited 125: unknown flag");
+
+        // The VM panel row and its detail.
+        let mut row = damaged.clone();
+        row["name"] = "work".into();
+        row["cpus"] = 2.into();
+        row["memoryMiB"] = 2048.into();
+        row["diskGiB"] = 60.into();
+        assert_eq!(label(&row), "work  running  recoveryRequired  guest disk damaged");
+        let detail = profile_detail(&row);
+        assert!(detail.contains(&format!("Disk: 60 GiB\nGuest disk damaged: {evidence}\nStarting the VM cannot repair this disk.")), "{detail}");
+        assert!(detail.contains("\ns start   t stop") && !detail.contains("repair   t stop"), "{detail}");
+        row["guestFilesystem"] = Value::Null;
+        assert_eq!(label(&row), "work  running  recoveryRequired");
+        assert!(profile_detail(&row).contains("Disk: 60 GiB\n\ns start / repair   t stop"));
     }
     #[test]
     fn failed_hamn_query_keeps_errors_that_starting_the_vm_cannot_fix() {

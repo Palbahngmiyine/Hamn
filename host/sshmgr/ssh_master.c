@@ -220,9 +220,11 @@ static char *remote_command_build(const char *const remote_argv[])
     return command;
 }
 
+/* quiet captures stdout and stderr into out (cap bytes), or into a scratch
+ * buffer when out is NULL; otherwise both pass through. */
 static int exec_remote(const struct profile *p, const char *ip,
                         const char *const remote_argv[], int quiet,
-                        unsigned timeout_ms)
+                        unsigned timeout_ms, char *out, size_t cap)
 {
     const char *argv[SSH_ARGV_MAX];
     struct ssh_strbuf sb;
@@ -240,10 +242,14 @@ static int exec_remote(const struct profile *p, const char *ip,
 
     int rc;
     if (quiet) {
-        char out[1024];
+        char scratch[1024];
+        if (!out) {
+            out = scratch;
+            cap = sizeof(scratch);
+        }
         rc = timeout_ms ?
-            proc_run_bounded(argv, out, sizeof(out), timeout_ms, NULL, NULL) :
-            proc_run_capture(argv, out, sizeof(out));
+            proc_run_bounded(argv, out, cap, timeout_ms, NULL, NULL) :
+            proc_run_capture(argv, out, cap);
     } else {
         rc = proc_run(argv);
     }
@@ -254,7 +260,7 @@ static int exec_remote(const struct profile *p, const char *ip,
 int ssh_exec(const struct profile *p, const char *ip,
              const char *const remote_argv[], int quiet)
 {
-    return exec_remote(p, ip, remote_argv, quiet, 0);
+    return exec_remote(p, ip, remote_argv, quiet, 0, NULL, 0);
 }
 
 int ssh_exec_bounded(const struct profile *p, const char *ip,
@@ -264,7 +270,19 @@ int ssh_exec_bounded(const struct profile *p, const char *ip,
         errno = EINVAL;
         return -1;
     }
-    return exec_remote(p, ip, remote_argv, 1, timeout_ms);
+    return exec_remote(p, ip, remote_argv, 1, timeout_ms, NULL, 0);
+}
+
+int ssh_exec_capture_bounded(const struct profile *p, const char *ip,
+                             const char *const remote_argv[], char *out,
+                             size_t cap, unsigned timeout_ms)
+{
+    if (!timeout_ms || !out || !cap) {
+        errno = EINVAL;
+        return -1;
+    }
+    out[0] = '\0';
+    return exec_remote(p, ip, remote_argv, 1, timeout_ms, out, cap);
 }
 
 int ssh_exec_capture(const struct profile *p, const char *ip,
