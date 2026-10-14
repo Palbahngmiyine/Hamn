@@ -102,7 +102,9 @@ fn value_style(value: &str) -> Style {
         "starting" | "stopping" | "preparing" | "Pending" | "ContainerCreating" | "Terminating"
         | "restarting" => Some(Level::Warning),
         "recoveryRequired" | "unavailable" | "Failed" | "CrashLoopBackOff" | "ImagePullBackOff"
-        | "ErrImagePull" | "OOMKilled" | "Error" | "dead" | "False" => Some(Level::Error),
+        | "ErrImagePull" | "OOMKilled" | "Error" | "dead" | "False" | "damaged" => {
+            Some(Level::Error)
+        }
         _ => None,
     };
     match tone {

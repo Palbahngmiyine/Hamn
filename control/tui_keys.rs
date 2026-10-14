@@ -15,6 +15,16 @@ use ratatui::{
 };
 
 pub fn hints(state: &State) -> Vec<Hint> {
+    // A profile whose guest disk is damaged cannot be repaired by a start;
+    // its keys offer the reset of the disk instead.
+    let selected_damaged = state
+        .selected()
+        .is_some_and(|row| crate::tui_state::guest_disk_damaged(&row));
+    let start = if selected_damaged {
+        "start"
+    } else {
+        "start/repair"
+    };
     if state.help {
         return vec![("Esc", "close help"), ("j/k", "scroll"), ("q", "quit")];
     }
@@ -31,9 +41,10 @@ pub fn hints(state: &State) -> Vec<Hint> {
     if state.detail.is_some() && state.vm_panel() {
         return vec![
             ("Esc", "back"),
-            ("s", "start/repair"),
+            ("s", start),
             ("t", "stop"),
             ("c", "settings"),
+            ("x", "reset disk"),
             ("d", "delete"),
             ("j/k", "scroll"),
             ("?", "help"),
@@ -69,9 +80,10 @@ pub fn hints(state: &State) -> Vec<Hint> {
     if state.vm_panel() {
         return vec![
             ("Enter", "detail"),
-            ("s", "start/repair"),
+            ("s", start),
             ("t", "stop"),
             ("c", "settings"),
+            ("x", "reset disk"),
             ("d", "delete"),
             ("Esc", "containers"),
             ("/", "filter"),
@@ -89,13 +101,16 @@ pub fn hints(state: &State) -> Vec<Hint> {
     match state.workspace {
         Workspace::Containers => {
             // s starts the VM of a Hamn profile whose Docker is not ready.
-            let vm_start = state
+            let hamn_view = state
                 .native
                 .as_ref()
-                .is_some_and(|i| i.hamn_profile.is_some())
-                && state.runtime["dockerStatus"] != "ready";
+                .is_some_and(|i| i.hamn_profile.is_some());
+            let vm_start = hamn_view && state.runtime["dockerStatus"] != "ready";
+            let disk_damaged = hamn_view && crate::tui_state::guest_disk_damaged(&state.runtime);
+            if !disk_damaged {
+                hints.push(("s", if vm_start { "start VM" } else { "start" }));
+            }
             hints.extend([
-                ("s", if vm_start { "start VM" } else { "start" }),
                 ("t", "stop"),
                 ("r", "restart"),
                 ("d", "delete"),
@@ -103,7 +118,10 @@ pub fn hints(state: &State) -> Vec<Hint> {
                 ("m", "actions"),
                 ("e", "environments"),
             ]);
-            if state.hamn_environment() {
+            if disk_damaged {
+                // The one key that helps comes first, so it fits a narrow terminal.
+                hints.insert(0, ("v", "VM: reset disk"));
+            } else if state.hamn_environment() {
                 hints.push(("v", "VM settings"));
             }
             if state
@@ -168,7 +186,10 @@ const SECTIONS: &[Section] = &[
         &[
             ("e", "Hamn profile, Docker context or kube context"),
             ("n", "Kubernetes namespace"),
-            ("v", "Hamn VM controls; c edits CPU, memory, disk"),
+            (
+                "v",
+                "Hamn VM controls; c edits CPU, memory, disk; x resets the disk",
+            ),
             ("b", "recent targets"),
             ("f", "toggle favorite target"),
             ("F", "favorite targets"),

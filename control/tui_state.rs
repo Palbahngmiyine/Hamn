@@ -124,6 +124,27 @@ impl Refresh {
 /// The failure code of a Hamn profile Docker query while its VM is not ready.
 pub const VM_NOT_READY: &str = "vmNotReady";
 
+/// What the latest start found wrong with a Hamn profile's guest disk, from
+/// `guestFilesystem` of `vm status` (core/guest_filesystem.h): Some((damaged,
+/// evidence)), or None when that start found nothing wrong or the status does
+/// not say. damaged is false for a record that cannot be validated: it is no
+/// evidence, and the next start checks the disk again. The evidence already
+/// says what failed.
+pub(crate) fn guest_disk_problem(status: &Value) -> Option<(bool, String)> {
+    let record = status.get("guestFilesystem").filter(|v| v.is_object())?;
+    let evidence = record["detail"].as_str().unwrap_or("").to_owned();
+    let damaged = matches!(
+        record["state"].as_str(),
+        Some("errorsRecorded" | "unreadable" | "readOnly")
+    );
+    Some((damaged, evidence))
+}
+
+/// Whether the guest disk of a profile is known to be damaged.
+pub(crate) fn guest_disk_damaged(status: &Value) -> bool {
+    guest_disk_problem(status).is_some_and(|(damaged, _)| damaged)
+}
+
 /// A Hamn profile's Docker socket answers only once its VM runs and guest
 /// Docker is ready. The Docker CLI proves that it could not reach the daemon
 /// (`DOCKER_UNREACHABLE`); the VM status observed by the same refresh then
@@ -132,7 +153,8 @@ pub const VM_NOT_READY: &str = "vmNotReady";
 /// Docker check. Every other failure, such as a usage error, an unknown
 /// command or the output limit, keeps its message because starting the VM
 /// cannot fix it. Without an observed status (the profile could not be read),
-/// or while Docker reports ready, the failure also stays unchanged.
+/// or while Docker reports ready, the failure also stays unchanged. A guest
+/// disk that a start found damaged comes first: starting cannot repair it.
 pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure) -> Failure {
     let Some(status) = status else {
         return error;
@@ -140,6 +162,14 @@ pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure)
     let docker = status["dockerStatus"].as_str().unwrap_or("unavailable");
     if error.code != crate::native::DOCKER_UNREACHABLE || docker == "ready" {
         return error;
+    }
+    // The message area holds one line, and the header already shows the
+    // evidence: say what is wrong and the one action that helps.
+    if let Some((true, _)) = guest_disk_problem(status) {
+        return Failure::new(
+            VM_NOT_READY,
+            format!("The guest disk of Hamn VM {profile} is damaged. v, then x resets the disk."),
+        );
     }
     let vm = status["state"].as_str().unwrap_or("unknown");
     let message = match (vm, docker) {
@@ -819,7 +849,7 @@ fn profile_detail(row: &Value) -> String {
         );
     }
     // The keys that act on the profile are the hints above the view.
-    format!(
+    let mut detail = format!(
         "Profile: {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB",
         value("name"),
         value("state"),
@@ -827,7 +857,18 @@ fn profile_detail(row: &Value) -> String {
         value("cpus"),
         value("memoryMiB"),
         value("diskGiB")
-    )
+    );
+    // A damaged guest disk is a state of its own: starting cannot repair it.
+    match guest_disk_problem(row) {
+        Some((true, evidence)) => detail.push_str(&format!(
+            "\nGuest disk: damaged\nEvidence: {evidence}\n\nStarting the VM cannot repair this disk; x deletes it and everything in the VM, and the next start creates a new one."
+        )),
+        Some((false, evidence)) => detail.push_str(&format!(
+            "\nGuest disk: not known to be damaged\nEvidence: {evidence}"
+        )),
+        None => {}
+    }
+    detail
 }
 
 // Identity is independent of row order and mutable status/resourceVersion.
@@ -885,7 +926,13 @@ fn label(value: &Value) -> String {
                 .or_else(|| value["status"]["phase"].as_str())
         })
         .unwrap_or("");
-    let docker = value["dockerStatus"].as_str().unwrap_or("");
+    let docker = match guest_disk_problem(value) {
+        Some((true, _)) => format!(
+            "{}  guest disk damaged",
+            value["dockerStatus"].as_str().unwrap_or("")
+        ),
+        _ => value["dockerStatus"].as_str().unwrap_or("").to_owned(),
+    };
     // A Hamn profile whose config.yaml cannot be read is listed with the
     // state of its VM and this reason, in the VM panel and in the picker.
     let status = match value["configurationError"].as_str() {
@@ -1101,15 +1148,7 @@ fn info_lines(state: &State, width: u16, full_width: u16) -> (Vec<Line<'static>>
             Some(failure) => {
                 let unavailable = Span::styled("status unavailable", theme::level(Level::Warning));
                 wrapped.extend(wrap_spans(vec![vm_line("status unavailable".into(), unavailable)], width));
-                let mut reason = wrap_lines(&format!("Status: {failure}"), full_width);
-                if reason.len() > 2 {
-                    let second = wrap_lines(&reason[1], full_width.saturating_sub(2))
-                        .first()
-                        .cloned()
-                        .unwrap_or_default();
-                    reason.truncate(1);
-                    reason.push(format!("{second} …"));
-                }
+                let reason = at_most_two_lines(&format!("Status: {failure}"), full_width);
                 for (index, line) in reason.into_iter().enumerate() {
                     reason_lines.push(match line.strip_prefix("Status: ").filter(|_| index == 0) {
                         Some(rest) => Line::from(vec![
@@ -1132,6 +1171,21 @@ fn info_lines(state: &State, width: u16, full_width: u16) -> (Vec<Line<'static>>
                     vec![vm_line(vm, Span::styled(docker, theme::level(level)))],
                     width,
                 ));
+                // A damaged guest disk is why Docker is unavailable, and a start
+                // cannot change that: the evidence follows at full width, and
+                // the keys offer the reset of the disk instead of the start.
+                if let Some((damaged, evidence)) = guest_disk_problem(&state.runtime) {
+                    let (sentence, level) = if damaged {
+                        (format!("Guest disk damaged: {evidence}"), Level::Error)
+                    } else {
+                        (format!("Guest disk not known to be damaged: {evidence}"), Level::Warning)
+                    };
+                    reason_lines.extend(
+                        at_most_two_lines(&sentence, full_width)
+                            .into_iter()
+                            .map(|line| Line::styled(line, theme::level(level))),
+                    );
+                }
             }
         }
     }
@@ -1175,6 +1229,27 @@ fn info_lines(state: &State, width: u16, full_width: u16) -> (Vec<Line<'static>>
         wrapped.push(Line::styled(summary, theme::level(operation_level(status))));
     }
     (side, wrapped)
+}
+
+/// A sentence broken between words at `width`, cut after its second line
+/// with an ellipsis: the header must leave room for the rows.
+fn at_most_two_lines(text: &str, width: u16) -> Vec<String> {
+    let words = |text: &str, width: u16| -> Vec<String> {
+        wrap_words(Line::raw(text.to_owned()), width)
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect()
+    };
+    let mut lines = words(text, width);
+    if lines.len() > 2 {
+        let second = words(&lines[1], width.saturating_sub(2))
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        lines.truncate(1);
+        lines.push(format!("{second} …"));
+    }
+    lines
 }
 
 /// The scope of the rows, as k9s writes it after the resource: the
@@ -1564,7 +1639,7 @@ fn operation_lines(state: &State) -> Vec<Line<'static>> {
 
 /// The state that a row of a Hamn profile or environment reports.
 fn label_tone(row: &Value) -> theme::Tone {
-    if row["configurationError"].is_string() || row["dockerStatus"] == "recoveryRequired" {
+    if row["configurationError"].is_string() || row["dockerStatus"] == "recoveryRequired" || guest_disk_damaged(row) {
         return theme::Tone::Failed;
     }
     if row["disabled"] == true {
@@ -2060,12 +2135,135 @@ mod tests {
         let lines = header(serde_json::json!({"statusError": long}), 80);
         let reason: Vec<_> = lines.iter().filter(|line| line.contains("Status: ") || line.contains("xxxx") || line.contains("kubernetes")).collect();
         assert_eq!(reason.len(), 2, "{lines:?}");
-        assert!(reason[1].starts_with("key: kubernetes xxxx") && reason[1].contains('…'), "{lines:?}");
+        assert!(reason[1].starts_with("key: kubernetes") && reason[1].contains('…'), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains("resize terminal")), "{lines:?}");
         // An observed status is shown as before.
         let lines = header(serde_json::json!({"state": "stopped", "dockerStatus": "unavailable"}), 120);
         assert!(lines.iter().any(|line| line.contains("VM: stopped | Docker: Connection unavailable")), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains("Status:")), "{lines:?}");
+    }
+    #[test]
+    fn x_in_the_vm_panel_asks_to_reset_the_selected_profile_disk() {
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        state.accept(Ok(serde_json::json!([
+            {"name": "other", "state": "stopped", "dockerStatus": "unavailable"},
+            {"name": "work", "state": "running", "dockerStatus": "recoveryRequired"}
+        ])));
+        assert!(state.vm_panel());
+        state.selected = Some(1);
+        let request = state.action("reset").unwrap();
+        assert_eq!(request.operation(), "vm reset");
+        assert_eq!(request.profile.as_deref(), Some("work"));
+        // A mutation: the TUI confirms it with this impact before it runs.
+        assert!(request.mutates() && request.yes);
+        let impact = request.impact();
+        assert!(impact.contains("permanently delete its disk") && impact.contains("every container, image, volume and file"), "{impact}");
+        assert!(impact.contains("profile settings and shared host directories are kept"), "{impact}");
+    }
+    #[test]
+    fn a_damaged_guest_disk_is_shown_instead_of_the_repair_offer() {
+        let header = |runtime: Value, width: u16| {
+            let mut state = State::new(Request::default());
+            state.native = Some(crate::native::parse("ps", &state).unwrap());
+            state.runtime = runtime;
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|f| draw(f, &state)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+        };
+        let evidence = "the guest cannot read its disk: /bin/bash: Input/output error";
+        let damaged = serde_json::json!({"state": "running", "dockerStatus": "recoveryRequired",
+            "guestFilesystem": {"state": "unreadable", "detail": evidence, "observedAt": 1}});
+        // The VM line stays; the evidence follows at full width, and the
+        // keys offer the VM panel, where x resets the disk, instead of a
+        // start that cannot repair it.
+        for width in [120, 80] {
+            let lines = header(damaged.clone(), width);
+            assert!(lines.iter().any(|line| line.contains("VM: running | Docker: Recovery required")), "{lines:?}");
+            // At 80 columns the sentence breaks between words onto a second line.
+            let joined = lines.iter().map(|line| line.trim_end()).collect::<Vec<_>>().join(" ");
+            assert!(joined.contains(&format!("Guest disk damaged: {evidence}")), "{lines:?}");
+            assert!(!lines.iter().any(|line| line.trim_end().ends_with("erro")), "{lines:?}");
+            let text = lines.join("\n");
+            assert!(text.contains("<v> VM: reset disk") && !text.contains("<s> start"), "{text}");
+        }
+        // Each damaged state is evidence. The sentence gets two lines at
+        // full width and is cut after them.
+        for state in ["errorsRecorded", "readOnly"] {
+            let mut status = damaged.clone();
+            status["guestFilesystem"]["state"] = state.into();
+            status["guestFilesystem"]["detail"] = "ext4 recorded 3 errors since its last complete check, the first at 2026-10-01T01:43:12Z and the last at 2026-10-14T09:00:00Z".into();
+            let lines = header(status.clone(), 80);
+            let first = lines.iter().position(|line| line.contains("Guest disk damaged: ext4 recorded 3")).unwrap();
+            assert!(lines[first + 1].contains("2026-10-14T09:00:00Z"), "{state}: {lines:?}");
+            assert!(!lines.iter().any(|line| line.contains('…')), "{state}: {lines:?}");
+            status["guestFilesystem"]["detail"] = format!("{} {}", status["guestFilesystem"]["detail"].as_str().unwrap(), "x".repeat(300)).into();
+            let lines = header(status, 80);
+            let first = lines.iter().position(|line| line.contains("Guest disk damaged: ext4 recorded 3")).unwrap();
+            assert!(lines[first + 1].contains('…') && !lines[first + 2].contains("xxxx"), "{state}: {lines:?}");
+        }
+        // A record that cannot be validated is no evidence: a start checks
+        // the disk again, so the keys keep offering it.
+        let mut unknown = damaged.clone();
+        unknown["guestFilesystem"] = serde_json::json!({"state": "unknown",
+            "detail": "cannot validate guest-filesystem.json: Invalid argument", "observedAt": null});
+        let text = header(unknown, 120).join("\n");
+        assert!(text.contains("Guest disk not known to be damaged: cannot validate guest-filesystem.json"), "{text}");
+        assert!(text.contains("<s> start VM") && !text.contains("reset disk"), "{text}");
+        // Without a record, the header is as it was.
+        let mut clean = damaged.clone();
+        clean["guestFilesystem"] = Value::Null;
+        let text = header(clean, 120).join("\n");
+        assert!(text.contains("VM: running | Docker: Recovery required") && text.contains("<s> start VM"), "{text}");
+        assert!(!text.contains("Guest disk"), "{text}");
+
+        // A Docker list that fails names the damage instead of `s`.
+        let failure = hamn_query_failure("work", Some(&damaged), Failure::new(crate::native::DOCKER_UNREACHABLE, "docker exited 1: Cannot connect"));
+        assert_eq!(failure.code, VM_NOT_READY);
+        assert_eq!(failure.message, "The guest disk of Hamn VM work is damaged. v, then x resets the disk.");
+        // It fits the one-line message area of an 80-column terminal.
+        assert!(failure.message.chars().count() <= 78, "{}", failure.message);
+        // Errors that a start could not fix anyway keep their message.
+        let usage = hamn_query_failure("work", Some(&damaged), Failure::new("cliError", "docker exited 125: unknown flag"));
+        assert_eq!(usage.message, "docker exited 125: unknown flag");
+
+        // The VM panel row, its detail and their keys.
+        let mut row = damaged.clone();
+        row["name"] = "work".into();
+        row["cpus"] = 2.into();
+        row["memoryMiB"] = 2048.into();
+        row["diskGiB"] = 60.into();
+        assert_eq!(label(&row), "work  running  recoveryRequired  guest disk damaged");
+        assert_eq!(label_tone(&row), theme::Tone::Failed);
+        let detail = profile_detail(&row);
+        assert!(detail.contains(&format!("Disk: 60 GiB\nGuest disk: damaged\nEvidence: {evidence}\n\nStarting the VM cannot repair this disk; x deletes it and everything in the VM, and the next start creates a new one.")), "{detail}");
+        let mut panel = State::new(Request::default());
+        panel.view("vm").unwrap();
+        panel.accept(Ok(serde_json::json!([row.clone()])));
+        let keys = crate::tui_keys::hints(&panel);
+        assert!(keys.contains(&("x", "reset disk")) && keys.contains(&("s", "start")), "{keys:?}");
+        assert!(panel.enter().unwrap().is_none());
+        let keys = crate::tui_keys::hints(&panel);
+        assert!(keys.contains(&("x", "reset disk")) && keys.contains(&("s", "start")), "{keys:?}");
+        // The detail shows the damage as a red state.
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &panel)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        let start = text.find("Guest disk: damaged").unwrap() + "Guest disk: ".len();
+        let index = text[..start].chars().count();
+        let width = usize::from(buffer.area.width);
+        assert_eq!(buffer[((index % width) as u16, (index / width) as u16)].fg, Color::Red);
+        // Without damage the keys offer the repair, and the detail is as it was.
+        row["guestFilesystem"] = Value::Null;
+        assert_eq!(label(&row), "work  running  recoveryRequired");
+        assert!(profile_detail(&row).ends_with("Disk: 60 GiB"));
+        panel.detail = None;
+        panel.accept(Ok(serde_json::json!([row])));
+        assert!(crate::tui_keys::hints(&panel).contains(&("s", "start/repair")));
     }
     #[test]
     fn failed_hamn_query_keeps_errors_that_starting_the_vm_cannot_fix() {

@@ -406,6 +406,32 @@ static cJSON *query_snapshot(const struct profile *profile)
     return snapshot;
 }
 
+/* Replaces the free-form string item name of object, when there is one,
+ * with its text redacted like a log line. Returns 0, or -1 when memory
+ * runs out. */
+static int redact_string_item(cJSON *object, const char *name)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (!cJSON_IsString(item) || !item->valuestring[0])
+        return 0;
+    struct text_buffer redacted = { 0 };
+    cJSON *replacement = NULL;
+    if (redact_log_text(item->valuestring, strlen(item->valuestring),
+                        &redacted) == 0 && redacted.data) {
+        while (redacted.length > 0 &&
+               redacted.data[redacted.length - 1] == '\n')
+            redacted.data[--redacted.length] = '\0';
+        replacement = cJSON_CreateString(redacted.data);
+    }
+    buffer_free(&redacted);
+    if (!replacement ||
+        !cJSON_ReplaceItemInObjectCaseSensitive(object, name, replacement)) {
+        cJSON_Delete(replacement);
+        return -1;
+    }
+    return 0;
+}
+
 static char *build_status_json(const struct profile *profile,
                                const cJSON *snapshot)
 {
@@ -416,11 +442,20 @@ static char *build_status_json(const struct profile *profile,
         cJSON_GetObjectItemCaseSensitive(snapshot, "hostFreeMiB");
     const cJSON *forward_failures =
         cJSON_GetObjectItemCaseSensitive(snapshot, "portForwardFailures");
+    const cJSON *guest_filesystem =
+        cJSON_GetObjectItemCaseSensitive(snapshot, "guestFilesystem");
     if (!cJSON_IsString(state) || !cJSON_IsString(docker_status) ||
         !(cJSON_IsNumber(host_free) || cJSON_IsNull(host_free)) ||
-        !cJSON_IsArray(forward_failures))
+        !cJSON_IsArray(forward_failures) ||
+        !(cJSON_IsObject(guest_filesystem) || cJSON_IsNull(guest_filesystem)))
         return NULL;
 
+    /* What a start found on the disk. Its detail quotes the guest. */
+    cJSON *filesystem = cJSON_Duplicate(guest_filesystem, 1);
+    if (!filesystem || redact_string_item(filesystem, "detail") != 0) {
+        cJSON_Delete(filesystem);
+        return NULL;
+    }
     cJSON *root = cJSON_CreateObject();
     cJSON *vm = NULL, *logs = NULL;
     cJSON *free_space = cJSON_Duplicate(host_free, 0);
@@ -436,6 +471,7 @@ static char *build_status_json(const struct profile *profile,
         !cJSON_AddNumberToObject(vm, "diskGiB", profile->disk_gib) ||
         !cJSON_AddStringToObject(vm, "dockerStatus",
                                  docker_status->valuestring) ||
+        !cJSON_AddItemToObject(vm, "guestFilesystem", filesystem) ||
         !cJSON_AddItemToObject(root, "hostFreeMiB", free_space) ||
         !cJSON_AddItemToObject(root, "portForwardFailures", failures) ||
         !(logs = cJSON_AddObjectToObject(root, "logs")) ||
@@ -443,6 +479,8 @@ static char *build_status_json(const struct profile *profile,
                                 DIAGNOSTIC_LOG_TAIL_BYTES) ||
         !cJSON_AddBoolToObject(logs, "redacted", 1)) {
         /* Items that never reached root are still owned here. */
+        if (!vm || !cJSON_GetObjectItemCaseSensitive(vm, "guestFilesystem"))
+            cJSON_Delete(filesystem);
         if (!root || !cJSON_GetObjectItemCaseSensitive(root, "hostFreeMiB"))
             cJSON_Delete(free_space);
         if (!root ||
@@ -466,25 +504,9 @@ static char *build_operation_json(const cJSON *snapshot)
         cJSON_CreateNull();
     if (!operation)
         return NULL;
-    const cJSON *error = cJSON_GetObjectItemCaseSensitive(operation, "error");
-    if (cJSON_IsString(error) && error->valuestring[0]) {
-        struct text_buffer redacted = { 0 };
-        cJSON *replacement = NULL;
-        if (redact_log_text(error->valuestring, strlen(error->valuestring),
-                            &redacted) == 0 && redacted.data) {
-            while (redacted.length > 0 &&
-                   redacted.data[redacted.length - 1] == '\n')
-                redacted.data[--redacted.length] = '\0';
-            replacement = cJSON_CreateString(redacted.data);
-        }
-        buffer_free(&redacted);
-        if (!replacement ||
-            !cJSON_ReplaceItemInObjectCaseSensitive(operation, "error",
-                                                    replacement)) {
-            cJSON_Delete(replacement);
-            cJSON_Delete(operation);
-            return NULL;
-        }
+    if (redact_string_item(operation, "error") != 0) {
+        cJSON_Delete(operation);
+        return NULL;
     }
     char *text = cJSON_PrintUnformatted(operation);
     cJSON_Delete(operation);
