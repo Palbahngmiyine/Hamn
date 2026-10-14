@@ -808,22 +808,25 @@ impl State {
 /// be read has no settings to show: the detail says why and where the file
 /// is, because every operation on the profile is refused until it reads.
 fn profile_detail(row: &Value) -> String {
+    // Strings are shown as text, not as JSON with quotes.
+    let value = |key: &str| row[key].as_str().map_or_else(|| row[key].to_string(), String::from);
     if let Some(error) = row["configurationError"].as_str() {
         return format!(
-            "Hamn profile {}\nVM: {}\nConfiguration: cannot be read: {error}\nFile: {}/config.yaml\n\nStart, stop, delete and settings are refused until the file is corrected.\nEsc returns to containers",
-            row["name"],
-            row["state"],
+            "Profile: {}\nVM: {}\nConfiguration: cannot be read: {error}\nFile: {}/config.yaml\n\nStart, stop, delete and settings are refused until the file is corrected.",
+            value("name"),
+            value("state"),
             row["directory"].as_str().unwrap_or("~/.hamn/<profile>")
         );
     }
+    // The keys that act on the profile are the hints above the view.
     format!(
-        "Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers",
-        row["name"],
-        row["state"],
-        row["dockerStatus"],
-        row["cpus"],
-        row["memoryMiB"],
-        row["diskGiB"]
+        "Profile: {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB",
+        value("name"),
+        value("state"),
+        value("dockerStatus"),
+        value("cpus"),
+        value("memoryMiB"),
+        value("diskGiB")
     )
 }
 
@@ -1159,14 +1162,7 @@ fn info_lines(state: &State, width: u16, full_width: u16) -> (Vec<Line<'static>>
         } else {
             status.clone()
         };
-        let level = if status.contains("in progress") || status.starts_with("Cancelling") {
-            Level::Warning
-        } else if status == "Operation completed" {
-            Level::Info
-        } else {
-            Level::Error
-        };
-        wrapped.push(Line::styled(summary, theme::level(level)));
+        wrapped.push(Line::styled(summary, theme::level(operation_level(status))));
     }
     (side, wrapped)
 }
@@ -1225,6 +1221,9 @@ fn title(state: &State) -> Line<'static> {
         spans.push(Span::styled("Help", theme::key(workspace)));
     } else if state.show_operation {
         spans.push(Span::styled("Operation log", theme::key(workspace)));
+    } else if state.detail.is_some() && state.vm_panel() {
+        let profile = state.request.profile.as_deref().unwrap_or("default");
+        spans.push(Span::styled(format!("Profile {}", clean(profile)), theme::key(workspace)));
     } else if state.detail.is_some() {
         spans.push(Span::styled("Detail", theme::key(workspace)));
     } else {
@@ -1449,16 +1448,11 @@ pub fn draw(frame: &mut Frame, state: &State) {
         .border_style(theme::border(workspace))
         .title(title(state))
         .title_alignment(Alignment::Center);
-    let operation_detail = format!(
-        "{}{}\n{}\n{}",
-        state.last_error.as_ref().map_or(String::new(), |error| format!(
-            "Last error ({})\n{}\n\n",
-            error.code, error.message
-        )),
-        state.operation_status,
-        state.operation_log,
-        serde_json::to_string_pretty(&state.uncertain).unwrap()
-    );
+    let detail: Option<Vec<Line<'static>>> = if state.show_operation {
+        Some(operation_lines(state))
+    } else {
+        state.detail.as_deref().map(crate::tui_detail::lines)
+    };
     if state.help {
         let columns = crate::tui_keys::help(workspace, areas[3].width);
         let inner = block.inner(areas[3]);
@@ -1474,13 +1468,9 @@ pub fn draw(frame: &mut Frame, state: &State) {
                 *part,
             );
         }
-    } else if let Some(detail) = if state.show_operation {
-        Some(&operation_detail)
-    } else {
-        state.detail.as_ref()
-    } {
+    } else if let Some(detail) = detail {
         frame.render_widget(
-            Paragraph::new(clean(detail))
+            Paragraph::new(detail)
                 .scroll((state.scroll, 0))
                 .wrap(Wrap { trim: false })
                 .block(block),
@@ -1517,6 +1507,44 @@ pub fn draw(frame: &mut Frame, state: &State) {
         bottom[1],
     );
     frame.render_widget(Paragraph::new(message), areas[6]);
+}
+
+/// How the status of the latest change reads: running, done, or failed.
+fn operation_level(status: &str) -> Level {
+    if status.contains("in progress") || status.starts_with("Cancelling") {
+        Level::Warning
+    } else if status == "Operation completed" {
+        Level::Info
+    } else {
+        Level::Error
+    }
+}
+
+/// The operation log: the last failure as it was received, the status of
+/// the latest change and its output, and the targets of changes whose
+/// outcome is unknown.
+fn operation_lines(state: &State) -> Vec<Line<'static>> {
+    let raw = |text: &str| -> Vec<Line<'static>> {
+        clean(text).lines().map(|line| Line::raw(line.to_owned())).collect()
+    };
+    let mut lines = Vec::new();
+    if let Some(error) = &state.last_error {
+        lines.push(Line::styled(
+            format!("Last error ({})", clean(&error.code)),
+            theme::level(Level::Error),
+        ));
+        lines.extend(raw(&error.message));
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::styled(
+        clean(&state.operation_status),
+        theme::level(operation_level(&state.operation_status)),
+    ));
+    lines.extend(raw(&state.operation_log));
+    lines.extend(crate::tui_detail::lines(
+        &serde_json::to_string_pretty(&state.uncertain).unwrap(),
+    ));
+    lines
 }
 
 /// The state that a row of a Hamn profile or environment reports.
@@ -2709,6 +2737,34 @@ mod tests {
         // No terminal input is a definition file.
         let refused = state.view("vm apply --file -").unwrap_err();
         assert_eq!(refused.code, "invalidRequest");
+    }
+    #[test]
+    fn a_profile_detail_reads_as_fields_with_the_keys_that_act_on_it() {
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        state.accept(Ok(serde_json::json!([{"name": "work", "state": "running",
+            "dockerStatus": "ready", "cpus": 4, "memoryMiB": 8192, "diskGiB": 80}])));
+        assert!(state.enter().unwrap().is_none());
+        let detail = state.detail.clone().unwrap();
+        // Text values without JSON quotes; the keys are hints, not text.
+        assert_eq!(detail, "Profile: work\nVM: running\nDocker: ready\nCPU: 4\nMemory: 8192 MiB\nDisk: 80 GiB");
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        for marker in ["Profile work", "<Esc> back", "<s> start/repair", "<t> stop", "<c> settings", "VM: running"] {
+            assert!(text.contains(marker), "{marker}: {text}");
+        }
+        assert!(!text.contains('"'), "{text}");
+        // Field names stand out and a known state takes its color.
+        let at = |needle: &str, offset: usize| {
+            let start = text.find(needle).unwrap() + offset;
+            let index = text[..start].chars().count();
+            let width = usize::from(buffer.area.width);
+            buffer[((index % width) as u16, (index / width) as u16)].clone()
+        };
+        assert_eq!(at("Memory:", 0).fg, crate::tui_detail::key_style().fg.unwrap());
+        assert_eq!(at("VM: running", 4).fg, Color::Green);
     }
     #[test]
     fn messages_break_between_words_and_keep_their_styles() {

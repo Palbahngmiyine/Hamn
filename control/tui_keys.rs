@@ -27,6 +27,19 @@ pub fn hints(state: &State) -> Vec<Hint> {
             ("q", "quit"),
         ];
     }
+    // A profile's detail keeps the keys that act on it.
+    if state.detail.is_some() && state.vm_panel() {
+        return vec![
+            ("Esc", "back"),
+            ("s", "start/repair"),
+            ("t", "stop"),
+            ("c", "settings"),
+            ("d", "delete"),
+            ("j/k", "scroll"),
+            ("?", "help"),
+            ("q", "quit"),
+        ];
+    }
     if state.detail.is_some() {
         return vec![
             ("Esc", "back"),
