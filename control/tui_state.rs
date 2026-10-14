@@ -1025,6 +1025,16 @@ pub fn native_confirmation_visible(
         && wrap_lines(&native_confirmation(action), area.width - 2).len()
             <= usize::from(area.height - 2)
 }
+/// The text of a confirmation in the style of a detail, its first line bold:
+/// what is confirmed.
+fn confirmation_lines(text: &str) -> Vec<Line<'static>> {
+    let mut lines = crate::tui_detail::lines(text);
+    if let Some(first) = lines.first_mut() {
+        first.style = first.style.add_modifier(Modifier::BOLD);
+    }
+    lines
+}
+
 /// A confirmation covers the screen; a deletion is framed in red.
 fn confirm_block(title: &'static str, danger: bool) -> Block<'static> {
     Block::bordered()
@@ -1423,7 +1433,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
             "Resize terminal to review the full target. Execution disabled. Esc cancels.".into()
         };
         frame.render_widget(
-            Paragraph::new(clean(&text))
+            Paragraph::new(confirmation_lines(&text))
                 .wrap(Wrap { trim: false })
                 .block(confirm_block("Hamn confirmation", action.description.contains("delete"))),
             area,
@@ -1442,9 +1452,14 @@ pub fn draw(frame: &mut Frame, state: &State) {
             "Resize terminal to review the full target and impact.\nExecution disabled. Esc cancels.".into()
         };
         frame.render_widget(
-            Paragraph::new(text)
+            Paragraph::new(confirmation_lines(&text))
                 .wrap(Wrap { trim: false })
-                .block(confirm_block("Hamn confirmation", pending.operation().ends_with("delete"))),
+                // A change that deletes data is framed in red, whatever its name.
+                .block(confirm_block(
+                    "Hamn confirmation",
+                    pending.operation().ends_with("delete")
+                        || pending.impact().to_lowercase().contains("delete"),
+                )),
             area,
         );
         return;
@@ -2846,6 +2861,48 @@ mod tests {
         }
         for input in ["\"unfinished\\", "\"unfinished\\\n", "unfinished\\"] {
             assert!(split_command(input).is_err(), "{input:?}");
+        }
+    }
+    #[test]
+    fn confirmations_read_like_details_and_frame_deletions_in_red() {
+        let render = |words: &[&str]| {
+            let mut state = State::new(Request::default());
+            let mut request = Request {
+                words: words.iter().map(|word| (*word).into()).collect(),
+                profile: Some("work".into()),
+                yes: true,
+                ..Default::default()
+            };
+            if words[0] == "k8s" {
+                request.profile = None;
+                request.context = Some("dev".into());
+                request.namespace = Some("default".into());
+                request.name = Some("api".into());
+            }
+            state.pending = Some(request);
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, &state)).unwrap();
+            terminal.backend().buffer().clone()
+        };
+        for (words, red) in [
+            (&["vm", "delete"][..], true),
+            (&["k8s", "pods", "delete"], true),
+            (&["vm", "stop"], false),
+        ] {
+            let buffer = render(words);
+            let border = buffer[(0, 0)].fg;
+            assert_eq!(border, if red { Color::Red } else { Color::Yellow }, "{words:?}");
+            // The first line says what is confirmed, in bold; field names stand out.
+            assert!(buffer[(1, 1)].modifier.contains(Modifier::BOLD), "{words:?}");
+            let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+            let impact = text.find("Impact:").unwrap();
+            let index = text[..impact].chars().count();
+            let width = usize::from(buffer.area.width);
+            assert_eq!(
+                buffer[((index % width) as u16, (index / width) as u16)].fg,
+                crate::tui_detail::key_style().fg.unwrap(),
+                "{words:?}"
+            );
         }
     }
     #[test]
