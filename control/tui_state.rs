@@ -1558,7 +1558,7 @@ pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &s
             Span::raw(if chosen { "> " } else { "  " }),
             Span::styled(
                 format!(" {} {name} ", index + 1),
-                if chosen { theme::badge(workspace) } else { theme::key(workspace) },
+                if chosen { theme::badge(workspace) } else { theme::value() },
             ),
             Span::raw(format!(" — {about}")),
         ])
@@ -2775,10 +2775,13 @@ mod tests {
                 let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
                 assert!(!text.contains(inactive), "{text}");
                 let tab = find(&buffer, active);
-                assert!(tab.fg == accent && tab.modifier.contains(Modifier::REVERSED), "{tab:?}");
+                assert_eq!(tab.bg, accent, "{tab:?}");
                 // The frame of the view and the keys take the same color.
                 assert_eq!(find(&buffer, "┌").fg, accent);
-                assert_eq!(find(&buffer, "<:>").fg, accent);
+                // The row count in the title keeps the text color, not the pale border.
+                let count = format!("[{}]", state.rows().len());
+                assert_eq!(find(&buffer, &count).fg, Color::Reset);
+                assert_eq!(find(&buffer, "<:>").bg, accent);
                 assert!(text.contains("<Tab> switch") && text.contains("<?> help"), "{text}");
             }
         }

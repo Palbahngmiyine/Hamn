@@ -1,12 +1,17 @@
-//! The look of the TUI, after the roles of a k9s skin: an accent color per
-//! workspace for its frame, tab, crumbs and keys; status colors for rows; a
-//! color per message level; and key hints drawn as `<key> label`.
+//! The look of the TUI, after the roles of a k9s skin and the palette of
+//! subux.dev: a pastel accent per workspace (sky blue for Containers, lilac
+//! for Kubernetes) frames its view and fills its pills, the active tab, the
+//! keys, the selected row and the crumbs, which carry dark text; rows take a
+//! status color, messages a level color, and key hints read `<key> label`.
 //!
 //! Contract: every distinction that a color makes is also made by text, so
 //! the screen reads the same without color: the active tab is `[Name]`, keys
 //! are in angle brackets, old rows are titled `[stale]`, and a message starts
-//! with an icon of its level. Only the 16 ANSI colors are used, so the
-//! terminal's own palette decides the exact shades on dark and light themes.
+//! with an icon of its level. A pill sets both its background and its text
+//! color, so it reads the same on light and dark terminals. The accents are
+//! 256-color pastels, which terminals show without truecolor support; status
+//! and message colors stay in the 16 ANSI colors, whose shades the
+//! terminal's own palette adapts to its background.
 //! The functions only build styled text; they hold no state.
 
 use crate::preferences::Workspace;
@@ -16,46 +21,57 @@ use ratatui::{
     text::{Line, Span},
 };
 
-/// Frames, the active tab and keys of the Containers and Kubernetes
-/// workspaces differ in color, so that Tab visibly changes the screen.
+/// Frames and pills of the Containers and Kubernetes workspaces differ in
+/// color, so that Tab visibly changes the screen. Containers takes the
+/// 256-color sky blue nearest subux.dev's #c2e7ff (#afd7ff); Kubernetes a
+/// lilac of the same lightness (#d7afff).
 pub fn accent(workspace: Workspace) -> Color {
     match workspace {
-        Workspace::Containers => Color::Cyan,
-        Workspace::Kubernetes => Color::Magenta,
+        Workspace::Containers => Color::Indexed(153),
+        Workspace::Kubernetes => Color::Indexed(183),
     }
+}
+
+/// The text of a pill: near subux.dev's #1f1f1f (#262626).
+const PILL_TEXT: Color = Color::Indexed(235);
+/// A pill that marks no workspace, such as an outer crumb (#e4e4e4).
+const PILL_NEUTRAL: Color = Color::Indexed(254);
+
+/// Dark text on a light background color, readable on any terminal.
+fn pill(color: Color) -> Style {
+    Style::default().fg(PILL_TEXT).bg(color)
 }
 
 pub fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
+/// A key, drawn as a pill like a keycap.
 pub fn key(workspace: Workspace) -> Style {
-    Style::default()
-        .fg(accent(workspace))
-        .add_modifier(Modifier::BOLD)
+    pill(accent(workspace)).add_modifier(Modifier::BOLD)
 }
 
-/// A label of the header, such as `Context:`.
+/// A label of the header, such as `Context:`, muted as subux.dev's #666.
 pub fn label() -> Style {
-    Style::default().fg(Color::Yellow)
+    Style::default().fg(Color::DarkGray)
 }
 
+/// A value, in the terminal's own text color. The color is set rather than
+/// inherited, so a value in a block title does not take the pale border color.
 pub fn value() -> Style {
-    Style::default().add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(Color::Reset)
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn border(workspace: Workspace) -> Style {
     Style::default().fg(accent(workspace))
 }
 
-/// Highlighted text on the accent color: the active tab, the selected row
-/// and the crumbs. The accent is reversed rather than paired with a fixed
-/// text color, so the text takes the terminal's own background color and
-/// stays readable on light and dark themes alike.
+/// The highlight of the workspace: the active tab, the selected row and the
+/// current crumb, as a pill of its accent.
 pub fn badge(workspace: Workspace) -> Style {
-    Style::default()
-        .fg(accent(workspace))
-        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    pill(accent(workspace)).add_modifier(Modifier::BOLD)
 }
 
 pub fn level(level: Level) -> Style {
@@ -245,9 +261,7 @@ pub fn crumbs(names: &[String], workspace: Workspace) -> Vec<Span<'static>> {
             let style = if index == last {
                 badge(workspace)
             } else {
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::REVERSED)
+                pill(PILL_NEUTRAL)
             };
             [Span::styled(format!(" {name} "), style), Span::raw(" ")]
         })
@@ -298,12 +312,15 @@ mod tests {
                 .iter()
                 .find(|span| span.content.contains('['))
                 .unwrap();
-            assert_eq!(tab.style.fg, Some(accent(active)));
-            assert!(tab.style.add_modifier.contains(Modifier::REVERSED));
-            // No fixed text color: the terminal's background shows through.
-            assert_eq!(tab.style.bg, None);
+            // A pill of the accent with its own dark text, on any terminal.
+            assert_eq!(
+                (tab.style.bg, tab.style.fg),
+                (Some(accent(active)), Some(PILL_TEXT))
+            );
         }
         assert_ne!(accent(Workspace::Containers), accent(Workspace::Kubernetes));
+        // subux.dev's sky blue for Containers, in the 256-color cube.
+        assert_eq!(accent(Workspace::Containers), Color::Indexed(153));
     }
 
     #[test]
@@ -332,8 +349,8 @@ mod tests {
         );
         let key = hint_grid(HINTS, Workspace::Kubernetes, 48, 3)[0].spans[0].clone();
         assert_eq!(
-            (key.content.as_ref(), key.style.fg),
-            ("<:>", Some(accent(Workspace::Kubernetes)))
+            (key.content.as_ref(), key.style.bg, key.style.fg),
+            ("<:>", Some(accent(Workspace::Kubernetes)), Some(PILL_TEXT))
         );
         assert_eq!(hint_grid_width(HINTS, 3), 48);
     }
@@ -375,8 +392,13 @@ mod tests {
         let spans = crumbs(&["pods".into(), "detail".into()], Workspace::Kubernetes);
         let shown: String = spans.iter().map(|span| span.content.as_ref()).collect();
         assert_eq!(shown, " pods   detail  ");
-        assert_eq!(spans[2].style.fg, Some(accent(Workspace::Kubernetes)));
-        assert!(spans[0].style.add_modifier.contains(Modifier::REVERSED));
-        assert_ne!(spans[0].style.fg, spans[2].style.fg);
+        assert_eq!(spans[2].style.bg, Some(accent(Workspace::Kubernetes)));
+        assert_eq!(spans[0].style.bg, Some(PILL_NEUTRAL));
+        assert!(
+            spans
+                .iter()
+                .step_by(2)
+                .all(|span| span.style.fg == Some(PILL_TEXT))
+        );
     }
 }
