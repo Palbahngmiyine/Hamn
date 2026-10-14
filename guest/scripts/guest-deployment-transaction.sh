@@ -110,8 +110,18 @@ validate_item_type() {
     esac
 }
 
+# A published phase is exactly the bytes "ready\n". A missing, empty or
+# zero-filled phase (a crash can leave any of them) is not ready, and its
+# backup is never restored. Bytes are compared because command substitution
+# would drop NULs.
+phase_is_ready() {
+    local phase=$1
+    [ -f "$phase" ] && [ ! -L "$phase" ] &&
+        [ "$(head -c 7 -- "$phase" | od -An -tx1 | tr -d ' \n')" = 72656164790a ]
+}
+
 refuse_pending_transaction() {
-    local entry name phase
+    local entry name
     local -a entries
     shopt -s nullglob dotglob
     entries=("$TRANSACTION_ROOT"/*)
@@ -123,17 +133,17 @@ refuse_pending_transaction() {
            [ ! -d "$entry" ] || [ -L "$entry" ] || [ ! -O "$entry" ]; then
             fail "transaction root contains an unsafe entry; inspect $TRANSACTION_ROOT"
         fi
-        phase=
-        if [ -f "$entry/phase" ] && [ ! -L "$entry/phase" ]; then
-            phase=$(cat "$entry/phase")
-        fi
-        if [ "$phase" = ready ]; then
+        if phase_is_ready "$entry/phase"; then
             fail "pending deployment transaction $name exists at $entry; "\
 "recover it before retrying: sudo bash $RECOVERY_SCRIPT "\
 "rollback $name"
         fi
-        fail "incomplete deployment transaction $name exists at $entry; "\
-"inspect it before retrying"
+        if [ -L "$entry/phase" ] ||
+           { [ -e "$entry/phase" ] && [ ! -f "$entry/phase" ]; }; then
+            fail "deployment transaction $name has an unsafe phase; inspect $entry"
+        fi
+        fail "deployment transaction $name at $entry has no ready backup; "\
+"it is never restored, and deployment recovery discards it"
     }
 }
 
@@ -146,6 +156,9 @@ begin_transaction() {
     cleanup_begin() {
         local rc=$?
         if [ "$cleanup_incomplete" -eq 1 ]; then
+            # A phase published before a failed barrier goes first, so a
+            # partial removal is discarded rather than restored.
+            rm -f -- "$TRANSACTION/phase" || true
             rm -rf -- "$TRANSACTION" || true
         fi
         exit "$rc"
@@ -221,10 +234,46 @@ load_transaction() {
         fail "transaction data is unsafe"
     [ -d "$TRANSACTION/meta" ] && [ ! -L "$TRANSACTION/meta" ] ||
         fail "transaction metadata is unsafe"
-    [ -f "$TRANSACTION/phase" ] && [ ! -L "$TRANSACTION/phase" ] ||
+    [ ! -L "$TRANSACTION/phase" ] &&
+        { [ ! -e "$TRANSACTION/phase" ] || [ -f "$TRANSACTION/phase" ]; } ||
         fail "transaction phase is unsafe"
-    [ "$(cat "$TRANSACTION/phase")" = ready ] ||
-        fail "transaction is incomplete"
+    phase_is_ready "$TRANSACTION/phase" || fail "transaction is incomplete"
+}
+
+# Make each protected item, and the directory that holds it, durable. find(1)
+# does not follow CNI symlinks into the live runtime; a symlink is durable
+# with its directory.
+sync_protected_items() {
+    local logical path
+    for logical in "${ITEM_PATHS[@]}"; do
+        path=$(rooted "$logical")
+        if [ -d "${path%/*}" ]; then
+            printf '%s\0' "${path%/*}"
+        fi
+        if [ -e "$path" ] && [ ! -L "$path" ]; then
+            find "$path" \( -type f -o -type d \) -print0
+        fi
+    done | xargs -0 sync --
+}
+
+# Retire a ready backup once commit or rollback has decided its outcome.
+# Removing phase is the decision point: from then on the backup is never
+# restored. It follows a durable runtime and precedes every other removal, so
+# a crash that loses part of the removal leaves an entry that recovery
+# discards, never a ready backup with missing or zero-filled data.
+retire_transaction() {
+    local runtime=$1
+    sync_protected_items ||
+        fail "cannot make the $runtime runtime durable; backup retained at $TRANSACTION"
+    rm -f -- "$TRANSACTION/phase" ||
+        fail "cannot retire the backup; it is retained at $TRANSACTION"
+    sync -- "$TRANSACTION" ||
+        fail "retired the backup at $TRANSACTION but cannot make that durable"
+    rm -rf -- "$TRANSACTION" ||
+        fail "retired the backup but cannot remove $TRANSACTION; "\
+"deployment recovery discards it"
+    sync -- "$TRANSACTION_ROOT" ||
+        fail "removed the retired backup but cannot make the removal durable"
 }
 
 ROLLBACK_FAILED=0
@@ -364,13 +413,12 @@ rollback_transaction() {
         rollback_error "rollback incomplete; backup retained at $TRANSACTION"
         return 1
     fi
-    rm -rf -- "$TRANSACTION" ||
-        fail "rollback succeeded but backup cleanup failed"
+    retire_transaction restored
 }
 
 commit_transaction() {
     load_transaction
-    rm -rf -- "$TRANSACTION" || fail "cannot remove committed backup"
+    retire_transaction deployed
     [ ! -e "$TRANSACTION" ] && [ ! -L "$TRANSACTION" ] ||
         fail "committed backup still exists"
 }

@@ -10,10 +10,12 @@
  * unreadable marker.
  */
 int guest_deployment_is_current(const struct profile *profile);
-/* Roll back a ready backup left by an interrupted guest transaction, under the
- * guest deployment lock. Returns 0 when no backup remains. After a cancelled
- * attempt, recovery_complete reports whether a second recovery finished and
- * Docker became ready; the caller must hold the profile mutation lock. */
+/* Roll back a ready backup left by an interrupted guest transaction, or
+ * discard one that is not ready (see core/deployment_recovery.h), under the
+ * guest deployment lock; a discard is logged. Returns 0 when no backup
+ * remains. After a cancelled attempt, recovery_complete reports whether a
+ * second recovery finished and Docker became ready; the caller must hold the
+ * profile mutation lock. */
 int guest_deployment_recover(const struct profile *profile, const char *ip);
 int guest_deployment_recovery_complete(void);
 /* A remote writer may still be active; do not stop the VM yet. */
