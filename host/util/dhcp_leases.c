@@ -1,8 +1,11 @@
 #include "util/dhcp_leases.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+
+#include "util/proc.h"
 
 #define LEASES_FILE "/var/db/dhcpd_leases"
 
@@ -70,10 +73,14 @@ int dhcp_lookup_ip(const char *mac, char *ip_out, size_t cap)
 
 int dhcp_wait_ip(const char *mac, int timeout_sec, char *ip_out, size_t cap)
 {
-    for (int i = 0; i < timeout_sec; i++) {
+    for (int i = 0; i < timeout_sec && !proc_cancelled(); i++) {
         if (dhcp_lookup_ip(mac, ip_out, cap) == 0)
             return 0;
-        sleep(1);
+        sleep(1); /* 취소 신호를 받으면 일찍 끝난다 */
+    }
+    if (proc_cancelled()) {
+        errno = ECANCELED;
+        return -1;
     }
     return dhcp_lookup_ip(mac, ip_out, cap);
 }

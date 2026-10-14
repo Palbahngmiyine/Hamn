@@ -58,6 +58,7 @@ PROFILE_APPLY_TEST := $(BUILD)/tests/test_profile_apply
 PROFILE_APPLY_FAULTS_TEST := $(BUILD)/tests/test_profile_apply_faults
 PROFILE_YAML_FAULTS_TEST := $(BUILD)/tests/test_profile_yaml_faults
 START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retry
+GUEST_WAIT_DEADLINES_TEST := $(BUILD)/tests/test_guest_wait_deadlines
 RAW_CACHE_TEST := $(BUILD)/tests/test_raw_cache
 # HAMN_TEST_SANITIZERS=1 builds the raw cache test with ASan and UBSan.
 SANITIZER_CFLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -192,6 +193,17 @@ $(START_DOCKER_CONTEXT_RETRY_TEST): tests/host/test_start_docker_context_retry.c
 	clang -DHAMN_TEST $(filter-out -MMD -MP,$(CFLAGS)) $(VERSION_CFLAGS) $< \
 		$(filter-out host/main.c host/cmd/cmd_start.c,$(HOST_C_SRCS)) \
 		host/cmd/cmd_start.c $(HOST_M_SRCS) $(LDFLAGS) -o $@
+
+# guest_deployment.c is compiled into this test a second time, with readiness
+# and image-check budgets of seconds, so its deployment paths end quickly.
+$(GUEST_WAIT_DEADLINES_TEST): tests/host/test_guest_wait_deadlines.c \
+		host/core/guest_deployment.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) -DGUEST_DEPLOYMENT_READY_TIMEOUT_SEC=2 \
+		-DGUEST_IMAGE_VERIFY_TIMEOUT_SEC=1 \
+		tests/host/test_guest_wait_deadlines.c host/core/guest_deployment.c \
+		$(filter-out $(BUILD)/host/core/guest_deployment.o,$(HOST_TEST_OBJS)) \
+		$(LDFLAGS) -o $@
 
 test-portable: hamn-dev
 	$(HAMN_DEV) test repository
@@ -451,7 +463,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(GUEST_FILESYSTEM_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
 		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
-		$(PROFILE_YAML_FAULTS_TEST)
+		$(PROFILE_YAML_FAULTS_TEST) $(GUEST_WAIT_DEADLINES_TEST)
 	rm -rf $(BUILD)/tests/raw-cache-data && mkdir -p $(BUILD)/tests/raw-cache-data
 	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
 	rm -rf $(BUILD)/tests/raw-cache-data
@@ -464,6 +476,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(SSH_OPTIONS_TEST)
 	$(GUEST_FILESYSTEM_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
+	$(GUEST_WAIT_DEADLINES_TEST)
 	$(LIFECYCLE_LOCK_TEST)
 	$(VMRUN_IDENTITY_TEST)
 	$(PROFILE_APPLY_TEST)

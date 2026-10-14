@@ -124,7 +124,8 @@ static int running_start_ready(const struct profile *p)
         !st.ip[0] || ssh_master_alive(p) != 0)
         return 0;
 
-    return guest_deployment_runtime_ready(p, st.ip, 1) == 0;
+    return guest_deployment_runtime_ready(
+        p, st.ip, GUEST_DEPLOYMENT_RUNNING_READY_TIMEOUT_SEC) == 0;
 }
 
 #define HOST_FREE_WARNING_MIB (10ULL * 1024ULL)
@@ -691,7 +692,10 @@ static int cmd_start_execute(const struct start_options *options,
     char ip[64];
     int ip_ready = dhcp_wait_ip(mac, 120, ip, sizeof(ip));
     if (ip_ready != 0) {
-        logerr("timed out waiting for dhcp lease; check %s", serial);
+        if (proc_cancelled())
+            logerr("cancelled while waiting for the guest's dhcp lease");
+        else
+            logerr("timed out waiting for dhcp lease; check %s", serial);
         goto rollback;
     }
     logmsg("guest ip: %s", ip);

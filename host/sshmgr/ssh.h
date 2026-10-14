@@ -53,6 +53,11 @@ int ssh_exec(const struct profile *p, const char *ip,
 /* Quiet bounded command; timeout ends the local client, not guest-side work. */
 int ssh_exec_bounded(const struct profile *p, const char *ip,
                      const char *const remote_argv[], unsigned timeout_ms);
+/* The same bound, with the command's output left on this process's stdout
+ * and stderr, as ssh_exec(..., 0) leaves it. */
+int ssh_exec_bounded_shown(const struct profile *p, const char *ip,
+                           const char *const remote_argv[],
+                           unsigned timeout_ms);
 int ssh_exec_capture(const struct profile *p, const char *ip,
                      const char *const remote_argv[], char *out, size_t cap);
 /* Bounded like ssh_exec_bounded, with the client's stdout and stderr

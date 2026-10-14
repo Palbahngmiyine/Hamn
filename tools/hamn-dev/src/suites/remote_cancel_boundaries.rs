@@ -130,6 +130,7 @@ const RECOVER_PREFIX: &str = r#"
 struct profile { int unused; };
 #define DEPLOYMENT_RECOVERY_SCRIPT "recover"
 #define GUEST_DEPLOYMENT_TRANSACTION_SCRIPT "/helper"
+#define GUEST_DEPLOYMENT_READY_TIMEOUT_SEC 30
 static int recovery_complete, cleanup_pending;
 static int cancelled, depth, calls, second_result, settled_writer_unknown, forwarded, ready;
 static const char *phase;

@@ -251,7 +251,9 @@ static int exec_remote(const struct profile *p, const char *ip,
             proc_run_bounded(argv, out, cap, timeout_ms, NULL, NULL) :
             proc_run_capture(argv, out, cap);
     } else {
-        rc = proc_run(argv);
+        rc = timeout_ms ?
+            proc_run_bounded(argv, NULL, 0, timeout_ms, NULL, NULL) :
+            proc_run(argv);
     }
     free(command);
     return rc;
@@ -283,6 +285,17 @@ int ssh_exec_capture_bounded(const struct profile *p, const char *ip,
     }
     out[0] = '\0';
     return exec_remote(p, ip, remote_argv, 1, timeout_ms, out, cap);
+}
+
+int ssh_exec_bounded_shown(const struct profile *p, const char *ip,
+                           const char *const remote_argv[],
+                           unsigned timeout_ms)
+{
+    if (!timeout_ms) {
+        errno = EINVAL;
+        return -1;
+    }
+    return exec_remote(p, ip, remote_argv, 0, timeout_ms);
 }
 
 int ssh_exec_capture(const struct profile *p, const char *ip,
