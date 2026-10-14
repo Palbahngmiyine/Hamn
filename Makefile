@@ -292,6 +292,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-workspaces
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-outcomes
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-native-regressions
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-command-completion
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-quoting
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-reload
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-refresh

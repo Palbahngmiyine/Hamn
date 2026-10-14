@@ -52,6 +52,7 @@ mod tui;
 #[cfg(target_os = "macos")]
 mod tui_backpressure;
 mod tui_cluster_target;
+mod tui_command_completion;
 mod tui_create_plugins;
 mod tui_docker_all;
 mod tui_docker_config;
@@ -114,6 +115,7 @@ const SUITES: &[Suite] = &[
     ("vm-apply", vm_apply::main),
     ("start-preflight", start_preflight::main),
     ("tui-native-regressions", tui_native_regressions::main),
+    ("tui-command-completion", tui_command_completion::main),
     ("udp-proxy", udp_proxy::main),
     ("tui-review-improvements", tui_review_improvements::main),
     ("tui-session-management", tui_session_management::main),

@@ -39,6 +39,33 @@ pub(crate) const KUBE_CONNECTION_FLAGS: &[&str] = &[
     "--warnings-as-errors",
     "--match-server-version",
 ];
+/// Docker words that `parse` replaces with the command that lists them.
+pub(crate) const DOCKER_VIEW_ALIASES: &[(&str, &[&str])] = &[
+    ("containers", &["ps"]),
+    ("volumes", &["volume", "ls"]),
+    ("networks", &["network", "ls"]),
+];
+/// kubectl resource words that `parse` reads as `get <word>`, unless an
+/// installed plugin owns the word.
+pub(crate) const KUBE_VIEW_ALIASES: &[&str] = &[
+    "pods",
+    "po",
+    "deployments",
+    "deploy",
+    "services",
+    "svc",
+    "nodes",
+    "namespaces",
+    "ns",
+    "statefulsets",
+    "sts",
+    "daemonsets",
+    "ds",
+    "jobs",
+    "cronjobs",
+    "ingresses",
+    "pvcs",
+];
 
 #[derive(Clone, Debug)]
 pub struct Invocation {
@@ -443,39 +470,16 @@ pub fn parse(text: &str, state: &State) -> Result<Invocation> {
     // considered; an alias must never turn a plugin into a different operation.
     let plugin = workspace == Workspace::Kubernetes
         && installed_kubectl_plugin(&args, command_index(&args, workspace));
+    let first = args.first().map(String::as_str).unwrap_or("");
     if workspace == Workspace::Containers {
-        match args.first().map(String::as_str).unwrap_or("") {
-            "containers" => args[0] = "ps".into(),
-            "volumes" => args
-                .splice(0..1, ["volume".into(), "ls".into()])
-                .for_each(drop),
-            "networks" => args
-                .splice(0..1, ["network".into(), "ls".into()])
-                .for_each(drop),
-            _ => {}
+        if let Some((_, command)) = DOCKER_VIEW_ALIASES
+            .iter()
+            .find(|(alias, _)| *alias == first)
+        {
+            args.splice(0..1, command.iter().map(|word| word.to_string()))
+                .for_each(drop);
         }
-    } else if !plugin
-        && [
-            "pods",
-            "po",
-            "deployments",
-            "deploy",
-            "services",
-            "svc",
-            "nodes",
-            "namespaces",
-            "ns",
-            "statefulsets",
-            "sts",
-            "daemonsets",
-            "ds",
-            "jobs",
-            "cronjobs",
-            "ingresses",
-            "pvcs",
-        ]
-        .contains(&args.first().map(String::as_str).unwrap_or(""))
-    {
+    } else if !plugin && KUBE_VIEW_ALIASES.contains(&first) {
         args.insert(0, "get".into());
     }
     let index = command_index(&args, workspace);
@@ -1236,5 +1240,49 @@ mod tests {
                 .args,
             ["config", "current-context"]
         );
+    }
+
+    #[test]
+    fn view_aliases_become_their_list_command_and_keep_the_rest() {
+        let mut state = State::new(Default::default());
+        state.docker_context = Some("ui-selected".into());
+        for (command, args, resource) in [
+            ("containers -a", vec!["ps", "-a"], "containers"),
+            ("volumes", vec!["volume", "ls"], "volumes"),
+            (
+                "networks --filter driver=bridge",
+                vec!["network", "ls", "--filter", "driver=bridge"],
+                "networks",
+            ),
+            ("docker volumes", vec!["volume", "ls"], "volumes"),
+            // Only the first word is an alias.
+            ("volume ls", vec!["volume", "ls"], "volumes"),
+        ] {
+            let invocation = parse(command, &state).unwrap();
+            assert_eq!(
+                invocation.args[..2],
+                ["--context", "ui-selected"],
+                "{command}"
+            );
+            assert_eq!(invocation.args[2..], args, "{command}");
+            assert_eq!(invocation.resource.as_deref(), Some(resource), "{command}");
+        }
+        // An alias in another position is an argument of the command.
+        let invocation = parse("image ls containers", &state).unwrap();
+        assert_eq!(invocation.args[2..], ["image", "ls", "containers"]);
+        state.workspace = Workspace::Kubernetes;
+        state.request.context = Some("dev".into());
+        for (command, args) in [
+            ("po -A", vec!["get", "po", "-A"]),
+            ("kubectl deployments", vec!["get", "deployments"]),
+            ("svc", vec!["get", "svc"]),
+        ] {
+            let invocation = parse(command, &state).unwrap();
+            assert_eq!(invocation.args[..2], ["--context", "dev"], "{command}");
+            assert_eq!(invocation.args[2..], args, "{command}");
+            assert!(invocation.resource.is_some(), "{command}");
+        }
+        // Docker's aliases are not kubectl's.
+        assert!(parse("volumes", &state).unwrap().resource.is_none());
     }
 }
