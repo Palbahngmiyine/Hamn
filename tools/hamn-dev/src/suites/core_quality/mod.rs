@@ -365,6 +365,10 @@ fn binary_runs_and_help_describes_data_semantics() {
         "help does not describe profile deletion semantics"
     );
     assert!(
+        help.contains("vm reset permanently deletes one profile's VM disk."),
+        "help does not describe disk reset data deletion"
+    );
+    assert!(
         help.contains("system uninstall permanently removes all Hamn data."),
         "help does not describe uninstall data deletion"
     );

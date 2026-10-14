@@ -18,6 +18,7 @@
 #include "cli.h"
 #include "core/control.h"
 #include "core/guest_deployment.h"
+#include "core/guest_filesystem.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/operation.h"
@@ -301,7 +302,40 @@ int hamn_test_start_ensure_signed_guest_image(char *image, size_t capacity,
 }
 #endif
 
-static int start_spawned, start_restored, start_unchanged;
+static int start_spawned, start_restored, start_unchanged, start_guest_damaged;
+
+#define GUEST_FILESYSTEM_CHECK_MS 15000
+
+/* The first guest command of a start, before any guest write. A damaged
+ * guest root filesystem fails every later step in a way a start cannot
+ * repair: the deployment's writes fail, and so does their fencing, which
+ * leaves only an unknown outcome. Reporting it as itself, before those
+ * steps, keeps the outcome known. A check that cannot tell lets the start
+ * go on. Returns -1 when the filesystem is damaged. */
+static int check_guest_filesystem(const struct profile *p, const char *ip)
+{
+    struct guest_filesystem_check check;
+    guest_filesystem_probe(p, ip, GUEST_FILESYSTEM_CHECK_MS, &check);
+    if (guest_filesystem_damaged(&check)) {
+        start_guest_damaged = 1;
+        if (guest_filesystem_record(p, &check) != 0)
+            logmsg("warning: cannot record the damaged guest filesystem "
+                   "for vm status: %s", strerror(errno));
+        logerr("the guest root filesystem of profile %s is damaged: %s; "
+               "starting the VM cannot repair it, and vm reset --profile %s "
+               "--yes deletes the disk and everything in the VM so that the "
+               "next start creates a new one", p->name, check.detail,
+               p->name);
+        return -1;
+    }
+    if (check.state == GUEST_FILESYSTEM_UNKNOWN)
+        logmsg("warning: cannot check the guest root filesystem: %s",
+               check.detail);
+    else if (guest_filesystem_forget(p) != 0)
+        logmsg("warning: cannot remove the earlier record of a damaged "
+               "guest filesystem: %s", strerror(errno));
+    return 0;
+}
 
 static int cmd_start_execute(const struct start_options *options,
                             const char *profile_name)
@@ -378,6 +412,13 @@ static int cmd_start_execute(const struct start_options *options,
              * committed. Validate and recover its backup before early success. */
             if (ssh_master_start(&p, running_state.ip, 15) != 0)
                 goto out;
+            start_trace_stage(&trace, "checking-guest-filesystem");
+            if (check_guest_filesystem(&p, running_state.ip) != 0) {
+                /* The check wrote nothing in the guest; the VM keeps
+                 * running as it was. */
+                start_unchanged = 1;
+                goto out;
+            }
             start_trace_stage(&trace, "recovering-deployment");
             if (guest_deployment_recover(&p, running_state.ip) != 0)
                 goto out;
@@ -681,6 +722,9 @@ static int cmd_start_execute(const struct start_options *options,
         goto rollback;
     }
     start_trace_stage(&trace, "ssh-ready");
+    start_trace_stage(&trace, "checking-guest-filesystem");
+    if (check_guest_filesystem(&p, ip) != 0)
+        goto rollback;
 
     if (provision_run_stage(&p, ip, "system") != 0 ||
         provision_run_stage(&p, ip, "user") != 0)
@@ -759,9 +803,13 @@ out:
 
 static int cmd_start_locked(const struct start_options *options, const char *profile)
 {
-    start_spawned = start_restored = start_unchanged = 0;
+    start_spawned = start_restored = start_unchanged = start_guest_damaged = 0;
     int rc = cmd_start_execute(options, profile);
     if (rc == START_REEXEC_AFTER_SIGNED_UPDATE) return operation_restart_required();
+    /* The damage is the result only while this start's own effect is known:
+     * it changed nothing, or it stopped again the VM it booted. */
+    if (rc != 0 && start_guest_damaged && (start_unchanged || start_restored))
+        rc = HAMN_CONTROL_GUEST_FILESYSTEM_DAMAGED;
     if (start_unchanged) return operation_finish_unchanged(rc);
     return operation_finish(rc, !remote_mutation_cleanup_pending() &&
         (start_restored || (!start_spawned &&
