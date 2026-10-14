@@ -220,7 +220,7 @@ fn core_worker_isolation_and_protocol() {
     assert!(rows.iter().all(|row| *row.get("name").expect("row name") != "deleted"), "{rows:?}");
     assert!(home.join(".hamn/deleted/config.yaml").exists());
     // A profile whose configuration cannot be read: the worker answers a
-    // start and a delete with the reason (`call` requires its exit status 0
+    // start, a delete and a reset with the reason (`call` requires its exit status 0
     // and a result) instead of ending without one, which the frontend can
     // only report as an unknown outcome. `disk: 1` stops a start that got
     // past the read before it saves the profile or prepares an image.
@@ -230,6 +230,7 @@ fn core_worker_isolation_and_protocol() {
     for (words, arguments) in [
         ("vm start", json!({"profile": "broken", "yes": true, "disk": 1})),
         ("vm delete", json!({"profile": "broken", "yes": true})),
+        ("vm reset", json!({"profile": "broken", "yes": true})),
     ] {
         let refused = worker.call(words, arguments);
         assert_eq!(

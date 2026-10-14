@@ -321,7 +321,10 @@ static int check_guest_filesystem(const struct profile *p, const char *ip)
             logmsg("warning: cannot record the damaged guest filesystem "
                    "for vm status: %s", strerror(errno));
         logerr("the guest root filesystem of profile %s is damaged: %s; "
-               "starting the VM cannot repair it", p->name, check.detail);
+               "starting the VM cannot repair it, and vm reset --profile %s "
+               "--yes deletes the disk and everything in the VM so that the "
+               "next start creates a new one", p->name, check.detail,
+               p->name);
         return -1;
     }
     if (check.state == GUEST_FILESYSTEM_UNKNOWN)

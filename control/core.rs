@@ -32,6 +32,8 @@ unsafe extern "C" {
     ) -> i32;
     fn hamn_control_stop(profile: *const libc::c_char) -> i32;
     fn hamn_control_delete(profile: *const libc::c_char) -> i32;
+    // Stops the VM, then deletes its disk; core/control.h describes what stays.
+    fn hamn_control_reset(profile: *const libc::c_char) -> i32;
     fn hamn_control_diagnostics(
         profile: *const libc::c_char,
         path: *const libc::c_char,
@@ -244,6 +246,7 @@ fn execute(request: &Request) -> Result<Value> {
             ),
             "vm stop" => hamn_control_stop(pointer),
             "vm delete" => hamn_control_delete(pointer),
+            "vm reset" => hamn_control_reset(pointer),
             _ => return Err(Failure::new("unsupportedOperation", &operation)),
         }
     };

@@ -125,12 +125,16 @@ UI 선택은 Docker의 현재 context나 kubeconfig의 `current-context`를 바�
 ## 데이터
 
 `vm delete`는 VM을 멈추고 목록에서 숨기며 디스크·Docker 데이터를 보존합니다.
+`vm reset --profile <이름> --yes`는 VM을 멈추고 그 디스크를 안의 컨테이너·이미지·볼륨·파일과 함께
+영구 삭제합니다. 다음 시작은 서명된 게스트 이미지로 새 디스크를 만들며, 프로필 설정과 공유한
+호스트 디렉터리는 그대로 남습니다.
 `system uninstall --yes`는 모든 Hamn 프로필과 관리 설치 파일을 영구 삭제합니다.
 
 시작은 게스트에 무엇을 바꾸기 전에 게스트 루트 파일시스템을 먼저 확인합니다.
 ext4가 오류를 기록했거나, 게스트가 자기 디스크를 읽지 못하거나, 루트가 읽기 전용이면
 `guestFilesystemDamaged`로 실패하고, 자신이 부팅한 VM은 다시 멈추며, `vm status`는
-그 근거를 `guestFilesystem`으로 보여 줍니다. 이런 디스크는 다시 시작해도 고쳐지지 않습니다.
+그 근거를 `guestFilesystem`으로 보여 줍니다. 이런 디스크는 다시 시작해도 고쳐지지 않으며
+`vm reset`으로 교체합니다.
 
 컨테이너 생성·Compose·exec·Kubernetes apply·port-forward는 TUI에서 외부 CLI로
 실행하며 헤드리스 SDK 작업 집합에는 추가하지 않습니다. MCP 서버는 제공하지 않습니다.

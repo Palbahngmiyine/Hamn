@@ -471,6 +471,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(PROFILE_YAML_FAULTS_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-apply
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-reset
 	bash guest/tests/test_guest_deployment_transaction.sh
 
 test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)
