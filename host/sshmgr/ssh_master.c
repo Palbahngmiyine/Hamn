@@ -295,7 +295,7 @@ int ssh_exec_bounded_shown(const struct profile *p, const char *ip,
         errno = EINVAL;
         return -1;
     }
-    return exec_remote(p, ip, remote_argv, 0, timeout_ms);
+    return exec_remote(p, ip, remote_argv, 0, timeout_ms, NULL, 0);
 }
 
 int ssh_exec_capture(const struct profile *p, const char *ip,
