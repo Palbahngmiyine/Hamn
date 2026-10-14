@@ -28,6 +28,15 @@
 #define GUEST_DEPLOYMENT_TRANSACTION_SCRIPT \
     "/usr/local/libexec/hamn/guest-deployment-transaction"
 #define GUEST_DEPLOYMENT_TOKEN_CAP 33
+/* Readiness budget after a guest runtime change or its recovery. */
+#ifndef GUEST_DEPLOYMENT_READY_TIMEOUT_SEC
+#define GUEST_DEPLOYMENT_READY_TIMEOUT_SEC 30
+#endif
+/* verify-image-contract reads a few files and runs a few local commands; it
+ * normally ends within a second. */
+#ifndef GUEST_IMAGE_VERIFY_TIMEOUT_SEC
+#define GUEST_IMAGE_VERIFY_TIMEOUT_SEC 30
+#endif
 
 static int deployment_fingerprint(const struct profile *profile,
                                   char output[65]);
@@ -223,7 +232,8 @@ int guest_deployment_recover(const struct profile *profile, const char *ip)
         recovery_complete = !cleanup_pending &&
             !remote_mutation_cleanup_pending() &&
             guest_deployment_forward_sockets(profile, ip) == 0 &&
-            guest_deployment_runtime_ready(profile, ip, 30) == 0;
+            guest_deployment_runtime_ready(
+                profile, ip, GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) == 0;
         if (!recovery_complete)
             logerr("cancelled deployment still needs recovery: %s",
                    reason[0] ? reason : "Docker readiness could not be confirmed");
@@ -285,7 +295,15 @@ static int guest_deployment_verify_image(const struct profile *profile,
         "sudo", "env", mode_env,
         "/usr/local/libexec/hamn/verify-image-contract", NULL
     };
-    if (ssh_exec(profile, ip, verify_image, 0) != 0) {
+    /* Its report stays on the operation's output. */
+    int rc = ssh_exec_bounded_shown(profile, ip, verify_image,
+                                    GUEST_IMAGE_VERIFY_TIMEOUT_SEC * 1000);
+    if (rc == PROC_RUN_TIMEOUT) {
+        logerr("guest image contract check did not finish within %d seconds",
+               GUEST_IMAGE_VERIFY_TIMEOUT_SEC);
+        return -1;
+    }
+    if (rc != 0) {
         logerr("guest image does not satisfy Hamn's preconfigured Docker/CRI contract");
         return -1;
     }
@@ -339,7 +357,9 @@ int guest_deployment_forward_sockets(const struct profile *profile,
     return 0;
 }
 
-int guest_deployment_docker_ready(const struct profile *profile)
+/* The forwarded Docker API answers _ping. A nonzero timeout_ms also bounds
+ * the curl client, whose own limit is 2 seconds. */
+static int docker_ping(const struct profile *profile, unsigned timeout_ms)
 {
     char path[PROFILE_PATH_CAP], response[16];
     if (!profile_path(profile, "docker.sock", path, sizeof(path)))
@@ -348,13 +368,50 @@ int guest_deployment_docker_ready(const struct profile *profile)
         "/usr/bin/curl", "--silent", "--fail", "--noproxy", "*",
         "--max-time", "2", "--unix-socket", path, "http://localhost/_ping", NULL
     };
-    return proc_run_capture(command, response, sizeof(response)) == 0 &&
-        strcmp(response, "OK") == 0;
+    int rc = timeout_ms ?
+        proc_run_bounded(command, response, sizeof(response), timeout_ms,
+                         NULL, NULL) :
+        proc_run_capture(command, response, sizeof(response));
+    return rc == 0 && strcmp(response, "OK") == 0;
 }
 
-static int runtime_ready_once(const struct profile *profile, const char *ip)
+int guest_deployment_docker_ready(const struct profile *profile)
 {
-    if (!guest_deployment_docker_ready(profile))
+    return docker_ping(profile, 0);
+}
+
+static long long monotonic_milliseconds(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* What is left of the budget that ends at deadline_ms, or 0. */
+static unsigned remaining_milliseconds(long long deadline_ms)
+{
+    long long now = monotonic_milliseconds();
+    if (now < 0 || now >= deadline_ms)
+        return 0;
+    long long left = deadline_ms - now;
+    return left < UINT_MAX ? (unsigned)left : UINT_MAX;
+}
+
+/* A probe's client gets what is left of the budget and is reaped by its
+ * deadline; a probe that cannot answer by then counts as not ready. */
+static int probe_within(const struct profile *profile, const char *ip,
+                        const char *const probe[], long long deadline_ms)
+{
+    unsigned left = remaining_milliseconds(deadline_ms);
+    return left && ssh_exec_bounded(profile, ip, probe, left) == 0;
+}
+
+static int runtime_ready_once(const struct profile *profile, const char *ip,
+                              long long deadline_ms)
+{
+    unsigned left = remaining_milliseconds(deadline_ms);
+    if (!left || !docker_ping(profile, left))
         return 0;
 
     const char *agent_probe[] = {
@@ -369,30 +426,32 @@ static int runtime_ready_once(const struct profile *profile, const char *ip)
         "sudo", "ctr", "--address", "/run/containerd/containerd.sock",
         "version", NULL
     };
-    return ssh_exec(profile, ip, agent_probe, 1) == 0 &&
-           ssh_exec(profile, ip, docker_probe, 1) == 0 &&
-           ssh_exec(profile, ip, containerd_probe, 1) == 0;
-}
-
-static long long monotonic_milliseconds(void)
-{
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
-        return -1;
-    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    return probe_within(profile, ip, agent_probe, deadline_ms) &&
+           probe_within(profile, ip, docker_probe, deadline_ms) &&
+           probe_within(profile, ip, containerd_probe, deadline_ms);
 }
 
 int guest_deployment_runtime_ready(const struct profile *profile,
                                    const char *ip, int timeout_sec)
 {
+    if (timeout_sec < 1) {
+        errno = EINVAL;
+        return -1;
+    }
     long long started = monotonic_milliseconds();
     if (started < 0)
         return -1;
     long long deadline = started + (long long)timeout_sec * 1000;
     long delay_ms = 50;
     for (;;) {
-        if (runtime_ready_once(profile, ip))
+        if (runtime_ready_once(profile, ip, deadline))
             return 0;
+        /* Outside cleanup a cancelled operation starts no probe, so polling
+         * on would only wait out the budget. */
+        if (proc_cancelled()) {
+            errno = ECANCELED;
+            return -1;
+        }
         long long now = monotonic_milliseconds();
         if (now < 0 || now >= deadline)
             return -1;
@@ -442,7 +501,8 @@ static void deployment_cancel_recover(const struct profile *profile, const char 
         cleanup_pending = 0;
         recovery_complete = guest_deployment_recover(profile, ip) == 0 &&
             guest_deployment_forward_sockets(profile, ip) == 0 &&
-            guest_deployment_runtime_ready(profile, ip, 30) == 0;
+            guest_deployment_runtime_ready(
+                profile, ip, GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) == 0;
     }
     if (!recovery_complete)
         logerr("cancelled deployment needs recovery; its result was not confirmed");
@@ -491,7 +551,8 @@ static int deployment_refresh_locked(const struct profile *profile,
         guest_deployment_forward_sockets(profile, state->ip) != 0)
         goto rollback;
     if (operation_phase("verifying") != 0 ||
-        guest_deployment_runtime_ready(profile, state->ip, 30) != 0) {
+        guest_deployment_runtime_ready(
+            profile, state->ip, GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) != 0) {
         logerr("guest agent, Docker, or system containerd did not become ready");
         goto rollback;
     }
@@ -526,7 +587,8 @@ rollback:
         guest_deployment_forward_sockets(profile, state->ip) != 0)
         logerr("guest runtime was restored but its host socket forwards "
                "could not be re-established");
-    recovery_complete = guest_deployment_runtime_ready(profile, state->ip, 30) == 0;
+    recovery_complete = guest_deployment_runtime_ready(
+        profile, state->ip, GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) == 0;
     proc_cleanup_end();
     return -1;
 }
@@ -562,7 +624,8 @@ int guest_deployment_reconcile_runtime_locked(
 
     if (guest_deployment_configure_docker(profile, state->ip) == 0 &&
         guest_deployment_forward_sockets(profile, state->ip) == 0 &&
-        guest_deployment_runtime_ready(profile, state->ip, 30) == 0) {
+        guest_deployment_runtime_ready(
+            profile, state->ip, GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) == 0) {
         if (deployment_transaction(profile, state->ip, "commit", token) == 0) {
             logmsg("warm start reconciled Docker networking and readiness");
             return 0;
