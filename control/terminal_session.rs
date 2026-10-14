@@ -287,25 +287,57 @@ impl Session {
             Constraint::Length(1),
         ])
         .split(frame.area());
+        use crate::tui_theme as theme;
+        use ratatui::text::{Line, Span};
+        let workspace = self.invocation.workspace;
         frame.render_widget(
-            Paragraph::new(crate::tui_state::clean(&format!(
-                "Hamn | {} terminal\n{}",
-                self.invocation.program(),
-                self.invocation.target
-            ))),
+            Paragraph::new(vec![
+                Line::from(vec![
+                    Span::styled(" Hamn ", theme::badge(workspace).add_modifier(ratatui::style::Modifier::REVERSED)),
+                    Span::raw(" "),
+                    Span::styled(format!(" {} terminal ", self.invocation.program()), theme::badge(workspace)),
+                ]),
+                Line::from(vec![
+                    Span::styled("Target: ", theme::label()),
+                    Span::raw(crate::tui_state::clean(&self.invocation.target)),
+                ]),
+            ]),
             areas[0],
         );
         frame.render_widget(terminal_io::Screen(self.parser.screen()), areas[1]);
-        let status = self.exit.map(|code| format!("Exit code {code} | PgUp/PgDn scroll | Enter / Esc returns to the resource list"))
-            .unwrap_or_else(|| "Input to CLI | Ctrl+Alt+B browser | Ctrl+Alt+S sessions | Ctrl+Alt+C interrupt | Shift+PgUp/PgDn scroll".into());
-        let status = self
-            .input_error
-            .as_ref()
-            .map_or(status.clone(), |error| match self.exit {
-                Some(code) => format!("Exit code {code} | {error} | Enter/Esc returns"),
-                None => format!("{error} | Ctrl+Alt+C interrupts"),
-            });
-        frame.render_widget(Paragraph::new(status), areas[2]);
+        let keys = |hints: &[theme::Hint]| -> Vec<Span<'static>> {
+            hints
+                .iter()
+                .flat_map(|(key, label)| {
+                    [Span::styled(format!("<{key}>"), theme::key(workspace)), Span::raw(format!(" {label}  "))]
+                })
+                .collect()
+        };
+        let mut status: Vec<Span> = Vec::new();
+        if let Some(code) = self.exit {
+            let level = if code == 0 { crate::tui_failure::Level::Info } else { crate::tui_failure::Level::Error };
+            status.push(Span::styled(format!("Exit code {code}"), theme::level(level)));
+            status.push(Span::styled(" · ", theme::dim()));
+        }
+        if let Some(error) = &self.input_error {
+            status.push(Span::styled(crate::tui_state::clean(error), theme::level(crate::tui_failure::Level::Error)));
+            status.push(Span::styled(" · ", theme::dim()));
+        }
+        match (self.exit, &self.input_error) {
+            (Some(_), None) => status.extend(keys(&[("PgUp/PgDn", "scroll"), ("Enter/Esc", "returns to the resource list")])),
+            (Some(_), Some(_)) => status.extend(keys(&[("Enter/Esc", "returns")])),
+            (None, Some(_)) => status.extend(keys(&[("Ctrl+Alt+C", "interrupts")])),
+            (None, None) => {
+                status.push(Span::styled("Input to CLI  ", theme::dim()));
+                status.extend(keys(&[
+                    ("Ctrl+Alt+B", "browser"),
+                    ("Ctrl+Alt+S", "sessions"),
+                    ("Ctrl+Alt+C", "interrupt"),
+                    ("Shift+PgUp/PgDn", "scroll"),
+                ]));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(status)), areas[2]);
         if !self.parser.screen().hide_cursor()
             && self.exit.is_none()
             && self.parser.screen().scrollback() == 0

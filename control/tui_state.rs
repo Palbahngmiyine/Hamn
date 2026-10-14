@@ -2,10 +2,12 @@ use crate::model::{Failure, Request, Result};
 use crate::preferences::Workspace;
 use crate::tui_failure::Level;
 use clap::Parser;
+use crate::tui_theme as theme;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
-    style::{Color, Style},
+    layout::{Alignment, Constraint, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::Value;
@@ -216,6 +218,8 @@ pub struct State {
     pub operation_status: String,
     pub operation_log: String,
     pub show_operation: bool,
+    /// The help screen covers the view; keys keep their meaning.
+    pub help: bool,
 }
 
 impl State {
@@ -258,6 +262,7 @@ impl State {
             operation_status: String::new(),
             operation_log: String::new(),
             show_operation: false,
+            help: false,
         }
     }
     pub fn for_workspace(request: Request, workspace: Workspace) -> Self {
@@ -307,19 +312,6 @@ impl State {
     pub fn fail(&mut self, failure: Failure) {
         let summary = crate::tui_failure::summarize(&failure);
         self.set_message(summary.level, summary.title, summary.hint, Some(failure));
-    }
-    /// The message as one line of text: the summary, what helps, and where
-    /// the full failure is.
-    pub fn message_line(&self) -> String {
-        let mut line = self.message.clone();
-        if let Some(hint) = self.message_hint {
-            line.push_str(" — ");
-            line.push_str(hint);
-        }
-        if self.last_error.is_some() && self.message_level == Level::Error {
-            line.push_str(" (! details)");
-        }
-        line
     }
     /// Rows are drawn whose last refresh failed: they may no longer be true.
     pub fn showing_stale_rows(&self) -> bool {
@@ -525,7 +517,7 @@ impl State {
         self.selected = key.and_then(|key| self.find_identity(&key));
     }
     pub fn move_by(&mut self, delta: isize) {
-        if self.detail.is_some() || self.show_operation {
+        if self.detail.is_some() || self.show_operation || self.help {
             self.scroll = self
                 .scroll
                 .saturating_add_signed(delta.clamp(-32768, 32767) as i16);
@@ -756,6 +748,8 @@ impl State {
                 self.clear_message();
             }
             Ok(value) => {
+                // A detail that arrives is shown, not kept behind the help.
+                self.help = false;
                 self.detail = Some(
                     value["yaml"]
                         .as_str()
@@ -981,66 +975,109 @@ pub fn native_confirmation_visible(
         && wrap_lines(&native_confirmation(action), area.width - 2).len()
             <= usize::from(area.height - 2)
 }
-pub fn draw(frame: &mut Frame, state: &State) {
-    if let Some(action) = &state.pending_native {
-        let text = if native_confirmation_visible(action, frame.area()) {
-            native_confirmation(action)
-        } else {
-            "Resize terminal to review the full target. Execution disabled. Esc cancels.".into()
-        };
-        frame.render_widget(
-            Paragraph::new(clean(&text))
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title("Hamn confirmation")),
-            frame.area(),
-        );
-        return;
+/// A confirmation covers the screen; a deletion is framed in red.
+fn confirm_block(title: &'static str, danger: bool) -> Block<'static> {
+    Block::bordered()
+        .title(Line::styled(
+            format!(" {title} "),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(if danger { Color::Red } else { Color::Yellow }))
+}
+
+/// Lines of styled text broken at `width` columns, character by character as
+/// [`wrap_lines`] breaks text, so the height of a header is known before it
+/// is drawn. Control characters become spaces.
+fn wrap_spans(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let mut wrapped = Vec::new();
+    for line in lines {
+        let mut current: Vec<Span<'static>> = Vec::new();
+        let mut used = 0;
+        for span in line.spans {
+            let mut text = String::new();
+            for c in span.content.chars() {
+                let c = if c.is_control() { ' ' } else { c };
+                let size = Line::raw(c.to_string()).width();
+                if used + size > width && used > 0 {
+                    if !text.is_empty() {
+                        current.push(Span::styled(std::mem::take(&mut text), span.style));
+                    }
+                    wrapped.push(Line::from(std::mem::take(&mut current)));
+                    used = 0;
+                }
+                text.push(c);
+                used += size;
+            }
+            if !text.is_empty() {
+                current.push(Span::styled(text, span.style));
+            }
+        }
+        wrapped.push(Line::from(current));
     }
-    if state.quit_confirmation {
-        frame.render_widget(Paragraph::new("Cancel the active operation and exit?\nHamn will wait for rollback and resource cleanup.\ny = cancel then exit; n / Esc = keep working")
-            .wrap(Wrap { trim: false }).block(Block::bordered().title("Active operation")), frame.area());
-        return;
+    wrapped
+}
+
+fn field(name: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{name}: "), theme::label()),
+        Span::styled(value, theme::value()),
+    ])
+}
+
+/// The header's account of the target: what the view reads, whether it
+/// answered, and changes that are running or whose outcome is unknown.
+/// The first lines are wrapped at `width`, beside the keys; the second,
+/// which can be long, such as a kubeconfig path, at `full_width` under them.
+fn info_lines(state: &State, width: u16, full_width: u16) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let mut lines = Vec::new();
+    match state.workspace {
+        Workspace::Containers if state.environment_picker => {
+            lines.push(Line::styled("Choose a Hamn profile or Docker context", theme::value()));
+            lines.push(Line::styled("Enter selects the environment; Esc cancels", theme::dim()));
+        }
+        Workspace::Containers => lines.push(field(
+            "Environment",
+            if state.hamn_environment() {
+                format!("Hamn profile {}", state.request.profile.as_deref().unwrap_or("default"))
+            } else {
+                state
+                    .docker_context
+                    .as_ref()
+                    .map(|c| format!("Docker context {c}"))
+                    .unwrap_or_else(|| "Explicit Docker CLI target".into())
+            },
+        )),
+        Workspace::Kubernetes => {
+            lines.push(field(
+                "Context",
+                state.request.context.as_deref().unwrap_or("choose a context").into(),
+            ));
+            lines.push(field(
+                "Namespace",
+                if state.request.all_namespaces {
+                    "all namespaces".into()
+                } else {
+                    state.request.namespace.as_deref().unwrap_or("default").into()
+                },
+            ));
+        }
     }
-    if let Some(pending) = &state.pending {
-        let area = frame.area();
-        let text = if confirmation_visible(pending, area) {
-            confirmation(pending, area.width - 2).join("\n")
-        } else {
-            "Resize terminal to review the full target and impact.\nExecution disabled. Esc cancels.".into()
-        };
-        frame.render_widget(
-            Paragraph::new(text)
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title("Hamn confirmation")),
-            area,
-        );
-        return;
-    }
-    let header = match state.workspace {
-        Workspace::Containers if state.environment_picker => "Hamn | [Containers]   Kubernetes   Tab switch   , settings\nChoose a Hamn profile or Docker context\nEnter selects the environment; Esc cancels".into(),
-        Workspace::Containers => format!("Hamn | [Containers]   Kubernetes   Tab switch   , settings\nEnvironment: {}\n{}",
-            if state.hamn_environment() { format!("Hamn profile {}", state.request.profile.as_deref().unwrap_or("default")) }
-            else { state.docker_context.as_ref().map(|c| format!("Docker context {c}")).unwrap_or_else(|| "Explicit Docker CLI target".into()) },
-            if state.hamn_environment() { "e environments   v VM settings   a running/all" } else { "e environments   a running/all" }),
-        Workspace::Kubernetes => format!("Hamn | Containers   [Kubernetes]   Tab switch   , settings\nContext: {}   Namespace: {}\ne contexts   n namespaces",
-            state.request.context.as_deref().unwrap_or("choose a context"),
-            if state.request.all_namespaces { "all namespaces" } else { state.request.namespace.as_deref().unwrap_or("default") }),
-    };
-    let header = if state.workspace == Workspace::Containers
-        && state
-            .native
-            .as_ref()
-            .is_some_and(|i| i.hamn_profile.is_some())
-        && !state.runtime.is_null()
-    {
-        let ready = match state.runtime["dockerStatus"]
-            .as_str()
-            .unwrap_or("unavailable")
-        {
-            "ready" => "Available",
-            "preparing" => "Docker connection preparing",
-            "recoveryRequired" => "Recovery required",
-            _ => "Connection unavailable",
+    let hamn_view = state.workspace == Workspace::Containers
+        && state.native.as_ref().is_some_and(|i| i.hamn_profile.is_some())
+        && !state.runtime.is_null();
+    let mut wrapped = wrap_spans(std::mem::take(&mut lines), width);
+    // Why the status is unavailable is a sentence: it takes the full width.
+    let mut reason_lines = Vec::new();
+    if hamn_view {
+        let vm_line = |vm: String, docker: Span<'static>| {
+            Line::from(vec![
+                Span::styled("VM: ", theme::label()),
+                Span::styled(vm, theme::value()),
+                Span::styled(" | ", theme::dim()),
+                Span::styled("Docker: ", theme::label()),
+                docker,
+            ])
         };
         // A status that could not be read observed neither the VM nor
         // Docker: the header says so and gives the reason below. The reason
@@ -1049,101 +1086,317 @@ pub fn draw(frame: &mut Frame, state: &State) {
         // and has to stay readable at 80 columns.
         match state.runtime["statusError"].as_str() {
             Some(failure) => {
-                let width = frame.area().width.saturating_sub(2);
-                let mut reason = wrap_lines(&format!("Status: {failure}"), width);
+                let unavailable = Span::styled("status unavailable", theme::level(Level::Warning));
+                wrapped.extend(wrap_spans(vec![vm_line("status unavailable".into(), unavailable)], width));
+                let mut reason = wrap_lines(&format!("Status: {failure}"), full_width);
                 if reason.len() > 2 {
-                    let second = wrap_lines(&reason[1], width.saturating_sub(2))
+                    let second = wrap_lines(&reason[1], full_width.saturating_sub(2))
                         .first()
                         .cloned()
                         .unwrap_or_default();
                     reason.truncate(1);
                     reason.push(format!("{second} …"));
                 }
-                format!(
-                    "{header}\nVM: status unavailable | Docker: status unavailable | s starts / repairs this Hamn environment\n{}",
-                    reason.join("\n")
-                )
+                for (index, line) in reason.into_iter().enumerate() {
+                    reason_lines.push(match line.strip_prefix("Status: ").filter(|_| index == 0) {
+                        Some(rest) => Line::from(vec![
+                            Span::styled("Status: ", theme::label()),
+                            Span::styled(rest.to_owned(), theme::level(Level::Warning)),
+                        ]),
+                        None => Line::styled(line, theme::level(Level::Warning)),
+                    });
+                }
             }
-            None => format!(
-                "{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment",
-                state.runtime["state"].as_str().unwrap_or("not created")
-            ),
+            None => {
+                let (docker, level) = match state.runtime["dockerStatus"].as_str().unwrap_or("unavailable") {
+                    "ready" => ("Available", Level::Info),
+                    "preparing" => ("Docker connection preparing", Level::Warning),
+                    "recoveryRequired" => ("Recovery required", Level::Error),
+                    _ => ("Connection unavailable", Level::Warning),
+                };
+                let vm = state.runtime["state"].as_str().unwrap_or("not created").to_owned();
+                wrapped.extend(wrap_spans(
+                    vec![vm_line(vm, Span::styled(docker, theme::level(level)))],
+                    width,
+                ));
+            }
         }
-    } else {
-        header
-    };
-    let header = if let Some(command) = &state.native {
-        format!("{header}\n{}: {}", command.target, state.connection_status)
-    } else {
-        header
-    };
-    let header = if state.uncertain.is_empty() {
-        header
-    } else {
-        format!(
-            "{header}\noutcomeUnknown: {} operation(s). ! shows targets; inspect before retry.",
-            state.uncertain.len()
-        )
-    };
+    }
+    let side = std::mem::replace(&mut wrapped, reason_lines);
+    let width = full_width;
+    if let Some(command) = &state.native {
+        let level = match state.connection_status.as_str() {
+            "Available" => Level::Info,
+            "Connecting" | "" => Level::Warning,
+            status if status.starts_with("Waiting") => Level::Warning,
+            _ => Level::Error,
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Target: ", theme::label()),
+            Span::raw(clean(&command.target)),
+            Span::styled(": ", theme::dim()),
+            Span::styled(state.connection_status.clone(), theme::level(level)),
+        ]));
+    }
+    if !state.uncertain.is_empty() {
+        lines.push(Line::styled(
+            format!(
+                "outcomeUnknown: {} operation(s). ! shows targets; inspect before retry.",
+                state.uncertain.len()
+            ),
+            theme::level(Level::Error),
+        ));
+    }
+    wrapped.extend(wrap_spans(lines, width));
     // Full diagnostics belong in the scrollable log, not the fixed header.
-    let width = frame.area().width.saturating_sub(2);
-    let summary = if wrap_lines(&state.operation_status, width).len() > 1 {
-        format!(
-            "{} … (! log)",
-            wrap_lines(&state.operation_status, width.saturating_sub(10))
-                .first()
-                .cloned()
-                .unwrap_or_default()
-        )
+    if !state.operation_status.is_empty() {
+        let status = &state.operation_status;
+        let summary = if wrap_lines(status, width).len() > 1 {
+            format!(
+                "{} … (! log)",
+                wrap_lines(status, width.saturating_sub(10)).first().cloned().unwrap_or_default()
+            )
+        } else {
+            status.clone()
+        };
+        let level = if status.contains("in progress") || status.starts_with("Cancelling") {
+            Level::Warning
+        } else if status == "Operation completed" {
+            Level::Info
+        } else {
+            Level::Error
+        };
+        wrapped.push(Line::styled(summary, theme::level(level)));
+    }
+    (side, wrapped)
+}
+
+/// The scope of the rows, as k9s writes it after the resource: the
+/// namespace, or the profile or context of Docker.
+fn scope(state: &State) -> Option<String> {
+    let invocation = state.native.as_ref()?;
+    if let Some(profile) = &invocation.hamn_profile {
+        return Some(profile.clone());
+    }
+    if invocation.target.contains("all namespaces") {
+        return Some("all".into());
+    }
+    let names: &[&str] = if invocation.workspace == Workspace::Kubernetes {
+        &["--namespace", "-n"]
     } else {
-        state.operation_status.clone()
+        &["--context", "-c"]
     };
-    let header = format!("{header}\n{summary}");
-    let header = wrap_lines(&header, frame.area().width.saturating_sub(2));
-    let header_height = header.len().saturating_add(2).min(u16::MAX as usize) as u16;
-    if frame.area().width < 20 || header_height.saturating_add(6) > frame.area().height {
+    invocation.target.split("  ").find_map(|part| {
+        names.iter().find_map(|name| {
+            part.strip_prefix(&format!("{name} "))
+                .or_else(|| part.strip_prefix(&format!("{name}=")))
+                .map(String::from)
+        })
+    })
+}
+
+/// The view's place, for the crumbs: the resource, then what covers it.
+fn crumbs(state: &State) -> Vec<String> {
+    let resource = if state.environment_picker {
+        "environments".into()
+    } else if let Some(invocation) = &state.native {
+        invocation.resource.clone().unwrap_or_else(|| "command".into())
+    } else {
+        let words = &state.request.words;
+        words.get(words.len().saturating_sub(2)).cloned().unwrap_or_default()
+    };
+    let mut names = vec![resource];
+    if state.help {
+        names.push("help".into());
+    } else if state.show_operation {
+        names.push("operation log".into());
+    } else if state.detail.is_some() {
+        names.push("detail".into());
+    }
+    names
+}
+
+/// The title of the main view: `resource(scope)[count]`, the filter and
+/// whether the rows are loading or stale.
+fn title(state: &State) -> Line<'static> {
+    let workspace = state.workspace;
+    let mut spans = vec![Span::raw(" ")];
+    if state.help {
+        spans.push(Span::styled("Help", theme::key(workspace)));
+    } else if state.show_operation {
+        spans.push(Span::styled("Operation log", theme::key(workspace)));
+    } else if state.detail.is_some() {
+        spans.push(Span::styled("Detail", theme::key(workspace)));
+    } else {
+        let name = if state.environment_picker {
+            "Container environments".into()
+        } else if let Some(invocation) = &state.native {
+            format!(
+                "{} {}",
+                invocation.program(),
+                invocation.resource.as_deref().unwrap_or("command")
+            )
+        } else {
+            state.request.operation()
+        };
+        spans.push(Span::styled(name, theme::key(workspace)));
+        if let Some(scope) = scope(state) {
+            spans.push(Span::styled(format!("({scope})"), theme::label()));
+        }
+        spans.push(Span::styled(format!("[{}]", state.rows().len()), theme::value()));
+        if !state.filter.is_empty() {
+            spans.push(Span::styled(
+                format!(" </{}>", clean(&state.filter)),
+                Style::default().fg(Color::Green),
+            ));
+        }
+    }
+    if state.loading {
+        spans.push(Span::styled(" [loading]", theme::level(Level::Warning)));
+    } else if state.showing_stale_rows() {
+        spans.push(Span::styled(" [stale]", theme::level(Level::Error)));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// The message line: an icon of its level, the message, what helps and
+/// where the details are; at most two lines.
+fn message_lines(state: &State, width: u16) -> Vec<Line<'static>> {
+    if state.message.is_empty() {
+        return vec![Line::raw("")];
+    }
+    let style = theme::level(state.message_level);
+    let mut spans = vec![
+        Span::styled(format!("{} ", theme::icon(state.message_level)), style),
+        Span::styled(clean(&state.message), style),
+    ];
+    if let Some(hint) = state.message_hint {
+        spans.push(Span::styled(format!(" — {hint}"), theme::dim()));
+    }
+    if state.last_error.is_some() && state.message_level == Level::Error {
+        spans.push(Span::styled(" (! details)", theme::dim()));
+    }
+    let mut lines = wrap_spans(vec![Line::from(spans)], width);
+    if lines.len() > 2 {
+        lines.truncate(2);
+        let last = &mut lines[1];
+        let text: String = last.spans.iter().map(|span| span.content.as_ref()).collect();
+        let kept: String = text.chars().take(text.chars().count().saturating_sub(2)).collect();
+        *last = Line::from(vec![Span::styled(format!("{kept} …"), style)]);
+    }
+    lines
+}
+
+pub fn draw(frame: &mut Frame, state: &State) {
+    let area = frame.area();
+    if let Some(action) = &state.pending_native {
+        let text = if native_confirmation_visible(action, area) {
+            native_confirmation(action)
+        } else {
+            "Resize terminal to review the full target. Execution disabled. Esc cancels.".into()
+        };
         frame.render_widget(
-            Paragraph::new("Hamn: resize terminal to show the selected target. q exits.")
-                .wrap(Wrap { trim: false }),
-            frame.area(),
+            Paragraph::new(clean(&text))
+                .wrap(Wrap { trim: false })
+                .block(confirm_block("Hamn confirmation", action.description.contains("delete"))),
+            area,
         );
         return;
     }
-    let areas = Layout::vertical([
-        Constraint::Length(header_height),
-        Constraint::Min(3),
-        Constraint::Length(3),
-        Constraint::Length(1),
-    ])
-    .split(frame.area());
-    frame.render_widget(
-        Paragraph::new(header.join("\n")).block(Block::bordered()),
-        areas[0],
-    );
-    let title = format!(
-        "{} {} | {}",
-        state
-            .native
-            .as_ref()
-            .map(|c| format!(
-                "{} {}",
-                c.program(),
-                c.resource.as_deref().unwrap_or("command")
-            ))
-            .unwrap_or_else(|| if state.environment_picker {
-                "Container environments".into()
-            } else {
-                state.request.operation()
-            }),
-        if state.loading {
-            "[loading]"
-        } else if state.showing_stale_rows() {
-            "[stale]"
+    if state.quit_confirmation {
+        frame.render_widget(Paragraph::new("Cancel the active operation and exit?\nHamn will wait for rollback and resource cleanup.\ny = cancel then exit; n / Esc = keep working")
+            .wrap(Wrap { trim: false }).block(confirm_block("Active operation", false)), area);
+        return;
+    }
+    if let Some(pending) = &state.pending {
+        let text = if confirmation_visible(pending, area) {
+            confirmation(pending, area.width - 2).join("\n")
         } else {
-            ""
-        },
-        state.refresh.label()
-    );
+            "Resize terminal to review the full target and impact.\nExecution disabled. Esc cancels.".into()
+        };
+        frame.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .block(confirm_block("Hamn confirmation", pending.operation().ends_with("delete"))),
+            area,
+        );
+        return;
+    }
+    let workspace = state.workspace;
+    let hints = crate::tui_keys::hints(state);
+    // As in k9s, wide terminals show the keys beside the target; narrow
+    // ones keep the target at full width and list the keys under the view.
+    let (info_width, header_hints, footer_hints) = if area.width >= 104 {
+        let column = usize::from(theme::hint_grid_width(&hints, 1)).max(1);
+        let columns = (usize::from(area.width - 60) / column).clamp(1, 4);
+        let width = theme::hint_grid_width(&hints, columns);
+        (area.width - width - 2, theme::hint_grid(&hints, workspace, width, 4), Vec::new())
+    } else {
+        (area.width, Vec::new(), theme::hint_flow(&hints, workspace, area.width, 2))
+    };
+    let (info, details) = info_lines(state, info_width, area.width);
+    let beside = info.len().max(header_hints.len());
+    let header_height = beside + details.len();
+    let prompt_height = if state.input.is_some() { 3 } else { 0 };
+    let message = message_lines(state, area.width);
+    let fixed = 1 + header_height + prompt_height + footer_hints.len() + 1 + message.len();
+    if area.width < 20 || fixed + 3 > usize::from(area.height) {
+        frame.render_widget(
+            Paragraph::new("Hamn: resize terminal to show the selected target. q exits.")
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let length = |n: usize| Constraint::Length(n as u16);
+    let areas = Layout::vertical([
+        Constraint::Length(1),
+        length(header_height),
+        length(prompt_height),
+        Constraint::Min(3),
+        length(footer_hints.len()),
+        Constraint::Length(1),
+        length(message.len()),
+    ])
+    .split(area);
+    frame.render_widget(Paragraph::new(theme::tabs(workspace)), areas[0]);
+    let header = Layout::vertical([length(beside), length(details.len())]).split(areas[1]);
+    frame.render_widget(Paragraph::new(details), header[1]);
+    if header_hints.is_empty() {
+        frame.render_widget(Paragraph::new(info), header[0]);
+    } else {
+        let header = Layout::horizontal([Constraint::Length(info_width), Constraint::Min(0)])
+            .spacing(2)
+            .split(header[0]);
+        frame.render_widget(Paragraph::new(info), header[0]);
+        frame.render_widget(Paragraph::new(header_hints), header[1]);
+    }
+    if let Some((prefix, input)) = &state.input {
+        let (name, keys) = if *prefix == ':' {
+            (" Command ", " Enter runs · ↑/↓ history · Esc cancels ")
+        } else {
+            (" Filter ", " Enter keeps · Esc closes ")
+        };
+        let text = format!("{prefix}{}", clean(input));
+        frame.render_widget(
+            Paragraph::new(text.clone()).block(
+                Block::bordered()
+                    .border_style(theme::border(workspace))
+                    .title(Line::styled(name, theme::key(workspace)))
+                    .title(Line::styled(keys, theme::dim()).right_aligned()),
+            ),
+            areas[2],
+        );
+        let column = Line::raw(text).width() as u16;
+        if column + 2 < areas[2].width {
+            frame.set_cursor_position((areas[2].x + 1 + column, areas[2].y + 1));
+        }
+    }
+    let block = Block::bordered()
+        .border_style(theme::border(workspace))
+        .title(title(state))
+        .title_alignment(Alignment::Center);
     let operation_detail = format!(
         "{}{}\n{}\n{}",
         state.last_error.as_ref().map_or(String::new(), |error| format!(
@@ -1154,7 +1407,22 @@ pub fn draw(frame: &mut Frame, state: &State) {
         state.operation_log,
         serde_json::to_string_pretty(&state.uncertain).unwrap()
     );
-    if let Some(detail) = if state.show_operation {
+    if state.help {
+        let columns = crate::tui_keys::help(workspace, areas[3].width);
+        let inner = block.inner(areas[3]);
+        frame.render_widget(block, areas[3]);
+        let parts = Layout::horizontal(vec![Constraint::Fill(1); columns.len()])
+            .spacing(2)
+            .split(inner);
+        for (lines, part) in columns.into_iter().zip(parts.iter()) {
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((state.scroll, 0)),
+                *part,
+            );
+        }
+    } else if let Some(detail) = if state.show_operation {
         Some(&operation_detail)
     } else {
         state.detail.as_ref()
@@ -1163,64 +1431,58 @@ pub fn draw(frame: &mut Frame, state: &State) {
             Paragraph::new(clean(detail))
                 .scroll((state.scroll, 0))
                 .wrap(Wrap { trim: false })
-                .block(Block::bordered().title(title)),
-            areas[1],
+                .block(block),
+            areas[3],
         );
     } else if state.native.is_some() {
-        crate::resource_table::draw(frame, areas[1], state, title);
+        crate::resource_table::draw(frame, areas[3], state, block);
     } else {
+        let stale = state.showing_stale_rows();
         let rows: Vec<_> = state
             .rows()
             .into_iter()
-            .map(|row| ListItem::new(label(row)))
+            .map(|row| {
+                let style = if stale { theme::dim() } else { theme::tone(label_tone(row)) };
+                ListItem::new(label(row)).style(style)
+            })
             .collect();
         frame.render_stateful_widget(
             List::new(rows)
-                .block(Block::bordered().title(title))
-                .highlight_style(Style::default().fg(Color::Cyan))
+                .block(block)
+                .highlight_style(theme::badge(workspace))
                 .highlight_symbol("> "),
-            areas[1],
+            areas[3],
             &mut ListState::default().with_selected(state.selected),
         );
     }
-    let message = if let Some((prefix, input)) = &state.input {
-        format!("{prefix}{input}")
-    } else {
-        state.message_line()
-    };
+    frame.render_widget(Paragraph::new(footer_hints), areas[4]);
+    let crumbs = Line::from(theme::crumbs(&crumbs(state), workspace));
+    let bottom = Layout::horizontal([Constraint::Length(crumbs.width() as u16), Constraint::Min(0)])
+        .split(areas[5]);
+    frame.render_widget(Paragraph::new(crumbs), bottom[0]);
     frame.render_widget(
-        Paragraph::new(clean(&message))
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered()),
-        areas[2],
+        Paragraph::new(Line::styled(state.refresh.label(), theme::dim()).right_aligned()),
+        bottom[1],
     );
-    let keys = if state.environment_picker {
-        ": command  / filter  Enter select  Esc cancel  Tab workspace  q quit"
-    } else if state.workspace == Workspace::Kubernetes {
-        ": command  / filter  Enter detail  l logs  g metrics  r rollout  d delete  m actions  ? help  q quit"
-    } else {
-        ": command  / filter  Enter detail  s start  t stop  r restart  d delete  l logs  g stats  m actions  ? help  q quit"
-    };
-    frame.render_widget(Paragraph::new(keys), areas[3]);
+    frame.render_widget(Paragraph::new(message), areas[6]);
+}
+
+/// The state that a row of a Hamn profile or environment reports.
+fn label_tone(row: &Value) -> theme::Tone {
+    if row["configurationError"].is_string() || row["dockerStatus"] == "recoveryRequired" {
+        return theme::Tone::Failed;
+    }
+    if row["disabled"] == true {
+        return theme::Tone::Done;
+    }
+    match row["state"].as_str().or_else(|| row["State"].as_str()).unwrap_or("") {
+        "stopped" | "exited" | "not created" => theme::Tone::Done,
+        "starting" | "stopping" | "created" | "paused" | "restarting" => theme::Tone::Pending,
+        _ => theme::Tone::Normal,
+    }
 }
 
 pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &str) {
-    let text = format!(
-        "{}\n\n{} Containers — Docker containers, images, volumes and networks\n{} Kubernetes — resources in your kubeconfig context\n\n1 / 2 or arrows to select, Enter to save\n{}\n\n{}",
-        if settings {
-            "Choose the workspace to open by default"
-        } else {
-            "Choose your default workspace"
-        },
-        if selected == 0 { ">" } else { " " },
-        if selected == 1 { ">" } else { " " },
-        if settings {
-            "Esc returns without changing the default"
-        } else {
-            "q exits"
-        },
-        clean(error)
-    );
     let dependency = |name: &str| {
         use std::os::unix::fs::PermissionsExt;
         std::env::var_os("PATH").is_some_and(|path| {
@@ -1231,23 +1493,75 @@ pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &s
             })
         })
     };
-    let text = format!(
-        "{text}\n\nDocker CLI: {} | kubectl: {}\nContainers: install Docker CLI, then e selects a Docker context or Hamn profile.\nKubernetes: install kubectl and configure kubeconfig; e selects an external cluster.\nConnection and credentials are checked by the first resource query.",
-        if dependency("docker") {
-            "found"
+    let found = |name: &str| {
+        if dependency(name) {
+            Span::styled("found", theme::level(Level::Info))
         } else {
-            "missing"
-        },
-        if dependency("kubectl") {
-            "found"
-        } else {
-            "missing"
+            Span::styled("missing", theme::level(Level::Error))
         }
+    };
+    let option = |index: usize, workspace: Workspace, name: &'static str, about: &'static str| {
+        let chosen = index == selected;
+        Line::from(vec![
+            Span::raw(if chosen { "> " } else { "  " }),
+            Span::styled(
+                format!(" {} {name} ", index + 1),
+                if chosen { theme::badge(workspace) } else { theme::key(workspace) },
+            ),
+            Span::raw(format!(" — {about}")),
+        ])
+    };
+    let workspace = if selected == 0 { Workspace::Containers } else { Workspace::Kubernetes };
+    let mut lines = vec![
+        Line::styled(
+            if settings {
+                "Choose the workspace to open by default"
+            } else {
+                "Choose your default workspace"
+            },
+            theme::value(),
+        ),
+        Line::raw(""),
+        option(0, Workspace::Containers, "Containers", "Docker containers, images, volumes and networks"),
+        option(1, Workspace::Kubernetes, "Kubernetes", "resources in your kubeconfig context"),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("<1>/<2>", theme::key(workspace)),
+            Span::raw(" or arrows to select, "),
+            Span::styled("<Enter>", theme::key(workspace)),
+            Span::raw(" to save"),
+        ]),
+        Line::from(if settings {
+            vec![Span::styled("<Esc>", theme::key(workspace)), Span::raw(" returns without changing the default")]
+        } else {
+            vec![Span::styled("<q>", theme::key(workspace)), Span::raw(" exits")]
+        }),
+        Line::raw(""),
+    ];
+    lines.extend(
+        clean(error)
+            .lines()
+            .map(|line| Line::styled(line.to_owned(), theme::level(Level::Error))),
     );
+    lines.extend([
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Docker CLI: ", theme::label()),
+            found("docker"),
+            Span::styled(" | ", theme::dim()),
+            Span::styled("kubectl: ", theme::label()),
+            found("kubectl"),
+        ]),
+        Line::raw("Containers: install Docker CLI, then e selects a Docker context or Hamn profile."),
+        Line::raw("Kubernetes: install kubectl and configure kubeconfig; e selects an external cluster."),
+        Line::styled("Connection and credentials are checked by the first resource query.", theme::dim()),
+    ]);
     frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered().title("Hamn settings")),
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::bordered()
+                .border_style(theme::border(workspace))
+                .title(Line::styled(" Hamn settings ", theme::key(workspace))),
+        ),
         frame.area(),
     );
 }
@@ -1276,7 +1590,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(rendered.contains("Docker context remote"));
-        assert!(!rendered.contains("v VM settings"));
+        assert!(!rendered.contains("<v> VM settings"));
         let inherited = state.view("docker containers list").unwrap();
         assert_eq!(inherited.context, remote.context);
         assert_eq!(inherited.docker_config, remote.docker_config);
@@ -1318,7 +1632,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(rendered.contains("Hamn profile local"));
-        assert!(rendered.contains("v VM settings"));
+        assert!(rendered.contains("<v> VM settings"));
         let inherited = state.view("docker containers list").unwrap();
         assert_eq!(inherited.profile.as_deref(), Some("local"));
         assert!(inherited.context.is_none());
@@ -1636,13 +1950,14 @@ mod tests {
         // VM, which can be running, nor Docker was observed.
         let lines = header(serde_json::json!({"statusError": unreadable}), 120);
         assert!(lines.iter().any(|line| line.contains("VM: status unavailable | Docker: status unavailable")), "{lines:?}");
+        // The reason takes the full width, under the keys of a wide terminal.
         assert!(lines.iter().any(|line| line.contains(&format!("Status: {unreadable}"))), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains("not created") || line.contains("Connection unavailable")), "{lines:?}");
         // At 80 columns the sentence takes a second line and keeps the rule,
         // which is its end.
         let lines = header(serde_json::json!({"statusError": unreadable}), 80);
         let first = lines.iter().position(|line| line.contains("Status: cannot read the configuration")).unwrap();
-        assert!(lines[first + 1].contains("n key: kubernetes"), "{lines:?}");
+        assert!(lines[first + 1].starts_with("key: kubernetes"), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains('…')), "{lines:?}");
         // A longer reason is cut after its second line: the header must
         // leave room for the rows.
@@ -1650,7 +1965,7 @@ mod tests {
         let lines = header(serde_json::json!({"statusError": long}), 80);
         let reason: Vec<_> = lines.iter().filter(|line| line.contains("Status: ") || line.contains("xxxx") || line.contains("kubernetes")).collect();
         assert_eq!(reason.len(), 2, "{lines:?}");
-        assert!(reason[1].contains("n key: kubernetes xxxx") && reason[1].contains('…'), "{lines:?}");
+        assert!(reason[1].starts_with("key: kubernetes xxxx") && reason[1].contains('…'), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains("resize terminal")), "{lines:?}");
         // An observed status is shown as before.
         let lines = header(serde_json::json!({"state": "stopped", "dockerStatus": "unavailable"}), 120);
@@ -1822,12 +2137,12 @@ mod tests {
             "shared  Hamn profile",
             "shared  Docker context",
             "unix:///external.sock",
-            "Enter select",
+            "<Enter> select",
         ] {
             assert!(screen.contains(marker), "{screen}");
         }
-        assert!(!screen.contains("v VM settings"));
-        assert!(!screen.contains("t stop"));
+        assert!(!screen.contains("<v> VM settings"));
+        assert!(!screen.contains("<t> stop"));
         assert!(state.cancel_picker());
         assert!(state.vm_panel());
         state.data = serde_json::json!([{"name":"shared"}]);
@@ -2032,7 +2347,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<String>();
         assert!(!text.contains("Hamn profile"));
-        assert!(!text.contains("v VM settings"));
+        assert!(!text.contains("<v> VM settings"));
         assert!(text.contains("--context external"));
         state.native = Some(crate::native::parse("ps", &state).unwrap());
         assert!(state.hamn_environment());
@@ -2344,6 +2659,77 @@ mod tests {
         assert_eq!(refused.code, "invalidRequest");
     }
     #[test]
+    fn workspaces_differ_in_tab_text_and_color_and_keys_stand_out() {
+        let render = |state: &State, width: u16| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let find = |buffer: &ratatui::buffer::Buffer, text: &str| {
+            let width = usize::from(buffer.area.width);
+            let cells: Vec<&str> = buffer.content().iter().map(|cell| cell.symbol()).collect();
+            let chars: Vec<String> = text.chars().map(String::from).collect();
+            let start = (0..cells.len())
+                .find(|&i| chars.iter().enumerate().all(|(n, c)| cells.get(i + n) == Some(&c.as_str())))
+                .unwrap_or_else(|| panic!("{text} not on screen"));
+            buffer[((start % width) as u16, (start / width) as u16)].clone()
+        };
+        let mut containers = State::new(Request::default());
+        containers.native = Some(crate::native::parse("ps", &containers).unwrap());
+        let mut kubernetes = State::new(Request::default());
+        kubernetes.workspace = Workspace::Kubernetes;
+        kubernetes.request.context = Some("dev".into());
+        kubernetes.native = Some(crate::native::parse("get pods", &kubernetes).unwrap());
+        for width in [80, 160] {
+            for (state, active, inactive) in [
+                (&containers, "[Containers]", "[Kubernetes]"),
+                (&kubernetes, "[Kubernetes]", "[Containers]"),
+            ] {
+                let accent = theme::accent(state.workspace);
+                let buffer = render(state, width);
+                let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+                assert!(!text.contains(inactive), "{text}");
+                assert_eq!(find(&buffer, active).bg, accent);
+                // The frame of the view and the keys take the same color.
+                assert_eq!(find(&buffer, "┌").fg, accent);
+                assert_eq!(find(&buffer, "<:>").fg, accent);
+                assert!(text.contains("<Tab> switch") && text.contains("<?> help"), "{text}");
+            }
+        }
+        assert_ne!(
+            find(&render(&containers, 80), "┌").fg,
+            find(&render(&kubernetes, 80), "┌").fg
+        );
+        // A failure is marked by its icon as well as its color.
+        containers.fail(Failure::new("cliError", "docker exited exit status: 1: Error response from daemon: No such container: web"));
+        let buffer = render(&containers, 80);
+        let icon = find(&buffer, "✗ No such container: web");
+        assert_eq!(icon.fg, Color::Red);
+        // The command prompt opens above the view and shows the cursor.
+        containers.input = Some((':', "get po".into()));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &containers)).unwrap();
+        let text: String = terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains(" Command ") && text.contains(":get po"), "{text}");
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(terminal.backend().buffer()[(cursor.x - 1, cursor.y)].symbol(), "o");
+        // Help covers the view and names every group of keys.
+        containers.input = None;
+        containers.help = true;
+        let text: String = render(&containers, 80).content().iter().map(|cell| cell.symbol()).collect();
+        for marker in ["GENERAL", "Commands:", "<Esc> close help", " help "] {
+            assert!(text.contains(marker), "{marker}: {text}");
+        }
+        containers.move_by(40);
+        assert_eq!(containers.scroll, 40);
+        let text: String = render(&containers, 80).content().iter().map(|cell| cell.symbol()).collect();
+        assert!(!text.contains("GENERAL") && text.contains("INTERNAL TERMINAL"), "{text}");
+        // A detail that arrives replaces the help.
+        containers.accept(Ok(serde_json::json!({"yaml": "kind: Pod"})));
+        assert!(!containers.help && containers.detail.as_deref() == Some("kind: Pod"));
+    }
+    #[test]
     fn a_failed_read_shows_its_summary_and_keeps_the_raw_failure_for_details() {
         let screen = |state: &State| {
             let mut terminal =
@@ -2383,7 +2769,7 @@ mod tests {
         state.show_operation = false;
         // Another message replaces the failure; a successful read clears both.
         state.warn("Refresh before reading previous data");
-        assert!(state.last_error.is_none() && !state.message_line().contains("details"));
+        assert!(state.last_error.is_none() && state.message_level == Level::Warning);
         state.accept(Err(Failure::new("cliError", raw)));
         state.accept(Ok(serde_json::json!([])));
         assert!(state.message.is_empty() && state.last_error.is_none() && state.message_hint.is_none());

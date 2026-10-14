@@ -7,8 +7,9 @@
 //! Contract: [`summarize`] is pure and total. Its title is never empty and
 //! contains no control character, so it fits one line of the screen. It
 //! never replaces the raw text: callers keep the `Failure` and show it
-//! unchanged in the diagnostics view. A message is recognized only by the
-//! wording that the tests record from real CLI and client output; any other
+//! unchanged in the diagnostics view. A message is recognized only by a
+//! wording that kubectl, the Docker CLI or their API clients print, each held
+//! by a test that says whether it was recorded from a run; any other
 //! message keeps its own first meaningful line, so an unknown cause is shown
 //! in its own words and never replaced by a guess.
 
@@ -463,8 +464,8 @@ mod tests {
         Failure::new("cliError", format!("{program} exited {status}: {stderr}"))
     }
 
-    // kubectl 1.34 against a kind cluster whose container is stopped: client
-    // log lines first, then the sentence that explains them.
+    // Recorded from kubectl 1.37.1 against a kind cluster whose container is
+    // stopped: client log lines first, then the sentence that explains them.
     const KUBECTL_REFUSED: &str = "E1015 01:17:26.408480   67207 memcache.go:381] \"Couldn't get current server API group list\" err=\"Get \\\"https://127.0.0.1:63621/api?timeout=32s\\\": dial tcp 127.0.0.1:63621: connect: connection refused\"\nE1015 01:17:26.408831   67207 memcache.go:381] \"Couldn't get current server API group list\" err=\"Get \\\"https://127.0.0.1:63621/api?timeout=32s\\\": dial tcp 127.0.0.1:63621: connect: connection refused\"\nThe connection to the server 127.0.0.1:63621 was refused - did you specify the right host or port?\n";
 
     #[test]
@@ -475,6 +476,7 @@ mod tests {
                 "Cannot reach the Kubernetes API server at 127.0.0.1:63621: connection refused",
                 Some(KUBE_UNREACHABLE),
             ),
+            // Recorded from kubectl 1.37.1 with --context nope.
             (
                 cli(
                     "kubectl",
@@ -484,6 +486,9 @@ mod tests {
                 "Context nope is not in the kubeconfig",
                 Some("e selects a context"),
             ),
+            // kubectl's wordings, not recorded here: an API refusal, a missing
+            // object or type, rejected credentials, a server it cannot resolve,
+            // reach in time or trust, and a usage error.
             (
                 cli(
                     "kubectl",
@@ -565,7 +570,10 @@ mod tests {
                 "kubectl: unknown flag: --bogus",
                 Some(OPTIONS),
             ),
-            // Docker CLI 29.8.1.
+            // Recorded from Docker CLI 29.9.0: a missing socket, a missing
+            // context and a usage error. The other connection messages are those
+            // that native.rs records from 29.8.1 and an earlier release; the
+            // socket permission and daemon answers are Docker's wordings.
             (
                 cli(
                     "docker",

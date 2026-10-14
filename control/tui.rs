@@ -422,7 +422,8 @@ fn terminal_output(session: &mut Session, event: TerminalEvent) {
         }
     }
 }
-fn draw_sessions(frame: &mut ratatui::Frame, sessions: &[Session], selected: usize) {
+fn draw_sessions(frame: &mut ratatui::Frame, sessions: &[Session], selected: usize, workspace: Workspace) {
+    use crate::tui_theme as theme;
     use ratatui::widgets::{Block, List, ListItem, ListState};
     let rows: Vec<_> = sessions
         .iter()
@@ -440,9 +441,15 @@ fn draw_sessions(frame: &mut ratatui::Frame, sessions: &[Session], selected: usi
         .collect();
     frame.render_stateful_widget(
         List::new(rows)
-            .block(Block::bordered().title(
-                "Sessions: Enter resumes | d terminates owned CLI and helpers | Esc browser",
-            ))
+            .block(
+                Block::bordered()
+                    .border_style(theme::border(workspace))
+                    .title(ratatui::text::Line::styled(
+                        " Sessions: Enter resumes | d terminates owned CLI and helpers | Esc browser ",
+                        theme::key(workspace),
+                    )),
+            )
+            .highlight_style(theme::badge(workspace))
             .highlight_symbol("> "),
         frame.area(),
         &mut ListState::default().with_selected((!sessions.is_empty()).then_some(selected)),
@@ -518,7 +525,8 @@ impl Menu {
             selected: 0,
         })
     }
-    fn draw(&self, frame: &mut ratatui::Frame) {
+    fn draw(&self, frame: &mut ratatui::Frame, workspace: Workspace) {
+        use crate::tui_theme as theme;
         use ratatui::widgets::{Block, List, ListItem, ListState};
         let rows: Vec<_> = self
             .items
@@ -527,7 +535,15 @@ impl Menu {
             .collect();
         frame.render_stateful_widget(
             List::new(rows)
-                .block(Block::bordered().title(self.title.as_str()))
+                .block(
+                    Block::bordered()
+                        .border_style(theme::border(workspace))
+                        .title(ratatui::text::Line::styled(
+                            format!(" {} ", self.title),
+                            theme::key(workspace),
+                        )),
+                )
+                .highlight_style(theme::badge(workspace))
                 .highlight_symbol("> "),
             frame.area(),
             &mut ListState::default().with_selected(Some(self.selected)),
@@ -606,9 +622,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
             if let Some(session) = &cli {
                 session.draw(frame);
             } else if sessions_open {
-                draw_sessions(frame, &sessions, session_selected);
+                draw_sessions(frame, &sessions, session_selected, state.workspace);
             } else if let Some(menu) = &menu {
-                menu.draw(frame);
+                menu.draw(frame, state.workspace);
             } else if choosing {
                 tui_state::draw_choice(frame, choice, settings, &settings_error)
             } else {
@@ -709,7 +725,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     }
                     let vm_not_ready = result.as_ref().is_err_and(|error| error.code == tui_state::VM_NOT_READY);
                     if finished && state.native.is_some() {
-                        state.connection_status = if result.is_ok() { "Available" } else if vm_not_ready { "Waiting for the Hamn VM" } else if state.hamn_environment() { "Connection failed; e environments, v VM controls" } else { "Connection failed; verify CLI installation, credentials and target; e selects target" }.into();
+                        state.connection_status = if result.is_ok() { "Available" } else if vm_not_ready { "Waiting for the Hamn VM" } else { "Connection failed" }.into();
                     }
                     if finished && result.is_ok() && !state.environment_picker {
                         if let Some(target) = current_target(&state).filter(|target| Some(target) != remembered_target.as_ref()) {
@@ -998,6 +1014,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     },
                     KeyCode::Char(':') => { state.history_index = None; state.input = Some((':', String::new())); },
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
+                    KeyCode::Esc if state.help => { state.help = false; state.scroll = 0; },
                     KeyCode::Esc => {
                         state.show_operation = false; state.detail = None; job.cancel(&mut state);
                         if state.cancel_picker() { job.refresh(&mut state); }
@@ -1029,9 +1046,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         Err(error) => state.fail(error),
                         _ => {}
                     },
-                    KeyCode::Char('!') => state.show_operation = !state.show_operation,
+                    KeyCode::Char('!') => { state.show_operation = !state.show_operation; state.help = false; },
                     KeyCode::Char('m') => { menu = Menu::actions(&state); if menu.is_none() { state.warn("Select a resource to see available actions"); } },
-                    KeyCode::Char('?') => state.detail = Some("Commands: use : to enter Docker or kubectl commands.\nContainers: ps, ps -a, images, volume ls, network ls\nKubernetes: pods, deployments, services, get pods -A\nExplicit docker / kubectl prefixes are also accepted.\nOutput options are preserved; other commands run in the internal terminal.\n\nSelected resource: Enter detail, l logs, g stats, s start, t stop, r restart, d delete.\nChanges from this menu require confirmation; typed CLI commands run directly.\n\nTab switches workspace; , changes the default workspace.\nCtrl+Alt+B returns to the browser with the CLI running.\nCtrl+Alt+S opens sessions; Enter resumes, d terminates owned processes.\np pauses refresh; [/] change its interval; R refreshes now.\nb recent targets; f toggles favorite; F favorite targets.\n:refresh-timeout 30 sets a 1..300 second query deadline.\nCommand input: Up/Down recall this session history.\ne chooses the environment/context; n chooses a namespace.\nv opens Hamn VM controls for a Hamn environment.\n! shows active operation logs. Esc returns. q exits.\nCLI terminal: Ctrl-C interrupts, Docker Ctrl-P Ctrl-Q detaches.\nAfter CLI exit, Enter returns and refreshes the list.\nShell pipelines, redirections and aliases are not interpreted.".into()),
+                    KeyCode::Char('?') => { state.help = !state.help; state.scroll = 0; },
                     KeyCode::Char(c) if "strdlg".contains(c) => {
                         let action = match c { 's'=>"start", 't'=>"stop", 'r'=>"restart", 'd'=>"delete", 'l'=>"logs", _=>"stats" };
                         if action == "start" && state.native.as_ref().is_some_and(|i| i.hamn_profile.is_some()) && state.runtime["dockerStatus"] != "ready" {
