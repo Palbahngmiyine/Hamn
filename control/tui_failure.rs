@@ -71,7 +71,7 @@ pub fn summarize(failure: &Failure) -> Summary {
         }
         _ => {}
     }
-    if let Some((program, stderr)) = cli_exit(message) {
+    if let Some((program, status, stderr)) = cli_exit(message) {
         let source = if program == "docker" {
             Source::Docker
         } else {
@@ -84,7 +84,11 @@ pub fn summarize(failure: &Failure) -> Summary {
         }
         let headline = lines.first().map_or("", |line| strip_prefixes(line));
         let title = if headline.is_empty() {
-            format!("{program} failed without an error message")
+            // The exit status is then all that tells this failure from another.
+            match status {
+                "" => format!("{program} failed without an error message"),
+                status => format!("{program} failed without an error message ({status})"),
+            }
         } else if headline.starts_with(&format!("{program}:")) {
             single_line(headline)
         } else {
@@ -130,20 +134,26 @@ fn summary(level: Level, title: String, hint: Option<&'static str>) -> Summary {
 
 /// `native::query` reports an exited CLI as `<program> exited <status>:
 /// <stderr>`, where the status reads `exit status: N` or `signal: N (NAME)`.
-fn cli_exit(message: &str) -> Option<(&'static str, &str)> {
+fn cli_exit(message: &str) -> Option<(&'static str, &str, &str)> {
     let (program, rest) = ["docker", "kubectl"].into_iter().find_map(|program| {
         Some((
             program,
             message.strip_prefix(program)?.strip_prefix(" exited ")?,
         ))
     })?;
-    let stderr = if let Some(code) = rest.strip_prefix("exit status: ") {
-        let digits = code.bytes().take_while(u8::is_ascii_digit).count();
-        code[digits..].strip_prefix(": ").unwrap_or(&code[digits..])
+    let (status, stderr) = if let Some(code) = rest.strip_prefix("exit status: ") {
+        let end = "exit status: ".len() + code.bytes().take_while(u8::is_ascii_digit).count();
+        (
+            &rest[..end],
+            rest[end..].strip_prefix(": ").unwrap_or(&rest[end..]),
+        )
     } else {
-        rest.split_once("): ").map_or(rest, |(_, stderr)| stderr)
+        match rest.split_once("): ") {
+            Some((status, stderr)) => (&rest[..status.len() + 1], stderr),
+            None => ("", rest),
+        }
     };
-    Some((program, stderr))
+    Some((program, status, stderr))
 }
 
 /// `native::query` reports a CLI that could not be started as
@@ -652,7 +662,12 @@ mod tests {
             ),
             (
                 cli("docker", "signal: 9 (SIGKILL)", ""),
-                "docker failed without an error message",
+                "docker failed without an error message (signal: 9 (SIGKILL))",
+                None,
+            ),
+            (
+                cli("docker", "exit status: 7", ""),
+                "docker failed without an error message (exit status: 7)",
                 None,
             ),
         ] {
@@ -811,6 +826,11 @@ mod tests {
                 );
             }
         }
+        // A status that cannot be read is left out rather than shown empty.
+        assert_eq!(
+            summarize(&Failure::new("cliError", "docker exited ")).title,
+            "docker failed without an error message"
+        );
         // Client log lines alone still say what failed: the error they carry.
         let logs = "kubectl exited exit status: 1: E1015 01:17:26.408480   67207 memcache.go:381] \"x\" err=\"dial tcp: connect: connection refused\"";
         assert_eq!(

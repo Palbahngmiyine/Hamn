@@ -19,6 +19,7 @@ void proc_request_cancel(void);
 void proc_cleanup_begin(void);
 void proc_cleanup_end(void);
 /* Finite synchronous command; reap the exact child before returning timeout.
+ * With out NULL (cap 0) its output stays on this process's stdout/stderr.
  * Optional completion still runs under the inherited supervisor locks. */
 int proc_run_bounded(const char *const argv[], char *out, size_t cap,
                       unsigned timeout_ms, proc_completion_fn completion,

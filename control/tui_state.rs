@@ -1299,6 +1299,58 @@ fn title(state: &State) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Styled text broken at spaces where it can be, so that words stay whole;
+/// only a word longer than the line is broken inside. The space at a break
+/// is dropped.
+fn wrap_words(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let cells: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            let style = span.style;
+            span.content
+                .chars()
+                .map(move |c| (if c.is_control() { ' ' } else { c }, style))
+        })
+        .collect();
+    let size = |c: char| Line::raw(c.to_string()).width();
+    let mut rows: Vec<&[(char, Style)]> = Vec::new();
+    let mut start = 0;
+    while start < cells.len() {
+        let (mut end, mut used) = (start, 0);
+        while end < cells.len() && used + size(cells[end].0) <= width {
+            used += size(cells[end].0);
+            end += 1;
+        }
+        if end < cells.len() {
+            if let Some(space) = (start + 1..=end).rev().find(|&i| cells[i].0 == ' ') {
+                rows.push(&cells[start..space]);
+                start = space + 1;
+                continue;
+            }
+            end = end.max(start + 1);
+        }
+        rows.push(&cells[start..end]);
+        start = end;
+    }
+    if rows.is_empty() {
+        rows.push(&[]);
+    }
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for &(c, style) in row {
+                match spans.last_mut() {
+                    Some(span) if span.style == style => span.content.to_mut().push(c),
+                    _ => spans.push(Span::styled(c.to_string(), style)),
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
 /// The message line: an icon of its level, the message, what helps and
 /// where the details are; at most two lines.
 fn message_lines(state: &State, width: u16) -> Vec<Line<'static>> {
@@ -1316,7 +1368,7 @@ fn message_lines(state: &State, width: u16) -> Vec<Line<'static>> {
     if state.last_error.is_some() && state.message_level == Level::Error {
         spans.push(Span::styled(" (! details)", theme::dim()));
     }
-    let mut lines = wrap_spans(vec![Line::from(spans)], width);
+    let mut lines = wrap_words(Line::from(spans), width);
     if lines.len() > 2 {
         lines.truncate(2);
         let last = &mut lines[1];
@@ -1561,7 +1613,7 @@ pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &s
             Span::raw(if chosen { "> " } else { "  " }),
             Span::styled(
                 format!(" {} {name} ", index + 1),
-                if chosen { theme::badge(workspace) } else { theme::key(workspace) },
+                if chosen { theme::badge(workspace) } else { theme::value() },
             ),
             Span::raw(format!(" — {about}")),
         ])
@@ -2714,6 +2766,38 @@ mod tests {
         assert_eq!(refused.code, "invalidRequest");
     }
     #[test]
+    fn messages_break_between_words_and_keep_their_styles() {
+        let text = |lines: &[Line]| -> Vec<String> {
+            lines
+                .iter()
+                .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+                .collect()
+        };
+        let plain = |text: &str, width| wrap_words(Line::raw(text.to_owned()), width);
+        assert_eq!(text(&plain("aaa bbb cccc dddddddddddd", 10)), ["aaa bbb", "cccc", "dddddddddd", "dd"]);
+        assert_eq!(text(&plain("exactly ten", 11)), ["exactly ten"]);
+        assert_eq!(text(&plain("", 10)), [""]);
+        // Wide characters count two columns and are never split.
+        assert_eq!(text(&plain("작업 상태", 6)), ["작업", "상태"]);
+        assert_eq!(text(&plain("ab", 1)), ["a", "b"]);
+        let styled = Line::from(vec![
+            Span::styled("✗ Cannot reach", theme::level(Level::Error)),
+            Span::styled(" — e selects another context", theme::dim()),
+        ]);
+        let lines = wrap_words(styled, 20);
+        assert_eq!(text(&lines), ["✗ Cannot reach — e", "selects another", "context"]);
+        assert_eq!(lines[0].spans[0].style, theme::level(Level::Error));
+        assert_eq!(lines[1].spans[0].style, theme::dim());
+        // On screen, the message's second line starts with a whole word.
+        let mut state = State::new(Request::default());
+        state.workspace = Workspace::Kubernetes;
+        state.fail(Failure::new("cliError", "kubectl exited exit status: 1: The connection to the server 127.0.0.1:63621 was refused - did you specify the right host or port?\n"));
+        let rendered = message_lines(&state, 132);
+        assert_eq!(rendered.len(), 2);
+        assert_eq!(text(&rendered)[1], "another context (! details)");
+        assert!(text(&rendered)[0].ends_with("; e selects"), "{:?}", text(&rendered));
+    }
+    #[test]
     fn workspaces_differ_in_tab_text_and_color_and_keys_stand_out() {
         let render = |state: &State, width: u16| {
             let mut terminal =
@@ -2745,10 +2829,14 @@ mod tests {
                 let buffer = render(state, width);
                 let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
                 assert!(!text.contains(inactive), "{text}");
-                assert_eq!(find(&buffer, active).bg, accent);
+                let tab = find(&buffer, active);
+                assert_eq!(tab.bg, accent, "{tab:?}");
                 // The frame of the view and the keys take the same color.
                 assert_eq!(find(&buffer, "┌").fg, accent);
-                assert_eq!(find(&buffer, "<:>").fg, accent);
+                // The row count in the title keeps the text color, not the pale border.
+                let count = format!("[{}]", state.rows().len());
+                assert_eq!(find(&buffer, &count).fg, Color::Reset);
+                assert_eq!(find(&buffer, "<:>").bg, accent);
                 assert!(text.contains("<Tab> switch") && text.contains("<?> help"), "{text}");
             }
         }

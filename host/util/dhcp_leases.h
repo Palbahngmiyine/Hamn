@@ -12,7 +12,10 @@
 /* 0=찾음(ip_out 채움), -1=없음 */
 int dhcp_lookup_ip(const char *mac, char *ip_out, size_t cap);
 
-/* timeout_sec 동안 1초 간격 폴링. 0=찾음, -1=타임아웃 */
+/*
+ * timeout_sec 동안 1초 간격 폴링. 0=찾음, -1=타임아웃.
+ * 취소(proc_cancelled)되면 다음 폴링 전에 errno=ECANCELED로 -1을 반환한다.
+ */
 int dhcp_wait_ip(const char *mac, int timeout_sec, char *ip_out, size_t cap);
 
 #endif
