@@ -47,7 +47,11 @@ enum Source {
 pub fn summarize(failure: &Failure) -> Summary {
     let message = failure.message.as_str();
     match failure.code.as_str() {
-        crate::tui_state::VM_NOT_READY | "staleData" | "noSelection" | "selectEnvironment" => {
+        crate::tui_state::VM_NOT_READY
+        | "staleData"
+        | "noSelection"
+        | "selectEnvironment"
+        | "invalidPorts" => {
             return summary(Level::Warning, sentence(message), None);
         }
         "queryTimeout" => {
@@ -718,6 +722,18 @@ mod tests {
         assert_eq!(
             (stale.level, stale.title.as_str()),
             (Level::Warning, "Refresh before acting on previous data")
+        );
+        // A port typed at the port-forward prompt is corrected there.
+        let ports = summarize(&Failure::new(
+            "invalidPorts",
+            "--address: enter LOCAL:REMOTE, :REMOTE or REMOTE, such as 8080:80",
+        ));
+        assert_eq!(
+            (ports.level, ports.title.as_str()),
+            (
+                Level::Warning,
+                "--address: enter LOCAL:REMOTE, :REMOTE or REMOTE, such as 8080:80"
+            )
         );
         let timeout = summarize(&Failure::new(
             "queryTimeout",

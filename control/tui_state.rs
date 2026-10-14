@@ -12,6 +12,9 @@ use ratatui::{
 };
 use serde_json::Value;
 
+/// The prompt of `State::input` that takes the ports of `State::forward`.
+pub const PORT_FORWARD: char = 'F';
+
 // Tokenize shell-style quotes without performing expansions or executing a shell.
 // In double quotes, backslash is literal except before $ ` " \ and newline.
 pub fn split_command(command: &str) -> Result<Vec<String>> {
@@ -187,7 +190,13 @@ pub struct State {
     pub data: Value,
     pub selected: Option<usize>,
     pub filter: String,
+    /// The prompt line: `:` a command, `/` a filter, or [`PORT_FORWARD`]
+    /// the ports of `forward`.
     pub input: Option<(char, String)>,
+    /// The list and row whose port-forward waits for its ports. Set exactly
+    /// while `input` is the [`PORT_FORWARD`] prompt: the row is kept as it
+    /// was chosen, so a refresh meanwhile cannot change the target.
+    pub forward: Option<(crate::native::Invocation, Value)>,
     pub history: Vec<String>,
     pub history_index: Option<usize>,
     /// The one-line message under the view. Written only through `notify`,
@@ -243,6 +252,7 @@ impl State {
             selected: Some(0),
             filter: String::new(),
             input: None,
+            forward: None,
             history: Vec::new(),
             history_index: None,
             message: String::new(),
@@ -432,7 +442,36 @@ impl State {
         self.scroll = 0;
         self.detail = None;
         self.pending_native = None;
+        if self.forward.take().is_some() {
+            self.input = None;
+        }
         self.connection_status = "Connecting".into();
+    }
+    /// `F` on the selected row: the port prompt of its port-forward, which
+    /// starts with the first port the row declares.
+    pub fn open_port_forward(&mut self) -> Result<()> {
+        if self.stale || self.loading {
+            return Err(Failure::new(
+                "staleData",
+                "refresh before acting on previous data",
+            ));
+        }
+        let invocation = self
+            .native
+            .clone()
+            .ok_or_else(|| Failure::new("noSelection", "select a resource list"))?;
+        let row = self
+            .selected()
+            .ok_or_else(|| Failure::new("noSelection", "select a resource first"))?;
+        let ports = crate::native_actions::forward_ports(&invocation, &row)?;
+        self.forward = Some((invocation, row));
+        self.input = Some((PORT_FORWARD, ports));
+        Ok(())
+    }
+    /// Closes the prompt line, and with it a port-forward waiting for ports.
+    pub fn close_input(&mut self) {
+        self.input = None;
+        self.forward = None;
     }
     pub fn rows(&self) -> Vec<&Value> {
         let filter = self.filter.to_lowercase();
@@ -1373,12 +1412,28 @@ pub fn draw(frame: &mut Frame, state: &State) {
         frame.render_widget(Paragraph::new(header_hints), header[1]);
     }
     if let Some((prefix, input)) = &state.input {
-        let (name, keys) = if *prefix == ':' {
-            (" Command ", " Enter runs · ↑/↓ history · Esc cancels ")
-        } else {
-            (" Filter ", " Enter keeps · Esc closes ")
+        let (name, keys, lead) = match (*prefix, &state.forward) {
+            (':', _) => (
+                " Command ".to_string(),
+                " Enter runs · ↑/↓ history · Esc cancels ",
+                ":".to_string(),
+            ),
+            (PORT_FORWARD, Some((invocation, row))) => (
+                clean(&format!(
+                    " Port-forward {}/{} — LOCAL:REMOTE ",
+                    invocation.resource.as_deref().unwrap_or_default(),
+                    row["metadata"]["name"].as_str().unwrap_or_default()
+                )),
+                " Enter starts · Esc cancels ",
+                "ports ".to_string(),
+            ),
+            _ => (
+                " Filter ".to_string(),
+                " Enter keeps · Esc closes ",
+                prefix.to_string(),
+            ),
         };
-        let text = format!("{prefix}{}", clean(input));
+        let text = format!("{lead}{}", clean(input));
         frame.render_widget(
             Paragraph::new(text.clone()).block(
                 Block::bordered()

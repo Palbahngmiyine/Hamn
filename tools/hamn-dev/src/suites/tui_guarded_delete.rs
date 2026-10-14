@@ -109,7 +109,7 @@ fn scenario(changed: Option<&'static str>) {
         }
     };
     until("victim");
-    pty::write_all(master, b"d");
+    pty::write_all(master, b"\x04"); // Ctrl+D
     until("Confirm delete pods victim");
     if let Some(field) = changed {
         api.identity.lock().unwrap()[field] = json!("replacement");

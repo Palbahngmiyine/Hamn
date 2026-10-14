@@ -3,6 +3,7 @@ use crate::terminal_session::{Event as TerminalEvent, Session};
 use crate::{
     model::{Request, Result},
     service,
+    tui_keys::{self, RowKey},
     tui_state::{self, State},
 };
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -271,6 +272,21 @@ fn resource_action(
         }
         return;
     }
+    row_action(state, job, cli, area, |invocation, row| {
+        crate::native_actions::selected(invocation, row, action)
+    });
+}
+
+/// Runs the action that `build` makes of the selected row of the current
+/// list: a change waits for confirmation, anything else opens in the
+/// internal terminal. Previous rows are not acted on.
+fn row_action(
+    state: &mut State,
+    job: &mut Job,
+    cli: &mut Option<Session>,
+    area: ratatui::layout::Rect,
+    build: impl FnOnce(&crate::native::Invocation, &Value) -> Result<crate::native_actions::Action>,
+) {
     let result = if state.stale || state.loading {
         Err(crate::model::Failure::new(
             "staleData",
@@ -278,11 +294,11 @@ fn resource_action(
         ))
     } else {
         state
-            .selected()
+            .native
+            .as_ref()
+            .zip(state.selected())
             .ok_or_else(|| crate::model::Failure::new("noSelection", "select a resource first"))
-            .and_then(|row| {
-                crate::native_actions::selected(state.native.as_ref().unwrap(), &row, action)
-            })
+            .and_then(|(invocation, row)| build(invocation, &row))
     };
     match result {
         Ok(action) if action.changes => state.pending_native = Some(action),
@@ -456,9 +472,54 @@ fn draw_sessions(frame: &mut ratatui::Frame, sessions: &[Session], selected: usi
     );
 }
 
+/// Runs a key of the selected row, as `tui_keys::row_key` decided it.
+fn run_row_key(
+    key: RowKey,
+    state: &mut State,
+    job: &mut Job,
+    cli: &mut Option<Session>,
+    menu: &mut Option<Menu>,
+    area: ratatui::layout::Rect,
+) {
+    match key {
+        RowKey::StartVm => {
+            state.pending = Some(Request {
+                words: vec!["vm".into(), "start".into()],
+                profile: state.native.as_ref().and_then(|i| i.hamn_profile.clone()),
+                yes: true,
+                timeout: 600,
+                ..Default::default()
+            })
+        }
+        RowKey::Logs => *menu = Menu::logs(state),
+        RowKey::Shell => match Menu::shell(state) {
+            Some(containers) => *menu = Some(containers),
+            None => row_action(state, job, cli, area, |invocation, row| {
+                crate::native_actions::shell(invocation, row, None)
+            }),
+        },
+        RowKey::PortForward => {
+            if let Err(error) = state.open_port_forward() {
+                state.fail(error);
+            }
+        }
+        RowKey::Native(action) => resource_action(action, state, job, cli, area),
+        RowKey::Hamn(action) => {
+            let request = state.action(action);
+            job.dispatch(request, state);
+        }
+        RowKey::Detail => match state.enter() {
+            Ok(Some(request)) => job.dispatch(Ok(request), state),
+            Ok(None) => {}
+            Err(error) => state.fail(error),
+        },
+    }
+}
+
 enum MenuAction {
     Native(&'static str),
     Log(Option<String>, bool),
+    Shell(String),
     Target(preferences::Target),
 }
 struct Menu {
@@ -522,6 +583,29 @@ impl Menu {
         Some(Self {
             title: "Logs (Enter selects; Esc cancels)".into(),
             items,
+            selected: 0,
+        })
+    }
+    /// The containers of a Pod that has several, as k9s asks before a
+    /// shell; `None` for one container or none, where kubectl picks it.
+    fn shell(state: &State) -> Option<Self> {
+        let invocation = state.native.as_ref()?;
+        if invocation.workspace != Workspace::Kubernetes {
+            return None;
+        }
+        let row = state.selected()?;
+        let containers: Vec<String> = row["spec"]["containers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|container| container["name"].as_str().map(String::from))
+            .collect();
+        (containers.len() > 1).then(|| Self {
+            title: "Shell in container (Enter selects; Esc cancels)".into(),
+            items: containers
+                .into_iter()
+                .map(|name| (name.clone(), MenuAction::Shell(name)))
+                .collect(),
             selected: 0,
         })
     }
@@ -823,8 +907,11 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                     job.cancel(&mut state);
                                     match apply_target(target, &mut state, &mut other) { Ok(()) => job.refresh(&mut state), Err(error) => state.fail(error) }
                                 },
-                                MenuAction::Native("logs") => menu = Menu::logs(&state),
-                                MenuAction::Native(action) => resource_action(action, &mut state, &mut job, &mut cli, terminal.get_frame().area()),
+                                MenuAction::Native(action) => {
+                                    let key = match action { "logs" => RowKey::Logs, "shell" => RowKey::Shell, "port-forward" => RowKey::PortForward, action => RowKey::Native(action) };
+                                    run_row_key(key, &mut state, &mut job, &mut cli, &mut menu, terminal.get_frame().area());
+                                },
+                                MenuAction::Shell(container) => row_action(&mut state, &mut job, &mut cli, terminal.get_frame().area(), |invocation, row| crate::native_actions::shell(invocation, row, Some(&container))),
                                 MenuAction::Log(container, previous) => {
                                     let result = state.selected().ok_or_else(|| crate::model::Failure::new("noSelection", "Selected resource is no longer available"))
                                         .and_then(|row| crate::native_actions::logs(state.native.as_ref().unwrap(), &row, container.as_deref(), previous));
@@ -912,14 +999,25 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 }
                 if state.input.is_some() {
                     match key.code {
-                        KeyCode::Esc => state.input = None,
+                        KeyCode::Esc => state.close_input(),
                         KeyCode::Backspace => state.edit_input("", true),
                         KeyCode::Up => state.recall_command(true),
                         KeyCode::Down => state.recall_command(false),
                         KeyCode::Char(c) => state.edit_input(&c.to_string(), false),
                         KeyCode::Enter => {
                             let (prefix, input) = state.input.take().unwrap();
-                            if prefix == ':' {
+                            if let Some((invocation, row)) = state.forward.take() {
+                                assert_eq!(prefix, tui_state::PORT_FORWARD, "a port-forward waits only at its prompt");
+                                match crate::native_actions::port_forward(&invocation, &row, &input) {
+                                    Ok(action) => {
+                                        job.cancel(&mut state);
+                                        let area = terminal.get_frame().area();
+                                        if let Some(session) = open_cli(action.invocation, area, &mut state) { cli = Some(session) }
+                                    },
+                                    // The prompt stays with the typed ports, to correct them.
+                                    Err(error) => { state.input = Some((prefix, input)); state.forward = Some((invocation, row)); state.fail(error); },
+                                }
+                            } else if prefix == ':' {
                                 state.remember_command(&input);
                                 if input == "q" {
                                     if mutation_job.mutation.is_none() { break; }
@@ -972,15 +1070,15 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         job.cancel(&mut state); std::mem::swap(&mut state, &mut other);
                         job.refresh(&mut state);
                     },
-                    KeyCode::Char('b') | KeyCode::Char('F') => {
-                        let favorites = key.code == KeyCode::Char('F');
+                    KeyCode::Char('b') | KeyCode::Char('B') => {
+                        let favorites = key.code == KeyCode::Char('B');
                         match preferences::targets(&preferences_path, favorites) {
                             Ok(targets) => menu = Some(Menu { title: if favorites { "Favorite targets" } else { "Recent targets" }.into(), selected: 0, items: targets.into_iter().map(|target| (target.label(), MenuAction::Target(target))).collect() }),
                             Err(error) => state.fail(crate::model::Failure::new("preferencesUnavailable", error)),
                         }
                     },
                     KeyCode::Char('f') => if let Some(target) = current_target(&state) {
-                        match preferences::remember_target(&preferences_path, target, true) { Ok(()) => state.notify("Favorite toggled; F lists favorites"), Err(error) => state.fail(crate::model::Failure::new("preferencesUnavailable", error)) }
+                        match preferences::remember_target(&preferences_path, target, true) { Ok(()) => state.notify("Favorite toggled; B lists favorites"), Err(error) => state.fail(crate::model::Failure::new("preferencesUnavailable", error)) }
                     },
                     KeyCode::Char('p') => state.refresh.paused = !state.refresh.paused,
                     KeyCode::Char('R') => job.refresh(&mut state),
@@ -1049,19 +1147,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     KeyCode::Char('!') => { state.show_operation = !state.show_operation; state.help = false; },
                     KeyCode::Char('m') => { menu = Menu::actions(&state); if menu.is_none() { state.warn("Select a resource to see available actions"); } },
                     KeyCode::Char('?') => { state.help = !state.help; state.scroll = 0; },
-                    KeyCode::Char(c) if "strdlg".contains(c) => {
-                        let action = match c { 's'=>"start", 't'=>"stop", 'r'=>"restart", 'd'=>"delete", 'l'=>"logs", _=>"stats" };
-                        if action == "start" && state.native.as_ref().is_some_and(|i| i.hamn_profile.is_some()) && state.runtime["dockerStatus"] != "ready" {
-                            state.pending = Some(Request { words: vec!["vm".into(), "start".into()], profile: state.native.as_ref().unwrap().hamn_profile.clone(), yes: true, timeout: 600, ..Default::default() });
-                        } else if state.native.is_some() && action == "logs" {
-                            menu = Menu::logs(&state);
-                        } else if state.native.is_some() {
-                            resource_action(action, &mut state, &mut job, &mut cli, terminal.get_frame().area());
-                        } else {
-                            let request = state.action(action); job.dispatch(request, &mut state);
-                        }
-                    }
-                    _ => {}
+                    code => if let Some(row_key) = tui_keys::row_key(&state, code, key.modifiers) {
+                        run_row_key(row_key, &mut state, &mut job, &mut cli, &mut menu, terminal.get_frame().area());
+                    },
                 }
             }
         }
