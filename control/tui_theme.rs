@@ -1,6 +1,6 @@
 //! The look of the TUI, after the roles of a k9s skin and the palette of
-//! subux.dev: a pastel accent per workspace (sky blue for Containers, lilac
-//! for Kubernetes) frames its view and fills its pills, the active tab, the
+//! subux.dev: a pastel accent per workspace (sky blue for Containers, its
+//! complementary orange for Kubernetes) frames its view and fills its pills, the active tab, the
 //! keys, the selected row and the crumbs, which carry dark text; rows take a
 //! status color, messages a level color, and key hints read `<key> label`.
 //!
@@ -23,12 +23,13 @@ use ratatui::{
 
 /// Frames and pills of the Containers and Kubernetes workspaces differ in
 /// color, so that Tab visibly changes the screen. Containers takes the
-/// 256-color sky blue nearest subux.dev's #c2e7ff (#afd7ff); Kubernetes a
-/// lilac of the same lightness (#d7afff).
+/// 256-color sky blue nearest subux.dev's #c2e7ff (#afd7ff, 153); Kubernetes
+/// its complement, the pastel orange #ffd7af (223), which is also the 256
+/// color nearest the complement of #c2e7ff (#ffdac2).
 pub fn accent(workspace: Workspace) -> Color {
     match workspace {
         Workspace::Containers => Color::Indexed(153),
-        Workspace::Kubernetes => Color::Indexed(183),
+        Workspace::Kubernetes => Color::Indexed(223),
     }
 }
 
@@ -321,6 +322,49 @@ mod tests {
         assert_ne!(accent(Workspace::Containers), accent(Workspace::Kubernetes));
         // subux.dev's sky blue for Containers, in the 256-color cube.
         assert_eq!(accent(Workspace::Containers), Color::Indexed(153));
+    }
+
+    /// The RGB of a color of the 256-color cube (16..=231).
+    fn cube(color: Color) -> [i32; 3] {
+        let Color::Indexed(index) = color else {
+            panic!("{color:?} is not indexed")
+        };
+        assert!((16..=231).contains(&index), "{index}");
+        let level = |n: u8| if n == 0 { 0 } else { 55 + 40 * i32::from(n) };
+        let i = index - 16;
+        [level(i / 36), level(i / 6 % 6), level(i % 6)]
+    }
+
+    /// The cube color nearest an RGB color.
+    fn nearest(rgb: [i32; 3]) -> Color {
+        (16..=231u8)
+            .map(Color::Indexed)
+            .min_by_key(|&color| {
+                let c = cube(color);
+                (0..3).map(|i| (c[i] - rgb[i]).pow(2)).sum::<i32>()
+            })
+            .unwrap()
+    }
+
+    /// The complement of an RGB color at the same hue lightness: each
+    /// channel mirrored between the largest and the smallest.
+    fn complement(rgb: [i32; 3]) -> [i32; 3] {
+        let sum = rgb.iter().max().unwrap() + rgb.iter().min().unwrap();
+        rgb.map(|channel| sum - channel)
+    }
+
+    #[test]
+    fn kubernetes_takes_the_complement_of_the_sky_blue_of_containers() {
+        let subux = [0xc2, 0xe7, 0xff];
+        assert_eq!(accent(Workspace::Containers), nearest(subux));
+        let sky = cube(accent(Workspace::Containers));
+        assert_eq!(sky, [0xaf, 0xd7, 0xff]);
+        // The orange is the exact complement of the sky blue on screen ...
+        assert_eq!(cube(accent(Workspace::Kubernetes)), complement(sky));
+        assert_eq!(complement(sky), [0xff, 0xd7, 0xaf]);
+        // ... and the cube color nearest the complement of subux.dev's blue.
+        assert_eq!(complement(subux), [0xff, 0xda, 0xc2]);
+        assert_eq!(accent(Workspace::Kubernetes), nearest(complement(subux)));
     }
 
     #[test]
