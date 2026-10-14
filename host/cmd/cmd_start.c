@@ -156,15 +156,22 @@ static int rollback_incomplete_start(const struct profile *p)
     return 0;
 }
 
+/* Polls vmrun's control socket every half second for up to timeout_sec.
+ * 0 once it reports running; -1 when the time is up, or with errno ECANCELED
+ * at the next poll after the operation is cancelled outside cleanup. */
 static int wait_vmrun_running(const struct profile *p, const char *ctl,
                               int timeout_sec)
 {
     char resp[256];
     for (int i = 0; i < timeout_sec * 2; i++) {
+        if (proc_cancelled()) {
+            errno = ECANCELED;
+            return -1;
+        }
         if (ctlsock_query_status(ctl, resp, sizeof(resp), 300) == 0 &&
             strstr(resp, "\"running\"") && vm_running_pid(p) > 0)
             return 0;
-        usleep(500 * 1000);
+        usleep(500 * 1000); /* a cancellation signal ends it early */
     }
     return -1;
 }
@@ -298,6 +305,12 @@ int hamn_test_start_ensure_signed_guest_image(char *image, size_t capacity,
                                               int *updated)
 {
     return ensure_signed_guest_image(image, capacity, updated);
+}
+
+int hamn_test_start_wait_vmrun_running(const struct profile *p,
+                                       const char *ctl, int timeout_sec)
+{
+    return wait_vmrun_running(p, ctl, timeout_sec);
 }
 #endif
 
@@ -641,7 +654,10 @@ static int cmd_start_execute(const struct start_options *options,
     }
 
     if (wait_vmrun_running(&p, ctl, 20) != 0) {
-        logerr("vm did not start; check %s", vmlog);
+        if (proc_cancelled())
+            logerr("cancelled while waiting for the vm to run");
+        else
+            logerr("vm did not start; check %s", vmlog);
         goto rollback;
     }
     start_trace_stage(&trace, "vm-running");

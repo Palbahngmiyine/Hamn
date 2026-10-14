@@ -24,6 +24,10 @@ void proc_cleanup_end(void);
 int proc_run_bounded(const char *const argv[], char *out, size_t cap,
                       unsigned timeout_ms, proc_completion_fn completion,
                       void *context);
+/* proc_run_bounded with proc_run_capture_checked's report: *truncated is 1
+ * when out was too small. A timeout keeps what was captured until then. */
+int proc_run_bounded_checked(const char *const argv[], char *out, size_t cap,
+                             int *truncated, unsigned timeout_ms);
 
 /* argv는 NULL 종단 배열. 종료까지 대기, exit code(0~255) 반환, 실패/시그널 -1. */
 int proc_run(const char *const argv[]);

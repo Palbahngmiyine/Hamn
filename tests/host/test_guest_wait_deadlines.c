@@ -1,16 +1,25 @@
 /* The guest waits of a VM start end at their deadline or on cancellation:
  * every probe of guest_deployment_runtime_ready() runs with the readiness
- * budget that is left, the guest image check has its own bound, and the DHCP
- * lease wait ends when the operation is cancelled. Each case runs in a child
- * that this test kills when it outlives its limit, so a wait without a
- * deadline fails its case instead of hanging the test.
+ * budget that is left, the guest image check has its own bound, the client
+ * of a guest writer, of the cloud-init wait and of a provisioning hook is
+ * reaped once the guest's own limit for that command has passed, and the
+ * vmrun and DHCP lease waits end when the operation is cancelled. Each case
+ * runs in a child that this test kills when it outlives its limit, so a wait
+ * without a deadline fails its case instead of hanging the test.
  *
  * `ssh` is this test executable, first in PATH. It answers control requests
  * (-O) with success, links a forwarded Docker socket to a fake Docker API,
  * and runs no remote command: the command succeeds, fails, is slow or hangs
  * as the case's environment asks. The fake Docker API answers _ping, or
- * accepts and never answers. The Makefile builds guest_deployment.c into this
- * test with readiness and image-check budgets of seconds. */
+ * accepts and never answers. The Makefile builds guest_deployment.c,
+ * remote_mutation.c, provision.c and cmd_start.c into this test with guest
+ * limits and budgets of seconds and no client margin. */
+#if !defined(GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) || \
+    !defined(GUEST_IMAGE_VERIFY_TIMEOUT_SEC) || \
+    !defined(GUEST_CLOUD_INIT_TIMEOUT_SEC) || \
+    !defined(REMOTE_MUTATION_SLACK_SEC) || !defined(SSH_REMOTE_MARGIN_SEC)
+#error "build with the test budgets of guest_deployment.c (see Makefile)"
+#endif
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -29,16 +38,23 @@
 #include "core/guest_deployment.h"
 #include "core/log.h"
 #include "core/profile.h"
+#include "core/provision.h"
+#include "core/remote_mutation.h"
 #include "util/dhcp_leases.h"
 #include "util/proc.h"
 
-#if !defined(GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) || \
-    !defined(GUEST_IMAGE_VERIFY_TIMEOUT_SEC)
-#error "build with the test budgets of guest_deployment.c (see Makefile)"
-#endif
+/* Test-only seam from host/cmd/cmd_start.c. */
+int hamn_test_start_wait_vmrun_running(const struct profile *p,
+                                       const char *ctl, int timeout_sec);
 
 #define READY_MS (GUEST_DEPLOYMENT_READY_TIMEOUT_SEC * 1000LL)
 #define VERIFY_MS (GUEST_IMAGE_VERIFY_TIMEOUT_SEC * 1000LL)
+/* A guest command bounded by `timeout --kill-after=5s <limit>` ends within
+ * limit + 5 s; its client is reaped after that and the client margin. */
+#define CLIENT_MS(limit_sec) \
+    (((limit_sec) + 5LL + SSH_REMOTE_MARGIN_SEC) * 1000LL)
+/* The guest's limit for a writer that waits 1 s for its lock and runs 1 s. */
+#define WRITER_LIMIT_SEC (1 + 1 + REMOTE_MUTATION_SLACK_SEC)
 /* Reaping the exact client after its deadline takes a few polls of 50 ms. */
 #define MARGIN_MS 700LL
 /* A case still running this long after its budget has a wait without one. */
@@ -56,6 +72,8 @@
 /* The operation's process, sent SIGTERM when the hanging command starts, as
  * the TUI cancels its worker. */
 #define ENV_CANCEL "HAMN_TEST_FAKE_SSH_CANCEL_PID"
+/* A line the hanging command prints before it hangs. */
+#define ENV_SAY "HAMN_TEST_FAKE_SSH_SAY"
 
 static long long now_ms(void)
 {
@@ -144,6 +162,9 @@ static int fake_ssh(int argc, char **argv)
     if (delay)
         sleep_ms(atol(delay));
     if (fake_matches(ENV_HANG, command)) {
+        const char *say = getenv(ENV_SAY);
+        if (say && (puts(say) == EOF || fflush(stdout) != 0))
+            return 254;
         const char *owner = getenv(ENV_CANCEL);
         if (owner && kill((pid_t)atoi(owner), SIGTERM) != 0)
             return 254;
@@ -165,6 +186,7 @@ static struct {
     char api[128];
     char log[128];
     char out[128];
+    char ctl[128];
     char docker_socket[256];
     struct profile profile;
 } fixture;
@@ -244,6 +266,26 @@ static int ssh_calls(const char *needle)
     }
     free(text);
     return count;
+}
+
+/* The place of the first fake ssh invocation whose command contains needle
+ * among all invocations, or -1. */
+static int ssh_call_index(const char *needle)
+{
+    char *text = read_file(fixture.log);
+    int index = 0, found = -1;
+    for (char *line = text; *line && found < 0; index++) {
+        char *end = strchr(line, '\n');
+        assert(end);
+        *end = '\0';
+        char *command = strchr(line, '\t');
+        assert(command);
+        if (strstr(command + 1, needle))
+            found = index;
+        line = end + 1;
+    }
+    free(text);
+    return found;
 }
 
 /* Every fake ssh gone after waiting at most limit_ms. */
@@ -476,6 +518,149 @@ static void image_check_output_stays_visible(void)
     ssh_clients_reaped();
 }
 
+/* ---- guest writers --------------------------------------------------- */
+
+#define WRITER "hamn-test-writer"
+/* The fence publishes the writer's token; the barrier takes the lock. */
+#define FENCE ": > \"$d/$1\""
+#define BARRIER "flock --wait 1 /run/hamn-deployment.lock true"
+
+/* A writer's client that outlives the guest's limit is reaped there, and the
+ * writer's outcome is unknown: its token is fenced, then the barrier waits
+ * for a writer that may hold the lock, in that order. */
+static void hung_writer(char *reason, size_t capacity, int *truncated)
+{
+    setenv(ENV_HANG, WRITER, 1);
+    const char *command[] = { "sudo", WRITER, NULL };
+    long long bound = CLIENT_MS(WRITER_LIMIT_SEC);
+    long long started = now_ms();
+    int rc = remote_mutation_run(&fixture.profile, GUEST_IP, 1, 1, command,
+                                 reason, capacity, truncated);
+    long long elapsed = now_ms() - started;
+    assert(rc == PROC_RUN_TIMEOUT);
+    assert(elapsed >= bound && elapsed < bound + 2000);
+    assert(ssh_calls(WRITER) == 1 && ssh_calls(FENCE) == 1 &&
+           ssh_calls(BARRIER) == 1);
+    assert(ssh_call_index(WRITER) < ssh_call_index(FENCE));
+    assert(ssh_call_index(FENCE) < ssh_call_index(BARRIER));
+    assert(!remote_mutation_cleanup_pending());
+    ssh_clients_reaped();
+}
+
+static void hung_writer_is_reaped_then_fenced(void)
+{
+    hung_writer(NULL, 0, NULL);
+}
+
+/* What the writer said before it hung stays the failure's reason. */
+static void hung_capturing_writer_keeps_its_reason(void)
+{
+    setenv(ENV_SAY, "recovering transaction 1 of 2", 1);
+    char reason[64] = "";
+    int truncated = -1;
+    hung_writer(reason, sizeof(reason), &truncated);
+    assert(strcmp(reason, "recovering transaction 1 of 2") == 0);
+    assert(truncated == 0);
+}
+
+/* ---- cloud-init wait and provisioning hooks -------------------------- */
+
+static void hung_cloud_init_wait_ends_at_its_bound(void)
+{
+    setenv(ENV_HANG, "cloud-init status --wait", 1);
+    setenv(ENV_SAY, "status: running", 1);
+    struct vm_state state;
+    memset(&state, 0, sizeof(state));
+    snprintf(state.ip, sizeof(state.ip), "%s", GUEST_IP);
+    long long bound = CLIENT_MS(GUEST_CLOUD_INIT_TIMEOUT_SEC);
+    long long started = now_ms();
+    assert(guest_deployment_refresh_locked(&fixture.profile, &state) == -1);
+    long long elapsed = now_ms() - started;
+    assert(elapsed >= bound && elapsed < bound + 2000);
+    assert(strstr(log_last_error(), "cloud-init did not finish within"));
+    assert(ssh_calls("cloud-init status --wait") == 1);
+    assert(ssh_calls("guest-deployment-transaction begin") == 0);
+    /* Its report still reaches the operation's output. */
+    fflush(NULL);
+    char *output = read_file(fixture.out);
+    assert(strstr(output, "status: running"));
+    free(output);
+    ssh_clients_reaped();
+}
+
+/* A hook's client is reaped after the hook's timeoutSeconds have passed in
+ * the guest, and the hook fails as a timed-out hook does. */
+static void hung_provision_hook_ends_at_its_bound(void)
+{
+    struct profile_hook *hook = &fixture.profile.hooks[0];
+    fixture.profile.hook_count = 1;
+    snprintf(hook->stage, sizeof(hook->stage), "system");
+    snprintf(hook->command, sizeof(hook->command), "hamn-test-hook");
+    hook->timeout_seconds = 1;
+    setenv(ENV_HANG, "hamn-test-hook", 1);
+    long long bound = CLIENT_MS(1);
+    long long started = now_ms();
+    assert(provision_run_stage(&fixture.profile, GUEST_IP, "system") == -1);
+    long long elapsed = now_ms() - started;
+    assert(elapsed >= bound && elapsed < bound + 2000);
+    assert(strstr(log_last_error(), "hook 0 (system) failed with exit 124"));
+    char path[PATH_MAX];
+    assert(profile_path(&fixture.profile, "logs/provision-system-0.log", path,
+                        sizeof(path)));
+    char *text = read_file(path);
+    assert(strstr(text, "result=failure") && strstr(text, "exitCode=124"));
+    free(text);
+    assert(ssh_calls("hamn-test-hook") == 1);
+    ssh_clients_reaped();
+}
+
+/* ---- vmrun wait ------------------------------------------------------ */
+
+static void cancelled_vmrun_wait_returns_at_once(void)
+{
+    assert(proc_cancel_install() == 0);
+    assert(raise(SIGTERM) == 0 && proc_cancelled());
+    long long started = now_ms();
+    errno = 0;
+    assert(hamn_test_start_wait_vmrun_running(&fixture.profile, fixture.ctl,
+                                              20) == -1);
+    assert(errno == ECANCELED);
+    assert(now_ms() - started < 500);
+}
+
+static void cancellation_ends_the_vmrun_wait(void)
+{
+    assert(proc_cancel_install() == 0);
+    pid_t owner = getpid();
+    pid_t canceller = fork();
+    assert(canceller >= 0);
+    if (canceller == 0) {
+        sleep_ms(300); /* while the wait polls or sleeps */
+        _exit(kill(owner, SIGTERM) == 0 ? 0 : 1);
+    }
+    long long started = now_ms();
+    errno = 0;
+    int rc = hamn_test_start_wait_vmrun_running(&fixture.profile, fixture.ctl,
+                                                20);
+    int saved = errno;
+    long long elapsed = now_ms() - started;
+    int status = 0;
+    while (waitpid(canceller, &status, 0) < 0 && errno == EINTR) {}
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(rc == -1 && saved == ECANCELED);
+    assert(elapsed < 1500); /* of a 20-second wait */
+}
+
+static void vmrun_wait_without_a_vm_times_out(void)
+{
+    long long started = now_ms();
+    assert(hamn_test_start_wait_vmrun_running(&fixture.profile, fixture.ctl,
+                                              1) == -1);
+    long long elapsed = now_ms() - started;
+    assert(elapsed >= 1000 && elapsed < 3000);
+    assert(!proc_cancelled());
+}
+
 /* ---- DHCP lease wait ------------------------------------------------- */
 
 static void cancelled_lease_wait_returns_at_once(void)
@@ -552,6 +737,7 @@ int main(int argc, char **argv)
     join(fixture.api, sizeof(fixture.api), "api.sock");
     join(fixture.log, sizeof(fixture.log), "ssh.log");
     join(fixture.out, sizeof(fixture.out), "case.out");
+    join(fixture.ctl, sizeof(fixture.ctl), "vmrun-ctl.sock"); /* never bound */
     join(fixture.profile.dir, sizeof(fixture.profile.dir), "profile");
     snprintf(fixture.profile.name, sizeof(fixture.profile.name), "waits");
     assert(profile_path(&fixture.profile, "docker.sock", fixture.docker_socket,
@@ -598,6 +784,24 @@ int main(int argc, char **argv)
     run_case("image_check_output_stays_visible",
              image_check_output_stays_visible, API_ANSWERS,
              VERIFY_MS + WATCHDOG_EXTRA_MS);
+    run_case("hung_writer_is_reaped_then_fenced",
+             hung_writer_is_reaped_then_fenced, API_ANSWERS,
+             CLIENT_MS(WRITER_LIMIT_SEC) + WATCHDOG_EXTRA_MS);
+    run_case("hung_capturing_writer_keeps_its_reason",
+             hung_capturing_writer_keeps_its_reason, API_ANSWERS,
+             CLIENT_MS(WRITER_LIMIT_SEC) + WATCHDOG_EXTRA_MS);
+    run_case("hung_cloud_init_wait_ends_at_its_bound",
+             hung_cloud_init_wait_ends_at_its_bound, API_ANSWERS,
+             CLIENT_MS(GUEST_CLOUD_INIT_TIMEOUT_SEC) + WATCHDOG_EXTRA_MS);
+    run_case("hung_provision_hook_ends_at_its_bound",
+             hung_provision_hook_ends_at_its_bound, API_ANSWERS,
+             CLIENT_MS(1) + WATCHDOG_EXTRA_MS);
+    run_case("cancelled_vmrun_wait_returns_at_once",
+             cancelled_vmrun_wait_returns_at_once, API_ANSWERS, 5000);
+    run_case("cancellation_ends_the_vmrun_wait",
+             cancellation_ends_the_vmrun_wait, API_ANSWERS, 5000);
+    run_case("vmrun_wait_without_a_vm_times_out",
+             vmrun_wait_without_a_vm_times_out, API_ANSWERS, 5000);
     run_case("cancelled_lease_wait_returns_at_once",
              cancelled_lease_wait_returns_at_once, API_ANSWERS, 5000);
     run_case("cancellation_ends_the_lease_wait",
@@ -613,7 +817,8 @@ int main(int argc, char **argv)
         return 1;
     }
     assert(removed);
-    puts("PASS: guest readiness probes, the image check and the DHCP lease "
-         "wait end at their deadline or on cancellation");
+    puts("PASS: guest readiness probes, the image check, guest writers, the "
+         "cloud-init wait and provisioning hooks end at their deadline, and "
+         "the vmrun and DHCP lease waits on cancellation");
     return 0;
 }

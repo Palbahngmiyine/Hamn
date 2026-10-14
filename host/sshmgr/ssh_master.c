@@ -220,9 +220,11 @@ static char *remote_command_build(const char *const remote_argv[])
     return command;
 }
 
+/* With out NULL the command's output stays on this process's stdout and
+ * stderr. A nonzero timeout_ms bounds the client. */
 static int exec_remote(const struct profile *p, const char *ip,
-                        const char *const remote_argv[], int quiet,
-                        unsigned timeout_ms)
+                        const char *const remote_argv[], char *out,
+                        size_t cap, int *truncated, unsigned timeout_ms)
 {
     const char *argv[SSH_ARGV_MAX];
     struct ssh_strbuf sb;
@@ -239,16 +241,12 @@ static int exec_remote(const struct profile *p, const char *ip,
     argv[n] = NULL;
 
     int rc;
-    if (quiet) {
-        char out[1024];
-        rc = timeout_ms ?
-            proc_run_bounded(argv, out, sizeof(out), timeout_ms, NULL, NULL) :
-            proc_run_capture(argv, out, sizeof(out));
-    } else {
-        rc = timeout_ms ?
-            proc_run_bounded(argv, NULL, 0, timeout_ms, NULL, NULL) :
-            proc_run(argv);
-    }
+    if (timeout_ms)
+        rc = proc_run_bounded_checked(argv, out, cap, truncated, timeout_ms);
+    else if (out)
+        rc = proc_run_capture_checked(argv, out, cap, truncated);
+    else
+        rc = proc_run(argv);
     free(command);
     return rc;
 }
@@ -256,7 +254,9 @@ static int exec_remote(const struct profile *p, const char *ip,
 int ssh_exec(const struct profile *p, const char *ip,
              const char *const remote_argv[], int quiet)
 {
-    return exec_remote(p, ip, remote_argv, quiet, 0);
+    char out[1024];
+    return quiet ? exec_remote(p, ip, remote_argv, out, sizeof(out), NULL, 0) :
+                   exec_remote(p, ip, remote_argv, NULL, 0, NULL, 0);
 }
 
 int ssh_exec_bounded(const struct profile *p, const char *ip,
@@ -266,7 +266,9 @@ int ssh_exec_bounded(const struct profile *p, const char *ip,
         errno = EINVAL;
         return -1;
     }
-    return exec_remote(p, ip, remote_argv, 1, timeout_ms);
+    char out[1024];
+    return exec_remote(p, ip, remote_argv, out, sizeof(out), NULL,
+                       timeout_ms);
 }
 
 int ssh_exec_bounded_shown(const struct profile *p, const char *ip,
@@ -277,7 +279,7 @@ int ssh_exec_bounded_shown(const struct profile *p, const char *ip,
         errno = EINVAL;
         return -1;
     }
-    return exec_remote(p, ip, remote_argv, 0, timeout_ms);
+    return exec_remote(p, ip, remote_argv, NULL, 0, NULL, timeout_ms);
 }
 
 int ssh_exec_capture(const struct profile *p, const char *ip,
@@ -290,20 +292,16 @@ int ssh_exec_capture_checked(const struct profile *p, const char *ip,
                              const char *const remote_argv[], char *out,
                              size_t cap, int *truncated)
 {
-    const char *argv[SSH_ARGV_MAX];
-    struct ssh_strbuf sb;
-    char dest[128];
-    int n = ssh_base_argv(p, argv, SSH_ARGV_MAX, &sb);
-    if (n < 0)
+    return exec_remote(p, ip, remote_argv, out, cap, truncated, 0);
+}
+
+int ssh_exec_capture_bounded(const struct profile *p, const char *ip,
+                             const char *const remote_argv[], char *out,
+                             size_t cap, int *truncated, unsigned timeout_ms)
+{
+    if (!timeout_ms || !out) {
+        errno = EINVAL;
         return -1;
-    snprintf(dest, sizeof(dest), "%s@%s", SSH_USER, ip);
-    argv[n++] = dest;
-    char *command = remote_command_build(remote_argv);
-    if (!command)
-        return -1;
-    argv[n++] = command;
-    argv[n] = NULL;
-    int rc = proc_run_capture_checked(argv, out, cap, truncated);
-    free(command);
-    return rc;
+    }
+    return exec_remote(p, ip, remote_argv, out, cap, truncated, timeout_ms);
 }
