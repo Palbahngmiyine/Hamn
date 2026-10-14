@@ -26,6 +26,7 @@ mod terminal_session;
 #[cfg(test)]
 mod test_fixture;
 mod tui;
+mod tui_failure;
 mod tui_state;
 mod upgrade;
 

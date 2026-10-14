@@ -1,5 +1,6 @@
 use crate::model::{Failure, Request, Result};
 use crate::preferences::Workspace;
+use crate::tui_failure::Level;
 use clap::Parser;
 use ratatui::{
     Frame,
@@ -187,7 +188,16 @@ pub struct State {
     pub input: Option<(char, String)>,
     pub history: Vec<String>,
     pub history_index: Option<usize>,
+    /// The one-line message under the view. Written only through `notify`,
+    /// `warn`, `fail` and `clear_message`, which keep it, its level and
+    /// the failure behind it consistent.
     pub message: String,
+    pub message_level: Level,
+    /// What helps next, shown after the message.
+    pub message_hint: Option<&'static str>,
+    /// The failure that `message` summarizes, kept whole for the
+    /// diagnostics view (`!`): the summary never replaces the raw text.
+    pub last_error: Option<Failure>,
     pub detail: Option<String>,
     pub pending: Option<Request>,
     pub pending_native: Option<crate::native_actions::Action>,
@@ -232,6 +242,9 @@ impl State {
             history: Vec::new(),
             history_index: None,
             message: String::new(),
+            message_level: Level::Info,
+            message_hint: None,
+            last_error: None,
             detail: None,
             pending: None,
             pending_native: None,
@@ -280,6 +293,52 @@ impl State {
             state.request.namespace = None;
         }
         state
+    }
+    /// Reports a result or a step that the user asked for.
+    pub fn notify(&mut self, text: impl Into<String>) {
+        self.set_message(Level::Info, text.into(), None, None);
+    }
+    /// Says why a key did nothing, or which state blocks it.
+    pub fn warn(&mut self, text: impl Into<String>) {
+        self.set_message(Level::Warning, text.into(), None, None);
+    }
+    /// Shows the summary of a failure. The failure itself stays available
+    /// to the diagnostics view until another message replaces it.
+    pub fn fail(&mut self, failure: Failure) {
+        let summary = crate::tui_failure::summarize(&failure);
+        self.set_message(summary.level, summary.title, summary.hint, Some(failure));
+    }
+    /// The message as one line of text: the summary, what helps, and where
+    /// the full failure is.
+    pub fn message_line(&self) -> String {
+        let mut line = self.message.clone();
+        if let Some(hint) = self.message_hint {
+            line.push_str(" — ");
+            line.push_str(hint);
+        }
+        if self.last_error.is_some() && self.message_level == Level::Error {
+            line.push_str(" (! details)");
+        }
+        line
+    }
+    /// Rows are drawn whose last refresh failed: they may no longer be true.
+    pub fn showing_stale_rows(&self) -> bool {
+        self.stale && self.data.as_array().is_some_and(|rows| !rows.is_empty())
+    }
+    pub fn clear_message(&mut self) {
+        self.set_message(Level::Info, String::new(), None, None);
+    }
+    fn set_message(
+        &mut self,
+        level: Level,
+        text: String,
+        hint: Option<&'static str>,
+        failure: Option<Failure>,
+    ) {
+        self.message = text;
+        self.message_level = level;
+        self.message_hint = hint;
+        self.last_error = failure;
     }
     pub fn hamn_environment(&self) -> bool {
         self.workspace == Workspace::Containers
@@ -677,7 +736,7 @@ impl State {
             if value["ended"] == true {
                 self.loading = false;
                 self.refreshing = false;
-                self.message = "log stream ended".into();
+                self.notify("Log stream ended");
                 return;
             }
         }
@@ -694,7 +753,7 @@ impl State {
                 } else {
                     identity.and_then(|key| self.find_identity(&key))
                 };
-                self.message.clear();
+                self.clear_message();
             }
             Ok(value) => {
                 self.detail = Some(
@@ -703,21 +762,20 @@ impl State {
                         .map(String::from)
                         .unwrap_or_else(|| serde_json::to_string_pretty(&value).unwrap()),
                 );
-                self.message.clear();
+                self.clear_message();
             }
             Err(error) if error.code == VM_NOT_READY => {
                 // Docker lists nothing until the VM is ready. Old rows would
                 // look live, so drop them and show how to start the VM.
                 self.data = Value::Null;
                 self.stale = true;
-                self.message = error.message;
+                self.fail(error);
             }
             Err(error) => {
+                // The rows stay visible and are marked stale where they are
+                // drawn; actions on them are refused until a read succeeds.
                 self.stale = true;
-                self.message = format!(
-                    "{}: {} (previous data may be stale)",
-                    error.code, error.message
-                )
+                self.fail(error);
             }
         }
     }
@@ -1077,11 +1135,21 @@ pub fn draw(frame: &mut Frame, state: &State) {
             } else {
                 state.request.operation()
             }),
-        if state.loading { "[loading]" } else { "" },
+        if state.loading {
+            "[loading]"
+        } else if state.showing_stale_rows() {
+            "[stale]"
+        } else {
+            ""
+        },
         state.refresh.label()
     );
     let operation_detail = format!(
-        "{}\n{}\n{}",
+        "{}{}\n{}\n{}",
+        state.last_error.as_ref().map_or(String::new(), |error| format!(
+            "Last error ({})\n{}\n\n",
+            error.code, error.message
+        )),
         state.operation_status,
         state.operation_log,
         serde_json::to_string_pretty(&state.uncertain).unwrap()
@@ -1118,7 +1186,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
     let message = if let Some((prefix, input)) = &state.input {
         format!("{prefix}{input}")
     } else {
-        state.message.clone()
+        state.message_line()
     };
     frame.render_widget(
         Paragraph::new(clean(&message))
@@ -2274,6 +2342,52 @@ mod tests {
         // No terminal input is a definition file.
         let refused = state.view("vm apply --file -").unwrap_err();
         assert_eq!(refused.code, "invalidRequest");
+    }
+    #[test]
+    fn a_failed_read_shows_its_summary_and_keeps_the_raw_failure_for_details() {
+        let screen = |state: &State| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 32)).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let raw = "kubectl exited exit status: 1: E1015 01:17:26.408480   67207 memcache.go:381] \"Couldn't get current server API group list\" err=\"dial tcp 127.0.0.1:63621: connect: connection refused\"\nThe connection to the server 127.0.0.1:63621 was refused - did you specify the right host or port?\n";
+        let mut state = State::new(Request::default());
+        state.workspace = Workspace::Kubernetes;
+        state.native = Some(crate::native::parse("get pods", &state).unwrap());
+        state.accept(Ok(serde_json::json!([{"metadata":{"name":"api", "namespace":"work", "uid":"1"}}])));
+        assert!(!screen(&state).contains("[stale]"));
+        state.accept(Err(Failure::new("cliError", raw)));
+        // The message is one sentence with the key that helps; the client
+        // log lines and the failure code stay off the list screen.
+        assert_eq!(
+            state.message,
+            "Cannot reach the Kubernetes API server at 127.0.0.1:63621: connection refused"
+        );
+        assert_eq!(state.message_level, Level::Error);
+        let text = screen(&state);
+        assert!(text.contains("Cannot reach the Kubernetes API server at 127.0.0.1:63621"), "{text}");
+        assert!(text.contains("e selects another context") && text.contains("(! details)"), "{text}");
+        assert!(!text.contains("cliError") && !text.contains("memcache.go"), "{text}");
+        // The rows of the last good read stay and say that they may be old.
+        assert!(text.contains("api") && text.contains("[stale]"), "{text}");
+        assert_eq!(state.action("delete").unwrap_err().code, "staleData");
+        // ! shows the failure as it was received.
+        state.show_operation = true;
+        let text = screen(&state);
+        assert!(text.contains("Last error (cliError)") && text.contains("memcache.go:381"), "{text}");
+        state.show_operation = false;
+        // Another message replaces the failure; a successful read clears both.
+        state.warn("Refresh before reading previous data");
+        assert!(state.last_error.is_none() && !state.message_line().contains("details"));
+        state.accept(Err(Failure::new("cliError", raw)));
+        state.accept(Ok(serde_json::json!([])));
+        assert!(state.message.is_empty() && state.last_error.is_none() && state.message_hint.is_none());
+        assert!(!screen(&state).contains("[stale]"));
     }
     #[test]
     fn failed_refresh_blocks_actions_and_view_switch_clears_old_rows() {
