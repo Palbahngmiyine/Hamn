@@ -158,10 +158,12 @@ pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure)
     if error.code != crate::native::DOCKER_UNREACHABLE || docker == "ready" {
         return error;
     }
-    if let Some((true, problem)) = guest_disk_problem(status) {
+    // The message area holds one line, and the header already shows the
+    // evidence: say what is wrong and the one action that helps.
+    if let Some((true, _)) = guest_disk_problem(status) {
         return Failure::new(
             VM_NOT_READY,
-            format!("Hamn VM {profile} cannot run Docker, and starting it cannot repair that. {problem}. v, then x deletes the disk and everything in the VM; the next start creates a new one."),
+            format!("The guest disk of Hamn VM {profile} is damaged. v, then x resets the disk."),
         );
     }
     let vm = status["state"].as_str().unwrap_or("unknown");
@@ -1724,7 +1726,9 @@ mod tests {
         // A Docker list that fails names the damage instead of `s`.
         let failure = hamn_query_failure("work", Some(&damaged), Failure::new(crate::native::DOCKER_UNREACHABLE, "docker exited 1: Cannot connect"));
         assert_eq!(failure.code, VM_NOT_READY);
-        assert_eq!(failure.message, format!("Hamn VM work cannot run Docker, and starting it cannot repair that. Guest disk damaged: {evidence}. v, then x deletes the disk and everything in the VM; the next start creates a new one."));
+        assert_eq!(failure.message, "The guest disk of Hamn VM work is damaged. v, then x resets the disk.");
+        // It fits the one-line message area of an 80-column terminal.
+        assert!(failure.message.chars().count() <= 78, "{}", failure.message);
         // Errors that a start could not fix anyway keep their message.
         let usage = hamn_query_failure("work", Some(&damaged), Failure::new("cliError", "docker exited 125: unknown flag"));
         assert_eq!(usage.message, "docker exited 125: unknown flag");
