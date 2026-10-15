@@ -12,6 +12,9 @@ use ratatui::{
 };
 use serde_json::Value;
 
+/// The prompt of `State::input` that takes the ports of `State::forward`.
+pub const PORT_FORWARD: char = 'F';
+
 // Tokenize shell-style quotes without performing expansions or executing a shell.
 // In double quotes, backslash is literal except before $ ` " \ and newline.
 pub fn split_command(command: &str) -> Result<Vec<String>> {
@@ -217,7 +220,13 @@ pub struct State {
     pub data: Value,
     pub selected: Option<usize>,
     pub filter: String,
+    /// The prompt line: `:` a command, `/` a filter, or [`PORT_FORWARD`]
+    /// the ports of `forward`.
     pub input: Option<(char, String)>,
+    /// The list and row whose port-forward waits for its ports. Set exactly
+    /// while `input` is the [`PORT_FORWARD`] prompt: the row is kept as it
+    /// was chosen, so a refresh meanwhile cannot change the target.
+    pub forward: Option<(crate::native::Invocation, Value)>,
     pub history: Vec<String>,
     pub history_index: Option<usize>,
     /// The one-line message under the view. Written only through `notify`,
@@ -273,6 +282,7 @@ impl State {
             selected: Some(0),
             filter: String::new(),
             input: None,
+            forward: None,
             history: Vec::new(),
             history_index: None,
             message: String::new(),
@@ -462,7 +472,36 @@ impl State {
         self.scroll = 0;
         self.detail = None;
         self.pending_native = None;
+        if self.forward.take().is_some() {
+            self.input = None;
+        }
         self.connection_status = "Connecting".into();
+    }
+    /// `F` on the selected row: the port prompt of its port-forward, which
+    /// starts with the first port the row declares.
+    pub fn open_port_forward(&mut self) -> Result<()> {
+        if self.stale || self.loading {
+            return Err(Failure::new(
+                "staleData",
+                "refresh before acting on previous data",
+            ));
+        }
+        let invocation = self
+            .native
+            .clone()
+            .ok_or_else(|| Failure::new("noSelection", "select a resource list"))?;
+        let row = self
+            .selected()
+            .ok_or_else(|| Failure::new("noSelection", "select a resource first"))?;
+        let ports = crate::native_actions::forward_ports(&invocation, &row)?;
+        self.forward = Some((invocation, row));
+        self.input = Some((PORT_FORWARD, ports));
+        Ok(())
+    }
+    /// Closes the prompt line, and with it a port-forward waiting for ports.
+    pub fn close_input(&mut self) {
+        self.input = None;
+        self.forward = None;
     }
     pub fn rows(&self) -> Vec<&Value> {
         let filter = self.filter.to_lowercase();
@@ -540,6 +579,20 @@ impl State {
         };
         self.history_index = (index < self.history.len()).then_some(index);
         self.input = Some((':', self.history.get(index).cloned().unwrap_or_default()));
+    }
+    /// What Tab or → appends to the `:` command being typed, shown dimmed
+    /// after the cursor; `None` for the filter. See `tui_completion`.
+    pub fn completion(&self) -> Option<String> {
+        match &self.input {
+            Some((':', typed)) => crate::tui_completion::suggestion(typed, self.workspace, &self.history),
+            _ => None,
+        }
+    }
+    /// Takes the completion as if it were typed; without one, nothing changes.
+    pub fn complete_input(&mut self) {
+        if let Some(rest) = self.completion() {
+            self.edit_input(&rest, false);
+        }
     }
     pub fn clear_filter(&mut self) {
         let key = self.selected().and_then(|row| identity(&row));
@@ -1514,14 +1567,36 @@ pub fn draw(frame: &mut Frame, state: &State) {
         frame.render_widget(Paragraph::new(header_hints), header[1]);
     }
     if let Some((prefix, input)) = &state.input {
-        let (name, keys) = if *prefix == ':' {
-            (" Command ", " Enter runs · ↑/↓ history · Esc cancels ")
-        } else {
-            (" Filter ", " Enter keeps · Esc closes ")
+        let (name, keys, lead) = match (*prefix, &state.forward) {
+            (':', _) => (
+                " Command ".to_string(),
+                " Enter runs · Tab completes · ↑/↓ history · Esc cancels ",
+                ":".to_string(),
+            ),
+            (PORT_FORWARD, Some((invocation, row))) => (
+                clean(&format!(
+                    " Port-forward {}/{} — LOCAL:REMOTE ",
+                    invocation.resource.as_deref().unwrap_or_default(),
+                    row["metadata"]["name"].as_str().unwrap_or_default()
+                )),
+                " Enter starts · Esc cancels ",
+                "ports ".to_string(),
+            ),
+            _ => (
+                " Filter ".to_string(),
+                " Enter keeps · Esc closes ",
+                prefix.to_string(),
+            ),
         };
-        let text = format!("{prefix}{}", clean(input));
+        let text = format!("{lead}{}", clean(input));
+        // The completion follows the cursor, dimmed, until Tab takes it.
+        let completion = state.completion().map(|rest| clean(&rest)).unwrap_or_default();
         frame.render_widget(
-            Paragraph::new(text.clone()).block(
+            Paragraph::new(Line::from(vec![
+                Span::raw(text.clone()),
+                Span::styled(completion, theme::dim()),
+            ]))
+            .block(
                 Block::bordered()
                     .border_style(theme::border(workspace))
                     .title(Line::styled(name, theme::key(workspace)))
@@ -3127,6 +3202,71 @@ mod tests {
         // A detail that arrives replaces the help.
         containers.accept(Ok(serde_json::json!({"yaml": "kind: Pod"})));
         assert!(!containers.help && containers.detail.as_deref() == Some("kind: Pod"));
+    }
+    #[test]
+    fn the_command_prompt_dims_its_completion_after_the_cursor_and_tab_takes_it() {
+        let render = |state: &State| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            (terminal.backend().buffer().clone(), cursor)
+        };
+        let row = |buffer: &ratatui::buffer::Buffer, y: u16| -> String {
+            (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
+        };
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        state.input = Some((':', "ima".into()));
+        let (buffer, cursor) = render(&state);
+        assert!(row(&buffer, cursor.y).contains(":images"), "{}", row(&buffer, cursor.y));
+        assert!(row(&buffer, cursor.y - 1).contains("Tab completes"), "{}", row(&buffer, cursor.y - 1));
+        // The typed text ends at the cursor; the completion starts there, dimmed.
+        let typed = &buffer[(cursor.x - 1, cursor.y)];
+        assert_eq!(typed.symbol(), "a");
+        assert_ne!(typed.fg, Color::DarkGray);
+        for (offset, symbol) in ["g", "e", "s"].into_iter().enumerate() {
+            let cell = &buffer[(cursor.x + offset as u16, cursor.y)];
+            assert_eq!((cell.symbol(), cell.fg), (symbol, Color::DarkGray), "{offset}");
+        }
+        assert_eq!(buffer[(cursor.x + 3, cursor.y)].symbol(), " ");
+        // Tab takes it as typed text: the cursor moves past it, and a complete
+        // command that nothing extends shows no completion.
+        state.complete_input();
+        assert_eq!(state.input, Some((':', "images".into())));
+        let (buffer, after) = render(&state);
+        assert_eq!((after.x, after.y), (cursor.x + 3, cursor.y));
+        assert_eq!(buffer[(after.x - 1, after.y)].symbol(), "s");
+        assert_eq!(buffer[(after.x, after.y)].symbol(), " ");
+        // Without a completion, Tab changes nothing; Up still recalls history.
+        state.complete_input();
+        assert_eq!(state.input, Some((':', "images".into())));
+        state.history = vec!["ps -a".into()];
+        state.recall_command(true);
+        assert_eq!(state.input, Some((':', "ps -a".into())));
+        // The filter prompt has no completion.
+        state.input = Some(('/', "p".into()));
+        assert_eq!(state.completion(), None);
+        state.complete_input();
+        assert_eq!(state.input, Some(('/', "p".into())));
+        let (buffer, cursor) = render(&state);
+        assert_eq!(buffer[(cursor.x - 1, cursor.y)].symbol(), "p");
+        assert_eq!(buffer[(cursor.x, cursor.y)].symbol(), " ");
+        // Wide characters: the cursor follows the display width of the typed
+        // text, and the completion from history starts at it.
+        let mut kubernetes = State::new(Request::default());
+        kubernetes.workspace = Workspace::Kubernetes;
+        kubernetes.native = Some(crate::native::parse("get pods", &kubernetes).unwrap());
+        kubernetes.history = vec!["get pods -l app=작업".into()];
+        kubernetes.input = Some((':', "get pods -l app=작".into()));
+        let (buffer, cursor) = render(&kubernetes);
+        // A wide character takes two cells; the second is left blank.
+        assert!(row(&buffer, cursor.y).contains(":get pods -l app=작"), "{}", row(&buffer, cursor.y));
+        assert_eq!(buffer[(cursor.x - 2, cursor.y)].symbol(), "작");
+        let cell = &buffer[(cursor.x, cursor.y)];
+        assert_eq!((cell.symbol(), cell.fg), ("업", Color::DarkGray));
+        kubernetes.complete_input();
+        assert_eq!(kubernetes.input, Some((':', "get pods -l app=작업".into())));
     }
     #[test]
     fn a_failed_read_shows_its_summary_and_keeps_the_raw_failure_for_details() {
