@@ -1,5 +1,6 @@
 #include "core/lifecycle.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -577,13 +578,19 @@ enum ctl_status_result {
     CTL_STATUS_UNCERTAIN,
 };
 
+/* The limit on each send and each receive of a status query, except in
+ * vm_running_pid(), whose caller gives its own. */
+#define CTL_STATUS_TIMEOUT_MS 300
+
 static enum ctl_status_result ctl_status_read(
-    const struct profile *p, struct ctl_status *status)
+    const struct profile *p, struct ctl_status *status, int timeout_ms)
 {
     char ctl[1024], resp[512];
     memset(status, 0, sizeof(*status));
     profile_path(p, "vmrun.sock", ctl, sizeof(ctl));
-    int query = ctlsock_query_status(ctl, resp, sizeof(resp), 300);
+    /* SO_RCVTIMEO and SO_SNDTIMEO of 0 would mean no limit. */
+    assert(timeout_ms >= 1);
+    int query = ctlsock_query_status(ctl, resp, sizeof(resp), timeout_ms);
     if (query == CTLSOCK_QUERY_UNAVAILABLE)
         return CTL_STATUS_UNAVAILABLE;
     if (query != CTLSOCK_QUERY_OK)
@@ -667,7 +674,8 @@ static enum vm_process_state ctl_identity_adopt(
     return VM_PROCESS_VERIFIED;
 }
 
-enum vm_process_state vm_process_probe(const struct profile *p, int *pid_out)
+static enum vm_process_state process_probe(const struct profile *p,
+                                           int *pid_out, int ctl_timeout_ms)
 {
     int pid = -1;
     if (pid_out)
@@ -679,7 +687,8 @@ enum vm_process_state vm_process_probe(const struct profile *p, int *pid_out)
         return VM_PROCESS_UNVERIFIED;
 
     struct ctl_status status;
-    enum ctl_status_result ctl_result = ctl_status_read(p, &status);
+    enum ctl_status_result ctl_result =
+        ctl_status_read(p, &status, ctl_timeout_ms);
     if (ctl_result == CTL_STATUS_VALID)
         return ctl_identity_adopt(p, &status, pid_out);
     if (ctl_result == CTL_STATUS_UNCERTAIN)
@@ -725,10 +734,16 @@ enum vm_process_state vm_process_probe(const struct profile *p, int *pid_out)
     return VM_PROCESS_STALE;
 }
 
-int vm_running_pid(const struct profile *p)
+enum vm_process_state vm_process_probe(const struct profile *p, int *pid_out)
+{
+    return process_probe(p, pid_out, CTL_STATUS_TIMEOUT_MS);
+}
+
+int vm_running_pid(const struct profile *p, int timeout_ms)
 {
     int pid = -1;
-    return vm_process_probe(p, &pid) == VM_PROCESS_VERIFIED ? pid : -1;
+    return process_probe(p, &pid, timeout_ms) == VM_PROCESS_VERIFIED ? pid
+                                                                      : -1;
 }
 
 static int wait_owned_pid_gone(const struct process_identity *identity,
@@ -755,7 +770,8 @@ static int verified_identity_is(const struct profile *p,
         !process_executable_identity_matches(identity))
         return 0;
     struct ctl_status status;
-    enum ctl_status_result result = ctl_status_read(p, &status);
+    enum ctl_status_result result =
+        ctl_status_read(p, &status, CTL_STATUS_TIMEOUT_MS);
     if (result == CTL_STATUS_VALID)
         return ctl_status_matches(&status, identity);
     if (result == CTL_STATUS_UNAVAILABLE)
