@@ -106,7 +106,7 @@ fn cluster_target(kubectl: &Path) {
         });
         assert!(harness.text().contains(flag), "{}", harness.text());
         assert_eq!(last().0, "alternate", "{:?}", requests.lock().unwrap());
-        harness.send(b"d", "Confirm delete");
+        harness.send(b"\x04", "Confirm delete"); // Ctrl+D
         assert!(harness.text().contains(flag), "{}", harness.text());
         harness.send(b"n", "[Kubernetes]"); // Review confirmation without changing resources.
         harness.until(&name);

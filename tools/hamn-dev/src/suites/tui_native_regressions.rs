@@ -51,7 +51,7 @@ fn changed_target_invalidates_previous_rows(workspace: &str, command: &str) {
     harness.noticed("query-blocked");
     // The FIFO keeps the new target unresolved. The input marker establishes
     // that the delete key was processed without opening an old-row prompt.
-    harness.write(b"d:REGRESSION_BARRIER");
+    harness.write(b"\x04:REGRESSION_BARRIER"); // Ctrl+D
     harness.wait(|harness| {
         let text = harness.text();
         text.contains("Confirm delete") || text.contains(":REGRESSION_BARRIER")

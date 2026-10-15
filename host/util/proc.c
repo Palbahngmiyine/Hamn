@@ -817,6 +817,16 @@ int proc_run_bounded(const char *const argv[], char *out, size_t cap,
     return run_supervised(argv, out, cap, NULL, completion, context, 0, timeout_ms);
 }
 
+int proc_run_bounded_checked(const char *const argv[], char *out, size_t cap,
+                             int *truncated, unsigned timeout_ms)
+{
+    if (!timeout_ms) {
+        errno = EINVAL;
+        return -1;
+    }
+    return run_supervised(argv, out, cap, truncated, NULL, NULL, 0, timeout_ms);
+}
+
 pid_t proc_spawn_daemon(const char *const argv[], const char *logfile)
 {
     if (proc_cancelled()) { errno = ECANCELED; return -1; }
