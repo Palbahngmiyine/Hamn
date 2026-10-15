@@ -349,6 +349,9 @@ static void run_case(const char *name, void (*body)(void),
 {
     int fd = open(fixture.log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     assert(fd >= 0 && close(fd) == 0);
+    /* Every case starts with a stale deployment: the reconcile cases write a
+     * current marker into the shared profile directory. */
+    assert(guest_deployment_forget(&fixture.profile) == 0);
     (void)unlink(fixture.docker_socket);
     assert(symlink(fixture.api, fixture.docker_socket) == 0);
     pid_t server = api_start(api);
