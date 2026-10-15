@@ -73,6 +73,11 @@ const DRIVER_CASES: &[(&str, Test)] = &[
     ("unconfirmed_tcp_records_are_asked_about_again", unconfirmed_tcp_records_are_asked_about_again),
     ("observer_asks_again_for_inherited_and_replaced_tcp_forwards", observer_asks_again_for_inherited_and_replaced_tcp_forwards),
     ("watch_names_an_unreadable_container_list_once", watch_names_an_unreadable_container_list_once),
+    (
+        "watch_names_a_connection_closed_without_a_reply_unreadable",
+        watch_names_a_connection_closed_without_a_reply_unreadable,
+    ),
+    ("watch_names_a_reply_over_the_limits_once", watch_names_a_reply_over_the_limits_once),
     ("every_host_address_maps_to_one_guest_listener", every_host_address_maps_to_one_guest_listener),
     ("listener_failures_leave_no_reservation", listener_failures_leave_no_reservation),
     ("failed_cancel_of_a_free_port_removes_the_tcp_record", failed_cancel_of_a_free_port_removes_the_tcp_record),
@@ -1149,18 +1154,40 @@ fn observer_asks_again_for_inherited_and_replaced_tcp_forwards(driver: &Driver) 
     assert_eq!(observe(&nothing, "3", "2"), 2, "a replaced master was asked on a later pass too");
 }
 
+/// What the watch loop logs, once, while it has no usable container list.
+const UNREADABLE_LIST: &str = "cannot read a usable container list from the Docker socket; published ports stay as they are until it answers";
+/// What the watch loop logs, once, while the list exceeds its limits.
+const LIST_OVER_LIMITS: &str = "the container list exceeds the port observer's limits (2048 containers, 512 KiB, 128 published ports); published ports are not synchronized";
+
+/// Runs the three-pass watch driver command `command` and asserts that the
+/// loop logged exactly `line`.
+fn assert_watch_logs_once(driver: &Driver, command: &str, line: &str) {
+    let profile = Profile::new(driver);
+    let output = profile.ok(&[command]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr.lines().collect();
+    assert_eq!(lines, [line], "{stderr}");
+}
+
 fn watch_names_an_unreadable_container_list_once(driver: &Driver) {
     // The watch loop retries twice a second. Three passes without a Docker
     // socket name the cause once.
-    let profile = Profile::new(driver);
-    let output = profile.ok(&["watch-unavailable"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let lines: Vec<&str> = stderr.lines().collect();
-    assert_eq!(
-        lines,
-        ["cannot read a usable container list from the Docker socket; published ports stay as they are until it answers"],
-        "{stderr}"
-    );
+    assert_watch_logs_once(driver, "watch-unavailable", UNREADABLE_LIST);
+}
+
+fn watch_names_a_connection_closed_without_a_reply_unreadable(driver: &Driver) {
+    // An SSH-forwarded Docker socket accepts a connection and closes it
+    // without a reply when the forward behind it fails. That is no usable
+    // list, not one over the limits. The fixture Engine reads the request of
+    // each of three passes and closes the connection; the driver fails
+    // unless every pass connected.
+    assert_watch_logs_once(driver, "watch-empty-reply", UNREADABLE_LIST);
+}
+
+fn watch_names_a_reply_over_the_limits_once(driver: &Driver) {
+    // A reply that does not fit the observer's limits is named as such. The
+    // fixture Engine answers each of three passes with a 1 MiB body.
+    assert_watch_logs_once(driver, "watch-oversized-reply", LIST_OVER_LIMITS);
 }
 
 fn every_host_address_maps_to_one_guest_listener(driver: &Driver) {
