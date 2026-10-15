@@ -1,14 +1,17 @@
 #include "vmrun/ctlsock.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <dispatch/dispatch.h>
@@ -318,20 +321,62 @@ enum status_attempt {
     ATTEMPT_UNANSWERED,
 };
 
+/* The deadline of a query whose sends and receives each wait timeout_ms. */
+#define NO_DEADLINE LLONG_MAX
+
+static long long monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* How long the next send or receive of a query may wait: timeout_ms, or what
+ * is left until deadline_ms on the monotonic clock if that is less; 0 once
+ * the deadline has passed or the clock cannot be read. */
+static int wait_limit_ms(int timeout_ms, long long deadline_ms)
+{
+    if (deadline_ms == NO_DEADLINE)
+        return timeout_ms;
+    long long now = monotonic_ms();
+    if (now < 0 || now >= deadline_ms)
+        return 0;
+    long long left = deadline_ms - now;
+    return left < timeout_ms ? (int)left : timeout_ms;
+}
+
+/* Sets SO_SNDTIMEO or SO_RCVTIMEO of fd to ms, at least 1: 0 would mean no
+ * limit. */
+static int set_wait_limit(int fd, int option, int ms)
+{
+    struct timeval tv = { .tv_sec = ms / 1000,
+                          .tv_usec = (ms % 1000) * 1000 };
+    return setsockopt(fd, SOL_SOCKET, option, &tv, sizeof(tv));
+}
+
 static enum status_attempt status_attempt(const char *path, char *resp,
-                                          size_t cap, int timeout_ms)
+                                          size_t cap, int timeout_ms,
+                                          long long deadline_ms)
 {
     static const char request[] = "{\"cmd\":\"status\"}\n";
     const ssize_t len = (ssize_t)sizeof(request) - 1;
 
+    /* No connection is opened once the query's time is spent. */
+    int ms = wait_limit_ms(timeout_ms, deadline_ms);
+    if (ms < 1)
+        return ATTEMPT_UNCERTAIN;
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0)
         return ATTEMPT_UNCERTAIN;
 
-    struct timeval tv = { .tv_sec = timeout_ms / 1000,
-                          .tv_usec = (timeout_ms % 1000) * 1000 };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    /* Both limits are set before connecting: once the server has closed
+     * the connection, setsockopt fails with EINVAL. */
+    if (set_wait_limit(fd, SO_RCVTIMEO, ms) != 0 ||
+        set_wait_limit(fd, SO_SNDTIMEO, ms) != 0) {
+        close(fd);
+        return ATTEMPT_UNCERTAIN;
+    }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
 
@@ -366,6 +411,18 @@ static enum status_attempt status_attempt(const char *path, char *resp,
         return sent < 0 && saved == EPIPE ? ATTEMPT_UNANSWERED
                                           : ATTEMPT_UNCERTAIN;
     }
+    if (deadline_ms != NO_DEADLINE) {
+        /* The receive gets only what the send left of the query. setsockopt
+         * fails once the server has closed the connection, possibly after
+         * its reply, and the read then returns at once; otherwise the limit
+         * set before connecting still bounds it. */
+        ms = wait_limit_ms(timeout_ms, deadline_ms);
+        if (ms < 1) {
+            close(fd);
+            return ATTEMPT_UNCERTAIN;
+        }
+        (void)set_wait_limit(fd, SO_RCVTIMEO, ms);
+    }
     ssize_t n = read(fd, resp, cap - 1);
     close(fd);
     if (n == 0)
@@ -376,11 +433,11 @@ static enum status_attempt status_attempt(const char *path, char *resp,
     return ATTEMPT_REPLIED;
 }
 
-int ctlsock_query_status(const char *path, char *resp, size_t cap,
-                         int timeout_ms)
+static int query_status(const char *path, char *resp, size_t cap,
+                        int timeout_ms, long long deadline_ms)
 {
     for (int attempt = 0; attempt < CTLSOCK_STATUS_ATTEMPTS; attempt++) {
-        switch (status_attempt(path, resp, cap, timeout_ms)) {
+        switch (status_attempt(path, resp, cap, timeout_ms, deadline_ms)) {
         case ATTEMPT_REPLIED:
             return CTLSOCK_QUERY_OK;
         case ATTEMPT_UNAVAILABLE:
@@ -392,4 +449,22 @@ int ctlsock_query_status(const char *path, char *resp, size_t cap,
         }
     }
     return CTLSOCK_QUERY_UNCERTAIN;
+}
+
+int ctlsock_query_status(const char *path, char *resp, size_t cap,
+                         int timeout_ms)
+{
+    /* SO_SNDTIMEO and SO_RCVTIMEO of 0 would mean no limit. */
+    assert(timeout_ms >= 1);
+    return query_status(path, resp, cap, timeout_ms, NO_DEADLINE);
+}
+
+int ctlsock_query_status_within(const char *path, char *resp, size_t cap,
+                                int budget_ms)
+{
+    assert(budget_ms >= 1);
+    long long now = monotonic_ms();
+    if (now < 0)
+        return CTLSOCK_QUERY_UNCERTAIN;
+    return query_status(path, resp, cap, budget_ms, now + budget_ms);
 }

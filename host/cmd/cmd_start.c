@@ -167,8 +167,7 @@ static long long monotonic_milliseconds(void)
 
 /* What is left of the wait until deadline for one status query, at most
  * 300 ms: at least 1, 0 once the deadline has passed, or -1 if the clock
- * fails. A query never gets 0, as SO_RCVTIMEO and SO_SNDTIMEO of 0 mean no
- * limit. */
+ * fails. */
 static int vmrun_query_ms(long long deadline)
 {
     long long now = monotonic_milliseconds();
@@ -182,11 +181,14 @@ static int vmrun_query_ms(long long deadline)
 
 /* Polls vmrun's control socket every half second until timeout_sec (at
  * least 1) has passed on the monotonic clock. Each status query, and the one
- * that verifies vmrun's process once it reports running, gets what is left
- * of the wait, at most 300 ms, for each send and receive, so a vmrun that
- * accepts and never answers, also right after it reported running, ends the
- * wait at its deadline; one that closes the query's connections unanswered
- * can make that last query retry past it (ctlsock.h). 0 once vmrun reports
+ * that verifies vmrun's process once it reports running, ends within what
+ * is left of the wait, at most 300 ms, including any connection it opens
+ * again after an unanswered close (ctlsock_query_status_within()). So a
+ * vmrun that never answers, stops answering right after it reported
+ * running, or closes the connections unanswered ends the wait at its
+ * deadline. After the reply, verifying the process also reads process
+ * information and the profile's identity files; the deadline does not bound
+ * those. 0 once vmrun reports
  * running and its process is verified; -1 with errno ETIMEDOUT when the time
  * is up, ECANCELED at the next poll after the operation is cancelled outside
  * cleanup, or EINVAL for a timeout_sec below 1. */
@@ -214,7 +216,8 @@ static int wait_vmrun_running(const struct profile *p, const char *ctl,
             errno = ETIMEDOUT;
             return -1;
         }
-        if (ctlsock_query_status(ctl, resp, sizeof(resp), query_ms) == 0 &&
+        if (ctlsock_query_status_within(ctl, resp, sizeof(resp),
+                                        query_ms) == 0 &&
             strstr(resp, "\"running\"")) {
             query_ms = vmrun_query_ms(deadline);
             if (query_ms < 0)
