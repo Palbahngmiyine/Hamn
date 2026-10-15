@@ -80,7 +80,16 @@ const DRAIN_AFTER_KILL: Duration = Duration::from_secs(1);
 /// open) must arrive in time. A child still running then is killed and
 /// reaped first. Either failure reports the last `REPORTED_TAIL` bytes of
 /// each stream read by then.
-pub fn communicate(mut child: Child, timeout: Duration) -> Output {
+pub fn communicate(child: Child, timeout: Duration) -> Output {
+    communicate_killing(child, timeout, |child| {
+        let _ = child.kill();
+    })
+}
+
+/// `communicate`, ending a child still running at `timeout` with `kill`
+/// (for example SIGKILL to its whole process group) before it is reaped.
+/// `kill` must make the child exit: the reap waits for it.
+pub fn communicate_killing(mut child: Child, timeout: Duration, kill: impl FnOnce(&mut Child)) -> Output {
     let deadline = Instant::now() + timeout;
     // Each reader appends as data arrives, so a failure can report output
     // from a child that never finished; the index sent marks a stream's end.
@@ -105,8 +114,9 @@ pub fn communicate(mut child: Child, timeout: Duration) -> Output {
         }
         if Instant::now() >= deadline {
             let id = child.id();
-            // The child is unreaped, so its pid still names it.
-            let _ = child.kill();
+            // The child is unreaped, so its pid (and the group it leads)
+            // still names it.
+            kill(&mut child);
             let _ = child.wait();
             let ended = await_ends(&receiver, Instant::now() + DRAIN_AFTER_KILL);
             panic!("process {id} timed out after {timeout:?}; it was killed and reaped\n{}", report(&captured, ended));
@@ -291,7 +301,7 @@ pub fn recorded_argv(path: &Path) -> Vec<Vec<String>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::support::tmp::TempDir;
 
@@ -309,7 +319,7 @@ mod tests {
     }
 
     /// The message of the panic `f` must raise.
-    fn panic_message(f: impl FnOnce()) -> String {
+    pub(crate) fn panic_message(f: impl FnOnce()) -> String {
         let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("expected a panic");
         match payload.downcast::<String>() {
             Ok(message) => *message,
