@@ -70,6 +70,31 @@ int ssh_exec_capture_bounded(const struct profile *p, const char *ip,
 int ssh_exec_capture_checked(const struct profile *p, const char *ip,
                              const char *const remote_argv[], char *out,
                              size_t cap, int *truncated);
+/* ssh_exec_capture_bounded that also sets *truncated (when not NULL) to 1
+ * when out was too small. A timeout keeps what was captured until then. */
+int ssh_exec_capture_bounded_checked(const struct profile *p, const char *ip,
+                                     const char *const remote_argv[],
+                                     char *out, size_t cap, int *truncated,
+                                     unsigned timeout_ms);
+
+/*
+ * A guest command that the guest itself bounds runs under
+ * `timeout SSH_REMOTE_KILL_AFTER <limit>`, which ends it within
+ * limit + SSH_REMOTE_KILL_AFTER_SEC seconds of its start. Its client waits
+ * SSH_REMOTE_MARGIN_SEC more for the dispatch through the master and the exit
+ * status to come back, and is reaped at SSH_REMOTE_CLIENT_MS(limit). A client
+ * reaped there leaves the command's outcome unknown: the guest may not have
+ * answered, or the connection hung. limit_sec is at most a few hours. Tests
+ * build with a smaller margin.
+ */
+#define SSH_REMOTE_KILL_AFTER "--kill-after=5s"
+#define SSH_REMOTE_KILL_AFTER_SEC 5U
+#ifndef SSH_REMOTE_MARGIN_SEC
+#define SSH_REMOTE_MARGIN_SEC 10U
+#endif
+#define SSH_REMOTE_CLIENT_MS(limit_sec) \
+    (((unsigned)(limit_sec) + SSH_REMOTE_KILL_AFTER_SEC + \
+      SSH_REMOTE_MARGIN_SEC) * 1000U)
 
 /* ssh_forward.c — control master에 unix socket 포워드 추가/해제 */
 int ssh_forward_add_unix(const struct profile *p, const char *ip,
