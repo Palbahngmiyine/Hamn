@@ -186,6 +186,7 @@ const FIXTURES: &[(&str, Fixture)] = &[
     ("exec-auth", exec_auth::fixture),
     ("native-regressions", tui_native_regressions::fixture),
     (ssh_deadline::UNRESPONSIVE_SSH, ssh_deadline::unresponsive_ssh),
+    (ssh_deadline::SLOW_START_SSH, ssh_deadline::slow_start_ssh),
     ("tui-review-improvements", tui_review_improvements::peer),
     ("tui-review-improvements-compose", tui_review_improvements::compose_peer),
     ("tui-session-management-forward", tui_session_management::forward_peer),
