@@ -52,16 +52,26 @@ int ctlsock_unlink_owned(const char *path, dev_t dev, ino_t ino);
  * OK=resp 채움, UNAVAILABLE=연결 전 실패,
  * UNCERTAIN=연결된 제어 소켓의 IO 실패.
  *
- * resp receives at most cap - 1 bytes and a terminating NUL. timeout_ms
- * bounds each send and each receive. A supervisor of Hamn 0.2.1 or earlier
- * closes a connection it accepts before the request has arrived. A status
- * request changes nothing in the supervisor, so when the server closes a
- * connection without replying the request is sent again on a new one, on at
- * most CTLSOCK_STATUS_ATTEMPTS connections in all; UNCERTAIN if none is
- * answered. A timeout or any other failure is reported at once.
+ * resp receives at most cap - 1 bytes and a terminating NUL. timeout_ms (at
+ * least 1) bounds each send and each receive. A supervisor of Hamn 0.2.1 or
+ * earlier closes a connection it accepts before the request has arrived. A
+ * status request changes nothing in the supervisor, so when the server
+ * closes a connection without replying the request is sent again on a new
+ * one, on at most CTLSOCK_STATUS_ATTEMPTS connections in all; UNCERTAIN if
+ * none is answered. A timeout or any other failure is reported at once.
  */
 int ctlsock_query_status(const char *path, char *resp, size_t cap,
                          int timeout_ms);
+
+/*
+ * ctlsock_query_status(), except that the whole query, every connection it
+ * opens included, ends within budget_ms (at least 1) of the call: a send
+ * waits at most what was left of budget_ms when its connection was opened,
+ * a receive at most what the send left, and no connection is opened once
+ * budget_ms is spent. UNCERTAIN if it is spent before a reply.
+ */
+int ctlsock_query_status_within(const char *path, char *resp, size_t cap,
+                                int budget_ms);
 
 #ifdef HAMN_TEST
 void ctlsock_test_fail_nonblocking_once(int error);
