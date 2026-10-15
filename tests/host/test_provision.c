@@ -13,6 +13,7 @@ static int calls;
 static char last_command[PROFILE_HOOK_COMMAND_CAP];
 static char last_user[32];
 static char last_timeout[16];
+static unsigned last_client_ms;
 
 const char *profile_path(const struct profile *profile, const char *file,
                          char *output, size_t capacity)
@@ -21,13 +22,13 @@ const char *profile_path(const struct profile *profile, const char *file,
     return length >= 0 && (size_t)length < capacity ? output : NULL;
 }
 
-int ssh_exec(const struct profile *profile, const char *ip,
-             const char *const remote_argv[], int quiet)
+int ssh_exec_bounded(const struct profile *profile, const char *ip,
+                     const char *const remote_argv[], unsigned timeout_ms)
 {
     (void)profile;
     (void)ip;
-    (void)quiet;
     calls++;
+    last_client_ms = timeout_ms;
     if (strcmp(remote_argv[0], "sudo") != 0)
         return -1;
     snprintf(last_user, sizeof(last_user), "%s",
@@ -75,7 +76,7 @@ int main(void)
     memset(&profile, 0, sizeof(profile));
     snprintf(profile.name, sizeof(profile.name), "default");
     snprintf(profile.dir, sizeof(profile.dir), "%s", root);
-    profile.hook_count = 3;
+    profile.hook_count = 5;
     snprintf(profile.hooks[0].stage, sizeof(profile.hooks[0].stage), "system");
     snprintf(profile.hooks[0].command, sizeof(profile.hooks[0].command),
              "echo token=super-secret");
@@ -90,17 +91,36 @@ int main(void)
     snprintf(profile.hooks[2].command, sizeof(profile.hooks[2].command),
              "fail");
     profile.hooks[2].timeout_seconds = 1;
+    /* The largest limit a profile accepts, then one outside the contract:
+     * `timeout 0s` would not bound the hook in the guest at all. */
+    snprintf(profile.hooks[3].stage, sizeof(profile.hooks[3].stage), "ready");
+    snprintf(profile.hooks[3].command, sizeof(profile.hooks[3].command),
+             "slow");
+    profile.hooks[3].timeout_seconds = 3600;
+    snprintf(profile.hooks[4].stage, sizeof(profile.hooks[4].stage), "ready");
+    snprintf(profile.hooks[4].command, sizeof(profile.hooks[4].command),
+             "unbounded");
+    profile.hooks[4].timeout_seconds = 0;
 
+    /* The guest ends a hook within its limit and 5 s after TERM; its client
+     * is reaped 10 s after that. */
     assert(provision_run_stage(&profile, "192.0.2.2", "system") == 0);
     assert(calls == 1 && strcmp(last_user, "root") == 0);
     assert(strcmp(last_command, "echo token=super-secret") == 0);
     assert(strcmp(last_timeout, "17s") == 0);
+    assert(last_client_ms == (17 + 5 + 10) * 1000);
     assert(provision_run_stage(&profile, "192.0.2.2", "user") == 0);
     assert(calls == 2 && strcmp(last_user, "hamn") == 0);
     assert(strcmp(last_timeout, "3s") == 0);
+    assert(last_client_ms == (3 + 5 + 10) * 1000);
     assert(provision_run_stage(&profile, "192.0.2.2", "after-boot") == -1);
     assert(calls == 3);
     assert(strcmp(last_timeout, "1s") == 0);
+    assert(last_client_ms == (1 + 5 + 10) * 1000);
+    assert(provision_run_stage(&profile, "192.0.2.2", "ready") == -1);
+    assert(calls == 4 && strcmp(last_command, "slow") == 0);
+    assert(strcmp(last_timeout, "3600s") == 0);
+    assert(last_client_ms == (3600 + 5 + 10) * 1000);
 
     char path[1024], text[1024];
     snprintf(path, sizeof(path), "%s/logs/provision-system-0.log", root);
@@ -111,6 +131,14 @@ int main(void)
     read_text(path, text, sizeof(text));
     assert(strstr(text, "mode=warn") && strstr(text, "result=failure") &&
            strstr(text, "exitCode=7"));
+    snprintf(path, sizeof(path), "%s/logs/provision-ready-3.log", root);
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "result=success"));
+    assert(unlink(path) == 0);
+    snprintf(path, sizeof(path), "%s/logs/provision-ready-4.log", root);
+    read_text(path, text, sizeof(text));
+    assert(strstr(text, "result=failure") && strstr(text, "exitCode=-1"));
+    assert(unlink(path) == 0);
     snprintf(path, sizeof(path), "%s/logs/provision-after-boot-2.log", root);
     read_text(path, text, sizeof(text));
     assert(strstr(text, "mode=fail") && strstr(text, "result=failure"));
@@ -122,6 +150,7 @@ int main(void)
     assert(unlink(path) == 0);
     snprintf(path, sizeof(path), "%s/logs", root);
     assert(rmdir(path) == 0 && rmdir(root) == 0);
-    puts("PASS: provision hooks time out remotely and redact logs");
+    puts("PASS: provision hooks time out remotely, their clients are bounded "
+         "by that limit, and logs are redacted");
     return 0;
 }
