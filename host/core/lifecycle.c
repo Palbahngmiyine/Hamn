@@ -13,6 +13,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "cjson/cJSON.h"
@@ -578,21 +579,39 @@ enum ctl_status_result {
     CTL_STATUS_UNCERTAIN,
 };
 
-/* A status query without a budget for the whole query, as every caller but
- * vm_running_pid() makes: each send and each receive of each connection it
- * opens waits CTL_STATUS_TIMEOUT_MS. */
-#define CTL_STATUS_NO_BUDGET 0
+/* A status query without a deadline, as every caller but vm_running_pid()
+ * makes: each send and each receive of each connection it opens waits
+ * CTL_STATUS_TIMEOUT_MS. */
+#define CTL_STATUS_NO_DEADLINE (-1LL)
 #define CTL_STATUS_TIMEOUT_MS 300
 
+static long long monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* deadline_ms is CTL_STATUS_NO_DEADLINE or a time on monotonic_ms()'s clock
+ * by which the query ends; UNCERTAIN without a query once it has passed. */
 static enum ctl_status_result ctl_status_read(
-    const struct profile *p, struct ctl_status *status, int budget_ms)
+    const struct profile *p, struct ctl_status *status, long long deadline_ms)
 {
     char ctl[1024], resp[512];
     memset(status, 0, sizeof(*status));
     profile_path(p, "vmrun.sock", ctl, sizeof(ctl));
-    int query = budget_ms == CTL_STATUS_NO_BUDGET ?
-        ctlsock_query_status(ctl, resp, sizeof(resp), CTL_STATUS_TIMEOUT_MS) :
-        ctlsock_query_status_within(ctl, resp, sizeof(resp), budget_ms);
+    int query;
+    if (deadline_ms == CTL_STATUS_NO_DEADLINE) {
+        query = ctlsock_query_status(ctl, resp, sizeof(resp),
+                                     CTL_STATUS_TIMEOUT_MS);
+    } else {
+        long long now = monotonic_ms();
+        if (now < 0 || now >= deadline_ms)
+            return CTL_STATUS_UNCERTAIN;
+        query = ctlsock_query_status_within(ctl, resp, sizeof(resp),
+                                            (int)(deadline_ms - now));
+    }
     if (query == CTLSOCK_QUERY_UNAVAILABLE)
         return CTL_STATUS_UNAVAILABLE;
     if (query != CTLSOCK_QUERY_OK)
@@ -677,7 +696,8 @@ static enum vm_process_state ctl_identity_adopt(
 }
 
 static enum vm_process_state process_probe(const struct profile *p,
-                                           int *pid_out, int ctl_budget_ms)
+                                           int *pid_out,
+                                           long long ctl_deadline_ms)
 {
     int pid = -1;
     if (pid_out)
@@ -690,7 +710,7 @@ static enum vm_process_state process_probe(const struct profile *p,
 
     struct ctl_status status;
     enum ctl_status_result ctl_result =
-        ctl_status_read(p, &status, ctl_budget_ms);
+        ctl_status_read(p, &status, ctl_deadline_ms);
     if (ctl_result == CTL_STATUS_VALID)
         return ctl_identity_adopt(p, &status, pid_out);
     if (ctl_result == CTL_STATUS_UNCERTAIN)
@@ -738,16 +758,19 @@ static enum vm_process_state process_probe(const struct profile *p,
 
 enum vm_process_state vm_process_probe(const struct profile *p, int *pid_out)
 {
-    return process_probe(p, pid_out, CTL_STATUS_NO_BUDGET);
+    return process_probe(p, pid_out, CTL_STATUS_NO_DEADLINE);
 }
 
 int vm_running_pid(const struct profile *p, int budget_ms)
 {
-    /* 0 would be CTL_STATUS_NO_BUDGET. */
     assert(budget_ms >= 1);
+    /* From the call, so the spawn-guard check before the query counts. */
+    long long now = monotonic_ms();
+    if (now < 0)
+        return -1;
     int pid = -1;
-    return process_probe(p, &pid, budget_ms) == VM_PROCESS_VERIFIED ? pid
-                                                                     : -1;
+    return process_probe(p, &pid, now + budget_ms) == VM_PROCESS_VERIFIED ?
+           pid : -1;
 }
 
 static int wait_owned_pid_gone(const struct process_identity *identity,
@@ -775,7 +798,7 @@ static int verified_identity_is(const struct profile *p,
         return 0;
     struct ctl_status status;
     enum ctl_status_result result =
-        ctl_status_read(p, &status, CTL_STATUS_NO_BUDGET);
+        ctl_status_read(p, &status, CTL_STATUS_NO_DEADLINE);
     if (result == CTL_STATUS_VALID)
         return ctl_status_matches(&status, identity);
     if (result == CTL_STATUS_UNAVAILABLE)
