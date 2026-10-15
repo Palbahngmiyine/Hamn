@@ -12,8 +12,9 @@
 //! `NAME` pauses a transaction at one named point:
 //! `HAMN_TEST_UPDATE_<NAME>_READY_FIFO` receives `ready\n` and then a line
 //! is awaited from `HAMN_TEST_UPDATE_<NAME>_RELEASE_FIFO`; either may be
-//! omitted. `HAMN_TEST_UPDATE_FAULTS` names comma-separated steps that then
-//! fail as if their filesystem operation had failed: `host-install`,
+//! omitted. Only a complete line releases the barrier, and a recorded signal
+//! ends the wait. `HAMN_TEST_UPDATE_FAULTS` names comma-separated steps that
+//! then fail as if their filesystem operation had failed: `host-install`,
 //! `receipt-write`, `rollback-link`, `retire-journal`, and every barrier
 //! `NAME` (a listed barrier fails instead of pausing). A seam can only pause
 //! or fail a step; it never skips a check, a journal write or a rollback.
@@ -21,7 +22,7 @@ use super::Result;
 use std::{
     ffi::CString,
     os::{
-        fd::{FromRawFd, OwnedFd},
+        fd::{AsRawFd, FromRawFd, OwnedFd},
         unix::ffi::OsStrExt,
     },
     path::Path,
@@ -157,35 +158,181 @@ pub(super) fn barrier(name: &str) -> Result<()> {
         let mut file = std::fs::File::from(fd);
         std::io::Write::write_all(&mut file, b"ready\n")?;
     }
-    let Some(release) = release else {
-        return Ok(());
-    };
-    let fd = open(&release, libc::O_RDONLY)?;
+    match release {
+        Some(release) => await_release(&release, pending),
+        None => Ok(()),
+    }
+}
+
+/// How long one wait for a release line lasts before `await_release`
+/// checks for a recorded signal again. A signal handled while the wait is
+/// in poll ends it at once (EINTR); one handled just before (for example
+/// right after the ready line, which is when a test sends it) interrupts
+/// nothing, so this bounds how long it goes unnoticed.
+const RELEASE_POLL_MILLISECONDS: libc::c_int = 50;
+
+/// Waits for a line on the release FIFO `path`; `Interrupted` once
+/// `pending` reports a recorded signal. The FIFO is opened without waiting
+/// for a writer, and every wait is one bounded poll, so no blocking call can
+/// outlast a signal that arrived before it started. Only a complete line
+/// releases: on macOS a read end reports neither a writer that has not
+/// opened the FIFO yet nor one that closed it (poll shows no hangup, read
+/// returns 0 for both), so neither ends the wait.
+fn await_release(path: &Path, pending: impl Fn() -> Option<i32>) -> Result<()> {
+    let fd = open(path, libc::O_RDONLY | libc::O_NONBLOCK)?;
     let mut byte = [0u8; 1];
     loop {
-        // One byte at a time up to the newline; the buffer is owned here.
-        let count = unsafe {
-            libc::read(
-                std::os::fd::AsRawFd::as_raw_fd(&fd),
-                byte.as_mut_ptr().cast(),
-                1,
-            )
+        if let Some(signal) = pending() {
+            return Err(Interrupted(signal).into());
+        }
+        let mut poll = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
         };
-        match count {
-            1 if byte[0] == b'\n' => return Ok(()),
-            1 => continue,
-            0 => {
-                return Err(
-                    format!("test barrier {name} was closed without a release line").into(),
-                );
-            }
-            _ => {
+        // One pollfd that lives across the call.
+        match unsafe { libc::poll(&mut poll, 1, RELEASE_POLL_MILLISECONDS) } {
+            0 => continue,
+            ready if ready < 0 => {
                 let error = std::io::Error::last_os_error();
                 if error.kind() != std::io::ErrorKind::Interrupted {
                     return Err(error.into());
                 }
-                check()?;
+                continue;
+            }
+            _ => {}
+        }
+        // What has arrived, one byte at a time up to the newline; the
+        // buffer is owned here and read never blocks.
+        loop {
+            match unsafe { libc::read(fd.as_raw_fd(), byte.as_mut_ptr().cast(), 1) } {
+                1 if byte[0] == b'\n' => return Ok(()),
+                1 => continue,
+                0 => break,
+                _ => {
+                    let error = std::io::Error::last_os_error();
+                    match error.kind() {
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted => break,
+                        _ => return Err(error.into()),
+                    }
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::install_support::test_support::Temp;
+    use std::{
+        io::Write,
+        os::unix::fs::OpenOptionsExt,
+        path::PathBuf,
+        sync::{Arc, mpsc},
+        time::{Duration, Instant},
+    };
+
+    /// Far above one poll slice, so only a wait that ignores `pending`
+    /// (or never returns) exceeds it, even on a loaded machine.
+    const BOUND: Duration = Duration::from_secs(10);
+
+    fn release_fifo(temp: &Temp) -> PathBuf {
+        let path = temp.0.join("release");
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        // mkfifo reads the NUL-terminated path only.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        path
+    }
+
+    /// A writer for `path`, once the wait has opened its read end (a
+    /// non-blocking open for writing fails with ENXIO until then).
+    fn writer(path: &Path) -> std::fs::File {
+        let deadline = Instant::now() + BOUND;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(path)
+            {
+                Ok(file) => return file,
+                Err(error) if error.raw_os_error() == Some(libc::ENXIO) => {
+                    assert!(Instant::now() < deadline, "the wait never opened {path:?}");
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("{path:?}: {error}"),
+            }
+        }
+    }
+
+    /// `await_release(path, pending)` on a thread while `act` runs:
+    /// `Ok(None)` when released, `Ok(Some(signal))` when interrupted. A wait
+    /// still running after `BOUND` fails the test, after a release line
+    /// ends it.
+    fn bounded_wait(
+        path: &Path,
+        pending: impl Fn() -> Option<i32> + Send + 'static,
+        act: impl FnOnce(),
+    ) -> std::result::Result<Option<i32>, String> {
+        let (sender, receiver) = mpsc::channel();
+        let waited = path.to_path_buf();
+        let thread = std::thread::spawn(move || {
+            let result = match await_release(&waited, pending) {
+                Ok(()) => Ok(None),
+                Err(error) => match error.downcast_ref::<Interrupted>() {
+                    Some(stopped) => Ok(Some(stopped.0)),
+                    None => Err(error.to_string()),
+                },
+            };
+            let _ = sender.send(result);
+        });
+        act();
+        let result = receiver.recv_timeout(BOUND);
+        if result.is_err() {
+            writer(path).write_all(b"\n").unwrap();
+        }
+        thread.join().unwrap();
+        result.expect("the wait outlasted its bound")
+    }
+
+    #[test]
+    fn a_signal_recorded_before_the_wait_ends_it() {
+        // A signal handled right after the ready line, before the wait
+        // blocks, interrupts no system call: only `pending` can show it.
+        let temp = Temp::new();
+        let path = release_fifo(&temp);
+        let result = bounded_wait(&path, || Some(libc::SIGTERM), || {});
+        assert_eq!(result, Ok(Some(libc::SIGTERM)));
+    }
+
+    #[test]
+    fn a_signal_recorded_during_the_wait_ends_it() {
+        let temp = Temp::new();
+        let path = release_fifo(&temp);
+        let recorded = Arc::new(AtomicI32::new(0));
+        let seen = Arc::clone(&recorded);
+        let pending = move || Some(seen.load(Ordering::SeqCst)).filter(|signal| *signal != 0);
+        let result = bounded_wait(&path, pending, || {
+            // A writer that leaves without a complete line releases nothing.
+            writer(&path).write_all(b"partial").unwrap();
+            std::thread::sleep(Duration::from_millis(3 * RELEASE_POLL_MILLISECONDS as u64));
+            recorded.store(libc::SIGHUP, Ordering::SeqCst);
+        });
+        assert_eq!(result, Ok(Some(libc::SIGHUP)));
+    }
+
+    #[test]
+    fn a_release_line_ends_the_wait() {
+        let temp = Temp::new();
+        let path = release_fifo(&temp);
+        // The writer leaves before the wait reads: the line stays readable.
+        let result = bounded_wait(
+            &path,
+            || None,
+            || {
+                writer(&path).write_all(b"continue\n").unwrap();
+            },
+        );
+        assert_eq!(result, Ok(None));
     }
 }

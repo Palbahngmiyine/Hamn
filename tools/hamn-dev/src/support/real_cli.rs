@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 /// `shutil.which(name)` with this process's PATH: the first PATH entry
@@ -65,26 +65,47 @@ pub fn run_checked(command: &mut Command, timeout: Duration) -> Output {
     output
 }
 
+/// How much of each stream a `communicate` failure reports: the end, where
+/// a stuck child's last progress and error lines are.
+const REPORTED_TAIL: usize = 8 * 1024;
+
+/// How long the streams of a timed-out child may take to end after it was
+/// killed and reaped (a descendant can hold them open) before the failure
+/// reports what arrived. It bounds only the report, not the timeout.
+const DRAIN_AFTER_KILL: Duration = Duration::from_secs(1);
+
 /// Reads a started child's piped standard output and error to their ends and
 /// waits for it, failing after `timeout` (`Popen.communicate(timeout=...)`):
 /// both the exit and the end of both streams (which a descendant can hold
 /// open) must arrive in time. A child still running then is killed and
-/// reaped first.
-pub fn communicate(mut child: Child, timeout: Duration) -> Output {
+/// reaped first. Either failure reports the last `REPORTED_TAIL` bytes of
+/// each stream read by then.
+pub fn communicate(child: Child, timeout: Duration) -> Output {
+    communicate_killing(child, timeout, |child| {
+        let _ = child.kill();
+    })
+}
+
+/// `communicate`, ending a child still running at `timeout` with `kill`
+/// (for example SIGKILL to its whole process group) before it is reaped.
+/// `kill` must make the child exit: the reap waits for it.
+pub fn communicate_killing(mut child: Child, timeout: Duration, kill: impl FnOnce(&mut Child)) -> Output {
     let deadline = Instant::now() + timeout;
-    let (sender, receiver) = mpsc::channel::<(usize, Vec<u8>)>();
+    // Each reader appends as data arrives, so a failure can report output
+    // from a child that never finished; the index sent marks a stream's end.
+    let captured: [Arc<Mutex<Vec<u8>>>; 2] = Default::default();
+    let (sender, receiver) = mpsc::channel::<usize>();
     let streams: [Option<Box<dyn Read + Send>>; 2] = [
         child.stdout.take().map(|stream| Box::new(stream) as Box<dyn Read + Send>),
         child.stderr.take().map(|stream| Box::new(stream) as Box<dyn Read + Send>),
     ];
     for (index, stream) in streams.into_iter().enumerate() {
-        let sender = sender.clone();
+        let (sender, captured) = (sender.clone(), Arc::clone(&captured[index]));
         std::thread::spawn(move || {
-            let mut data = Vec::new();
-            if let Some(mut stream) = stream {
-                stream.read_to_end(&mut data).expect("read child output");
+            if let Some(stream) = stream {
+                capture(stream, &captured);
             }
-            let _ = sender.send((index, data));
+            let _ = sender.send(index);
         });
     }
     let status = loop {
@@ -92,24 +113,70 @@ pub fn communicate(mut child: Child, timeout: Duration) -> Output {
             break status;
         }
         if Instant::now() >= deadline {
-            // The child is unreaped, so its pid still names it.
-            let _ = child.kill();
+            let id = child.id();
+            // The child is unreaped, so its pid (and the group it leads)
+            // still names it.
+            kill(&mut child);
             let _ = child.wait();
-            panic!("process {} timed out after {timeout:?}", child.id());
+            let ended = await_ends(&receiver, Instant::now() + DRAIN_AFTER_KILL);
+            panic!("process {id} timed out after {timeout:?}; it was killed and reaped\n{}", report(&captured, ended));
         }
         // A bounded poll of an owned child; try_wait has no timeout form.
         std::thread::sleep(Duration::from_millis(5));
     };
-    let mut outputs = [Vec::new(), Vec::new()];
-    for _ in 0..2 {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let (index, data) = receiver
-            .recv_timeout(remaining)
-            .unwrap_or_else(|_| panic!("output of process {} still open after {timeout:?}", child.id()));
-        outputs[index] = data;
+    let ended = await_ends(&receiver, deadline);
+    if ended != [true; 2] {
+        panic!("output of process {} still open after {timeout:?}\n{}", child.id(), report(&captured, ended));
     }
-    let [stdout, stderr] = outputs;
+    let [stdout, stderr] = captured.map(|stream| std::mem::take(&mut *locked(&stream)));
     Output { returncode: returncode(status), stdout, stderr }
+}
+
+/// Appends everything read from `stream` to `captured` as it arrives.
+fn capture(mut stream: impl Read, captured: &Mutex<Vec<u8>>) {
+    let mut chunk = [0u8; 8192];
+    loop {
+        match stream.read(&mut chunk) {
+            Ok(0) => return,
+            Ok(count) => locked(captured).extend_from_slice(&chunk[..count]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => panic!("read child output: {error}"),
+        }
+    }
+}
+
+/// A capture buffer; a reader that panicked leaves its bytes usable.
+fn locked(captured: &Mutex<Vec<u8>>) -> std::sync::MutexGuard<'_, Vec<u8>> {
+    captured.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Which of standard output and error ended by `until`.
+fn await_ends(receiver: &mpsc::Receiver<usize>, until: Instant) -> [bool; 2] {
+    let mut ended = [false; 2];
+    while ended != [true; 2] {
+        match receiver.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            Ok(index) => ended[index] = true,
+            Err(_) => break,
+        }
+    }
+    ended
+}
+
+/// The end of each captured stream for a failure message: its last
+/// `REPORTED_TAIL` bytes, the total read, and whether it had ended.
+fn report(captured: &[Arc<Mutex<Vec<u8>>>; 2], ended: [bool; 2]) -> String {
+    let mut text = String::new();
+    for ((name, captured), ended) in ["stdout", "stderr"].into_iter().zip(captured).zip(ended) {
+        let data = locked(captured);
+        let tail = &data[data.len().saturating_sub(REPORTED_TAIL)..];
+        let state = if ended { "ended" } else { "still open" };
+        text.push_str(&format!("--- {name}: last {} of {} bytes, {state} ---\n", tail.len(), data.len()));
+        text.push_str(&String::from_utf8_lossy(tail));
+        if !tail.is_empty() && !tail.ends_with(b"\n") {
+            text.push('\n');
+        }
+    }
+    text
 }
 
 /// Reads `child`'s piped standard output until `marker` appears, failing
@@ -234,7 +301,7 @@ pub fn recorded_argv(path: &Path) -> Vec<Vec<String>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::support::tmp::TempDir;
 
@@ -249,6 +316,143 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    /// The message of the panic `f` must raise.
+    pub(crate) fn panic_message(f: impl FnOnce()) -> String {
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).expect_err("expected a panic");
+        match payload.downcast::<String>() {
+            Ok(message) => *message,
+            Err(payload) => payload.downcast_ref::<&str>().expect("a text panic").to_string(),
+        }
+    }
+
+    /// Kills the process group a test child leads when dropped, so a
+    /// descendant holding its pipes cannot outlive the test.
+    ///
+    /// The group id is only a number, which the system can give to another
+    /// group once every member is gone. So the cleanup owns a member: a
+    /// child of the test in that group, reaped only after the kill. Until
+    /// then the group exists (an unreaped member stays in it), its id cannot
+    /// be reused, and the kill reaches no other group.
+    pub(crate) struct GroupCleanup {
+        group: libc::pid_t,
+        member: Child,
+    }
+
+    impl GroupCleanup {
+        /// Joins the group that `leader` leads. The leader must be the
+        /// test's unreaped child, so that the group exists.
+        pub(crate) fn join(leader: u32) -> Self {
+            let member = Command::new("/bin/sleep")
+                .arg("3600")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(leader as i32)
+                .spawn()
+                .unwrap_or_else(|error| panic!("join process group {leader}: {error}"));
+            Self { group: leader as libc::pid_t, member }
+        }
+    }
+
+    impl Drop for GroupCleanup {
+        fn drop(&mut self) {
+            // SAFETY: killpg only sends a signal; the unreaped member keeps
+            // `group` naming this group.
+            unsafe { libc::killpg(self.group, libc::SIGKILL) };
+            // SIGKILL cannot be caught, so the wait ends.
+            let _ = self.member.kill();
+            let _ = self.member.wait();
+        }
+    }
+
+    /// Starts `script` (`$1` names a marker it must create once everything
+    /// it writes before that is written) under /bin/sh in a new process
+    /// group with piped output, and waits for the marker.
+    fn started(directory: &Path, script: &str) -> (Child, GroupCleanup) {
+        let marker = directory.join("marker");
+        let child = Command::new("/bin/sh")
+            .args(["-c", script, "sh"])
+            .arg(&marker)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = GroupCleanup::join(child.id());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() {
+            assert!(Instant::now() < deadline, "{script:?} did not reach its marker");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        (child, group)
+    }
+
+    #[test]
+    fn a_timed_out_child_is_reaped_and_its_output_reported() {
+        let directory = TempDir::new("hamn-communicate-");
+        let (child, _group) = started(directory.path(), "echo started; echo failing >&2; : > \"$1\"; exec sleep 30");
+        let pid = child.id() as libc::pid_t;
+        let message = panic_message(|| {
+            communicate(child, Duration::from_millis(100));
+        });
+        assert!(message.starts_with(&format!("process {pid} timed out after 100ms; it was killed and reaped\n")), "{message}");
+        assert!(message.contains("--- stdout: last 8 of 8 bytes, ended ---\nstarted\n"), "{message}");
+        assert!(message.contains("--- stderr: last 8 of 8 bytes, ended ---\nfailing\n"), "{message}");
+        // Reaped: no zombie keeps the pid.
+        // SAFETY: kill with signal 0 only checks for the process.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+    }
+
+    #[test]
+    fn a_descendant_holding_the_output_delays_a_timeout_report_only_briefly() {
+        let directory = TempDir::new("hamn-communicate-");
+        let (child, _group) = started(directory.path(), "echo started; sleep 30 & : > \"$1\"; exec sleep 30");
+        let begun = Instant::now();
+        let message = panic_message(|| {
+            communicate(child, Duration::from_millis(100));
+        });
+        let elapsed = begun.elapsed();
+        assert!(elapsed >= DRAIN_AFTER_KILL && elapsed < Duration::from_secs(10), "{elapsed:?}");
+        assert!(message.contains("--- stdout: last 8 of 8 bytes, still open ---\nstarted\n"), "{message}");
+        assert!(message.contains("--- stderr: last 0 of 0 bytes, still open ---\n"), "{message}");
+    }
+
+    #[test]
+    fn output_held_open_past_the_deadline_is_reported() {
+        let directory = TempDir::new("hamn-communicate-");
+        let (child, _group) = started(directory.path(), "echo started; sleep 30 & : > \"$1\"");
+        let pid = child.id();
+        let message = panic_message(|| {
+            communicate(child, Duration::from_millis(500));
+        });
+        assert!(message.starts_with(&format!("output of process {pid} still open after 500ms\n")), "{message}");
+        assert!(message.contains("--- stdout: last 8 of 8 bytes, still open ---\nstarted\n"), "{message}");
+    }
+
+    #[test]
+    fn a_report_keeps_the_end_of_long_output() {
+        let mut stdout = b"first\n".to_vec();
+        stdout.resize(REPORTED_TAIL * 3, b'x');
+        stdout.extend_from_slice(b"\nlast\n");
+        let captured = [Arc::new(Mutex::new(stdout.clone())), Arc::new(Mutex::new(b"partial".to_vec()))];
+        let tail = String::from_utf8_lossy(&stdout[stdout.len() - REPORTED_TAIL..]).into_owned();
+        assert_eq!(
+            report(&captured, [true, false]),
+            format!(
+                "--- stdout: last {REPORTED_TAIL} of {} bytes, ended ---\n{tail}--- stderr: last 7 of 7 bytes, still open ---\npartial\n",
+                stdout.len()
+            )
+        );
+    }
+
+    #[test]
+    fn a_finished_run_returns_all_of_its_output() {
+        let script = "head -c 100000 /dev/zero; printf done >&2; exit 3";
+        let output = run(Command::new("/bin/sh").args(["-c", script]), Duration::from_secs(30));
+        assert_eq!((output.returncode, output.stdout.len(), output.stderr), (3, 100_000, b"done".to_vec()));
     }
 
     #[test]

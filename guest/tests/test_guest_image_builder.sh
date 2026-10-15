@@ -130,7 +130,10 @@ for argument in "$@"; do
         *:/tmp/hamn-guest-sources.tar.gz)
             tar -tzf "${argument%:/tmp/hamn-guest-sources.tar.gz}" \
                 >"$HAMN_TEST_ARCHIVE_LIST"
-            exit 0
+            ;;
+        *:/tmp/hamn-root-fstab.sh)
+            cp "${argument%:/tmp/hamn-root-fstab.sh}" \
+                "$HAMN_TEST_ROOT_FSTAB_SCRIPT"
             ;;
     esac
 done
@@ -205,6 +208,7 @@ GUESTFISH_LABEL_COMMANDS=$WORK/guestfish-label-commands
 GUESTFISH_RESIZE_ARGUMENTS=$WORK/guestfish-resize-arguments
 GUESTFISH_RESIZE_COMMANDS=$WORK/guestfish-resize-commands
 GUESTFISH_TRIM_ARGUMENTS=$WORK/guestfish-trim-arguments
+ROOT_FSTAB_SCRIPT=$WORK/root-fstab.sh
 printf 'base image fixture\n' >"$BASE"
 BASE_SHA256=$(shasum -a 256 "$BASE" | awk '{print $1}')
 if PATH="$WORK/bin:$PATH" \
@@ -225,6 +229,7 @@ HAMN_TEST_GUESTFISH_LABEL_COMMANDS="$GUESTFISH_LABEL_COMMANDS" \
 HAMN_TEST_GUESTFISH_RESIZE_ARGUMENTS="$GUESTFISH_RESIZE_ARGUMENTS" \
 HAMN_TEST_GUESTFISH_RESIZE_COMMANDS="$GUESTFISH_RESIZE_COMMANDS" \
 HAMN_TEST_GUESTFISH_TRIM_ARGUMENTS="$GUESTFISH_TRIM_ARGUMENTS" \
+HAMN_TEST_ROOT_FSTAB_SCRIPT="$ROOT_FSTAB_SCRIPT" \
 "$REPO/guest/image/build-ubuntu-24.04-arm64.sh" >"$WORK/build.out" 2>"$WORK/build.err"; then
     echo "FAIL: empty synthetic image passed actual extraction validation" >&2
     exit 1
@@ -319,6 +324,75 @@ awk '
     echo "FAIL: guest image builder must install and verify its kernel command line after provisioning" >&2
     exit 1
 }
+
+# The root fstab rewrite and the periodic trim that replaces online discard
+# are also part of the provisioned image, before the baseline (the slim
+# script is uploaded only after it).
+awk '
+    $0 == "--run-command" {
+        getline
+        if ($0 == "bash /tmp/hamn-image-provision.sh") provision = NR
+        if ($0 == "bash /tmp/hamn-root-fstab.sh /etc/fstab") rewrite = NR
+        if ($0 == "rm -f /tmp/hamn-root-fstab.sh") remove = NR
+        if ($0 == "systemctl enable fstrim.timer") timer = NR
+        next
+    }
+    $0 == "--upload" {
+        getline
+        if ($0 ~ /:\/tmp\/hamn-root-fstab\.sh$/) upload = NR
+        if ($0 ~ /\/guest\/image\/slim-guest\.sh:\/root\/hamn-image-slim\.sh$/) slim = NR
+        next
+    }
+    END { exit !(provision > 0 && upload > provision && rewrite > upload && remove > rewrite && timer > remove && slim > timer) }
+' "$VIRT_ARGUMENTS" || {
+    echo "FAIL: guest image builder must rewrite the root fstab and enable fstrim.timer before the baseline" >&2
+    exit 1
+}
+
+# The uploaded rewrite turns Ubuntu's own fstab (the fixture is what
+# livecd-rootfs ubuntu/noble writes) into exactly the fstab that
+# test_verify_image_contract.sh accepts, in place, keeping the file's mode.
+FIXTURES=$GUEST_ROOT/tests/fixtures
+UBUNTU_FSTAB=$FIXTURES/ubuntu-24.04-cloudimg.fstab
+EXPECTED_FSTAB=$FIXTURES/hamn-guest.fstab
+test -f "$ROOT_FSTAB_SCRIPT"
+FSTAB=$WORK/fstab
+cp "$UBUNTU_FSTAB" "$FSTAB"
+chmod 0640 "$FSTAB"
+bash "$ROOT_FSTAB_SCRIPT" "$FSTAB"
+cmp "$EXPECTED_FSTAB" "$FSTAB"
+[ -n "$(find "$FSTAB" -perm 0640)" ]
+# Comments and blank lines are kept and are not entries.
+{ printf '#LABEL=cloudimg-rootfs / ext4 discard 0 1\n\t#LABEL=cloudimg-rootfs / ext4 discard 0 1\n\n'; cat "$UBUNTU_FSTAB"; } >"$FSTAB"
+bash "$ROOT_FSTAB_SCRIPT" "$FSTAB"
+{ printf '#LABEL=cloudimg-rootfs / ext4 discard 0 1\n\t#LABEL=cloudimg-rootfs / ext4 discard 0 1\n\n'; cat "$EXPECTED_FSTAB"; } |
+    cmp - "$FSTAB"
+
+# Any other base fstab fails the build and is left as it was.
+reject_base_fstab() {
+    local case=$1
+    cat >"$FSTAB"
+    cp "$FSTAB" "$WORK/fstab.before"
+    if bash "$ROOT_FSTAB_SCRIPT" "$FSTAB" 2>"$WORK/fstab.err"; then
+        echo "FAIL: root fstab rewrite accepted $case" >&2
+        exit 1
+    fi
+    grep -Fq "unexpected base image fstab: $FSTAB" "$WORK/fstab.err"
+    cmp "$WORK/fstab.before" "$FSTAB"
+}
+reject_base_fstab 'an already rewritten fstab' <"$EXPECTED_FSTAB"
+reject_base_fstab 'other root options' < <(sed '1s/commit=30/commit=5/' "$UBUNTU_FSTAB")
+reject_base_fstab 'a root that is not ext4' < <(sed '1s/ext4/xfs/' "$UBUNTU_FSTAB")
+reject_base_fstab 'no root entry' < <(sed 1d "$UBUNTU_FSTAB")
+reject_base_fstab 'two root entries' < <(cat "$UBUNTU_FSTAB"; sed -n 1p "$UBUNTU_FSTAB")
+reject_base_fstab 'discard on /boot' < <(sed 's/defaults/defaults,discard/' "$UBUNTU_FSTAB")
+reject_base_fstab 'discard on /boot/efi' < <(sed 's/umask=0077/discard,umask=0077/' "$UBUNTU_FSTAB")
+reject_base_fstab 'an empty fstab' </dev/null
+if bash "$ROOT_FSTAB_SCRIPT" "$WORK/missing-fstab" 2>"$WORK/fstab.err"; then
+    echo "FAIL: root fstab rewrite accepted a missing fstab" >&2
+    exit 1
+fi
+[ ! -e "$WORK/missing-fstab" ]
 
 grep -Fxq 'guest/Makefile' "$ARCHIVE_LIST"
 grep -Fxq 'vendor/cjson/cJSON.c' "$ARCHIVE_LIST"
