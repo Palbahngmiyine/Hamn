@@ -110,6 +110,16 @@ const ROW_KEYS: &[(&str, &str, &str, &str)] = &[
 ];
 
 pub fn hints(state: &State) -> Vec<Hint> {
+    // A profile whose guest disk is damaged cannot be repaired by a start;
+    // its keys offer the reset of the disk instead.
+    let selected_damaged = state
+        .selected()
+        .is_some_and(|row| crate::tui_state::guest_disk_damaged(&row));
+    let start = if selected_damaged {
+        "start"
+    } else {
+        "start/repair"
+    };
     if state.help {
         return vec![("Esc", "close help"), ("j/k", "scroll"), ("q", "quit")];
     }
@@ -118,6 +128,20 @@ pub fn hints(state: &State) -> Vec<Hint> {
             ("Esc", "back"),
             ("j/k", "scroll"),
             ("!", "close log"),
+            ("?", "help"),
+            ("q", "quit"),
+        ];
+    }
+    // A profile's detail keeps the keys that act on it.
+    if state.detail.is_some() && state.vm_panel() {
+        return vec![
+            ("Esc", "back"),
+            ("s", start),
+            ("t", "stop"),
+            ("c", "settings"),
+            ("x", "reset disk"),
+            ("Ctrl+D", "delete"),
+            ("j/k", "scroll"),
             ("?", "help"),
             ("q", "quit"),
         ];
@@ -151,9 +175,10 @@ pub fn hints(state: &State) -> Vec<Hint> {
     if state.vm_panel() {
         return vec![
             ("Enter", "detail"),
-            ("s", "start/repair"),
+            ("s", start),
             ("t", "stop"),
             ("c", "settings"),
+            ("x", "reset disk"),
             ("Ctrl+D", "delete"),
             ("Esc", "containers"),
             ("/", "filter"),
@@ -162,10 +187,17 @@ pub fn hints(state: &State) -> Vec<Hint> {
             ("q", "quit"),
         ];
     }
+    // A Hamn profile whose guest disk is damaged: a start cannot repair
+    // it, so the reset of the disk takes the place of the start key.
+    let disk_damaged = state
+        .native
+        .as_ref()
+        .is_some_and(|i| i.hamn_profile.is_some())
+        && crate::tui_state::guest_disk_damaged(&state.runtime);
     let mut hints = vec![(":", "command"), ("/", "filter"), ("Enter", "detail")];
     if let Some(invocation) = &state.native {
         let docker = state.workspace == Workspace::Containers;
-        if vm_start(state) {
+        if vm_start(state) && !disk_damaged {
             hints.push(("s", "start VM"));
         }
         for &(key, action, docker_label, kube_label) in ROW_KEYS {
@@ -186,7 +218,10 @@ pub fn hints(state: &State) -> Vec<Hint> {
     match state.workspace {
         Workspace::Containers => {
             hints.push(("e", "environments"));
-            if state.hamn_environment() {
+            if disk_damaged {
+                // The one key that helps comes first, so it fits a narrow terminal.
+                hints.insert(0, ("v", "VM: reset disk"));
+            } else if state.hamn_environment() {
                 hints.push(("v", "VM settings"));
             }
             if state
@@ -248,7 +283,10 @@ const SECTIONS: &[Section] = &[
         &[
             ("e", "Hamn profile, Docker context or kube context"),
             ("n", "Kubernetes namespace"),
-            ("v", "Hamn VM controls; c edits CPU, memory, disk"),
+            (
+                "v",
+                "Hamn VM controls; c edits CPU, memory, disk; x resets the disk",
+            ),
             ("b", "recent targets"),
             ("f", "toggle favorite target"),
             ("B", "favorite targets"),

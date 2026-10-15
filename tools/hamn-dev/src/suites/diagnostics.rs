@@ -18,6 +18,7 @@ pub fn main(filters: &[String]) -> ExitCode {
         vec![
             case("archive_is_private_complete_and_redacted", archive_is_private_complete_and_redacted),
             case("operation_error_is_redacted", operation_error_is_redacted),
+            case("guest_filesystem_record_is_reported_and_redacted", guest_filesystem_record_is_reported_and_redacted),
             case("existing_files_and_symlinks_are_never_replaced", existing_files_and_symlinks_are_never_replaced),
             case("bounded_tail_drops_its_partial_first_line", bounded_tail_drops_its_partial_first_line),
             case("log_symlinks_are_not_followed", log_symlinks_are_not_followed),
@@ -254,6 +255,8 @@ fn archive_is_private_complete_and_redacted() {
     assert!(status["hostFreeMiB"].as_u64().is_some_and(|free| free > 0), "{status}");
     assert_eq!(status["portForwardFailures"], serde_json::json!([]), "{status}");
     assert!(status["vm"].get("dockerContext").is_none(), "{status}");
+    // No start found the guest disk damaged.
+    assert_eq!(status["vm"]["guestFilesystem"], serde_json::Value::Null, "{status}");
     let live: serde_json::Value =
         serde_json::from_slice(&home.hamn(&["vm", "status", "--profile", "default"]).stdout).unwrap();
     let operation: serde_json::Value = serde_json::from_str(&fs::read_to_string(extracted.join("operation.json")).unwrap()).unwrap();
@@ -287,6 +290,39 @@ fn operation_error_is_redacted() {
     let operation: serde_json::Value = serde_json::from_str(&fs::read_to_string(extracted.join("operation.json")).unwrap()).unwrap();
     assert_eq!(operation["error"], "[REDACTED sensitive log line]", "{operation}");
     assert!(operation["operation"] == "vm start" && operation["status"] == "failed", "{operation}");
+}
+
+/// A damaged guest disk that a start recorded is in the status, with the
+/// guest's evidence redacted like a log line.
+fn guest_filesystem_record_is_reported_and_redacted() {
+    use std::os::unix::fs::MetadataExt;
+    let home = Home::new();
+    let disk = home.profile().join("disk.img");
+    private_file(&disk, "disk\n");
+    let metadata = fs::metadata(&disk).unwrap();
+    let record = |detail: &str| {
+        private_file(
+            &home.profile().join("guest-filesystem.json"),
+            &serde_json::json!({"schemaVersion": 1, "state": "unreadable", "detail": detail,
+                "observedAt": 1790000000, "disk": format!("{}:{}", metadata.dev(), metadata.ino())})
+            .to_string(),
+        );
+    };
+    let evidence = "the guest cannot read its disk: /bin/bash: Input/output error";
+    record(evidence);
+    let status = |name: &str| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(home.extracted(name).join("status.json")).unwrap()).unwrap()
+    };
+    let reported = status("guest-filesystem");
+    assert_eq!(
+        reported["vm"]["guestFilesystem"],
+        serde_json::json!({"state": "unreadable", "detail": evidence, "observedAt": 1790000000}),
+        "{reported}"
+    );
+    record(&format!("the guest cannot read its disk: token: {TOKEN}"));
+    let redacted = status("guest-filesystem-redacted");
+    assert_eq!(redacted["vm"]["guestFilesystem"]["detail"], "[REDACTED sensitive log line]", "{redacted}");
+    assert_eq!(redacted["vm"]["guestFilesystem"]["state"], "unreadable", "{redacted}");
 }
 
 fn existing_files_and_symlinks_are_never_replaced() {

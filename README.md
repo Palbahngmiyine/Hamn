@@ -128,8 +128,17 @@ authentication runs according to the installed CLI in the embedded terminal.
 ## Data
 
 `vm delete` stops and hides a profile while preserving its disk and Docker data.
+`vm reset --profile <name> --yes` stops the VM and permanently deletes its disk with
+every container, image, volume and file inside it; the next start creates a new disk
+from the signed guest image. The profile settings and shared host directories stay.
 `system uninstall --yes` permanently removes all Hamn profiles and managed
 installation files.
+
+Before a start changes anything in the guest, it checks the guest root filesystem.
+When ext4 has recorded errors, the guest cannot read its own disk, or the root is
+mounted read-only, the start fails with `guestFilesystemDamaged`, stops a VM it
+booted, and `vm status` reports the evidence as `guestFilesystem`. Starting again
+cannot repair such a disk; `vm reset` replaces it.
 
 Container creation, Compose, exec, Kubernetes apply, and port-forward use the
 installed native CLIs in the TUI.

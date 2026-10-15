@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Debug, Default, Parser, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[command(name = "hamn", version = crate::core::version(), about = "VM, Docker and Kubernetes console",
-    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. system uninstall permanently removes all Hamn data.",
+    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. vm reset permanently deletes one profile's VM disk. system uninstall permanently removes all Hamn data.",
     after_help = "Operations and their arguments: hamn --headless capabilities")]
 pub struct Request {
     #[arg(long)]
@@ -114,6 +114,7 @@ pub const OPERATIONS: &[(&str, bool)] = &[
     ("vm start", true),
     ("vm stop", true),
     ("vm delete", true),
+    ("vm reset", true),
     ("vm diagnostics", true),
     ("vm env", false),
     ("system upgrade", true),
@@ -200,6 +201,7 @@ impl Request {
             "vm start" => "Start the VM.".into(),
             "vm stop" => "Stop the VM and interrupt its running containers.".into(),
             "vm delete" => "Stop and remove the profile from active listings. Its disk and Docker data are preserved.".into(),
+            "vm reset" => "Stop the VM and permanently delete its disk: every container, image, volume and file inside the VM. The next start creates a new disk from the signed guest image; the profile settings and shared host directories are kept.".into(),
             "vm diagnostics" => "Write a redacted diagnostic archive to the selected path.".into(),
             "system upgrade" => "Download and publish a verified Hamn release and managed guest image.".into(),
             "system uninstall" => "Permanently remove ALL Hamn profiles, VM disks, Docker data and the managed installation.".into(),
