@@ -42,9 +42,17 @@ static int write_hook_log(const struct profile *profile, size_t index,
     return fs_write_file_atomic(path, text, (size_t)length, 0600);
 }
 
+/* A hook runs under its own timeoutSeconds in the guest (1 to 3600, as the
+ * profile validates). Its client is reaped once that limit and its
+ * --kill-after have passed with SSH_REMOTE_MARGIN_SEC to spare, and the hook
+ * then fails with PROC_RUN_TIMEOUT, the exit status of a timed-out hook. */
 static int run_hook(const struct profile *profile, const char *ip,
                     const struct profile_hook *hook)
 {
+    if (hook->timeout_seconds < 1 || hook->timeout_seconds > 3600) {
+        errno = EINVAL;
+        return -1;
+    }
     char timeout[16];
     int length = snprintf(timeout, sizeof(timeout), "%us",
                           hook->timeout_seconds);
@@ -53,17 +61,17 @@ static int run_hook(const struct profile *profile, const char *ip,
         return -1;
     }
     const char *root_command[] = {
-        "sudo", "timeout", "--kill-after=5s", timeout, "/bin/bash", "-lc",
+        "sudo", "timeout", SSH_REMOTE_KILL_AFTER, timeout, "/bin/bash", "-lc",
         hook->command, NULL,
     };
     const char *user_command[] = {
-        "sudo", "-u", "hamn", "--", "timeout", "--kill-after=5s",
+        "sudo", "-u", "hamn", "--", "timeout", SSH_REMOTE_KILL_AFTER,
         timeout, "/bin/bash", "-lc", hook->command, NULL,
     };
-    return ssh_exec(profile, ip,
-                    strcmp(hook->stage, "user") == 0 ? user_command :
-                                                         root_command,
-                    1);
+    return ssh_exec_bounded(profile, ip,
+                            strcmp(hook->stage, "user") == 0 ? user_command :
+                                                                 root_command,
+                            SSH_REMOTE_CLIENT_MS(hook->timeout_seconds));
 }
 
 int provision_run_stage(const struct profile *profile, const char *ip,

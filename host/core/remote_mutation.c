@@ -11,6 +11,11 @@
 
 /* Every guest writer and rollback shares this one guest lock. */
 static const char lock[] = "/run/hamn-deployment.lock";
+/* The guest's deadline for a writer is flock's wait, the run limit and this
+ * much for sudo, bash and the marker check. Tests build with less. */
+#ifndef REMOTE_MUTATION_SLACK_SEC
+#define REMOTE_MUTATION_SLACK_SEC 20U
+#endif
 static int cleanup_pending;
 int remote_mutation_cleanup_pending(void) { return cleanup_pending; }
 
@@ -49,10 +54,11 @@ int remote_mutation_run(const struct profile *profile, const char *ip,
     char token[33], wait[16], limit[16], total[16];
     arc4random_buf(random, sizeof(random));
     for (int i = 0; i < 16; i++) snprintf(token + 2 * i, 3, "%02x", random[i]);
+    unsigned total_seconds = wait_seconds + run_seconds + REMOTE_MUTATION_SLACK_SEC;
     snprintf(wait, sizeof(wait), "%u", wait_seconds);
     snprintf(limit, sizeof(limit), "%us", run_seconds);
-    snprintf(total, sizeof(total), "%us", wait_seconds + run_seconds + 20);
-    const char *wrapped[64] = { "sudo", "timeout", "--kill-after=5s", total,
+    snprintf(total, sizeof(total), "%us", total_seconds);
+    const char *wrapped[64] = { "sudo", "timeout", SSH_REMOTE_KILL_AFTER, total,
         "bash", "-c", writer, "--", token, lock, wait, limit };
     size_t count = 12;
     for (size_t i = 1; command[i]; i++) {
@@ -62,14 +68,20 @@ int remote_mutation_run(const struct profile *profile, const char *ip,
         wrapped[count++] = command[i];
     }
     wrapped[count] = NULL;
-    int rc = output ? ssh_exec_capture_checked(profile, ip, wrapped, output, capacity, truncated) :
-                      ssh_exec(profile, ip, wrapped, 0);
+    /* A client that outlives the guest's deadline is reaped. Its
+     * PROC_RUN_TIMEOUT is unsuccessful like any other failure: the writer may
+     * still be queued, running or finished, so it is fenced and settled. */
+    unsigned client_ms = SSH_REMOTE_CLIENT_MS(total_seconds);
+    int rc = output ?
+        ssh_exec_capture_bounded_checked(profile, ip, wrapped, output,
+                                         capacity, truncated, client_ms) :
+        ssh_exec_bounded_shown(profile, ip, wrapped, client_ms);
     if (rc != 0) {
         int cancelled = proc_cancelled();
         proc_cleanup_begin();
         (void)operation_phase(cancelled ? "fencing-after-cancel" : "fencing-after-failure");
         const char *publish[] = { "sudo", "bash", "-c", fence, "--", token, NULL };
-        const char *barrier[] = { "sudo", "timeout", "--kill-after=5s", total,
+        const char *barrier[] = { "sudo", "timeout", SSH_REMOTE_KILL_AFTER, total,
             "flock", "--wait", wait, lock, "true", NULL };
         /* Publishing outside the lock also defeats an original writer queued
          * behind us. The barrier alone would not establish FIFO ordering. */
