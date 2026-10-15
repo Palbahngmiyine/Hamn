@@ -5,12 +5,14 @@
  * Guest-side recovery of an interrupted deployment transaction, run as root
  * under the guest deployment lock:
  *
- *     bash -c DEPLOYMENT_RECOVERY_SCRIPT -- ROOT HELPER
+ *     bash -c DEPLOYMENT_RECOVERY_SCRIPT -- ROOT HELPER [DIGEST...]
  *
  * ROOT is the transaction directory (/var/lib/hamn/deployment-transactions)
- * and HELPER the image's guest-deployment-transaction script. The script is
- * sent from the host because images that are already installed have no
- * recovery action of their own.
+ * and HELPER the image's guest-deployment-transaction script. Each DIGEST is
+ * the SHA-256 of a helper that published ready without fsync (the host
+ * passes DEPLOYMENT_UNDURABLE_HELPERS). The script is sent from the host
+ * because images that are already installed have no recovery action of
+ * their own.
  *
  * The single entry's phase file decides; an incomplete backup is never
  * restored:
@@ -26,7 +28,10 @@
  *     rollback decided the outcome, or by a failed begin, so there is
  *     nothing to roll back either.
  *   In both cases the entry is removed, the removal is made durable, and one
- *   line on stderr names it.
+ *   line on stderr names it. Both conclusions rest on a durable begin: when
+ *   HELPER's digest is a DIGEST, a crash can also lose an in-place phase
+ *   after the host changed the guest, so both states are refused and kept
+ *   as ambiguous instead (a missing helper is refused too).
  *   - any other bytes (empty, truncated or foreign): no helper writes them
  *     since 0.1.1, so they cannot show that the guest was left unchanged.
  *     Images before 0.1.1 published ready without fsync, so an empty phase
@@ -40,13 +45,15 @@
  * that was not ready was discarded, or because the single ready backup was
  * rolled back and removed. Nonzero, with a reason on stderr: the root is
  * unsafe, more than one entry exists, the entry is not an owned 32-hex
- * directory, its phase is unsafe, unreadable or damaged, removing a
- * discarded entry failed, clearing systemd's start-limit state failed
- * (before any restore), or the rollback failed or left its backup behind
- * (the helper retains the backup for another attempt).
+ * directory, its phase is unsafe, unreadable, damaged or ambiguous, the
+ * helper cannot be identified, removing a discarded entry failed, clearing
+ * systemd's start-limit state failed (before any restore), or the rollback
+ * failed or left its backup behind (the helper retains the backup for
+ * another attempt).
  */
 #define DEPLOYMENT_RECOVERY_SCRIPT \
     "set -euo pipefail; shopt -s nullglob dotglob; root=$1; helper=$2; " \
+    "shift 2; undurable=\" $* \"; " \
     "test -e \"$root\" || test -L \"$root\" || exit 0; " \
     "test -d \"$root\" && test ! -L \"$root\" || " \
     "{ echo \"unsafe deployment backup root $root\" >&2; exit 1; }; " \
@@ -71,6 +78,13 @@
     "discarded: inspect $entry, and remove it to keep the current guest " \
     "runtime\" >&2; exit 1 ;; esac; fi; " \
     "if test \"$state\" != ready; then " \
+    "digest=$(sha256sum < \"$helper\") || { echo \"cannot identify the " \
+    "deployment helper $helper; inspect $entry\" >&2; exit 1; }; " \
+    "case $undurable in *\" ${digest%% *} \"*) echo \"ambiguous deployment " \
+    "backup (phase $state) from a helper that published without fsync " \
+    "(Hamn before 0.1.1): the guest may be partly configured, so it is " \
+    "neither restored nor discarded: inspect $entry, and remove it to keep " \
+    "the current guest runtime\" >&2; exit 1 ;; esac; " \
     "rm -rf -- \"$entry\"; sync -- \"$root\"; " \
     "echo \"discarded deployment backup $token (phase $state): it was never " \
     "published or was already retired, so it is never restored\" >&2; " \
@@ -81,5 +95,18 @@
     "bash \"$helper\" rollback \"$token\"; " \
     "test ! -e \"$entry\" || " \
     "{ echo 'deployment recovery did not remove its backup' >&2; exit 1; }"
+
+/*
+ * SHA-256 of the guest-deployment-transaction helpers that the Hamn 0.0.1
+ * and 0.1.0 guest images install, the DIGEST arguments above. They wrote
+ * phase in place without fsync before returning; every later helper
+ * publishes ready durably. Derived with
+ *     git show v0.0.1:guest/scripts/guest-deployment-transaction.sh |
+ *         shasum -a 256
+ * and likewise for v0.1.0; signed images install that file unchanged.
+ */
+#define DEPLOYMENT_UNDURABLE_HELPERS \
+    "1627767c1297df2c84e54c07adedef697b8766769e90b76a7627d21557e56540", \
+    "912bfb92669467768ae7eecae07ef2f405d4f6d0308eb81431595b101dd9c901"
 
 #endif

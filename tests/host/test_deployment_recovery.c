@@ -89,13 +89,38 @@ static int run(const char *const argv[], const char *extra)
     return WEXITSTATUS(status);
 }
 
-static int recover(const char *extra)
+/* Runs recovery with `helper` and the NULL-terminated digests of helpers
+ * that published without fsync; `extra` is NAME=VALUE or NULL. */
+static int recover_with(const char *helper, const char *const digests[],
+                        const char *extra)
 {
     write_file(systemctl_log, "", 0600);
     write_file(sync_log, "", 0600);
-    const char *argv[] = { "bash", "-c", DEPLOYMENT_RECOVERY_SCRIPT, "--",
-        transactions, HELPER, NULL };
+    const char *argv[16] = { "bash", "-c", DEPLOYMENT_RECOVERY_SCRIPT, "--",
+        transactions, helper };
+    size_t count = 6;
+    for (size_t index = 0; digests[index]; index++) {
+        assert(count + 1 < sizeof(argv) / sizeof(argv[0]));
+        argv[count++] = digests[index];
+    }
+    argv[count] = NULL;
     return run(argv, extra);
+}
+
+/* Recovery as the host runs it: the current helper and the real list. */
+static int recover(const char *extra)
+{
+    static const char *const undurable[] = { DEPLOYMENT_UNDURABLE_HELPERS, NULL };
+    return recover_with(HELPER, undurable, extra);
+}
+
+/* The SHA-256 of the helper under test, as lowercase hex. */
+static void helper_digest(char digest[65])
+{
+    FILE *pipe = popen("/usr/bin/shasum -a 256 " HELPER, "r");
+    assert(pipe && fread(digest, 1, 64, pipe) == 64 && pclose(pipe) == 0);
+    digest[64] = '\0';
+    assert(strspn(digest, "0123456789abcdef") == 64);
 }
 
 /* Runs the helper's begin; `extra` is FAIL_SYNC_AT=... or NULL. */
@@ -214,6 +239,20 @@ int main(void)
         "call=$(wc -l <\"$SYNC_LOG\" | tr -d ' ')\n"
         "case \" ${FAIL_SYNC_AT:-} \" in *\" $call \"*) "
         "echo 'injected durability failure' >&2; exit 1 ;; esac\n", 0755);
+    /* The guest's coreutils digest; macOS ships shasum. */
+    snprintf(fixture, sizeof(fixture), "%s/bin/sha256sum", base);
+    write_file(fixture, "#!/bin/bash\nexec /usr/bin/shasum -a 256 \"$@\"\n", 0755);
+
+    /* The undurable helpers are two well-formed digests, and the helper
+     * under test is not one of them. */
+    char digest[65];
+    helper_digest(digest);
+    static const char *const undurable[] = { DEPLOYMENT_UNDURABLE_HELPERS };
+    assert(sizeof(undurable) / sizeof(undurable[0]) == 2);
+    for (size_t index = 0; index < 2; index++)
+        assert(strlen(undurable[index]) == 64 &&
+               strspn(undurable[index], "0123456789abcdef") == 64 &&
+               strcmp(undurable[index], digest) != 0);
 
     /* No transaction root, or an empty one: nothing to recover. */
     reset();
@@ -323,6 +362,44 @@ int main(void)
     assert(recover(NULL) == 0);
     assert_discarded(TOKEN, "missing");
     assert_hamnd("new");
+
+    /* The 0.0.1 and 0.1.0 helpers wrote phase in place without fsync, so
+     * for them a missing or zero-filled phase can follow applied changes:
+     * the backup is kept and refused as ambiguous, neither restored nor
+     * discarded. Its ready backup still rolls back. The helper under test
+     * stands in for one of them here. */
+    const char *const old_helper[] = { DEPLOYMENT_UNDURABLE_HELPERS, digest, NULL };
+    write_file(hamnd, "old", 0755);
+    begin(TOKEN);
+    write_file(hamnd, "new", 0755);
+    write_phase(TOKEN, "\0\0\0\0\0\0", 6);
+    assert(recover_with(HELPER, old_helper, NULL) == 1 &&
+           strstr(error, "ambiguous deployment backup (phase zero-filled)") &&
+           strstr(error, TOKEN));
+    assert(unlink(phase) == 0);
+    assert(recover_with(HELPER, old_helper, NULL) == 1 &&
+           strstr(error, "ambiguous deployment backup (phase missing)"));
+    assert_no_systemctl();
+    assert_hamnd("new");
+    assert(exists(TOKEN));
+    write_phase(TOKEN, "ready\n", 6);
+    assert(recover_with(HELPER, old_helper, NULL) == 0);
+    assert_hamnd("old");
+    assert(!exists(TOKEN));
+
+    /* Without its helper, a phase that is not ready cannot be judged. */
+    begin(TOKEN);
+    write_file(hamnd, "new", 0755);
+    assert(unlink(phase) == 0);
+    char no_helper[PATH_MAX];
+    snprintf(no_helper, sizeof(no_helper), "%s/no-such-helper", base);
+    const char *const none[] = { NULL };
+    assert(recover_with(no_helper, none, NULL) == 1 &&
+           strstr(error, "cannot identify the deployment helper"));
+    assert_no_systemctl();
+    assert_hamnd("new");
+    assert(exists(TOKEN));
+    remove_entry(TOKEN);
 
     /* An interrupted commit. Before its runtime (the protected items, then
      * the root filesystem) is durable the backup stays ready and intact, and
