@@ -231,6 +231,7 @@ const COMMANDS: &[&str] = &[
     "  docker and kubectl prefixes are accepted; output options are kept.",
     "  Other commands run in the internal terminal, without confirmation.",
     "  :refresh-timeout 30 sets a 1..300 second query deadline.",
+    "  Tab or → takes the dimmed completion: history, then known commands.",
     "  Up / Down recall this session's command history.",
     "  Shell pipelines, redirections and aliases are not interpreted.",
 ];
@@ -390,6 +391,7 @@ mod tests {
             "<Ctrl+Alt+S>",
             "<:>",
             "refresh-timeout",
+            "Tab or → takes the dimmed completion",
         ] {
             assert!(text(&narrow).contains(marker), "{marker}");
         }
