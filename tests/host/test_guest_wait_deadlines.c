@@ -2,18 +2,20 @@
  * every probe of guest_deployment_runtime_ready() runs with the readiness
  * budget that is left, the guest image check has its own bound, the client
  * of a guest writer, of the cloud-init wait and of a provisioning hook is
- * reaped once the guest's own limit for that command has passed, and the
- * vmrun and DHCP lease waits end when the operation is cancelled. Each case
- * runs in a child that this test kills when it outlives its limit, so a wait
- * without a deadline fails its case instead of hanging the test.
+ * reaped once the guest's own limit for that command has passed, the vmrun
+ * wait ends at its deadline when vmrun's control socket never answers, and
+ * the vmrun and DHCP lease waits end when the operation is cancelled. Each
+ * case runs in a child that this test kills when it outlives its limit, so a
+ * wait without a deadline fails its case instead of hanging the test.
  *
  * `ssh` is this test executable, first in PATH. It answers control requests
  * (-O) with success, links a forwarded Docker socket to a fake Docker API,
  * and runs no remote command: the command succeeds, fails, is slow or hangs
  * as the case's environment asks. The fake Docker API answers _ping, or
- * accepts and never answers. The Makefile builds guest_deployment.c,
- * remote_mutation.c, provision.c and cmd_start.c into this test with guest
- * limits and budgets of seconds and no client margin. */
+ * accepts and never answers; silent, it also stands in for a stuck vmrun
+ * control socket. The Makefile builds guest_deployment.c, remote_mutation.c,
+ * provision.c and cmd_start.c into this test with guest limits and budgets
+ * of seconds and no client margin. */
 #if !defined(GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) || \
     !defined(GUEST_IMAGE_VERIFY_TIMEOUT_SEC) || \
     !defined(GUEST_CLOUD_INIT_TIMEOUT_SEC) || \
@@ -661,6 +663,23 @@ static void vmrun_wait_without_a_vm_times_out(void)
     assert(!proc_cancelled());
 }
 
+/* A vmrun whose control socket accepts and never answers, as when its main
+ * queue is stuck: the silent fake Docker API stands in for that socket. The
+ * wait ends at its deadline, not after a number of polls that each wait out
+ * a status query and a sleep. */
+static void silent_vmrun_socket_ends_the_wait_at_its_deadline(void)
+{
+    long long started = now_ms();
+    errno = 0;
+    int rc = hamn_test_start_wait_vmrun_running(&fixture.profile, fixture.api,
+                                                2);
+    int saved = errno;
+    long long elapsed = now_ms() - started;
+    assert(rc == -1);
+    assert(elapsed >= 2000 && elapsed < 2000 + MARGIN_MS);
+    assert(saved == ETIMEDOUT && !proc_cancelled());
+}
+
 /* ---- DHCP lease wait ------------------------------------------------- */
 
 static void cancelled_lease_wait_returns_at_once(void)
@@ -802,6 +821,9 @@ int main(int argc, char **argv)
              cancellation_ends_the_vmrun_wait, API_ANSWERS, 5000);
     run_case("vmrun_wait_without_a_vm_times_out",
              vmrun_wait_without_a_vm_times_out, API_ANSWERS, 5000);
+    run_case("silent_vmrun_socket_ends_the_wait_at_its_deadline",
+             silent_vmrun_socket_ends_the_wait_at_its_deadline, API_SILENT,
+             2000 + WATCHDOG_EXTRA_MS);
     run_case("cancelled_lease_wait_returns_at_once",
              cancelled_lease_wait_returns_at_once, API_ANSWERS, 5000);
     run_case("cancellation_ends_the_lease_wait",
@@ -818,7 +840,7 @@ int main(int argc, char **argv)
     }
     assert(removed);
     puts("PASS: guest readiness probes, the image check, guest writers, the "
-         "cloud-init wait and provisioning hooks end at their deadline, and "
-         "the vmrun and DHCP lease waits on cancellation");
+         "cloud-init wait, provisioning hooks and the vmrun wait end at their "
+         "deadline, and the vmrun and DHCP lease waits on cancellation");
     return 0;
 }
