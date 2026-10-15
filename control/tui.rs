@@ -1003,6 +1003,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         KeyCode::Backspace => state.edit_input("", true),
                         KeyCode::Up => state.recall_command(true),
                         KeyCode::Down => state.recall_command(false),
+                        // The cursor stays at the end of the input, so → has
+                        // nothing to move over; while typing, Tab completes
+                        // instead of switching the workspace.
+                        KeyCode::Tab | KeyCode::Right => state.complete_input(),
                         KeyCode::Char(c) => state.edit_input(&c.to_string(), false),
                         KeyCode::Enter => {
                             let (prefix, input) = state.input.take().unwrap();

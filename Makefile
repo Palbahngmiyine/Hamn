@@ -194,15 +194,20 @@ $(START_DOCKER_CONTEXT_RETRY_TEST): tests/host/test_start_docker_context_retry.c
 		$(filter-out host/main.c host/cmd/cmd_start.c,$(HOST_C_SRCS)) \
 		host/cmd/cmd_start.c $(HOST_M_SRCS) $(LDFLAGS) -o $@
 
-# guest_deployment.c is compiled into this test a second time, with readiness
-# and image-check budgets of seconds, so its deployment paths end quickly.
+# These sources are compiled into this test a second time, with readiness,
+# image-check, cloud-init and writer limits of seconds and no SSH client
+# margin, so their waits end quickly; cmd_start.c with its test seam.
+GUEST_WAIT_DEADLINES_SRCS := host/core/guest_deployment.c \
+	host/core/remote_mutation.c host/core/provision.c host/cmd/cmd_start.c
 $(GUEST_WAIT_DEADLINES_TEST): tests/host/test_guest_wait_deadlines.c \
-		host/core/guest_deployment.c $(HOST_TEST_OBJS)
+		$(GUEST_WAIT_DEADLINES_SRCS) $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
-	clang $(filter-out -MMD -MP,$(CFLAGS)) -DGUEST_DEPLOYMENT_READY_TIMEOUT_SEC=2 \
-		-DGUEST_IMAGE_VERIFY_TIMEOUT_SEC=1 \
-		tests/host/test_guest_wait_deadlines.c host/core/guest_deployment.c \
-		$(filter-out $(BUILD)/host/core/guest_deployment.o,$(HOST_TEST_OBJS)) \
+	clang $(filter-out -MMD -MP,$(CFLAGS)) -DHAMN_TEST \
+		-DGUEST_DEPLOYMENT_READY_TIMEOUT_SEC=2 \
+		-DGUEST_IMAGE_VERIFY_TIMEOUT_SEC=1 -DGUEST_CLOUD_INIT_TIMEOUT_SEC=1 \
+		-DREMOTE_MUTATION_SLACK_SEC=0 -DSSH_REMOTE_MARGIN_SEC=0 \
+		tests/host/test_guest_wait_deadlines.c $(GUEST_WAIT_DEADLINES_SRCS) \
+		$(filter-out $(patsubst %.c,$(BUILD)/%.o,$(GUEST_WAIT_DEADLINES_SRCS)),$(HOST_TEST_OBJS)) \
 		$(LDFLAGS) -o $@
 
 test-portable: hamn-dev
@@ -298,6 +303,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-workspaces
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-outcomes
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-native-regressions
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-command-completion
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-quoting
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-reload
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-refresh

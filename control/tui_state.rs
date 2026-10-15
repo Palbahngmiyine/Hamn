@@ -580,6 +580,20 @@ impl State {
         self.history_index = (index < self.history.len()).then_some(index);
         self.input = Some((':', self.history.get(index).cloned().unwrap_or_default()));
     }
+    /// What Tab or → appends to the `:` command being typed, shown dimmed
+    /// after the cursor; `None` for the filter. See `tui_completion`.
+    pub fn completion(&self) -> Option<String> {
+        match &self.input {
+            Some((':', typed)) => crate::tui_completion::suggestion(typed, self.workspace, &self.history),
+            _ => None,
+        }
+    }
+    /// Takes the completion as if it were typed; without one, nothing changes.
+    pub fn complete_input(&mut self) {
+        if let Some(rest) = self.completion() {
+            self.edit_input(&rest, false);
+        }
+    }
     pub fn clear_filter(&mut self) {
         let key = self.selected().and_then(|row| identity(&row));
         self.filter.clear();
@@ -1556,7 +1570,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
         let (name, keys, lead) = match (*prefix, &state.forward) {
             (':', _) => (
                 " Command ".to_string(),
-                " Enter runs · ↑/↓ history · Esc cancels ",
+                " Enter runs · Tab completes · ↑/↓ history · Esc cancels ",
                 ":".to_string(),
             ),
             (PORT_FORWARD, Some((invocation, row))) => (
@@ -1575,8 +1589,14 @@ pub fn draw(frame: &mut Frame, state: &State) {
             ),
         };
         let text = format!("{lead}{}", clean(input));
+        // The completion follows the cursor, dimmed, until Tab takes it.
+        let completion = state.completion().map(|rest| clean(&rest)).unwrap_or_default();
         frame.render_widget(
-            Paragraph::new(text.clone()).block(
+            Paragraph::new(Line::from(vec![
+                Span::raw(text.clone()),
+                Span::styled(completion, theme::dim()),
+            ]))
+            .block(
                 Block::bordered()
                     .border_style(theme::border(workspace))
                     .title(Line::styled(name, theme::key(workspace)))
@@ -3182,6 +3202,71 @@ mod tests {
         // A detail that arrives replaces the help.
         containers.accept(Ok(serde_json::json!({"yaml": "kind: Pod"})));
         assert!(!containers.help && containers.detail.as_deref() == Some("kind: Pod"));
+    }
+    #[test]
+    fn the_command_prompt_dims_its_completion_after_the_cursor_and_tab_takes_it() {
+        let render = |state: &State| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            (terminal.backend().buffer().clone(), cursor)
+        };
+        let row = |buffer: &ratatui::buffer::Buffer, y: u16| -> String {
+            (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
+        };
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        state.input = Some((':', "ima".into()));
+        let (buffer, cursor) = render(&state);
+        assert!(row(&buffer, cursor.y).contains(":images"), "{}", row(&buffer, cursor.y));
+        assert!(row(&buffer, cursor.y - 1).contains("Tab completes"), "{}", row(&buffer, cursor.y - 1));
+        // The typed text ends at the cursor; the completion starts there, dimmed.
+        let typed = &buffer[(cursor.x - 1, cursor.y)];
+        assert_eq!(typed.symbol(), "a");
+        assert_ne!(typed.fg, Color::DarkGray);
+        for (offset, symbol) in ["g", "e", "s"].into_iter().enumerate() {
+            let cell = &buffer[(cursor.x + offset as u16, cursor.y)];
+            assert_eq!((cell.symbol(), cell.fg), (symbol, Color::DarkGray), "{offset}");
+        }
+        assert_eq!(buffer[(cursor.x + 3, cursor.y)].symbol(), " ");
+        // Tab takes it as typed text: the cursor moves past it, and a complete
+        // command that nothing extends shows no completion.
+        state.complete_input();
+        assert_eq!(state.input, Some((':', "images".into())));
+        let (buffer, after) = render(&state);
+        assert_eq!((after.x, after.y), (cursor.x + 3, cursor.y));
+        assert_eq!(buffer[(after.x - 1, after.y)].symbol(), "s");
+        assert_eq!(buffer[(after.x, after.y)].symbol(), " ");
+        // Without a completion, Tab changes nothing; Up still recalls history.
+        state.complete_input();
+        assert_eq!(state.input, Some((':', "images".into())));
+        state.history = vec!["ps -a".into()];
+        state.recall_command(true);
+        assert_eq!(state.input, Some((':', "ps -a".into())));
+        // The filter prompt has no completion.
+        state.input = Some(('/', "p".into()));
+        assert_eq!(state.completion(), None);
+        state.complete_input();
+        assert_eq!(state.input, Some(('/', "p".into())));
+        let (buffer, cursor) = render(&state);
+        assert_eq!(buffer[(cursor.x - 1, cursor.y)].symbol(), "p");
+        assert_eq!(buffer[(cursor.x, cursor.y)].symbol(), " ");
+        // Wide characters: the cursor follows the display width of the typed
+        // text, and the completion from history starts at it.
+        let mut kubernetes = State::new(Request::default());
+        kubernetes.workspace = Workspace::Kubernetes;
+        kubernetes.native = Some(crate::native::parse("get pods", &kubernetes).unwrap());
+        kubernetes.history = vec!["get pods -l app=작업".into()];
+        kubernetes.input = Some((':', "get pods -l app=작".into()));
+        let (buffer, cursor) = render(&kubernetes);
+        // A wide character takes two cells; the second is left blank.
+        assert!(row(&buffer, cursor.y).contains(":get pods -l app=작"), "{}", row(&buffer, cursor.y));
+        assert_eq!(buffer[(cursor.x - 2, cursor.y)].symbol(), "작");
+        let cell = &buffer[(cursor.x, cursor.y)];
+        assert_eq!((cell.symbol(), cell.fg), ("업", Color::DarkGray));
+        kubernetes.complete_input();
+        assert_eq!(kubernetes.input, Some((':', "get pods -l app=작업".into())));
     }
     #[test]
     fn a_failed_read_shows_its_summary_and_keeps_the_raw_failure_for_details() {
