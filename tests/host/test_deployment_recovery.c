@@ -161,6 +161,24 @@ static void assert_discarded(const char *token, const char *state)
            !strcmp(calls + length - strlen(last), last));
 }
 
+/* Recovery prints nothing only when there was no backup: the host takes any
+ * output as a recovered backup and applies the whole runtime again. */
+static void assert_nothing_recovered(void)
+{
+    assert(error[0] == '\0');
+    assert_no_systemctl();
+}
+
+/* The ready backup was restored and removed, and one line names it. */
+static void assert_rolled_back(const char *token)
+{
+    char expected[128];
+    snprintf(expected, sizeof(expected), "rolled back deployment backup %s: ",
+             token);
+    assert(strstr(error, expected) && strstr(error, "before its transaction"));
+    assert(!exists(token));
+}
+
 static void reset(void)
 {
     char command[PATH_MAX + 16];
@@ -201,25 +219,25 @@ int main(void)
     /* No transaction root, or an empty one: nothing to recover. */
     reset();
     assert(recover(NULL) == 0);
-    assert_no_systemctl();
+    assert_nothing_recovered();
     make_transactions();
     assert(recover(NULL) == 0);
-    assert_no_systemctl();
+    assert_nothing_recovered();
 
     /* A ready backup is restored after clearing systemd's start limit, then
-     * removed; a second recovery finds nothing. */
+     * removed and named; a second recovery finds nothing. */
     begin(TOKEN);
     write_file(hamnd, "new", 0755);
     assert(recover(NULL) == 0);
     assert_hamnd("old");
-    assert(!exists(TOKEN));
+    assert_rolled_back(TOKEN);
     char calls[4096];
     read_file(systemctl_log, calls, sizeof(calls));
     assert(!strncmp(calls, "reset-failed docker.service docker.socket containerd.service "
                            "hamnd.service hamn-host-dns.service\n", 91));
     assert(strstr(calls, "daemon-reload"));
     assert(recover(NULL) == 0);
-    assert_no_systemctl();
+    assert_nothing_recovered();
 
     /* systemd state cannot be cleared: nothing is restored, the backup stays,
      * and a later attempt completes the recovery. */
@@ -230,19 +248,20 @@ int main(void)
     assert(exists(TOKEN));
     read_file(systemctl_log, calls, sizeof(calls));
     assert(!strstr(calls, "daemon-reload"));
+    assert(!strstr(error, "rolled back"));
     assert(recover(NULL) == 0);
     assert_hamnd("old");
-    assert(!exists(TOKEN));
+    assert_rolled_back(TOKEN);
 
     /* A failed rollback keeps its backup for the next attempt. */
     begin(TOKEN);
     write_file(hamnd, "new", 0755);
     assert(recover("FAIL_RESTART=1") != 0);
-    assert(strstr(error, "backup retained"));
+    assert(strstr(error, "backup retained") && !strstr(error, "rolled back"));
     assert(exists(TOKEN));
     assert(recover(NULL) == 0);
     assert_hamnd("old");
-    assert(!exists(TOKEN));
+    assert_rolled_back(TOKEN);
 
     /* More than one entry: none is chosen. */
     begin(TOKEN);
@@ -299,7 +318,7 @@ int main(void)
     assert(commit(TOKEN, "FAIL_SYNC_AT=1") != 0 && strstr(error, "backup retained"));
     assert(recover(NULL) == 0);
     assert_hamnd("old");
-    assert(!exists(TOKEN));
+    assert_rolled_back(TOKEN);
     begin(TOKEN);
     write_file(hamnd, "new", 0755);
     assert(commit(TOKEN, "FAIL_SYNC_AT=2") != 0 &&
@@ -315,7 +334,7 @@ int main(void)
            strstr(error, "cannot make the removal durable"));
     assert(!exists(TOKEN));
     assert(recover(NULL) == 0);
-    assert_no_systemctl();
+    assert_nothing_recovered();
     assert_hamnd("new");
 
     /* A phase that is a directory or a symlink is not a state any helper

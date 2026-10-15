@@ -24,15 +24,17 @@
  *     the removal is made durable, and one line on stderr names it. Images
  *     before 0.1.1 published ready without fsync, so after a crash their
  *     empty phase can accompany applied changes; that backup cannot be
- *     restored either. The start that follows applies only its own
- *     deployment over them: the full refresh for a stale marker, the Docker
- *     reconciliation for a current one.
+ *     restored either, and the start that follows applies the whole guest
+ *     runtime over them.
  *   - a symlink or other non-regular file: refused.
  *
  * Exit 0: no backup remains, either because none existed, because a backup
  * that was not ready was discarded, or because the single ready backup was
- * rolled back and removed. Nonzero, with a reason on stderr: the root is
- * unsafe, more than one entry exists, the entry is not an owned 32-hex
+ * rolled back and removed. It prints nothing only when none existed: a
+ * discard or a rollback prints one line on stderr that names the entry and
+ * what was done, because the guest runtime may then no longer be the
+ * deployment the host marker records. Nonzero, with a reason on stderr: the
+ * root is unsafe, more than one entry exists, the entry is not an owned 32-hex
  * directory, its phase is unsafe, removing a discarded entry failed,
  * clearing systemd's start-limit state failed (before any restore), or the
  * rollback failed or left its backup behind (the helper retains the backup
@@ -67,6 +69,8 @@
     "hamnd.service hamn-host-dns.service; " \
     "bash \"$helper\" rollback \"$token\"; " \
     "test ! -e \"$entry\" || " \
-    "{ echo 'deployment recovery did not remove its backup' >&2; exit 1; }"
+    "{ echo 'deployment recovery did not remove its backup' >&2; exit 1; }; " \
+    "echo \"rolled back deployment backup $token: the guest runtime is the " \
+    "one from before its transaction\" >&2"
 
 #endif

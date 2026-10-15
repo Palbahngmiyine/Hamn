@@ -200,13 +200,14 @@ static int deployment_exec_locked(const struct profile *profile, const char *ip,
     return remote_mutation_run(profile, ip, 120, 60, command, NULL, 0, NULL);
 }
 
-static int recovery_complete, cleanup_pending;
+static int recovery_complete, cleanup_pending, recovered_backup;
 int guest_deployment_cleanup_pending(void) { return cleanup_pending; }
 int guest_deployment_recovery_complete(void) { return recovery_complete; }
+int guest_deployment_recovered_backup(void) { return recovered_backup; }
 
 int guest_deployment_recover(const struct profile *profile, const char *ip)
 {
-    recovery_complete = cleanup_pending = 0;
+    recovery_complete = cleanup_pending = recovered_backup = 0;
     const char *command[] = { "sudo", "bash", "-c", DEPLOYMENT_RECOVERY_SCRIPT,
         "--", "/var/lib/hamn/deployment-transactions",
         GUEST_DEPLOYMENT_TRANSACTION_SCRIPT, NULL };
@@ -214,10 +215,14 @@ int guest_deployment_recover(const struct profile *profile, const char *ip)
     int truncated = 0;
     int rc = remote_mutation_run(profile, ip, 120, 120, command, reason,
                                  sizeof(reason), &truncated);
-    if (rc == 0 && reason[0])
-        /* A discarded backup that was not ready names itself. */
+    if (rc == 0 && reason[0]) {
+        /* The script is silent only when there was no backup; a discard or
+         * a rollback names itself. Any other output counts as a recovered
+         * backup too, which only costs a full reconfiguration. */
+        recovered_backup = 1;
         logmsg("deployment recovery: %s%s", reason,
                truncated ? " (truncated)" : "");
+    }
     if (rc != 0)
         logerr("deployment recovery failed: %s%s",
                reason[0] ? reason : "guest connection or recovery interrupted",
@@ -618,12 +623,19 @@ int guest_deployment_reconcile_runtime_locked(
         return -1;
     }
     /* begin refuses a transaction that a crash or an interrupted operation
-     * left behind. Recover it first, as a refresh does: the backup is rolled
-     * back or discarded, and Docker's settings are applied over either. A
-     * recovery that fails or is cancelled begins nothing and keeps its own
-     * cleanup_pending and recovery_complete. */
+     * left behind. Recover it first, as a refresh does. A recovery that fails
+     * or is cancelled begins nothing and keeps its own cleanup_pending and
+     * recovery_complete. */
     if (guest_deployment_recover(profile, state->ip) != 0)
         return -1;
+    /* A recovered backup leaves the runtime of before its transaction, or of
+     * a deployment whose last writes a crash may have lost: an image without
+     * the durable commit loses them together with the backup's removal,
+     * including the x86_64 translation state, which no backup holds. Then
+     * the whole runtime is applied again, not only Docker's settings. A disk
+     * whose marker is current has finished its first boot, so this needs no
+     * cloud-init wait, as Docker's settings alone do not. */
+    int whole_runtime = guest_deployment_recovered_backup();
 
     char token[GUEST_DEPLOYMENT_TOKEN_CAP];
     deployment_token_generate(token);
@@ -633,12 +645,21 @@ int guest_deployment_reconcile_runtime_locked(
         return -1;
     }
 
-    if (guest_deployment_configure_docker(profile, state->ip) == 0 &&
+    if (whole_runtime)
+        logmsg("deployment recovery changed the guest runtime; applying the "
+               "whole guest runtime configuration again");
+    int configured = whole_runtime ?
+        guest_deployment_configure_runtime(profile, state->ip) :
+        guest_deployment_configure_docker(profile, state->ip);
+    if (configured == 0 &&
         guest_deployment_forward_sockets(profile, state->ip) == 0 &&
         guest_deployment_runtime_ready(
             profile, state->ip, GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) == 0) {
         if (deployment_transaction(profile, state->ip, "commit", token) == 0) {
-            logmsg("warm start reconciled Docker networking and readiness");
+            logmsg(whole_runtime ?
+                   "warm start applied the whole guest runtime and confirmed "
+                   "its readiness" :
+                   "warm start reconciled Docker networking and readiness");
             return 0;
         }
         logerr("guest runtime reconciliation succeeded but backup commit failed "

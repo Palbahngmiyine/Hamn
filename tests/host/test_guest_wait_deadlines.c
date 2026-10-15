@@ -496,10 +496,40 @@ static int leftover_exists(void)
     return 0;
 }
 
+/* A cold start without a leftover: the recovery finds nothing, and only
+ * Docker's network-dependent settings are applied. */
+static void reconcile_without_a_leftover_configures_docker_only(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    assert(unsetenv(ENV_LEFTOVER) == 0 && unlink(fixture.leftover) == 0);
+    assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
+                                                     &state) == 0);
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
+    assert(ssh_calls("configure-docker") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
+    assert(ssh_calls("configure-rosetta") == 0 &&
+           ssh_calls("verify-image-contract") == 0 &&
+           ssh_calls("configure-containerd") == 0 && ssh_calls("cloud-init") == 0);
+    fflush(NULL);
+    char *output = read_file(fixture.out);
+    assert(!strstr(output, "deployment recovery"));
+    assert(!strstr(output, "whole guest runtime"));
+    assert(strstr(output, "warm start reconciled Docker networking"));
+    free(output);
+    ssh_clients_reaped();
+}
+
 /* A crash can leave a transaction that the helper's begin refuses. The
  * reconciliation of a cold start recovers it before its begin and succeeds,
- * so the start needs no repair: none of the full refresh's steps runs. */
-static void reconcile_recovers_a_leftover_transaction(void)
+ * so the start needs no repair. Because the recovery changed the guest, and
+ * on an image without the durable commit the crash may also have lost the
+ * last deployment's writes, the whole runtime is configured again inside the
+ * reconciliation's own transaction: x86_64 translation, the image check,
+ * containerd and Docker, each once. Only the refresh's cloud-init wait,
+ * which a disk past its first boot does not need, is left out. */
+static void reconcile_recovers_a_leftover_and_applies_the_whole_runtime(void)
 {
     struct vm_state state;
     leave_a_transaction(&state);
@@ -508,18 +538,20 @@ static void reconcile_recovers_a_leftover_transaction(void)
     assert(!leftover_exists());
     assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
     assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
+    assert(ssh_calls("configure-rosetta disable") == 1);
+    assert(ssh_calls("verify-image-contract") == 1);
+    assert(ssh_calls("configure-containerd") == 1);
     assert(ssh_calls("configure-docker") == 1);
     assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
     assert(ssh_calls(TRANSACTION_HELPER " rollback") == 0);
-    assert(ssh_calls("cloud-init") == 0 && ssh_calls("configure-rosetta") == 0 &&
-           ssh_calls("verify-image-contract") == 0 &&
-           ssh_calls("configure-containerd") == 0);
+    assert(ssh_calls("cloud-init") == 0);
     assert(!guest_deployment_cleanup_pending());
     fflush(NULL);
     char *output = read_file(fixture.out);
     assert(strstr(output, "deployment recovery: discarded deployment backup "
                           "0123456789abcdef0123456789abcdef (phase not ready)"));
-    assert(strstr(output, "warm start reconciled Docker networking"));
+    assert(strstr(output, "applying the whole guest runtime configuration"));
+    assert(strstr(output, "warm start applied the whole guest runtime"));
     assert(!strstr(output, "has no ready backup"));
     assert(!strstr(output, "cannot create a safe guest runtime"));
     assert(!strstr(output, "reconciliation failed"));
@@ -717,9 +749,12 @@ int main(int argc, char **argv)
     run_case("hang_in_cleanup_after_cancellation_ends_at_the_budget",
              hang_in_cleanup_after_cancellation_ends_at_the_budget,
              API_ANSWERS, READY_MS + WATCHDOG_EXTRA_MS);
-    run_case("reconcile_recovers_a_leftover_transaction",
-             reconcile_recovers_a_leftover_transaction, API_ANSWERS,
+    run_case("reconcile_without_a_leftover_configures_docker_only",
+             reconcile_without_a_leftover_configures_docker_only, API_ANSWERS,
              READY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reconcile_recovers_a_leftover_and_applies_the_whole_runtime",
+             reconcile_recovers_a_leftover_and_applies_the_whole_runtime,
+             API_ANSWERS, READY_MS + VERIFY_MS + WATCHDOG_EXTRA_MS);
     run_case("reconcile_begins_nothing_when_recovery_fails",
              reconcile_begins_nothing_when_recovery_fails, API_ANSWERS,
              WATCHDOG_EXTRA_MS);
