@@ -103,7 +103,7 @@ fn cancel_preserves_query(workspace: &str, command: &str, key: &[u8; 1], title: 
     assert!(!harness.text().contains(title), "{}", harness.text());
     assert!(!harness.text().contains("outside"), "{}", harness.text());
     // The filter and selected row must survive, including after the fresh query.
-    harness.send(b"d", "Confirm delete");
+    harness.send(b"\x04", "Confirm delete"); // Ctrl+D
     assert!(harness.text().contains("row-two"), "{}", harness.text());
     assert!(harness.text().contains("explicit"), "{}", harness.text());
     assert!(!harness.calls().iter().any(|(_, args)| has(args, "delete") || has(args, "rm")), "{:?}", harness.calls());
