@@ -1,8 +1,9 @@
+use crate::tui_theme::{self as theme, Tone};
 use crate::{preferences::Workspace, tui_state::State};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
-    style::{Color, Style},
+    style::{Modifier, Style},
     widgets::{Block, Cell, Row, Table, TableState},
 };
 use serde_json::Value;
@@ -21,7 +22,14 @@ fn text(value: &Value) -> String {
             .as_str(),
     )
 }
-pub fn draw(frame: &mut Frame, area: Rect, state: &State, title: String) {
+/// Docker IDs are shown as the CLI shows them by default: 12 hexadecimal
+/// digits without the digest algorithm. Rows keep the full ID, which
+/// selection and actions use.
+fn short_id(id: String) -> String {
+    let id = id.strip_prefix("sha256:").map(String::from).unwrap_or(id);
+    id.chars().take(12).collect()
+}
+pub fn draw(frame: &mut Frame, area: Rect, state: &State, block: Block<'static>) {
     let invocation = state.native.as_ref().unwrap();
     let columns: &[&str] = if invocation.workspace == Workspace::Kubernetes {
         kube_columns(invocation.resource.as_deref().unwrap_or(""))
@@ -46,43 +54,137 @@ pub fn draw(frame: &mut Frame, area: Rect, state: &State, title: String) {
         .unwrap_or(0)
         .saturating_sub(visible.saturating_sub(1));
     let now = jiff::Timestamp::now();
-    let rows: Vec<Row> = state
+    let resource = invocation.resource.as_deref().unwrap_or("");
+    // Rows of a failed refresh are dimmed: their states may be old.
+    let stale = state.showing_stale_rows();
+    let cells: Vec<(Vec<String>, Tone)> = state
         .rows()
         .into_iter()
         .skip(offset)
         .take(visible)
         .map(|row| {
-            let fields: Vec<Cell> = if invocation.workspace == Workspace::Kubernetes {
-                kube_fields(row, invocation.resource.as_deref().unwrap_or(""), now)
-                    .into_iter()
-                    .map(Cell::from)
-                    .collect()
+            if invocation.workspace == Workspace::Kubernetes {
+                (kube_fields(row, resource, now), kube_tone(row, resource))
             } else {
-                columns
+                let fields = columns
                     .iter()
                     .map(|name| {
-                        Cell::from(text(if *name == "Status" && row[name].is_null() {
+                        let value = text(if *name == "Status" && row[name].is_null() {
                             &row["State"]
                         } else {
                             &row[name]
-                        }))
+                        });
+                        if *name == "ID" { short_id(value) } else { value }
                     })
-                    .collect()
-            };
-            Row::new(fields)
+                    .collect();
+                (fields, docker_tone(row, resource))
+            }
         })
         .collect();
-    let widths: Vec<_> = columns.iter().map(|_| Constraint::Fill(1)).collect();
+    // Columns share the width in proportion to what they show, as k9s
+    // sizes them to their content.
+    let widths: Vec<_> = columns
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let content = cells
+                .iter()
+                .map(|(fields, _)| fields.get(index).map_or(0, |f| f.chars().count()))
+                .max()
+                .unwrap_or(0);
+            Constraint::Fill(content.max(name.len()).clamp(4, 60) as u16)
+        })
+        .collect();
+    let rows: Vec<Row> = cells
+        .into_iter()
+        .map(|(fields, tone)| {
+            Row::new(fields.into_iter().map(Cell::from).collect::<Vec<_>>()).style(if stale {
+                theme::dim()
+            } else {
+                theme::tone(tone)
+            })
+        })
+        .collect();
     let table = Table::new(rows, widths)
-        .header(Row::new(columns.iter().copied()).style(Style::default().fg(Color::DarkGray)))
-        .block(Block::bordered().title(title))
-        .row_highlight_style(Style::default().fg(Color::Cyan))
+        .header(
+            Row::new(columns.iter().map(|name| name.to_uppercase()))
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .block(block)
+        .row_highlight_style(theme::badge(invocation.workspace))
         .highlight_symbol("> ");
     frame.render_stateful_widget(
         table,
         area,
         &mut TableState::default().with_selected(state.selected.map(|index| index - offset)),
     );
+}
+/// How a Docker row reads: health and exit codes are in its status text.
+fn docker_tone(row: &Value, resource: &str) -> Tone {
+    let status = row["Status"].as_str().unwrap_or("");
+    match resource {
+        "containers" => match row["State"].as_str().unwrap_or("") {
+            "running" if status.contains("(unhealthy)") => Tone::Failed,
+            "running" if status.contains("(health: starting)") => Tone::Pending,
+            "running" => Tone::Normal,
+            "exited" if status.starts_with("Exited (0)") => Tone::Done,
+            "exited" | "dead" => Tone::Failed,
+            "created" | "paused" | "restarting" | "removing" => Tone::Pending,
+            _ => Tone::Normal,
+        },
+        "projects" if status.contains("restarting") => Tone::Pending,
+        "projects" if !status.contains("running") => Tone::Done,
+        _ => Tone::Normal,
+    }
+}
+/// How a Kubernetes row reads, from the same fields its columns show.
+fn kube_tone(row: &Value, resource: &str) -> Tone {
+    match resource {
+        "pods" | "pod" | "po" => {
+            let statuses = row["status"]["containerStatuses"].as_array();
+            let all_ready = statuses.is_some_and(|s| s.iter().all(|s| s["ready"] == true));
+            match pod_reason(row).as_str() {
+                "Running" if all_ready => Tone::Normal,
+                "Running" | "Pending" | "ContainerCreating" | "PodInitializing" | "Terminating" => {
+                    Tone::Pending
+                }
+                "Succeeded" | "Completed" => Tone::Done,
+                reason
+                    if reason.starts_with("Init:")
+                        && !reason.contains("Err")
+                        && !reason.contains("BackOff") =>
+                {
+                    Tone::Pending
+                }
+                _ => Tone::Failed,
+            }
+        }
+        "events" | "event" | "ev" if row["type"] == "Warning" => Tone::Pending,
+        "nodes" | "node" | "no" => {
+            let fields = kube_fields(row, resource, jiff::Timestamp::UNIX_EPOCH);
+            if fields[2] != "True" {
+                Tone::Failed
+            } else if !fields[3].is_empty() {
+                Tone::Pending
+            } else {
+                Tone::Normal
+            }
+        }
+        "deployments" | "deployment" | "deploy" | "statefulsets" | "statefulset" | "sts"
+        | "daemonsets" | "daemonset" | "ds" => {
+            let fields = kube_fields(row, resource, jiff::Timestamp::UNIX_EPOCH);
+            match fields[2].split_once('/') {
+                Some((ready, desired)) if ready != desired => Tone::Pending,
+                _ => Tone::Normal,
+            }
+        }
+        _ => match row["status"]["phase"].as_str().unwrap_or("") {
+            "Pending" | "Terminating" => Tone::Pending,
+            "Failed" | "Lost" | "Unknown" => Tone::Failed,
+            "Succeeded" => Tone::Done,
+            _ => Tone::Normal,
+        },
+    }
 }
 fn kube_columns(resource: &str) -> &'static [&'static str] {
     match resource {
@@ -263,7 +365,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 10)).unwrap();
         terminal
-            .draw(|frame| draw(frame, frame.area(), &state, "pods".into()))
+            .draw(|frame| draw(frame, frame.area(), &state, Block::bordered().title("pods")))
             .unwrap();
         let rendered: String = terminal
             .backend()
@@ -277,7 +379,7 @@ mod tests {
         state.filter = "pod000".into();
         state.selected = Some(9);
         terminal
-            .draw(|frame| draw(frame, frame.area(), &state, "filtered".into()))
+            .draw(|frame| draw(frame, frame.area(), &state, Block::bordered().title("filtered")))
             .unwrap();
         let rendered: String = terminal
             .backend()
@@ -324,6 +426,69 @@ mod tests {
         );
     }
     #[test]
+    fn row_tones_follow_the_state_each_resource_reports() {
+        let container = |state: &str, status: &str| serde_json::json!({"State": state, "Status": status});
+        for (row, tone) in [
+            (container("running", "Up 2 hours"), Tone::Normal),
+            (container("running", "Up 2 hours (unhealthy)"), Tone::Failed),
+            (container("running", "Up 3 seconds (health: starting)"), Tone::Pending),
+            (container("exited", "Exited (0) 1 hour ago"), Tone::Done),
+            (container("exited", "Exited (137) 1 hour ago"), Tone::Failed),
+            (container("restarting", "Restarting (1) 2 seconds ago"), Tone::Pending),
+            (container("dead", ""), Tone::Failed),
+        ] {
+            assert_eq!(docker_tone(&row, "containers"), tone, "{row}");
+        }
+        assert_eq!(docker_tone(&serde_json::json!({"Status": "exited(2)"}), "projects"), Tone::Done);
+        assert_eq!(docker_tone(&serde_json::json!({"Status": "running(2)"}), "projects"), Tone::Normal);
+        assert_eq!(docker_tone(&serde_json::json!({"Size": "1GB"}), "images"), Tone::Normal);
+        let pod = |phase: &str, ready: bool, waiting: Option<&str>| {
+            let mut status = serde_json::json!({"ready": ready});
+            if let Some(reason) = waiting {
+                status["state"] = serde_json::json!({"waiting": {"reason": reason}});
+            }
+            serde_json::json!({"spec": {"containers": [{}]}, "status": {"phase": phase, "containerStatuses": [status]}})
+        };
+        for (row, tone) in [
+            (pod("Running", true, None), Tone::Normal),
+            (pod("Running", false, None), Tone::Pending),
+            (pod("Pending", false, Some("ContainerCreating")), Tone::Pending),
+            (pod("Running", false, Some("CrashLoopBackOff")), Tone::Failed),
+            (pod("Pending", false, Some("ImagePullBackOff")), Tone::Failed),
+            (pod("Succeeded", false, None), Tone::Done),
+            (pod("Failed", false, None), Tone::Failed),
+        ] {
+            assert_eq!(kube_tone(&row, "pods"), tone, "{row}");
+        }
+        let deployment = |ready: u64| serde_json::json!({"spec": {"replicas": 3}, "status": {"readyReplicas": ready}});
+        assert_eq!(kube_tone(&deployment(3), "deployments"), Tone::Normal);
+        assert_eq!(kube_tone(&deployment(1), "deployments"), Tone::Pending);
+        let node = |ready: &str, pressure: &str| serde_json::json!({"status": {"conditions": [
+            {"type": "Ready", "status": ready}, {"type": "DiskPressure", "status": pressure}]}});
+        assert_eq!(kube_tone(&node("True", "False"), "nodes"), Tone::Normal);
+        assert_eq!(kube_tone(&node("True", "True"), "nodes"), Tone::Pending);
+        assert_eq!(kube_tone(&node("False", "False"), "nodes"), Tone::Failed);
+        assert_eq!(kube_tone(&serde_json::json!({"type": "Warning"}), "events"), Tone::Pending);
+        assert_eq!(kube_tone(&serde_json::json!({"status": {"phase": "Bound"}}), "pvcs"), Tone::Normal);
+        assert_eq!(kube_tone(&serde_json::json!({"status": {"phase": "Lost"}}), "pvcs"), Tone::Failed);
+    }
+    #[test]
+    fn ids_are_shown_short_and_rows_keep_the_full_id() {
+        let full = "f".repeat(64);
+        assert_eq!(short_id(format!("sha256:{full}")), "f".repeat(12));
+        assert_eq!(short_id("abc".into()), "abc");
+        let mut state = State::new(Default::default());
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        state.data = serde_json::json!([{"ID": full, "Names": "web", "State": "running"}]);
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 8)).unwrap();
+        terminal
+            .draw(|f| draw(f, f.area(), &state, Block::bordered()))
+            .unwrap();
+        let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+        assert!(text.contains(&"f".repeat(12)) && !text.contains(&"f".repeat(13)), "{text}");
+        assert_eq!(state.selected().unwrap()["ID"], full);
+    }
+    #[test]
     fn resource_tables_display_cli_fields_and_keep_literal_untrusted_text() {
         let mut state = State::new(Default::default());
         state.native = Some(crate::native::parse("ps", &state).unwrap());
@@ -331,7 +496,7 @@ mod tests {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 12)).unwrap();
         terminal
-            .draw(|f| draw(f, f.area(), &state, "docker ps".into()))
+            .draw(|f| draw(f, f.area(), &state, Block::bordered().title("docker ps")))
             .unwrap();
         let text: String = terminal
             .backend()
@@ -341,7 +506,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         for value in [
-            "ID", "Names", "Image", "Status", "Ports", "web", "nginx", "8080",
+            "ID", "NAMES", "IMAGE", "STATUS", "PORTS", "web", "nginx", "8080",
         ] {
             assert!(text.contains(value));
         }
@@ -365,7 +530,7 @@ mod tests {
         ] {
             state.native = Some(crate::native::parse(&format!("ps {flags}"), &state).unwrap());
             terminal
-                .draw(|f| draw(f, f.area(), &state, "containers".into()))
+                .draw(|f| draw(f, f.area(), &state, Block::bordered().title("containers")))
                 .unwrap();
             let text: String = terminal
                 .backend()
@@ -374,7 +539,7 @@ mod tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect();
-            assert_eq!(text.contains("Size"), visible, "{flags}");
+            assert_eq!(text.contains("SIZE"), visible, "{flags}");
             assert_eq!(text.contains("42B"), visible, "{flags}");
         }
     }

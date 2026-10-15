@@ -125,6 +125,14 @@ int guest_deployment_is_current(const struct profile *profile)
            memcmp(actual, expected, offset) == 0 ? 1 : 0;
 }
 
+int guest_deployment_forget(const struct profile *profile)
+{
+    char path[PATH_MAX];
+    if (!profile_path(profile, GUEST_DEPLOYMENT_MARKER, path, sizeof(path)))
+        return -1;
+    return fs_unlink_if_exists(path);
+}
+
 int guest_deployment_mark_current(const struct profile *profile)
 {
     char text[256];

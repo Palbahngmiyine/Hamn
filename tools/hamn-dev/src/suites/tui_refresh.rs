@@ -85,7 +85,7 @@ fn automatic_refresh_keeps_the_screen() {
     // The displayed rows remain actionable; the action cancels the refresh.
     harness.send(b"\r", "ACTION_DONE");
     harness.until("Exit code 0");
-    assert!(!harness.text().contains("refresh before acting"), "{}", harness.text());
+    assert!(!harness.text().contains("Refresh before acting"), "{}", harness.text());
     let inspected = harness
         .calls()
         .into_iter()
@@ -99,8 +99,9 @@ fn stopped_vm_shows_start_guidance() {
     select_peer(&harness.root, "docker", "tui-refresh");
     fail_queries(&harness.root, "unreachable");
     // Without a readable default profile no VM state explains the failure,
-    // so the CLI error stays visible.
-    harness.until("dockerUnreachable: docker exited");
+    // so the CLI error stays visible, as one line without its code.
+    harness.until("Cannot connect to the Docker daemon at unix://");
+    assert!(!harness.text().contains("dockerUnreachable"), "{}", harness.text());
     assert!(!harness.text().contains("Press s to start it"), "{}", harness.text());
     // An existing, stopped profile reports its state to the next refresh.
     stopped_profile(&harness.root);
@@ -111,7 +112,7 @@ fn stopped_vm_shows_start_guidance() {
     harness.wait(|harness| docker_queries(harness) >= first + 3);
     let text = harness.text();
     for hidden in
-        ["cliError", "dockerUnreachable", "Cannot connect", "old-target-row", "retry backoff", "previous data may be stale"]
+        ["cliError", "dockerUnreachable", "Cannot connect", "old-target-row", "retry backoff", "[stale]", "(! details)"]
     {
         assert!(!text.contains(hidden), "{hidden}: {text}");
     }
@@ -136,15 +137,17 @@ fn stopped_vm_keeps_errors_that_starting_it_cannot_fix() {
     select_peer(&harness.root, "docker", "tui-refresh");
     stopped_profile(&harness.root);
     for (mode, shown) in [
-        ("usage", "cliError: docker exited exit status: 125: unknown flag: --bogus-flag"),
-        ("unknown-command", "cliError: docker exited exit status: 1: docker: unknown command: docker compose"),
-        ("overflow", "cliError: CLI output exceeds 16 MiB"),
+        ("usage", "docker: unknown flag: --bogus-flag"),
+        ("unknown-command", "docker: unknown command: docker compose"),
+        ("overflow", "CLI output exceeds 16 MiB"),
     ] {
         fail_queries(&harness.root, mode);
         harness.write(b"R");
         harness.until(shown);
         let text = harness.text();
         assert!(!text.contains("Press s to start it") && !text.contains("Waiting for the Hamn VM"), "{mode}: {text}");
+        // What the CLI printed after the error stays in the details (!).
+        assert!(!text.contains("Usage:") && !text.contains("cliError") && text.contains("(! details)"), "{mode}: {text}");
     }
     // The same stopped VM explains a daemon the CLI could not reach.
     fail_queries(&harness.root, "unreachable");
@@ -269,9 +272,9 @@ fn installed_docker_connection_failures(docker: &Path) {
     let text = harness.text();
     assert!(!text.contains("engine-row") && !text.contains("error during connect"), "{text}");
     // A usage error needs no daemon and keeps its CLI message.
-    harness.send(b":ps --bogus-flag\r", "unknown flag: --bogus-flag");
+    harness.send(b":ps --bogus-flag\r", "docker: unknown flag: --bogus-flag");
     let text = harness.text();
-    assert!(text.contains("cliError: docker exited exit status: 125"), "{text}");
+    assert!(!text.contains("Usage:") && !text.contains("cliError"), "{text}");
     assert!(!text.contains("Press s to start it"), "{text}");
 }
 

@@ -60,14 +60,22 @@ int ssh_exec_bounded_shown(const struct profile *p, const char *ip,
                            unsigned timeout_ms);
 int ssh_exec_capture(const struct profile *p, const char *ip,
                      const char *const remote_argv[], char *out, size_t cap);
+/* Bounded like ssh_exec_bounded, with the client's stdout and stderr
+ * together in out (cap bytes, NUL-terminated, cut to fit, trailing line
+ * ends removed). Returns the exit status, PROC_RUN_TIMEOUT when the
+ * deadline ended the client, 130 when cancelled, or -1. */
+int ssh_exec_capture_bounded(const struct profile *p, const char *ip,
+                             const char *const remote_argv[], char *out,
+                             size_t cap, unsigned timeout_ms);
 int ssh_exec_capture_checked(const struct profile *p, const char *ip,
                              const char *const remote_argv[], char *out,
                              size_t cap, int *truncated);
-/* ssh_exec_capture_checked with ssh_exec_bounded's deadline. A timeout
- * returns PROC_RUN_TIMEOUT with what was captured until then. */
-int ssh_exec_capture_bounded(const struct profile *p, const char *ip,
-                             const char *const remote_argv[], char *out,
-                             size_t cap, int *truncated, unsigned timeout_ms);
+/* ssh_exec_capture_bounded that also sets *truncated (when not NULL) to 1
+ * when out was too small. A timeout keeps what was captured until then. */
+int ssh_exec_capture_bounded_checked(const struct profile *p, const char *ip,
+                                     const char *const remote_argv[],
+                                     char *out, size_t cap, int *truncated,
+                                     unsigned timeout_ms);
 
 /*
  * A guest command that the guest itself bounds runs under

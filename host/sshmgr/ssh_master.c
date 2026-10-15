@@ -271,6 +271,18 @@ int ssh_exec_bounded(const struct profile *p, const char *ip,
                        timeout_ms);
 }
 
+int ssh_exec_capture_bounded(const struct profile *p, const char *ip,
+                             const char *const remote_argv[], char *out,
+                             size_t cap, unsigned timeout_ms)
+{
+    if (!timeout_ms || !out || !cap) {
+        errno = EINVAL;
+        return -1;
+    }
+    out[0] = '\0';
+    return exec_remote(p, ip, remote_argv, out, cap, NULL, timeout_ms);
+}
+
 int ssh_exec_bounded_shown(const struct profile *p, const char *ip,
                            const char *const remote_argv[],
                            unsigned timeout_ms)
@@ -295,13 +307,15 @@ int ssh_exec_capture_checked(const struct profile *p, const char *ip,
     return exec_remote(p, ip, remote_argv, out, cap, truncated, 0);
 }
 
-int ssh_exec_capture_bounded(const struct profile *p, const char *ip,
-                             const char *const remote_argv[], char *out,
-                             size_t cap, int *truncated, unsigned timeout_ms)
+int ssh_exec_capture_bounded_checked(const struct profile *p, const char *ip,
+                                     const char *const remote_argv[],
+                                     char *out, size_t cap, int *truncated,
+                                     unsigned timeout_ms)
 {
-    if (!timeout_ms || !out) {
+    if (!timeout_ms || !out || !cap) {
         errno = EINVAL;
         return -1;
     }
+    out[0] = '\0';
     return exec_remote(p, ip, remote_argv, out, cap, truncated, timeout_ms);
 }

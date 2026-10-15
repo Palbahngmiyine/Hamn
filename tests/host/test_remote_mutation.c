@@ -63,10 +63,10 @@ int ssh_exec_bounded_shown(const struct profile *p, const char *ip,
     return fake_ssh(argv);
 }
 
-int ssh_exec_capture_bounded(const struct profile *p, const char *ip,
-                             const char *const argv[], char *out,
-                             size_t capacity, int *truncated,
-                             unsigned timeout_ms)
+int ssh_exec_capture_bounded_checked(const struct profile *p, const char *ip,
+                                     const char *const argv[], char *out,
+                                     size_t capacity, int *truncated,
+                                     unsigned timeout_ms)
 {
     (void)p; (void)ip;
     assert(capture && calls == 0 && timeout_ms == writer_client_ms(120, 120));

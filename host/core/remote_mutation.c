@@ -73,8 +73,8 @@ int remote_mutation_run(const struct profile *profile, const char *ip,
      * still be queued, running or finished, so it is fenced and settled. */
     unsigned client_ms = SSH_REMOTE_CLIENT_MS(total_seconds);
     int rc = output ?
-        ssh_exec_capture_bounded(profile, ip, wrapped, output, capacity,
-                                 truncated, client_ms) :
+        ssh_exec_capture_bounded_checked(profile, ip, wrapped, output,
+                                         capacity, truncated, client_ms) :
         ssh_exec_bounded_shown(profile, ip, wrapped, client_ms);
     if (rc != 0) {
         int cancelled = proc_cancelled();
