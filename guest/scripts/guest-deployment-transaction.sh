@@ -110,21 +110,33 @@ validate_item_type() {
     esac
 }
 
-# A published phase is exactly the bytes "ready\n". A missing, empty or
-# zero-filled phase (a crash can leave any of them) is not ready, and its
-# backup is never restored. Bytes are compared because command substitution
-# would drop NULs. Returns 0 when ready, 1 when not, and 2 when the phase
-# cannot be read: its backup may be ready, so it is neither restored nor
-# treated as not ready.
-phase_is_ready() {
+# Prints the state of a phase file. Only "ready" is restored.
+#   ready       exactly the bytes "ready\n", which begin publishes by rename.
+#   absent      never published, or removed by retirement.
+#   zero-filled the six bytes of a published phase read back as zeros: a
+#               crash lost the phase's removal after its freed block was
+#               discarded. Removal follows a decided commit or rollback, or a
+#               failed begin, so nothing is left to roll back.
+#   unreadable  its backup may be ready, so it is neither restored nor removed.
+#   unsafe      a symlink or not a regular file.
+#   damaged     any other bytes: no helper writes them, so they prove nothing.
+# Bytes are compared because command substitution would drop NULs.
+phase_state() {
     local phase=$1 bytes
-    [ -f "$phase" ] && [ ! -L "$phase" ] || return 1
-    bytes=$(head -c 7 -- "$phase" | od -An -tx1 | tr -d ' \n') || return 2
-    [ "$bytes" = 72656164790a ]
+    if [ -L "$phase" ]; then echo unsafe; return; fi
+    if [ ! -e "$phase" ]; then echo absent; return; fi
+    if [ ! -f "$phase" ]; then echo unsafe; return; fi
+    bytes=$(head -c 7 -- "$phase" | od -An -tx1 | tr -d ' \n') ||
+        { echo unreadable; return; }
+    case "$bytes" in
+        72656164790a) echo ready ;;
+        000000000000) echo zero-filled ;;
+        *) echo damaged ;;
+    esac
 }
 
 refuse_pending_transaction() {
-    local entry name ready=0
+    local entry name state
     local -a entries
     shopt -s nullglob dotglob
     entries=("$TRANSACTION_ROOT"/*)
@@ -136,20 +148,27 @@ refuse_pending_transaction() {
            [ ! -d "$entry" ] || [ -L "$entry" ] || [ ! -O "$entry" ]; then
             fail "transaction root contains an unsafe entry; inspect $TRANSACTION_ROOT"
         fi
-        phase_is_ready "$entry/phase" || ready=$?
-        [ "$ready" -ne 2 ] ||
-            fail "cannot read the phase of deployment transaction $name; inspect $entry"
-        if [ "$ready" -eq 0 ]; then
-            fail "pending deployment transaction $name exists at $entry; "\
+        state=$(phase_state "$entry/phase")
+        case "$state" in
+            ready)
+                fail "pending deployment transaction $name exists at $entry; "\
 "recover it before retrying: sudo bash $RECOVERY_SCRIPT "\
 "rollback $name"
-        fi
-        if [ -L "$entry/phase" ] ||
-           { [ -e "$entry/phase" ] && [ ! -f "$entry/phase" ]; }; then
-            fail "deployment transaction $name has an unsafe phase; inspect $entry"
-        fi
-        fail "deployment transaction $name at $entry has no ready backup; "\
-"it is never restored, and deployment recovery discards it"
+                ;;
+            absent|zero-filled)
+                fail "deployment transaction $name at $entry has no ready backup; "\
+"it is never restored, and deployment recovery discards it (phase $state)"
+                ;;
+            unreadable)
+                fail "cannot read the phase of deployment transaction $name; inspect $entry"
+                ;;
+            unsafe)
+                fail "deployment transaction $name has an unsafe phase; inspect $entry"
+                ;;
+            *)
+                fail "deployment transaction $name has a damaged phase; inspect $entry"
+                ;;
+        esac
     }
 }
 
@@ -162,10 +181,16 @@ begin_transaction() {
     cleanup_begin() {
         local rc=$?
         if [ "$cleanup_incomplete" -eq 1 ]; then
-            # A phase published before a failed barrier goes first, so a
-            # partial removal is discarded rather than restored.
-            rm -f -- "$TRANSACTION/phase" || true
-            rm -rf -- "$TRANSACTION" || true
+            # A phase published before a failed barrier is removed durably
+            # first, as in retirement, so a partial removal is discarded
+            # rather than restored. Otherwise the backup stays for recovery,
+            # which restores it only while it is ready and intact.
+            if rm -f -- "$TRANSACTION/phase" && sync -- "$TRANSACTION"; then
+                rm -rf -- "$TRANSACTION" || true
+            else
+                echo "hamn: guest deployment transaction: left $TRANSACTION" \
+                    "for deployment recovery" >&2
+            fi
         fi
         exit "$rc"
     }
@@ -233,7 +258,6 @@ begin_transaction() {
 }
 
 load_transaction() {
-    local ready=0
     [ -d "$TRANSACTION" ] && [ ! -L "$TRANSACTION" ] ||
         fail "transaction does not exist"
     [ -O "$TRANSACTION" ] || fail "transaction has the wrong owner"
@@ -241,12 +265,13 @@ load_transaction() {
         fail "transaction data is unsafe"
     [ -d "$TRANSACTION/meta" ] && [ ! -L "$TRANSACTION/meta" ] ||
         fail "transaction metadata is unsafe"
-    [ ! -L "$TRANSACTION/phase" ] &&
-        { [ ! -e "$TRANSACTION/phase" ] || [ -f "$TRANSACTION/phase" ]; } ||
-        fail "transaction phase is unsafe"
-    phase_is_ready "$TRANSACTION/phase" || ready=$?
-    [ "$ready" -ne 2 ] || fail "cannot read the transaction phase"
-    [ "$ready" -eq 0 ] || fail "transaction is incomplete"
+    case "$(phase_state "$TRANSACTION/phase")" in
+        ready) ;;
+        absent|zero-filled) fail "transaction is incomplete" ;;
+        unreadable) fail "cannot read the transaction phase" ;;
+        unsafe) fail "transaction phase is unsafe" ;;
+        *) fail "transaction phase is damaged" ;;
+    esac
 }
 
 # Make each protected item, and the directory that holds it, durable. find(1)

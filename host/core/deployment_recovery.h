@@ -16,15 +16,22 @@
  * restored:
  *   - exactly the bytes "ready\n": the backup is complete. systemd's start
  *     limits are cleared, then the helper restores and removes the backup.
- *   - missing, or a regular file holding anything else (empty, or
- *     zero-filled after a crash): the backup was never published, or commit
- *     or rollback had already retired it. Its begin changes nothing outside
- *     the entry and the host changes the guest only after begin publishes
- *     ready durably, so there is nothing to roll back. The entry is removed,
- *     the removal is made durable, and one line on stderr names it. Images
- *     before 0.1.1 published ready without fsync, so after a crash their
- *     empty phase can accompany applied changes; that backup cannot be
- *     restored either, and the start that follows redeploys over them.
+ *   - missing: the backup was never published, or commit or rollback had
+ *     already retired it. Its begin changes nothing outside the entry and
+ *     the host changes the guest only after begin publishes ready durably,
+ *     so there is nothing to roll back.
+ *   - exactly six zero bytes: a published phase whose removal a crash lost
+ *     after its freed block was discarded (observed with the guest root's
+ *     `discard` mount option). The phase is removed only after commit or
+ *     rollback decided the outcome, or by a failed begin, so there is
+ *     nothing to roll back either.
+ *   In both cases the entry is removed, the removal is made durable, and one
+ *   line on stderr names it.
+ *   - any other bytes (empty, truncated or foreign): no helper writes them
+ *     since 0.1.1, so they cannot show that the guest was left unchanged.
+ *     Images before 0.1.1 published ready without fsync, so an empty phase
+ *     there can accompany applied changes. Refused and kept; the message
+ *     names the entry and how to keep the current guest runtime.
  *   - a symlink or other non-regular file: refused.
  *   - a phase that cannot be read: refused. Its backup may be ready, so it
  *     is neither restored nor discarded.
@@ -33,10 +40,10 @@
  * that was not ready was discarded, or because the single ready backup was
  * rolled back and removed. Nonzero, with a reason on stderr: the root is
  * unsafe, more than one entry exists, the entry is not an owned 32-hex
- * directory, its phase is unsafe or unreadable, removing a discarded entry
- * failed, clearing systemd's start-limit state failed (before any restore),
- * or the rollback failed or left its backup behind (the helper retains the
- * backup for another attempt).
+ * directory, its phase is unsafe, unreadable or damaged, removing a
+ * discarded entry failed, clearing systemd's start-limit state failed
+ * (before any restore), or the rollback failed or left its backup behind
+ * (the helper retains the backup for another attempt).
  */
 #define DEPLOYMENT_RECOVERY_SCRIPT \
     "set -euo pipefail; shopt -s nullglob dotglob; root=$1; helper=$2; " \
@@ -58,7 +65,11 @@
     "bytes=$(head -c 7 \"$phase\" | od -An -tx1 | tr -d ' \\n') || " \
     "{ echo \"cannot read deployment backup phase; inspect $entry\" >&2; " \
     "exit 1; }; " \
-    "state='not ready'; test \"$bytes\" != 72656164790a || state=ready; fi; " \
+    "case $bytes in 72656164790a) state=ready ;; " \
+    "000000000000) state=zero-filled ;; " \
+    "*) echo \"damaged deployment backup phase; neither restored nor " \
+    "discarded: inspect $entry, and remove it to keep the current guest " \
+    "runtime\" >&2; exit 1 ;; esac; fi; " \
     "if test \"$state\" != ready; then " \
     "rm -rf -- \"$entry\"; sync -- \"$root\"; " \
     "echo \"discarded deployment backup $token (phase $state): it was never " \

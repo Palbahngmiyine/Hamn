@@ -98,10 +98,25 @@ static int recover(const char *extra)
     return run(argv, extra);
 }
 
+/* Runs the helper's begin; `extra` is FAIL_SYNC_AT=... or NULL. */
+static int begin_with(const char *token, const char *extra)
+{
+    write_file(sync_log, "", 0600);
+    const char *argv[] = { "bash", HELPER, "begin", token, NULL };
+    return run(argv, extra);
+}
+
 static void begin(const char *token)
 {
-    const char *argv[] = { "bash", HELPER, "begin", token, NULL };
-    assert(run(argv, NULL) == 0);
+    assert(begin_with(token, NULL) == 0);
+}
+
+/* Removes the entry of `token`, as an operator would after inspecting it. */
+static void remove_entry(const char *token)
+{
+    char command[PATH_MAX + 64];
+    snprintf(command, sizeof(command), "rm -rf '%s/%s'", transactions, token);
+    assert(system(command) == 0);
 }
 
 /* Runs the helper's commit; `extra` is FAIL_SYNC_AT=N or NULL. */
@@ -191,12 +206,14 @@ int main(void)
         "esac\nexit 0\n", 0755);
     snprintf(fixture, sizeof(fixture), "%s/bin/sysctl", base);
     write_file(fixture, "#!/bin/bash\nexit 0\n", 0755);
-    /* One line of operands per sync(1) call; FAIL_SYNC_AT=N fails the Nth. */
+    /* One line of operands per sync(1) call; FAIL_SYNC_AT="N [M ...]" fails
+     * the Nth (and Mth) call. */
     snprintf(fixture, sizeof(fixture), "%s/bin/sync", base);
     write_file(fixture,
         "#!/bin/bash\nprintf '%s\\n' \"$*\" >>\"$SYNC_LOG\"\n"
-        "test \"$(wc -l <\"$SYNC_LOG\")\" -ne \"${FAIL_SYNC_AT:-0}\" || "
-        "{ echo 'injected durability failure' >&2; exit 1; }\n", 0755);
+        "call=$(wc -l <\"$SYNC_LOG\" | tr -d ' ')\n"
+        "case \" ${FAIL_SYNC_AT:-} \" in *\" $call \"*) "
+        "echo 'injected durability failure' >&2; exit 1 ;; esac\n", 0755);
 
     /* No transaction root, or an empty one: nothing to recover. */
     reset();
@@ -265,21 +282,38 @@ int main(void)
     assert(recover(NULL) == 0);
     assert_discarded("1123456789abcdef0123456789abcdef", "missing");
 
-    /* A complete backup whose phase a crash left zero-filled (observed after
-     * an ext4 shutdown lost the commit's removal), empty, foreign or with a
-     * trailing NUL, or whose phase is missing. The deployed runtime stays. */
+    /* A complete backup whose phase a crash left zero-filled: its removal
+     * was lost after the freed block was discarded (observed after an ext4
+     * shutdown lost the commit's removal). The deployed runtime stays. */
+    begin(TOKEN);
+    write_file(hamnd, "new", 0755);
+    write_phase(TOKEN, "\0\0\0\0\0\0", 6);
+    assert(recover(NULL) == 0);
+    assert_discarded(TOKEN, "zero-filled");
+    assert_hamnd("new");
+
+    /* Any other bytes no helper writes since 0.1.1 (empty, foreign, a
+     * trailing NUL or newline, or too few zeros): they cannot show the guest
+     * was left unchanged, so the backup is kept and neither restored nor
+     * discarded, and the message names the entry. */
     static const struct { const char *bytes; size_t size; } damaged[] = {
-        { "\0\0\0\0\0\0", 6 }, { "", 0 }, { "begin\n", 6 },
-        { "ready\0", 6 }, { "ready\n\n", 7 },
+        { "", 0 }, { "begin\n", 6 }, { "ready\0", 6 }, { "ready\n\n", 7 },
+        { "\0\0\0\0\0", 5 },
     };
     for (size_t index = 0; index < sizeof(damaged) / sizeof(damaged[0]); index++) {
+        write_file(hamnd, "old", 0755);
         begin(TOKEN);
         write_file(hamnd, "new", 0755);
         write_phase(TOKEN, damaged[index].bytes, damaged[index].size);
-        assert(recover(NULL) == 0);
-        assert_discarded(TOKEN, "not ready");
+        assert(recover(NULL) == 1 &&
+               strstr(error, "damaged deployment backup phase; neither restored "
+                             "nor discarded: inspect") &&
+               strstr(error, TOKEN));
+        assert(!strstr(error, "null byte"));
+        assert_no_systemctl();
         assert_hamnd("new");
-        write_file(hamnd, "old", 0755);
+        assert(exists(TOKEN));
+        remove_entry(TOKEN);
     }
     begin(TOKEN);
     write_file(hamnd, "new", 0755);
@@ -324,6 +358,17 @@ int main(void)
     assert(recover(NULL) == 0);
     assert_no_systemctl();
     assert_hamnd("new");
+
+    /* A begin whose last barrier fails, and whose phase removal cannot be
+     * made durable either, leaves its backup without a phase. The guest was
+     * never changed, and recovery discards the entry. */
+    write_file(hamnd, "old", 0755);
+    assert(begin_with(TOKEN, "FAIL_SYNC_AT=3 4") != 0 &&
+           strstr(error, "for deployment recovery"));
+    assert(exists(TOKEN));
+    assert(recover(NULL) == 0);
+    assert_discarded(TOKEN, "missing");
+    assert_hamnd("old");
 
     /* A phase that cannot be read (here: no read permission) may belong to a
      * ready backup: it is neither discarded nor restored. Once it reads
@@ -388,6 +433,7 @@ int main(void)
     snprintf(command, sizeof(command), "rm -rf '%s'", base);
     assert(system(command) == 0);
     puts("PASS: deployment recovery rolls back only a single ready backup, "
-         "retains it on failure and discards a backup that is not ready");
+         "retains it on failure, discards one whose phase is missing or "
+         "zero-filled and keeps one whose phase is damaged");
     return 0;
 }
