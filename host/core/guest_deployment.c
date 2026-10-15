@@ -225,11 +225,16 @@ int guest_deployment_recover(const struct profile *profile, const char *ip)
     recovery_complete = cleanup_pending = 0;
     const char *command[] = { "sudo", "bash", "-c", DEPLOYMENT_RECOVERY_SCRIPT,
         "--", "/var/lib/hamn/deployment-transactions",
-        GUEST_DEPLOYMENT_TRANSACTION_SCRIPT, NULL };
+        GUEST_DEPLOYMENT_TRANSACTION_SCRIPT, DEPLOYMENT_UNDURABLE_HELPERS,
+        NULL };
     char reason[4096] = {0};
     int truncated = 0;
     int rc = remote_mutation_run(profile, ip, 120, 120, command, reason,
                                  sizeof(reason), &truncated);
+    if (rc == 0 && reason[0])
+        /* A discarded backup that was not ready names itself. */
+        logmsg("deployment recovery: %s%s", reason,
+               truncated ? " (truncated)" : "");
     if (rc != 0)
         logerr("deployment recovery failed: %s%s",
                reason[0] ? reason : "guest connection or recovery interrupted",

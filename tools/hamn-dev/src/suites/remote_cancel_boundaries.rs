@@ -129,6 +129,7 @@ const RECOVER_PREFIX: &str = r#"
 #include <string.h>
 struct profile { int unused; };
 #define DEPLOYMENT_RECOVERY_SCRIPT "recover"
+#define DEPLOYMENT_UNDURABLE_HELPERS "old-a", "old-b"
 #define GUEST_DEPLOYMENT_TRANSACTION_SCRIPT "/helper"
 #define GUEST_DEPLOYMENT_READY_TIMEOUT_SEC 30
 static int recovery_complete, cleanup_pending;
@@ -157,7 +158,8 @@ static int remote_mutation_run(const struct profile *p, const char *ip, unsigned
  assert(!strcmp(command[0], "sudo") && !strcmp(command[1], "bash") && !strcmp(command[2], "-c"));
  assert(!strcmp(command[3], "recover") && !strcmp(command[4], "--"));
  assert(!strcmp(command[5], "/var/lib/hamn/deployment-transactions"));
- assert(!strcmp(command[6], "/helper") && command[7] == NULL);
+ assert(!strcmp(command[6], "/helper") && !strcmp(command[7], "old-a"));
+ assert(!strcmp(command[8], "old-b") && command[9] == NULL);
  if (++calls == 1) {
   assert(!depth);
   if (first_result == 130) cancelled = 1;
