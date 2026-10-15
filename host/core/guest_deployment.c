@@ -617,6 +617,13 @@ int guest_deployment_reconcile_runtime_locked(
         logerr("cannot reconcile guest runtime without a running VM address");
         return -1;
     }
+    /* begin refuses a transaction that a crash or an interrupted operation
+     * left behind. Recover it first, as a refresh does: the backup is rolled
+     * back or discarded, and Docker's settings are applied over either. A
+     * recovery that fails or is cancelled begins nothing and keeps its own
+     * cleanup_pending and recovery_complete. */
+    if (guest_deployment_recover(profile, state->ip) != 0)
+        return -1;
 
     char token[GUEST_DEPLOYMENT_TOKEN_CAP];
     deployment_token_generate(token);

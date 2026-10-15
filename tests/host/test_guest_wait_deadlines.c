@@ -8,9 +8,12 @@
  * `ssh` is this test executable, first in PATH. It answers control requests
  * (-O) with success, links a forwarded Docker socket to a fake Docker API,
  * and runs no remote command: the command succeeds, fails, is slow or hangs
- * as the case's environment asks. The fake Docker API answers _ping, or
- * accepts and never answers. The Makefile builds guest_deployment.c into this
- * test with readiness and image-check budgets of seconds. */
+ * as the case's environment asks. It can also stand for a guest with one
+ * deployment transaction that an earlier operation left: the helper's begin
+ * refuses while it exists, and the recovery command discards it. The fake
+ * Docker API answers _ping, or accepts and never answers. The Makefile builds
+ * guest_deployment.c into this test with readiness and image-check budgets
+ * of seconds. */
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -56,6 +59,10 @@
 /* The operation's process, sent SIGTERM when the hanging command starts, as
  * the TUI cancels its worker. */
 #define ENV_CANCEL "HAMN_TEST_FAKE_SSH_CANCEL_PID"
+/* A file that stands for the leftover transaction while it exists. */
+#define ENV_LEFTOVER "HAMN_TEST_FAKE_GUEST_LEFTOVER"
+#define RECOVERY_ROOT "/var/lib/hamn/deployment-transactions"
+#define TRANSACTION_HELPER "/usr/local/libexec/hamn/guest-deployment-transaction"
 
 static long long now_ms(void)
 {
@@ -152,6 +159,27 @@ static int fake_ssh(int argc, char **argv)
     }
     if (fake_matches(ENV_FAIL, command))
         return 3;
+    /* What the helper and the recovery script do with a leftover entry whose
+     * phase is not ready. */
+    const char *leftover = getenv(ENV_LEFTOVER);
+    if (leftover && access(leftover, F_OK) == 0) {
+        if (strstr(command, TRANSACTION_HELPER " begin")) {
+            fputs("guest-deployment-transaction: deployment transaction "
+                  "0123456789abcdef0123456789abcdef has no ready backup; it is "
+                  "never restored, and deployment recovery discards it\n",
+                  stderr);
+            return 1;
+        }
+        if (strstr(command, " " RECOVERY_ROOT " ")) {
+            if (unlink(leftover) != 0)
+                return 254;
+            fputs("discarded deployment backup "
+                  "0123456789abcdef0123456789abcdef (phase not ready): it was "
+                  "never published or was already retired, so it is never "
+                  "restored\n", stderr);
+            return 0;
+        }
+    }
     if (strstr(command, "verify-image-contract"))
         puts("hamn: verified Ubuntu 24.04 arm64 guest image contract");
     return 0;
@@ -165,6 +193,7 @@ static struct {
     char api[128];
     char log[128];
     char out[128];
+    char leftover[128];
     char docker_socket[256];
     struct profile profile;
 } fixture;
@@ -445,6 +474,101 @@ static void hang_in_cleanup_after_cancellation_ends_at_the_budget(void)
     ssh_clients_reaped();
 }
 
+/* ---- reconciliation over a leftover transaction --------------------- */
+
+/* A current marker and a guest with a leftover transaction. */
+static void leave_a_transaction(struct vm_state *state)
+{
+    assert(guest_deployment_mark_current(&fixture.profile) == 0);
+    int fd = open(fixture.leftover, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                  0600);
+    assert(fd >= 0 && close(fd) == 0);
+    assert(setenv(ENV_LEFTOVER, fixture.leftover, 1) == 0);
+    memset(state, 0, sizeof(*state));
+    snprintf(state->ip, sizeof(state->ip), "%s", GUEST_IP);
+}
+
+static int leftover_exists(void)
+{
+    if (access(fixture.leftover, F_OK) == 0)
+        return 1;
+    assert(errno == ENOENT);
+    return 0;
+}
+
+/* A crash can leave a transaction that the helper's begin refuses. The
+ * reconciliation of a cold start recovers it before its begin and succeeds,
+ * so the start needs no repair: none of the full refresh's steps runs. */
+static void reconcile_recovers_a_leftover_transaction(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
+                                                     &state) == 0);
+    assert(!leftover_exists());
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
+    assert(ssh_calls("configure-docker") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " rollback") == 0);
+    assert(ssh_calls("cloud-init") == 0 && ssh_calls("configure-rosetta") == 0 &&
+           ssh_calls("verify-image-contract") == 0 &&
+           ssh_calls("configure-containerd") == 0);
+    assert(!guest_deployment_cleanup_pending());
+    fflush(NULL);
+    char *output = read_file(fixture.out);
+    assert(strstr(output, "deployment recovery: discarded deployment backup "
+                          "0123456789abcdef0123456789abcdef (phase not ready)"));
+    assert(strstr(output, "warm start reconciled Docker networking"));
+    assert(!strstr(output, "has no ready backup"));
+    assert(!strstr(output, "cannot create a safe guest runtime"));
+    assert(!strstr(output, "reconciliation failed"));
+    free(output);
+    ssh_clients_reaped();
+}
+
+/* A recovery that fails begins nothing: the guest keeps its runtime and the
+ * leftover stays for the next attempt. */
+static void reconcile_begins_nothing_when_recovery_fails(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    setenv(ENV_FAIL, " " RECOVERY_ROOT " ", 1);
+    assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
+                                                     &state) == -1);
+    assert(strstr(log_last_error(), "deployment recovery failed"));
+    assert(leftover_exists());
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " ") == 0);
+    assert(ssh_calls("configure-docker") == 0 && ssh_calls("-O forward") == 0);
+    assert(!guest_deployment_cleanup_pending() &&
+           !guest_deployment_recovery_complete());
+    ssh_clients_reaped();
+}
+
+/* A recovery cancelled before its start runs again inside cleanup. The
+ * reconciliation then fails without attempting its begin, names the
+ * interrupted recovery as the reason, and keeps what the retry reported: it
+ * finished and Docker is ready. */
+static void cancelled_recovery_keeps_its_result_in_reconcile(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    assert(proc_cancel_install() == 0);
+    assert(raise(SIGTERM) == 0 && proc_cancelled());
+    assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
+                                                     &state) == -1);
+    assert(strstr(log_last_error(), "deployment recovery failed"));
+    assert(!leftover_exists());
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " ") == 0);
+    assert(ssh_calls("configure-docker") == 0);
+    assert(guest_deployment_recovery_complete() &&
+           !guest_deployment_cleanup_pending());
+    assert(proc_cancelled());
+    ssh_clients_reaped();
+}
+
 /* ---- guest image check ---------------------------------------------- */
 
 static void hung_image_check_ends_at_its_bound(void)
@@ -552,6 +676,7 @@ int main(int argc, char **argv)
     join(fixture.api, sizeof(fixture.api), "api.sock");
     join(fixture.log, sizeof(fixture.log), "ssh.log");
     join(fixture.out, sizeof(fixture.out), "case.out");
+    join(fixture.leftover, sizeof(fixture.leftover), "leftover");
     join(fixture.profile.dir, sizeof(fixture.profile.dir), "profile");
     snprintf(fixture.profile.name, sizeof(fixture.profile.name), "waits");
     assert(profile_path(&fixture.profile, "docker.sock", fixture.docker_socket,
@@ -592,6 +717,15 @@ int main(int argc, char **argv)
     run_case("hang_in_cleanup_after_cancellation_ends_at_the_budget",
              hang_in_cleanup_after_cancellation_ends_at_the_budget,
              API_ANSWERS, READY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reconcile_recovers_a_leftover_transaction",
+             reconcile_recovers_a_leftover_transaction, API_ANSWERS,
+             READY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reconcile_begins_nothing_when_recovery_fails",
+             reconcile_begins_nothing_when_recovery_fails, API_ANSWERS,
+             WATCHDOG_EXTRA_MS);
+    run_case("cancelled_recovery_keeps_its_result_in_reconcile",
+             cancelled_recovery_keeps_its_result_in_reconcile, API_ANSWERS,
+             READY_MS + WATCHDOG_EXTRA_MS);
     run_case("hung_image_check_ends_at_its_bound",
              hung_image_check_ends_at_its_bound, API_ANSWERS,
              VERIFY_MS + WATCHDOG_EXTRA_MS);

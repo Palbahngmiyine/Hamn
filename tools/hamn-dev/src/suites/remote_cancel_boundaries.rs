@@ -69,6 +69,11 @@ struct vm_state { char ip[64]; };
 static int recovery_complete, cleanup_pending, cancel_recovered;
 static int cancelled, depth, remote_active, barriers, fail_barrier, fail_recovery;
 static int fixture_current, transactions, recovery_calls;
+/* leftover: a transaction an earlier operation left, which begin refuses.
+ * first_recovery: 0 runs the recovery before begin; 1 fails it; 2 and 3
+ * cancel it, and its retry in cleanup then finishes or fails, as the real
+ * guest_deployment_recover reports through these flags. */
+static int leftover, first_recovery;
 static const char *fault;
 #define logerr(...) ((void)0)
 #define logmsg(...) ((void)0)
@@ -93,10 +98,18 @@ static int deployment_exec_locked(const struct profile *p, const char *ip, const
 }
 static int guest_deployment_recover(const struct profile *p, const char *ip) {
  (void)p; (void)ip; recovery_calls++;
- assert(!remote_active); return fail_recovery && depth ? -1 : 0;
+ assert(!remote_active);
+ if (!depth && first_recovery) {
+  cancelled = first_recovery >= 2;
+  cleanup_pending = first_recovery == 3; recovery_complete = first_recovery == 2;
+  return cancelled ? 130 : 1;
+ }
+ leftover = 0;
+ return fail_recovery && depth ? -1 : 0;
 }
 static int deployment_transaction(const struct profile *p, const char *ip, const char *action, const char *token) {
  (void)p; (void)ip; (void)token; transactions++;
+ if (!strcmp(action, "begin") && leftover) return 1;
  if (!strcmp(action, fault)) { cancelled=1; remote_active=1; return 130; }
  return 0;
 }
@@ -111,14 +124,37 @@ int main(void) {
  for (int failure=0; failure<3; failure++) {
   fault=phases[phase]; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  fail_barrier=failure==1; fail_recovery=failure==2;
+  fail_barrier=failure==1; fail_recovery=failure==2; leftover=first_recovery=0;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==-1 && cancelled && depth==0 && barriers==1);
   assert(cleanup_pending==fail_barrier && remote_active==fail_barrier);
-  assert(recovery_calls==(!reconcile + !fail_barrier) && recovery_complete==(failure==0));
+  /* Each path recovers once before its begin, and again after the
+   * cancellation only once the barrier has settled the writer. */
+  assert(recovery_calls==1 + !fail_barrier && recovery_complete==(failure==0));
   assert(transactions==(phase ? 2 : 1));
  }
- puts("PASS: refresh/reconcile begin/commit cancellation, barrier failure and recovery failure");
+ /* A leftover transaction would make begin refuse; the recovery before begin
+  * removes it, so neither path fails on it. */
+ for (int reconcile=0; reconcile<2; reconcile++) {
+  fault="none"; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
+  recovery_complete=cleanup_pending=recovery_calls=transactions=0;
+  fail_barrier=fail_recovery=first_recovery=0; leftover=1;
+  int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
+  assert(rc==0 && !leftover && recovery_calls==1 && transactions==2);
+  assert(!cancelled && depth==0 && barriers==0 && !cleanup_pending && !recovery_complete);
+ }
+ /* A recovery that fails or is cancelled begins nothing, and the caller keeps
+  * what the recovery reported: nothing, a finished retry, or pending cleanup. */
+ for (int reconcile=0; reconcile<2; reconcile++)
+ for (int outcome=1; outcome<=3; outcome++) {
+  fault="none"; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
+  recovery_complete=cleanup_pending=recovery_calls=transactions=0;
+  fail_barrier=fail_recovery=0; leftover=1; first_recovery=outcome;
+  int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
+  assert(rc==-1 && recovery_calls==1 && transactions==0 && barriers==0 && depth==0);
+  assert(cleanup_pending==(outcome==3) && recovery_complete==(outcome==2));
+ }
+ puts("PASS: refresh/reconcile recover before begin; begin/commit cancellation, barrier failure and recovery failure");
 }
 "#;
 

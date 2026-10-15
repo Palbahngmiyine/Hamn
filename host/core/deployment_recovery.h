@@ -24,7 +24,9 @@
  *     the removal is made durable, and one line on stderr names it. Images
  *     before 0.1.1 published ready without fsync, so after a crash their
  *     empty phase can accompany applied changes; that backup cannot be
- *     restored either, and the start that follows redeploys over them.
+ *     restored either. The start that follows applies only its own
+ *     deployment over them: the full refresh for a stale marker, the Docker
+ *     reconciliation for a current one.
  *   - a symlink or other non-regular file: refused.
  *
  * Exit 0: no backup remains, either because none existed, because a backup
