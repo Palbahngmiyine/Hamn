@@ -13,11 +13,13 @@
  * `ssh` is this test executable, first in PATH. It answers control requests
  * (-O) with success, links a forwarded Docker socket to a fake Docker API,
  * and runs no remote command: the command succeeds, fails, is slow or hangs
- * as the case's environment asks. The fake Docker API answers _ping, or
- * accepts and never answers; silent, it also stands in for a stuck vmrun
- * control socket. The Makefile builds guest_deployment.c, remote_mutation.c,
- * provision.c and cmd_start.c into this test with guest limits and budgets
- * of seconds and no client margin. */
+ * as the case's environment asks. It can also stand for a guest with one
+ * deployment transaction that an earlier operation left: the helper's begin
+ * refuses while it exists, and the recovery command discards it. The fake
+ * Docker API answers _ping, or accepts and never answers; silent, it also
+ * stands in for a stuck vmrun control socket. The Makefile builds
+ * guest_deployment.c, remote_mutation.c, provision.c and cmd_start.c into
+ * this test with guest limits and budgets of seconds and no client margin. */
 #if !defined(GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) || \
     !defined(GUEST_IMAGE_VERIFY_TIMEOUT_SEC) || \
     !defined(GUEST_CLOUD_INIT_TIMEOUT_SEC) || \
@@ -81,6 +83,12 @@ int hamn_test_start_wait_vmrun_running(const struct profile *p,
 #define ENV_CANCEL "HAMN_TEST_FAKE_SSH_CANCEL_PID"
 /* A line the hanging command prints before it hangs. */
 #define ENV_SAY "HAMN_TEST_FAKE_SSH_SAY"
+/* A file that stands for the leftover transaction while it exists. */
+#define ENV_LEFTOVER "HAMN_TEST_FAKE_GUEST_LEFTOVER"
+#define RECOVERY_ROOT "/var/lib/hamn/deployment-transactions"
+#define TRANSACTION_HELPER "/usr/local/libexec/hamn/guest-deployment-transaction"
+/* The host removing the guest's reapply record after a whole runtime. */
+#define SETTLE_RECORD "rm -f -- \"$1\" && sync"
 
 static long long now_ms(void)
 {
@@ -180,6 +188,27 @@ static int fake_ssh(int argc, char **argv)
     }
     if (fake_matches(ENV_FAIL, command))
         return 3;
+    /* What the helper and the recovery script do with a leftover entry whose
+     * phase is not ready. */
+    const char *leftover = getenv(ENV_LEFTOVER);
+    if (leftover && access(leftover, F_OK) == 0) {
+        if (strstr(command, TRANSACTION_HELPER " begin")) {
+            fputs("guest-deployment-transaction: deployment transaction "
+                  "0123456789abcdef0123456789abcdef has no ready backup; it is "
+                  "never restored, and deployment recovery discards it\n",
+                  stderr);
+            return 1;
+        }
+        if (strstr(command, " " RECOVERY_ROOT " ")) {
+            if (unlink(leftover) != 0)
+                return 254;
+            fputs("discarded deployment backup "
+                  "0123456789abcdef0123456789abcdef (phase not ready): it was "
+                  "never published or was already retired, so it is never "
+                  "restored\n", stderr);
+            return 0;
+        }
+    }
     if (strstr(command, "verify-image-contract"))
         puts("hamn: verified Ubuntu 24.04 arm64 guest image contract");
     return 0;
@@ -193,6 +222,7 @@ static struct {
     char api[128];
     char log[128];
     char out[128];
+    char leftover[128];
     char ctl[128];
     char docker_socket[256];
     struct profile profile;
@@ -326,6 +356,9 @@ static void run_case(const char *name, void (*body)(void),
 {
     int fd = open(fixture.log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     assert(fd >= 0 && close(fd) == 0);
+    /* Every case starts with a stale deployment: the reconcile cases write a
+     * current marker into the shared profile directory. */
+    assert(guest_deployment_forget(&fixture.profile) == 0);
     (void)unlink(fixture.docker_socket);
     assert(symlink(fixture.api, fixture.docker_socket) == 0);
     pid_t server = api_start(api);
@@ -490,6 +523,209 @@ static void hang_in_cleanup_after_cancellation_ends_at_the_budget(void)
     assert(ssh_calls("/var/lib/hamn/deployment-transactions") == 1);
     assert(ssh_calls("-O forward") == 2);
     assert(ssh_calls("systemctl is-active") == 1);
+    assert(proc_cancelled());
+    ssh_clients_reaped();
+}
+
+/* ---- reconciliation over a leftover transaction --------------------- */
+
+/* A current marker and a guest with a leftover transaction. */
+static void leave_a_transaction(struct vm_state *state)
+{
+    assert(guest_deployment_mark_current(&fixture.profile) == 0);
+    int fd = open(fixture.leftover, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                  0600);
+    assert(fd >= 0 && close(fd) == 0);
+    assert(setenv(ENV_LEFTOVER, fixture.leftover, 1) == 0);
+    memset(state, 0, sizeof(*state));
+    snprintf(state->ip, sizeof(state->ip), "%s", GUEST_IP);
+}
+
+static int leftover_exists(void)
+{
+    if (access(fixture.leftover, F_OK) == 0)
+        return 1;
+    assert(errno == ENOENT);
+    return 0;
+}
+
+/* A cold start without a leftover: the recovery finds nothing. A boot
+ * registers only qemu's x86_64 handler, so the profile's translation is
+ * applied, then Docker's network-dependent settings, each once and in the
+ * reconciliation's transaction; nothing else of the image is touched. */
+static void reconcile_without_a_leftover(int rosetta)
+{
+    fixture.profile.rosetta = rosetta;
+    struct vm_state state;
+    leave_a_transaction(&state);
+    assert(unsetenv(ENV_LEFTOVER) == 0 && unlink(fixture.leftover) == 0);
+    assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
+                                                     &state) == 0);
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
+    assert(ssh_calls(rosetta ? "configure-rosetta enable" :
+                               "configure-rosetta disable") == 1);
+    assert(ssh_calls("configure-rosetta") == 1);
+    assert(ssh_calls("configure-docker") == 1);
+    assert(ssh_calls(SETTLE_RECORD) == 0);
+    assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
+    assert(ssh_calls("verify-image-contract") == 0 &&
+           ssh_calls("configure-containerd") == 0 && ssh_calls("cloud-init") == 0);
+    fflush(NULL);
+    char *output = read_file(fixture.out);
+    assert(!strstr(output, "deployment recovery"));
+    assert(!strstr(output, "whole guest runtime"));
+    assert(strstr(output, "warm start reconciled x86_64 translation, Docker "
+                          "networking and readiness"));
+    free(output);
+    ssh_clients_reaped();
+}
+
+static void reconcile_without_a_leftover_applies_qemu_translation(void)
+{
+    reconcile_without_a_leftover(0);
+}
+
+static void reconcile_without_a_leftover_applies_rosetta_translation(void)
+{
+    reconcile_without_a_leftover(1);
+}
+
+/* A translation that cannot be applied fails the reconciliation loudly: its
+ * transaction is rolled back and Docker is not reconfigured. */
+static void reconcile_rolls_back_when_translation_fails(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    assert(unsetenv(ENV_LEFTOVER) == 0 && unlink(fixture.leftover) == 0);
+    setenv(ENV_FAIL, "configure-rosetta", 1);
+    assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
+                                                     &state) == -1);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
+    assert(ssh_calls("configure-rosetta") == 1);
+    assert(ssh_calls("configure-docker") == 0);
+    assert(ssh_calls(TRANSACTION_HELPER " commit") == 0);
+    assert(ssh_calls(TRANSACTION_HELPER " rollback") == 1);
+    assert(!guest_deployment_cleanup_pending());
+    fflush(NULL);
+    char *output = read_file(fixture.out);
+    assert(strstr(output, "cannot configure qemu x86_64 translation"));
+    assert(strstr(output, "guest runtime reconciliation failed; restoring the "
+                          "runtime files and services its backup holds"));
+    free(output);
+    ssh_clients_reaped();
+}
+
+/* A crash can leave a transaction that the helper's begin refuses. The
+ * reconciliation of a cold start recovers it before its begin and succeeds,
+ * so the start needs no repair. Because the recovery changed the guest, and
+ * on an image without the durable commit the crash may also have lost the
+ * last deployment's writes, the whole runtime is configured again inside the
+ * reconciliation's own transaction: x86_64 translation, the image check,
+ * containerd and Docker, each once. Only the refresh's cloud-init wait,
+ * which a disk past its first boot does not need, is left out. */
+static void reconcile_recovers_a_leftover_and_applies_the_whole_runtime(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
+                                                     &state) == 0);
+    assert(!leftover_exists());
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
+    assert(ssh_calls("configure-rosetta disable") == 1);
+    assert(ssh_calls("verify-image-contract") == 1);
+    assert(ssh_calls("configure-containerd") == 1);
+    assert(ssh_calls("configure-docker") == 1);
+    assert(ssh_calls(SETTLE_RECORD) == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
+    assert(ssh_call_index(SETTLE_RECORD) >
+           ssh_call_index(TRANSACTION_HELPER " commit"));
+    assert(ssh_calls(TRANSACTION_HELPER " rollback") == 0);
+    assert(ssh_calls("cloud-init") == 0);
+    assert(!guest_deployment_cleanup_pending());
+    fflush(NULL);
+    char *output = read_file(fixture.out);
+    assert(strstr(output, "deployment recovery: discarded deployment backup "
+                          "0123456789abcdef0123456789abcdef (phase not ready)"));
+    assert(strstr(output, "applying the whole guest runtime configuration"));
+    assert(strstr(output, "applied the whole guest runtime again"));
+    assert(!strstr(output, "has no ready backup"));
+    assert(!strstr(output, "cannot create a safe guest runtime"));
+    assert(!strstr(output, "reconciliation failed"));
+    free(output);
+    ssh_clients_reaped();
+}
+
+/* A start that finds the VM running has already recovered: when that
+ * recovery rolled back or discarded a backup, the start reapplies the whole
+ * runtime, although the reapplication's own recovery then finds nothing. */
+static void reapply_applies_the_whole_runtime_without_a_leftover(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    assert(unsetenv(ENV_LEFTOVER) == 0 && unlink(fixture.leftover) == 0);
+    assert(guest_deployment_reapply_runtime_locked(&fixture.profile,
+                                                   &state) == 0);
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
+    assert(ssh_calls("configure-rosetta disable") == 1);
+    assert(ssh_calls("verify-image-contract") == 1);
+    assert(ssh_calls("configure-containerd") == 1);
+    assert(ssh_calls("configure-docker") == 1);
+    assert(ssh_calls(SETTLE_RECORD) == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
+    assert(ssh_call_index(SETTLE_RECORD) >
+           ssh_call_index(TRANSACTION_HELPER " commit"));
+    assert(ssh_calls("cloud-init") == 0);
+    fflush(NULL);
+    char *output = read_file(fixture.out);
+    assert(!strstr(output, "deployment recovery:"));
+    assert(strstr(output, "applying the whole guest runtime configuration"));
+    assert(strstr(output, "applied the whole guest runtime again"));
+    free(output);
+    ssh_clients_reaped();
+}
+
+/* A recovery that fails begins nothing: the guest keeps its runtime and the
+ * leftover stays for the next attempt. */
+static void reconcile_begins_nothing_when_recovery_fails(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    setenv(ENV_FAIL, " " RECOVERY_ROOT " ", 1);
+    assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
+                                                     &state) == -1);
+    assert(strstr(log_last_error(), "deployment recovery failed"));
+    assert(leftover_exists());
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 0);
+    assert(ssh_calls("configure-rosetta") == 0 && ssh_calls("configure-docker") == 0 &&
+           ssh_calls("-O forward") == 0);
+    assert(!guest_deployment_cleanup_pending() &&
+           !guest_deployment_recovery_complete());
+    ssh_clients_reaped();
+}
+
+/* A recovery cancelled before its start runs again inside cleanup. The
+ * reconciliation then fails without attempting its begin, names the
+ * interrupted recovery as the reason, and keeps what the retry reported: it
+ * finished and Docker is ready. */
+static void cancelled_recovery_keeps_its_result_in_reconcile(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    assert(proc_cancel_install() == 0);
+    assert(raise(SIGTERM) == 0 && proc_cancelled());
+    assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
+                                                     &state) == -1);
+    assert(strstr(log_last_error(), "deployment recovery failed"));
+    assert(!leftover_exists());
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 0);
+    assert(ssh_calls("configure-rosetta") == 0 && ssh_calls("configure-docker") == 0);
+    assert(guest_deployment_recovery_complete() &&
+           !guest_deployment_cleanup_pending());
     assert(proc_cancelled());
     ssh_clients_reaped();
 }
@@ -1093,6 +1329,7 @@ int main(int argc, char **argv)
     join(fixture.api, sizeof(fixture.api), "api.sock");
     join(fixture.log, sizeof(fixture.log), "ssh.log");
     join(fixture.out, sizeof(fixture.out), "case.out");
+    join(fixture.leftover, sizeof(fixture.leftover), "leftover");
     join(fixture.ctl, sizeof(fixture.ctl), "vmrun-ctl.sock"); /* never bound */
     join(fixture.profile.dir, sizeof(fixture.profile.dir), "profile");
     snprintf(fixture.profile.name, sizeof(fixture.profile.name), "waits");
@@ -1134,6 +1371,27 @@ int main(int argc, char **argv)
     run_case("hang_in_cleanup_after_cancellation_ends_at_the_budget",
              hang_in_cleanup_after_cancellation_ends_at_the_budget,
              API_ANSWERS, READY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reconcile_without_a_leftover_applies_qemu_translation",
+             reconcile_without_a_leftover_applies_qemu_translation,
+             API_ANSWERS, READY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reconcile_without_a_leftover_applies_rosetta_translation",
+             reconcile_without_a_leftover_applies_rosetta_translation,
+             API_ANSWERS, READY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reconcile_rolls_back_when_translation_fails",
+             reconcile_rolls_back_when_translation_fails, API_ANSWERS,
+             READY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reconcile_recovers_a_leftover_and_applies_the_whole_runtime",
+             reconcile_recovers_a_leftover_and_applies_the_whole_runtime,
+             API_ANSWERS, READY_MS + VERIFY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reapply_applies_the_whole_runtime_without_a_leftover",
+             reapply_applies_the_whole_runtime_without_a_leftover,
+             API_ANSWERS, READY_MS + VERIFY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reconcile_begins_nothing_when_recovery_fails",
+             reconcile_begins_nothing_when_recovery_fails, API_ANSWERS,
+             WATCHDOG_EXTRA_MS);
+    run_case("cancelled_recovery_keeps_its_result_in_reconcile",
+             cancelled_recovery_keeps_its_result_in_reconcile, API_ANSWERS,
+             READY_MS + WATCHDOG_EXTRA_MS);
     run_case("hung_image_check_ends_at_its_bound",
              hung_image_check_ends_at_its_bound, API_ANSWERS,
              VERIFY_MS + WATCHDOG_EXTRA_MS);

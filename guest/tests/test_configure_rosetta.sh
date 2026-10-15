@@ -203,6 +203,37 @@ awk -F '\t' '$1 != "hamn-rosetta" { print }' "$STATE" >"$STATE.clean"
 mv "$STATE.clean" "$STATE"
 assert_rosetta_removed
 
+# A cold start begins from what a boot registers: qemu's handler is enabled
+# again and the kernel no longer has the Rosetta handler, which its database
+# still lists. The host applies the profile's translation on every cold
+# start, so enable restores Rosetta from that state with one entry, and
+# disable leaves qemu enabled with no Rosetta entry.
+simulate_boot() {
+    local tmp
+    tmp=$(mktemp "$STATE.XXXXXX")
+    awk -F '\t' -v OFS='\t' '$1 == "qemu-x86_64" { $2 = "enabled" } { print }' \
+        "$STATE" >"$tmp"
+    mv -f "$tmp" "$STATE"
+    tmp=$(mktemp "$ROSETTA_STATE.XXXXXX")
+    awk -F '\t' -v OFS='\t' '$1 == "hamn-rosetta" { $2 = "disabled" } { print }' \
+        "$ROSETTA_STATE" >"$tmp"
+    mv -f "$tmp" "$ROSETTA_STATE"
+}
+run_rosetta enable >"$WORK/boot-first.out"
+simulate_boot
+assert_entry qemu-x86_64 enabled /usr/bin/qemu-x86_64-static
+assert_entry hamn-rosetta disabled "$MOUNT_POINT/rosetta"
+run_rosetta enable >"$WORK/boot-enable.out"
+grep -Fq 'Rosetta x86_64 translation is enabled' "$WORK/boot-enable.out"
+assert_entry hamn-rosetta enabled "$MOUNT_POINT/rosetta"
+assert_entry qemu-x86_64 disabled /usr/bin/qemu-x86_64-static
+test "$(awk -F '\t' '$1 == "hamn-rosetta" { count++ } END { print count + 0 }' "$ROSETTA_STATE")" -eq 1
+simulate_boot
+run_rosetta disable >"$WORK/boot-disable.out"
+grep -Fq 'qemu x86_64 translation is enabled' "$WORK/boot-disable.out"
+assert_entry qemu-x86_64 enabled /usr/bin/qemu-x86_64-static
+assert_rosetta_removed
+
 rm -rf "$ROSETTA_DATABASE"
 ln -s "$WORK" "$ROSETTA_DATABASE"
 if run_rosetta enable >"$WORK/symlink.out" 2>"$WORK/symlink.err"; then

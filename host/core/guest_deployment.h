@@ -21,6 +21,13 @@ int guest_deployment_forget(const struct profile *profile);
  * profile mutation lock. */
 int guest_deployment_recover(const struct profile *profile, const char *ip);
 int guest_deployment_recovery_complete(void);
+/* After guest_deployment_recover returned 0: 1 when it discarded or rolled
+ * back a backup, found the guest's record that an earlier recovery's change
+ * has not been followed by a whole runtime yet (or printed anything else),
+ * so the guest runtime may differ from the deployment its marker records; 0
+ * when there was neither. A refresh or reapplication that commits the whole
+ * runtime removes that record. */
+int guest_deployment_recovered_backup(void);
 /* A remote writer may still be active; do not stop the VM yet. */
 int guest_deployment_cleanup_pending(void);
 int guest_deployment_mark_current(const struct profile *profile);
@@ -48,8 +55,22 @@ int guest_deployment_runtime_ready(const struct profile *profile,
 /* Caller must hold the profile mutation lock. */
 int guest_deployment_refresh_locked(const struct profile *profile,
                                     const struct vm_state *state);
-/* Reapply network-dependent Docker settings without modifying the guest image. */
+/* Reapply what a boot resets, without modifying the guest image, for a current
+ * marker: the profile's x86_64 translation (a boot registers only qemu) and
+ * network-dependent Docker settings. Like a refresh, it first recovers a
+ * backup that an interrupted transaction left (guest_deployment_recover), so a
+ * leftover does not fail it; when that recovery fails, it returns -1 before
+ * any change with the recovery's cleanup state. When the recovery discarded
+ * or rolled back a backup, it applies the whole runtime configuration
+ * instead. Returns 0 when the runtime is reconciled. A failure rolls back the
+ * files and services the transaction's backup holds; the x86_64 translation
+ * stays as the profile sets it. */
 int guest_deployment_reconcile_runtime_locked(
+    const struct profile *profile, const struct vm_state *state);
+/* The reconciliation above, applying the whole runtime configuration: for a
+ * running VM whose guest_deployment_recover rolled back or discarded a
+ * backup, so its runtime is no longer the deployment its marker records. */
+int guest_deployment_reapply_runtime_locked(
     const struct profile *profile, const struct vm_state *state);
 int guest_deployment_repair_locked(const struct profile *profile,
                                    const struct vm_state *state);

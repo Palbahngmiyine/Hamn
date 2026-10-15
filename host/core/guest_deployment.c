@@ -27,6 +27,9 @@
 #define GUEST_DEPLOYMENT_MARKER "guest-deployment.version"
 #define GUEST_DEPLOYMENT_TRANSACTION_SCRIPT \
     "/usr/local/libexec/hamn/guest-deployment-transaction"
+/* Exists while a recovery's change to the guest runtime has not been followed
+ * by a committed whole runtime (see core/deployment_recovery.h). */
+#define GUEST_DEPLOYMENT_REAPPLY_RECORD "/var/lib/hamn/deployment-reapply"
 #define GUEST_DEPLOYMENT_TOKEN_CAP 33
 /* Readiness budget after a guest runtime change or its recovery. */
 #ifndef GUEST_DEPLOYMENT_READY_TIMEOUT_SEC
@@ -216,25 +219,32 @@ static int deployment_exec_locked(const struct profile *profile, const char *ip,
     return remote_mutation_run(profile, ip, 120, 60, command, NULL, 0, NULL);
 }
 
-static int recovery_complete, cleanup_pending;
+static int recovery_complete, cleanup_pending, recovered_backup;
 int guest_deployment_cleanup_pending(void) { return cleanup_pending; }
 int guest_deployment_recovery_complete(void) { return recovery_complete; }
+int guest_deployment_recovered_backup(void) { return recovered_backup; }
 
 int guest_deployment_recover(const struct profile *profile, const char *ip)
 {
-    recovery_complete = cleanup_pending = 0;
+    recovery_complete = cleanup_pending = recovered_backup = 0;
     const char *command[] = { "sudo", "bash", "-c", DEPLOYMENT_RECOVERY_SCRIPT,
         "--", "/var/lib/hamn/deployment-transactions",
-        GUEST_DEPLOYMENT_TRANSACTION_SCRIPT, DEPLOYMENT_UNDURABLE_HELPERS,
+        GUEST_DEPLOYMENT_TRANSACTION_SCRIPT, GUEST_DEPLOYMENT_REAPPLY_RECORD,
+        DEPLOYMENT_UNDURABLE_HELPERS,
         NULL };
     char reason[4096] = {0};
     int truncated = 0;
     int rc = remote_mutation_run(profile, ip, 120, 120, command, reason,
                                  sizeof(reason), &truncated);
-    if (rc == 0 && reason[0])
-        /* A discarded backup that was not ready names itself. */
+    if (rc == 0 && reason[0]) {
+        /* The script is silent only when there was no backup and no pending
+         * reapply record; a discard, a rollback and a pending record name
+         * themselves. Any other output counts as a recovered backup too,
+         * which only costs a full reconfiguration. */
+        recovered_backup = 1;
         logmsg("deployment recovery: %s%s", reason,
                truncated ? " (truncated)" : "");
+    }
     if (rc != 0)
         logerr("deployment recovery failed: %s%s",
                reason[0] ? reason : "guest connection or recovery interrupted",
@@ -509,6 +519,23 @@ static int deployment_transaction(const struct profile *profile,
     return deployment_exec_locked(profile, ip, command);
 }
 
+/* After a committed transaction that applied the whole runtime, remove the
+ * record a recovery left: nothing remains to apply again. A record that
+ * cannot be removed only makes the next start apply the whole runtime
+ * again, so this reports and goes on. */
+static void deployment_settle_reapply(const struct profile *profile,
+                                      const char *ip)
+{
+    const char *command[] = {
+        "sudo", "bash", "-c", "rm -f -- \"$1\" && sync -- \"${1%/*}\"", "--",
+        GUEST_DEPLOYMENT_REAPPLY_RECORD, NULL
+    };
+    if (deployment_exec_locked(profile, ip, command) != 0)
+        logmsg("warning: cannot remove the guest's record of a deployment "
+               "recovery; the next start applies the whole guest runtime "
+               "again");
+}
+
 /* A cancelled SSH client cannot acknowledge begin/commit. Wait behind the
  * original writer before inspecting its token or allowing owned-VM cleanup. */
 static void deployment_cancel_recover(const struct profile *profile, const char *ip)
@@ -555,6 +582,7 @@ static int deployment_refresh_locked(const struct profile *profile,
         guest_deployment_wait_cloud_init(profile, state->ip,
                                          GUEST_CLOUD_INIT_TIMEOUT_SEC) != 0)
         return -1;
+    int record_pending = guest_deployment_recovered_backup();
 
     char token[GUEST_DEPLOYMENT_TOKEN_CAP];
     deployment_token_generate(token);
@@ -590,6 +618,8 @@ static int deployment_refresh_locked(const struct profile *profile,
                "the deployment safely", strerror(errno));
         return -1;
     }
+    if (record_pending)
+        deployment_settle_reapply(profile, state->ip);
     logmsg("guest deployment fingerprint is current");
     return 0;
 
@@ -621,8 +651,11 @@ int guest_deployment_refresh_locked(const struct profile *profile,
     return deployment_refresh_locked(profile, state, 0);
 }
 
-int guest_deployment_reconcile_runtime_locked(
-    const struct profile *profile, const struct vm_state *state)
+/* The reconciliation of a current deployment; whole_runtime asks for the
+ * whole runtime even when its own recovery finds nothing. */
+static int deployment_reconcile_locked(const struct profile *profile,
+                                       const struct vm_state *state,
+                                       int whole_runtime)
 {
     recovery_complete = cleanup_pending = 0;
     if (guest_deployment_is_current(profile) != 1) {
@@ -635,6 +668,21 @@ int guest_deployment_reconcile_runtime_locked(
         logerr("cannot reconcile guest runtime without a running VM address");
         return -1;
     }
+    /* begin refuses a transaction that a crash or an interrupted operation
+     * left behind. Recover it first, as a refresh does. A recovery that fails
+     * or is cancelled begins nothing and keeps its own cleanup_pending and
+     * recovery_complete. */
+    if (guest_deployment_recover(profile, state->ip) != 0)
+        return -1;
+    /* A recovered backup leaves the runtime of before its transaction, or of
+     * a deployment whose last writes a crash may have lost: an image without
+     * the durable commit loses them together with the backup's removal. Then
+     * the whole runtime is applied again. The guest's reapply record keeps
+     * the recovery reporting itself until a whole runtime commits, so an
+     * interruption before that asks for it again. A disk whose marker is
+     * current has finished its first boot, so neither case needs the
+     * cloud-init wait of a refresh. */
+    whole_runtime = whole_runtime || guest_deployment_recovered_backup();
 
     char token[GUEST_DEPLOYMENT_TOKEN_CAP];
     deployment_token_generate(token);
@@ -644,12 +692,37 @@ int guest_deployment_reconcile_runtime_locked(
         return -1;
     }
 
-    if (guest_deployment_configure_docker(profile, state->ip) == 0 &&
+    /* Every boot registers only qemu's x86_64 handler: systemd-binfmt and
+     * binfmt-support load qemu, and nothing loads the Rosetta handler from
+     * its own database. Like Docker's network settings, the profile's x86_64
+     * translation is applied on every cold start; configure-rosetta checks
+     * the handler it leaves enabled. */
+    /* The translation lives outside the backup (binfmt databases and kernel
+     * registrations, the Rosetta mount), so a rollback below leaves it as
+     * configure-rosetta set it: the profile's mode, which the marker records,
+     * and not the qemu-only state a boot leaves. A refresh's rollback does
+     * the same. */
+    int configured;
+    if (whole_runtime) {
+        logmsg("deployment recovery changed the guest runtime; applying the "
+               "whole guest runtime configuration again");
+        configured = guest_deployment_configure_runtime(profile, state->ip);
+    } else {
+        configured = guest_deployment_configure_rosetta(profile, state->ip) == 0 &&
+            guest_deployment_configure_docker(profile, state->ip) == 0 ? 0 : -1;
+    }
+    if (configured == 0 &&
         guest_deployment_forward_sockets(profile, state->ip) == 0 &&
         guest_deployment_runtime_ready(
             profile, state->ip, GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) == 0) {
         if (deployment_transaction(profile, state->ip, "commit", token) == 0) {
-            logmsg("warm start reconciled Docker networking and readiness");
+            if (whole_runtime)
+                deployment_settle_reapply(profile, state->ip);
+            logmsg(whole_runtime ?
+                   "applied the whole guest runtime again and confirmed its "
+                   "readiness" :
+                   "warm start reconciled x86_64 translation, Docker "
+                   "networking and readiness");
             return 0;
         }
         logerr("guest runtime reconciliation succeeded but backup commit failed "
@@ -660,7 +733,9 @@ int guest_deployment_reconcile_runtime_locked(
 
     proc_cleanup_begin();
     (void)operation_phase("recovering");
-    logerr("warm start reconciliation failed; restoring the previous guest runtime");
+    logerr("guest runtime reconciliation failed; restoring the runtime files "
+           "and services its backup holds (x86_64 translation stays as the "
+           "profile sets it)");
     if (deployment_transaction(profile, state->ip, "rollback", token) != 0) {
         logerr("guest runtime reconciliation rollback failed for operation %s; "
                "the guest backup was retained for manual recovery", token);
@@ -673,6 +748,18 @@ int guest_deployment_reconcile_runtime_locked(
                "could not be re-established");
     proc_cleanup_end();
     return -1;
+}
+
+int guest_deployment_reconcile_runtime_locked(
+    const struct profile *profile, const struct vm_state *state)
+{
+    return deployment_reconcile_locked(profile, state, 0);
+}
+
+int guest_deployment_reapply_runtime_locked(
+    const struct profile *profile, const struct vm_state *state)
+{
+    return deployment_reconcile_locked(profile, state, 1);
 }
 
 int guest_deployment_repair_locked(const struct profile *profile,
