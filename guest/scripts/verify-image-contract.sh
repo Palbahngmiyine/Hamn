@@ -11,6 +11,7 @@ HAMND_BIN=${HAMN_HAMND_BIN:-/usr/local/bin/hamnd}
 GETENT=${HAMN_GETENT:-getent}
 SYSTEMCTL=${HAMN_SYSTEMCTL:-systemctl}
 GUEST_JSON=${HAMN_GUEST_JSON:-/usr/local/libexec/hamn/guest-json}
+FSTAB=${HAMN_FSTAB:-/etc/fstab}
 BINFMT_MODE=${HAMN_BINFMT_MODE:-qemu}
 case "$BINFMT_MODE" in
     qemu) DEFAULT_BINFMT_ENTRY=/proc/sys/fs/binfmt_misc/qemu-x86_64 ;;
@@ -54,6 +55,23 @@ done
     fail "required guest group is unavailable: hamn"
 "$SYSTEMCTL" is-enabled --quiet hamnd.service >/dev/null 2>&1 ||
     fail "hamnd.service is not enabled in the guest image"
+# With online discard, an aborted ext4 journal can discard the blocks of files
+# deleted in its lost transaction, and replay then restores them zero-filled.
+# The image mounts its root ext4 without discard and trims it periodically.
+safe_regular "$FSTAB" || fail "guest fstab is unavailable"
+awk '
+    /^[[:space:]]*(#|$)/ { next }
+    $2 == "/" { roots++; if ($3 == "ext4") ext4++ }
+    END { exit !(roots == 1 && ext4 == 1) }
+' "$FSTAB" || fail "guest fstab must mount the root filesystem once, as ext4"
+DISCARD_MOUNTS=$(awk '
+    /^[[:space:]]*(#|$)/ { next }
+    ("," $4 ",") ~ /,discard(=[^,]*)?,/ { printf "%s%s", separator, $2; separator = " " }
+' "$FSTAB") || fail "cannot read guest fstab"
+[ -z "$DISCARD_MOUNTS" ] ||
+    fail "guest fstab mounts with online discard: $DISCARD_MOUNTS"
+"$SYSTEMCTL" is-enabled --quiet fstrim.timer >/dev/null 2>&1 ||
+    fail "fstrim.timer is not enabled in the guest image"
 [ -f "$BINFMT_ENTRY" ] && grep -Fxq enabled "$BINFMT_ENTRY" ||
     fail "amd64 binfmt registration is unavailable"
 
