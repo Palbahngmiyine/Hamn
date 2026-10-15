@@ -160,17 +160,21 @@ fn a_blocked_lookup_keeps_typing_responsive_and_a_failed_one_says_why() {
     assert!(!harness.text().contains(":get widg"), "{}", harness.text());
     assert_eq!(harness.kinds_lookups(), [kinds_lookup("old-cluster")]);
     // The lookup fails while the prompt is open: the prompt's border says
-    // why, once, and the message line does not.
+    // why in one line, and the message line does not.
     harness.release_gate();
-    harness.until(&format!(
-        "! get completes built-in kinds only: kubectl api-resources failed (exit status: 1): {LOOKUP_ERROR}"
-    ));
-    assert_eq!(harness.text().matches(LOOKUP_ERROR).count(), 1, "{}", harness.text());
+    let reason = "Kubernetes rejected the credentials of this context";
+    harness.until(&format!("! get completes built-in kinds only: {reason}"));
+    assert_eq!(harness.text().matches(reason).count(), 1, "{}", harness.text());
     assert!(!harness.text().contains(":get widg"), "{}", harness.text());
-    // The next prompt retries the lookup, which answers this time: the
-    // cluster's own kind completes and the border's reason is gone.
+    // kubectl's own words are kept for the diagnostics view.
     harness.write(b"\x1b");
     harness.wait(|harness| !harness.text().contains(" Command "));
+    harness.send(b"!", LOOKUP_ERROR);
+    assert!(harness.text().contains("Kinds lookup failed (cliError)"), "{}", harness.text());
+    harness.write(b"!");
+    harness.wait(|harness| !harness.text().contains(LOOKUP_ERROR));
+    // The next prompt retries the lookup, which answers this time: the
+    // cluster's own kind completes and the border's reason is gone.
     harness.write(b":get wid");
     harness.until(":get widgets");
     assert!(!harness.text().contains("built-in kinds only"), "{}", harness.text());

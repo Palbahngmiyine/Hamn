@@ -563,8 +563,9 @@ impl State {
     }
     /// Why `:get` completes only the built-in kinds, shown in the border of
     /// the prompt while a Kubernetes command is typed: the last lookup of
-    /// the cluster's kinds failed. It never replaces the message line.
-    pub fn completion_failure(&self) -> Option<&str> {
+    /// the cluster's kinds failed, in one line (`cluster_kinds::reason`).
+    /// It never replaces the message line; `!` shows the whole failure.
+    pub fn completion_failure(&self) -> Option<String> {
         match &self.input {
             Some((':', typed))
                 if self.workspace == Workspace::Kubernetes
@@ -573,6 +574,7 @@ impl State {
             {
                 self.cluster_kinds
                     .failure(&crate::cluster_kinds::Target::of(&self.request))
+                    .map(crate::cluster_kinds::reason)
             }
             _ => None,
         }
@@ -1574,7 +1576,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
                 format!(
                     " {} get completes built-in kinds only: {} ",
                     theme::icon(level),
-                    clean(reason)
+                    clean(&reason)
                 ),
                 theme::level(level),
             ));
@@ -1668,7 +1670,8 @@ fn operation_level(status: &str) -> Level {
     }
 }
 
-/// The operation log: the last failure as it was received, the status of
+/// The operation log: the last failure as it was received, the failed
+/// lookup of the cluster's kinds with kubectl's whole stderr, the status of
 /// the latest change and its output, and the targets of changes whose
 /// outcome is unknown.
 fn operation_lines(state: &State) -> Vec<Line<'static>> {
@@ -1682,6 +1685,18 @@ fn operation_lines(state: &State) -> Vec<Line<'static>> {
             theme::level(Level::Error),
         ));
         lines.extend(raw(&error.message));
+        lines.push(Line::raw(""));
+    }
+    let target = crate::cluster_kinds::Target::of(&state.request);
+    if let Some(failure) = state.cluster_kinds.failure(&target) {
+        lines.push(Line::styled(
+            format!(
+                "Kinds lookup failed ({}); get completes built-in kinds only",
+                clean(&failure.code)
+            ),
+            theme::level(Level::Warning),
+        ));
+        lines.extend(raw(&failure.message));
         lines.push(Line::raw(""));
     }
     lines.push(Line::styled(
@@ -3293,8 +3308,9 @@ mod tests {
                 .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect())
                 .collect()
         };
-        let reason = "kubectl api-resources failed (exit status: 1): error: Forbidden";
-        let hint = format!("! get completes built-in kinds only: {reason}");
+        let stderr = "Error from server (Forbidden): the server does not allow this method on the requested resource";
+        let raw = format!("kubectl exited exit status: 1: {stderr}");
+        let hint = "! get completes built-in kinds only: The server does not allow this method on the requested resource";
         let mut state = State::new(Request::default());
         state.workspace = Workspace::Kubernetes;
         state.request.context = Some("old-cluster".into());
@@ -3303,7 +3319,7 @@ mod tests {
         state.fail(Failure::new("cliError", "kubectl exited 1: pods is forbidden"));
         let message = state.message.clone();
         let ticket = state.cluster_kinds.begin(Target::of(&state.request));
-        assert!(state.cluster_kinds.finish(ticket, Err(Failure::new("cliError", reason))));
+        assert!(state.cluster_kinds.finish(ticket, Err(Failure::new("cliError", &raw))));
         state.input = Some((':', "get ".into()));
         let lines = screen(&state);
         let border = lines.iter().position(|line| line.contains(&hint)).unwrap_or_else(|| panic!("{lines:#?}"));
@@ -3318,6 +3334,16 @@ mod tests {
             let shown = screen(&state).iter().any(|line| line.contains(&hint));
             assert_eq!(shown, typed.is_empty(), "{typed:?}");
         }
+        // The diagnostics view keeps kubectl's own words whole.
+        state.input = None;
+        state.show_operation = true;
+        let lines = screen(&state);
+        let heading = lines
+            .iter()
+            .position(|line| line.contains("Kinds lookup failed (cliError); get completes built-in kinds only"))
+            .unwrap_or_else(|| panic!("{lines:#?}"));
+        assert!(lines[heading + 1].contains(&raw), "{lines:#?}");
+        state.show_operation = false;
         state.input = Some(('/', "get".into()));
         assert!(!screen(&state).iter().any(|line| line.contains("built-in kinds only")));
         state.input = Some((':', "get ".into()));
@@ -3332,7 +3358,7 @@ mod tests {
         let mut containers = State::new(Request::default());
         containers.native = Some(crate::native::parse("ps", &containers).unwrap());
         let ticket = containers.cluster_kinds.begin(Target::of(&containers.request));
-        assert!(containers.cluster_kinds.finish(ticket, Err(Failure::new("cliError", reason))));
+        assert!(containers.cluster_kinds.finish(ticket, Err(Failure::new("cliError", &raw))));
         containers.input = Some((':', "kubectl get ".into()));
         assert!(!screen(&containers).iter().any(|line| line.contains("built-in kinds only")));
     }

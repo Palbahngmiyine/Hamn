@@ -13,14 +13,20 @@
 //!   state's kubeconfig and context are still that target. `retarget` drops
 //!   a running lookup for another target, and a result whose ticket is not
 //!   the running lookup's is discarded.
-//! - A lookup that fails offers nothing beyond the built-in kinds. Its reason
-//!   is shown in the border of the prompt (`failure`), never as the message
-//!   under the view, which belongs to what the user ran. The next prompt
-//!   retries it, and the reason stays shown while the retry runs.
+//! - A lookup that fails offers nothing beyond the built-in kinds. `reason`
+//!   says why in one line, which the border of the prompt shows; the whole
+//!   `failure`, kubectl's stderr included, is kept for the diagnostics view
+//!   (`!`). Neither is the message under the view, which belongs to what the
+//!   user ran. The next prompt retries the lookup, and the failure stays
+//!   shown while the retry runs.
 //! - `lookup` runs kubectl as an owned `QueryProcess`, bounded by
 //!   `deadline`: when the deadline passes, or the future is dropped because
 //!   the target changed or the TUI quits, the process group is killed and
 //!   its leader reaped. It reads at most `OUTPUT_LIMIT` bytes of each stream.
+//!   Its failures are `cliUnavailable` (kubectl did not start), `cliError`
+//!   (it exited unsuccessfully, reported as `native::query` reports one),
+//!   `cliOutput` (its output could not be read or was too long),
+//!   `queryTimeout` and `cliProtocol` (`words` refused the output).
 //! - `words` turns the output into the words that `get` completes.
 
 use crate::model::{Failure, Request, Result};
@@ -55,14 +61,14 @@ impl Target {
 enum Status {
     #[default]
     Idle,
-    /// `failed` is the reason the previous lookup of the same target failed,
-    /// still shown while this one retries it.
+    /// `failed` is why the previous lookup of the same target failed, still
+    /// shown while this one retries it.
     Running {
         ticket: u64,
-        failed: Option<String>,
+        failed: Option<Failure>,
     },
     Ready(Vec<String>),
-    Failed(String),
+    Failed(Failure),
 }
 
 #[derive(Debug, Default)]
@@ -88,11 +94,11 @@ impl ClusterKinds {
     pub fn begin(&mut self, target: Target) -> u64 {
         let same = self.target.as_ref() == Some(&target);
         let failed = match std::mem::take(&mut self.status) {
-            Status::Failed(reason)
+            Status::Failed(failure)
             | Status::Running {
-                failed: Some(reason),
+                failed: Some(failure),
                 ..
-            } if same => Some(reason),
+            } if same => Some(failure),
             _ => None,
         };
         self.tickets += 1;
@@ -113,7 +119,7 @@ impl ClusterKinds {
         }
         self.status = match result {
             Ok(words) => Status::Ready(words),
-            Err(failure) => Status::Failed(failure.message),
+            Err(failure) => Status::Failed(failure),
         };
         true
     }
@@ -139,18 +145,29 @@ impl ClusterKinds {
 
     /// Why `get` completes only the built-in kinds for `target`, when the
     /// reason is that its last lookup failed.
-    pub fn failure(&self, target: &Target) -> Option<&str> {
+    pub fn failure(&self, target: &Target) -> Option<&Failure> {
         if self.target.as_ref() != Some(target) {
             return None;
         }
         match &self.status {
-            Status::Failed(reason)
+            Status::Failed(failure)
             | Status::Running {
-                failed: Some(reason),
+                failed: Some(failure),
                 ..
-            } => Some(reason),
+            } => Some(failure),
             _ => None,
         }
+    }
+}
+
+/// The failure of a lookup in one line for the border of the prompt. What
+/// kubectl said is summarized as the message line summarizes a CLI's
+/// failure (`tui_failure`), which skips its client log lines and names the
+/// causes it knows. Hamn's own reasons are one sentence already.
+pub fn reason(failure: &Failure) -> String {
+    match failure.code.as_str() {
+        "cliError" | "cliUnavailable" => crate::tui_failure::summarize(failure).title,
+        _ => failure.message.clone(),
     }
 }
 
@@ -194,14 +211,13 @@ async fn output(command: tokio::process::Command, deadline: Duration) -> Result<
         let (mut process, stdout, stderr) = QueryProcess::spawn(command)
             .map_err(|error| Failure::new("cliUnavailable", format!("kubectl: {error}")))?;
         let (status, out, err) = tokio::try_join!(process.wait(), read(stdout), read(stderr))
-            .map_err(|error| Failure::new("cliError", format!("kubectl api-resources: {error}")))?;
+            .map_err(|error| {
+                Failure::new("cliOutput", format!("kubectl api-resources: {error}"))
+            })?;
         if !status.success() {
             return Err(Failure::new(
                 "cliError",
-                format!(
-                    "kubectl api-resources failed ({status}): {}",
-                    first_line(&err)
-                ),
+                format!("kubectl exited {status}: {}", String::from_utf8_lossy(&err)),
             ));
         }
         Ok(out)
@@ -214,17 +230,6 @@ async fn output(command: tokio::process::Command, deadline: Duration) -> Result<
                 format!("kubectl api-resources did not finish in {deadline:?} and was stopped"),
             ))
         })
-}
-
-/// The first line of `stderr` that has text, shortened for a border.
-fn first_line(stderr: &[u8]) -> String {
-    let text = String::from_utf8_lossy(stderr);
-    let line = text
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no error message");
-    shorten(line)
 }
 
 fn shorten(text: &str) -> String {
@@ -587,25 +592,28 @@ mod tests {
         let (cluster, other) = (target("old-cluster"), target("new-cluster"));
         let mut kinds = ClusterKinds::default();
         let ticket = kinds.begin(cluster.clone());
-        let reason = "kubectl api-resources failed (exit status: 1): forbidden";
+        let message = |kinds: &ClusterKinds, target: &Target| {
+            kinds.failure(target).map(|failure| failure.message.clone())
+        };
+        let reason = "kubectl exited exit status: 1: error: forbidden";
         assert!(kinds.finish(ticket, Err(Failure::new("cliError", reason))));
-        assert_eq!(kinds.failure(&cluster), Some(reason));
+        assert_eq!(message(&kinds, &cluster).as_deref(), Some(reason));
         assert!(kinds.offered(&cluster).is_empty());
-        assert_eq!(kinds.failure(&other), None);
+        assert_eq!(message(&kinds, &other), None);
         // The next prompt retries it; the reason stays until the retry ends.
         assert!(kinds.wanted(&cluster));
         let retry = kinds.begin(cluster.clone());
         assert!(!kinds.wanted(&cluster));
-        assert_eq!(kinds.failure(&cluster), Some(reason));
+        assert_eq!(message(&kinds, &cluster).as_deref(), Some(reason));
         assert!(kinds.finish(retry, Ok(strings(&["certificates"]))));
-        assert_eq!(kinds.failure(&cluster), None);
+        assert_eq!(message(&kinds, &cluster), None);
         assert_eq!(kinds.offered(&cluster), strings(&["certificates"]));
         // A failure is not carried over to another target.
         let failed = kinds.begin(cluster.clone());
         assert!(kinds.finish(failed, Err(Failure::new("queryTimeout", "slow"))));
         kinds.begin(other.clone());
         assert_eq!(
-            (kinds.failure(&cluster), kinds.failure(&other)),
+            (message(&kinds, &cluster), message(&kinds, &other)),
             (None, None)
         );
         // Nor kept after the target changes and comes back.
@@ -613,7 +621,64 @@ mod tests {
         assert!(kinds.finish(failed, Err(Failure::new("queryTimeout", "slow"))));
         assert!(!kinds.retarget(&other));
         assert!(!kinds.retarget(&cluster));
-        assert_eq!(kinds.failure(&cluster), None);
+        assert_eq!(message(&kinds, &cluster), None);
+    }
+
+    #[test]
+    fn the_reason_of_a_failed_lookup_is_one_line_in_kubectls_or_hamns_words() {
+        let exited = |stderr: &str| {
+            Failure::new(
+                "cliError",
+                format!("kubectl exited exit status: 1: {stderr}"),
+            )
+        };
+        for (failure, expected) in [
+            // kubectl's client log lines come before its own sentence when the
+            // API server cannot be reached; the sentence is what is shown.
+            (
+                exited(concat!(
+                    "E1015 01:17:26.408480   67207 memcache.go:265] \"Couldn't get current server API group list\" ",
+                    "err=\"Get \\\"https://127.0.0.1:63621/api?timeout=32s\\\": dial tcp 127.0.0.1:63621: connect: connection refused\"\n",
+                    "The connection to the server 127.0.0.1:63621 was refused - did you specify the right host or port?\n",
+                )),
+                "Cannot reach the Kubernetes API server at 127.0.0.1:63621: connection refused",
+            ),
+            (
+                exited("error: You must be logged in to the server (Unauthorized)\n"),
+                "Kubernetes rejected the credentials of this context",
+            ),
+            (
+                exited(
+                    "Error from server (Forbidden): the server does not allow this method on the requested resource\n",
+                ),
+                "The server does not allow this method on the requested resource",
+            ),
+            (
+                exited(""),
+                "kubectl failed without an error message (exit status: 1)",
+            ),
+            (
+                Failure::new(
+                    "cliUnavailable",
+                    "kubectl: No such file or directory (os error 2)",
+                ),
+                "kubectl is not installed or not on PATH",
+            ),
+            // Hamn's own reasons stay as they are, whatever their code.
+            (
+                Failure::new(
+                    "queryTimeout",
+                    "kubectl api-resources did not finish in 30s and was stopped",
+                ),
+                "kubectl api-resources did not finish in 30s and was stopped",
+            ),
+            (
+                words(b"ACTION_DONE\n").unwrap_err(),
+                "kubectl api-resources printed \"ACTION_DONE\", which is not a resource name",
+            ),
+        ] {
+            assert_eq!(reason(&failure), expected, "{failure:?}");
+        }
     }
 
     #[test]
@@ -708,7 +773,7 @@ int main(int argc, char **argv) {
     }
 
     #[tokio::test]
-    async fn a_successful_lookup_gives_words_and_a_failed_one_its_first_error_line() {
+    async fn a_successful_lookup_gives_words_and_a_failed_one_keeps_kubectls_stderr() {
         let fixture = peer("results");
         let names = output(
             peer_command(&fixture, &["names".as_ref()]),
@@ -727,10 +792,16 @@ int main(int argc, char **argv) {
         )
         .await
         .unwrap_err();
+        // The whole stderr is kept, in the form `native::query` reports an
+        // exit, and the border shows its first meaningful line.
         assert_eq!(failure.code, "cliError");
         assert_eq!(
             failure.message,
-            "kubectl api-resources failed (exit status: 1): error: unable to retrieve the complete list of server APIs"
+            "kubectl exited exit status: 1: \n  error: unable to retrieve the complete list of server APIs  \nmore\n"
+        );
+        assert_eq!(
+            reason(&failure),
+            "kubectl: unable to retrieve the complete list of server APIs"
         );
         let missing = output(
             tokio::process::Command::new(fixture.program().with_file_name("missing")),
@@ -739,6 +810,7 @@ int main(int argc, char **argv) {
         .await
         .unwrap_err();
         assert_eq!(missing.code, "cliUnavailable");
+        assert_eq!(reason(&missing), "kubectl is not installed or not on PATH");
         assert!(
             missing.message.starts_with("kubectl: "),
             "{}",
@@ -756,11 +828,12 @@ int main(int argc, char **argv) {
         )
         .await
         .unwrap_err();
-        assert_eq!(failure.code, "cliError");
+        assert_eq!(failure.code, "cliOutput");
         assert_eq!(
             failure.message,
             "kubectl api-resources: output exceeds 1024 KiB"
         );
+        assert_eq!(reason(&failure), failure.message);
         assert!(
             started.elapsed() < Duration::from_secs(30),
             "{:?}",
