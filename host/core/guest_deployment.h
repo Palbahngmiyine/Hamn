@@ -22,8 +22,11 @@ int guest_deployment_forget(const struct profile *profile);
 int guest_deployment_recover(const struct profile *profile, const char *ip);
 int guest_deployment_recovery_complete(void);
 /* After guest_deployment_recover returned 0: 1 when it discarded or rolled
- * back a backup (or printed anything else), so the guest runtime may differ
- * from the deployment its marker records; 0 when there was no backup. */
+ * back a backup, found the guest's record that an earlier recovery's change
+ * has not been followed by a whole runtime yet (or printed anything else),
+ * so the guest runtime may differ from the deployment its marker records; 0
+ * when there was neither. A refresh or reapplication that commits the whole
+ * runtime removes that record. */
 int guest_deployment_recovered_backup(void);
 /* A remote writer may still be active; do not stop the VM yet. */
 int guest_deployment_cleanup_pending(void);

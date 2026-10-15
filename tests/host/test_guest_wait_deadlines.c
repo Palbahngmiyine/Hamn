@@ -82,6 +82,8 @@ int hamn_test_start_wait_vmrun_running(const struct profile *p,
 #define ENV_LEFTOVER "HAMN_TEST_FAKE_GUEST_LEFTOVER"
 #define RECOVERY_ROOT "/var/lib/hamn/deployment-transactions"
 #define TRANSACTION_HELPER "/usr/local/libexec/hamn/guest-deployment-transaction"
+/* The host removing the guest's reapply record after a whole runtime. */
+#define SETTLE_RECORD "rm -f -- \"$1\" && sync"
 
 static long long now_ms(void)
 {
@@ -560,6 +562,7 @@ static void reconcile_without_a_leftover(int rosetta)
                                "configure-rosetta disable") == 1);
     assert(ssh_calls("configure-rosetta") == 1);
     assert(ssh_calls("configure-docker") == 1);
+    assert(ssh_calls(SETTLE_RECORD) == 0);
     assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
     assert(ssh_calls("verify-image-contract") == 0 &&
            ssh_calls("configure-containerd") == 0 && ssh_calls("cloud-init") == 0);
@@ -629,7 +632,10 @@ static void reconcile_recovers_a_leftover_and_applies_the_whole_runtime(void)
     assert(ssh_calls("verify-image-contract") == 1);
     assert(ssh_calls("configure-containerd") == 1);
     assert(ssh_calls("configure-docker") == 1);
+    assert(ssh_calls(SETTLE_RECORD) == 1);
     assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
+    assert(ssh_call_index(SETTLE_RECORD) >
+           ssh_call_index(TRANSACTION_HELPER " commit"));
     assert(ssh_calls(TRANSACTION_HELPER " rollback") == 0);
     assert(ssh_calls("cloud-init") == 0);
     assert(!guest_deployment_cleanup_pending());
@@ -662,7 +668,10 @@ static void reapply_applies_the_whole_runtime_without_a_leftover(void)
     assert(ssh_calls("verify-image-contract") == 1);
     assert(ssh_calls("configure-containerd") == 1);
     assert(ssh_calls("configure-docker") == 1);
+    assert(ssh_calls(SETTLE_RECORD) == 1);
     assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
+    assert(ssh_call_index(SETTLE_RECORD) >
+           ssh_call_index(TRANSACTION_HELPER " commit"));
     assert(ssh_calls("cloud-init") == 0);
     fflush(NULL);
     char *output = read_file(fixture.out);
@@ -685,7 +694,7 @@ static void reconcile_begins_nothing_when_recovery_fails(void)
     assert(strstr(log_last_error(), "deployment recovery failed"));
     assert(leftover_exists());
     assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
-    assert(ssh_calls(TRANSACTION_HELPER " ") == 0);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 0);
     assert(ssh_calls("configure-rosetta") == 0 && ssh_calls("configure-docker") == 0 &&
            ssh_calls("-O forward") == 0);
     assert(!guest_deployment_cleanup_pending() &&
@@ -708,7 +717,7 @@ static void cancelled_recovery_keeps_its_result_in_reconcile(void)
     assert(strstr(log_last_error(), "deployment recovery failed"));
     assert(!leftover_exists());
     assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
-    assert(ssh_calls(TRANSACTION_HELPER " ") == 0);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 0);
     assert(ssh_calls("configure-rosetta") == 0 && ssh_calls("configure-docker") == 0);
     assert(guest_deployment_recovery_complete() &&
            !guest_deployment_cleanup_pending());

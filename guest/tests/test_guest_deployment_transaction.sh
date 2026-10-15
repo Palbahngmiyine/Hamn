@@ -120,7 +120,8 @@ set -u
 printf '%s\n' "$*" >>"$SYSCTL_LOG"
 [ "${FAIL_SYSCTL:-0}" != 1 ]
 EOF
-# One line of operands per sync(1) call; FAIL_SYNC_AT=N fails the Nth call.
+# One line of operands per sync(1) call; FAIL_SYNC_AT=N fails the Nth call,
+# and FAIL_SYNC_AT="N M" each of those calls.
 # With SYNC_WATCH set to a transaction, each call also records whether its
 # phase and backup data still existed when that barrier ran.
 export SYNC_LOG="$WORK/sync.log"
@@ -136,10 +137,12 @@ if [ -n "${SYNC_WATCH:-}" ]; then
     [ ! -e "$SYNC_WATCH/data" ] || data=1
     printf 'phase=%s data=%s\n' "$phase" "$data" >>"$SYNC_WATCH_LOG"
 fi
-if [ "$(wc -l <"$SYNC_LOG")" -eq "${FAIL_SYNC_AT:-0}" ]; then
+case " ${FAIL_SYNC_AT:-} " in
+*" $(wc -l <"$SYNC_LOG" | tr -d ' ') "*)
     echo 'injected durability failure' >&2
     exit 1
-fi
+    ;;
+esac
 EOF
 chmod +x "$BIN/systemctl" "$BIN/sysctl" "$BIN/sync"
 export PATH="$BIN:$PATH"
@@ -385,17 +388,47 @@ mv "$ROOT/etc/docker-real" "$ROOT/etc/docker"
 
 # A failed durability barrier must never publish a recoverable ready backup.
 # Each sync(1) call is one barrier: backup contents, the unpublished phase,
-# then the directories that hold the published phase.
+# then the directories that hold the published phase. A failure at the third
+# barrier comes after ready was published: the failed begin then retires its
+# phase as commit and rollback do, removed and made durable (a fourth sync)
+# while the backup data still exists, and only then removes the rest.
+FAILED_BEGIN=4123456789abcdef0123456789abcdef
 for failure in 1 2 3; do
     : >"$SYNC_LOG"
-    if FAIL_SYNC_AT="$failure" bash "$SCRIPT" begin \
-        4123456789abcdef0123456789abcdef >"$WORK/sync.out" 2>"$WORK/sync.err"; then
+    : >"$SYNC_WATCH_LOG"
+    if SYNC_WATCH="$TRANSACTION_ROOT/$FAILED_BEGIN" FAIL_SYNC_AT="$failure" \
+        bash "$SCRIPT" begin "$FAILED_BEGIN" >"$WORK/sync.out" 2>"$WORK/sync.err"; then
         fail "accepted a failed durability barrier"
     fi
     grep -Fq 'injected durability failure' "$WORK/sync.err"
-    [ "$(wc -l <"$SYNC_LOG")" -eq "$failure" ] || fail "barrier $failure was not the last sync"
-    test ! -e "$TRANSACTION_ROOT/4123456789abcdef0123456789abcdef"
+    expected=$failure
+    [ "$failure" -ne 3 ] || expected=4
+    [ "$(wc -l <"$SYNC_LOG")" -eq "$expected" ] ||
+        fail "barrier $failure: unexpected sync barriers"
+    if [ "$failure" -eq 3 ]; then
+        [ "$(sed -n 4p "$SYNC_LOG")" = "-- $TRANSACTION_ROOT/$FAILED_BEGIN" ] ||
+            fail "the failed begin did not make its phase retirement durable"
+        [ "$(sed -n 4p "$SYNC_WATCH_LOG")" = "phase=0 data=1" ] ||
+            fail "the failed begin removed backup data before retiring its phase"
+    fi
+    test ! -e "$TRANSACTION_ROOT/$FAILED_BEGIN"
     assert_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
 done
+# When that retirement cannot be made durable either, the backup stays whole
+# without its phase: recovery discards it, and a crash that brought the phase
+# back would leave a complete backup, durable since before its publication.
+: >"$SYNC_LOG"
+if FAIL_SYNC_AT="3 4" bash "$SCRIPT" begin "$FAILED_BEGIN" \
+    >"$WORK/sync.out" 2>"$WORK/sync.err"; then
+    fail "accepted a failed durability barrier"
+fi
+[ "$(wc -l <"$SYNC_LOG")" -eq 4 ] || fail "unexpected sync barriers"
+[ -d "$TRANSACTION_ROOT/$FAILED_BEGIN/data" ] &&
+    [ -d "$TRANSACTION_ROOT/$FAILED_BEGIN/meta" ] ||
+    fail "the failed begin removed a backup whose phase retirement was not durable"
+[ ! -e "$TRANSACTION_ROOT/$FAILED_BEGIN/phase" ] ||
+    fail "the failed begin kept a ready phase"
+rm -rf -- "${TRANSACTION_ROOT:?}/$FAILED_BEGIN"
+assert_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
 
 echo "PASS: Docker/CRI guest deployment transactions roll back atomically"

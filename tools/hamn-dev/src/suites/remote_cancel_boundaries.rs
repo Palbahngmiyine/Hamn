@@ -79,6 +79,8 @@ static int leftover, first_recovery;
  * that succeeded, that is, whether it found a leftover. The counters tell
  * x86_64 translation and Docker's settings from the whole runtime. */
 static int recovered, runtime_configs, rosetta_configs, docker_configs;
+/* settles: removals of the guest's reapply record after a whole runtime. */
+static int settles;
 static const char *fault;
 #define logerr(...) ((void)0)
 #define logmsg(...) ((void)0)
@@ -92,6 +94,7 @@ static const char *fault;
 #define guest_deployment_configure_rosetta(...) (rosetta_configs++, 0)
 #define guest_deployment_configure_docker(...) (docker_configs++, 0)
 #define guest_deployment_recovered_backup() recovered
+#define deployment_settle_reapply(...) ((void)settles++)
 #define guest_deployment_forward_sockets(...) 0
 #define guest_deployment_runtime_ready(...) 0
 #define guest_deployment_mark_current(...) 0
@@ -133,7 +136,7 @@ int main(void) {
  for (int failure=0; failure<3; failure++) {
   fault=phases[phase]; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=rosetta_configs=docker_configs=0;
+  runtime_configs=rosetta_configs=docker_configs=settles=0;
   fail_barrier=failure==1; fail_recovery=failure==2; leftover=first_recovery=0;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==-1 && cancelled && depth==0 && barriers==1);
@@ -143,6 +146,7 @@ int main(void) {
   assert(recovery_calls==1 + !fail_barrier && recovery_complete==(failure==0));
   assert(transactions==(phase ? 2 : 1));
   assert(runtime_configs==(phase && !reconcile));
+  assert(settles==0);
   assert(rosetta_configs==(phase && reconcile) && docker_configs==(phase && reconcile));
  }
  /* A leftover transaction would make begin refuse; the recovery before begin
@@ -154,13 +158,15 @@ int main(void) {
  for (int left=0; left<2; left++) {
   fault="none"; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=rosetta_configs=docker_configs=0;
+  runtime_configs=rosetta_configs=docker_configs=settles=0;
   fail_barrier=fail_recovery=first_recovery=0; leftover=left;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==0 && !leftover && recovery_calls==1 && transactions==2);
   assert(!cancelled && depth==0 && barriers==0 && !cleanup_pending && !recovery_complete);
   assert(runtime_configs==(!reconcile || left));
   assert(rosetta_configs==(reconcile && !left) && docker_configs==(reconcile && !left));
+  /* Only a whole runtime after a recovered backup settles its record. */
+  assert(settles==left);
  }
  /* A recovery that fails or is cancelled begins nothing, and the caller keeps
   * what the recovery reported: nothing, a finished retry, or pending cleanup. */
@@ -168,11 +174,12 @@ int main(void) {
  for (int outcome=1; outcome<=3; outcome++) {
   fault="none"; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=rosetta_configs=docker_configs=0;
+  runtime_configs=rosetta_configs=docker_configs=settles=0;
   fail_barrier=fail_recovery=0; leftover=1; first_recovery=outcome;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==-1 && recovery_calls==1 && transactions==0 && barriers==0 && depth==0);
   assert(runtime_configs==0 && rosetta_configs==0 && docker_configs==0);
+  assert(settles==0);
   assert(cleanup_pending==(outcome==3) && recovery_complete==(outcome==2));
  }
  /* The reapplication a running VM's start asks for after its own recovery
@@ -181,11 +188,12 @@ int main(void) {
  for (int left=0; left<2; left++) {
   fault="none"; fixture_current=1; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=rosetta_configs=docker_configs=0;
+  runtime_configs=rosetta_configs=docker_configs=settles=0;
   fail_barrier=fail_recovery=first_recovery=0; leftover=left;
   assert(guest_deployment_reapply_runtime_locked(&p,&state)==0);
   assert(!leftover && recovery_calls==1 && transactions==2 && barriers==0 && depth==0);
   assert(runtime_configs==1 && rosetta_configs==0 && docker_configs==0);
+  assert(settles==1);
  }
  fixture_current=0;
  assert(guest_deployment_reapply_runtime_locked(&p,&state)==-1 && errno==ESTALE);
@@ -201,6 +209,7 @@ const RECOVER_PREFIX: &str = r#"
 struct profile { int unused; };
 #define DEPLOYMENT_RECOVERY_SCRIPT "recover"
 #define GUEST_DEPLOYMENT_TRANSACTION_SCRIPT "/helper"
+#define GUEST_DEPLOYMENT_REAPPLY_RECORD "/var/lib/hamn/deployment-reapply"
 #define GUEST_DEPLOYMENT_READY_TIMEOUT_SEC 30
 static int recovery_complete, cleanup_pending, recovered_backup;
 static int cancelled, depth, calls, second_result, settled_writer_unknown, forwarded, ready;
@@ -230,7 +239,8 @@ static int remote_mutation_run(const struct profile *p, const char *ip, unsigned
  assert(!strcmp(command[0], "sudo") && !strcmp(command[1], "bash") && !strcmp(command[2], "-c"));
  assert(!strcmp(command[3], "recover") && !strcmp(command[4], "--"));
  assert(!strcmp(command[5], "/var/lib/hamn/deployment-transactions"));
- assert(!strcmp(command[6], "/helper") && command[7] == NULL);
+ assert(!strcmp(command[6], "/helper"));
+ assert(!strcmp(command[7], "/var/lib/hamn/deployment-reapply") && command[8] == NULL);
  if (++calls == 1) {
   assert(!depth && output[0] == '\0');
   if (first_prints) snprintf(output, capacity, "discarded deployment backup ...");

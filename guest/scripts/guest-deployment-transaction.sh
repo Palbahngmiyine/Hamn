@@ -162,9 +162,16 @@ begin_transaction() {
     cleanup_begin() {
         local rc=$?
         if [ "$cleanup_incomplete" -eq 1 ]; then
-            # A phase published before a failed barrier goes first, so a
-            # partial removal is discarded rather than restored.
-            rm -f -- "$TRANSACTION/phase" || true
+            # A phase published before a failed barrier is retired as
+            # retire_transaction does: removed and made durable before the
+            # rest, so a crash during the removal leaves an entry that
+            # recovery discards, never a ready phase with part of the backup.
+            # If the retirement cannot be made durable, the backup stays
+            # whole; everything in it was durable before ready was published.
+            if [ -e "$TRANSACTION/phase" ] || [ -L "$TRANSACTION/phase" ]; then
+                rm -f -- "$TRANSACTION/phase" && sync -- "$TRANSACTION" ||
+                    exit "$rc"
+            fi
             rm -rf -- "$TRANSACTION" || true
         fi
         exit "$rc"
