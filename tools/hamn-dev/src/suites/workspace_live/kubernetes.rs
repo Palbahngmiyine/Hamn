@@ -169,12 +169,12 @@ fn guarded_mutations(live: &Live, config: &Path, environment: &BTreeMap<String, 
                 guarded.record("replacementNamespaceUid", replacement["metadata"]["uid"].clone());
                 assert_ne!(guarded.recorded("replacementNamespaceUid"), guarded.recorded("originalNamespaceUid"));
             };
-            guarded.confirmed_action("namespaces", &name, b"d", "delete", &replace_namespace, 1);
+            guarded.confirmed_action("namespaces", &name, b"\x04", "delete", &replace_namespace, 1);
             assert_eq!(
                 guarded.resource("namespace", &name)["metadata"]["uid"],
                 guarded.recorded("replacementNamespaceUid")
             );
-            guarded.confirmed_action("namespaces", &name, b"d", "delete", &|| {}, 0);
+            guarded.confirmed_action("namespaces", &name, b"\x04", "delete", &|| {}, 0);
             guarded.kubectl(&["wait", "--for=delete", &format!("namespace/{name}"), "--timeout=60s"]);
             guarded.owned.set(false);
             guarded.record("replacementPreservedThenFreshDeleteSucceeded", json!(true));
