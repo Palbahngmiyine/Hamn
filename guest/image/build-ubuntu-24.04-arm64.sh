@@ -137,6 +137,38 @@ update-binfmts --import qemu-x86_64
 systemctl enable binfmt-support.service
 EOF
 chmod 0755 "$PROVISION"
+# Ubuntu's cloud image mounts the root ext4 with online discard. After an ext4
+# error aborted the journal, a directory deleted just before came back from
+# journal replay with zero-filled file data, and intact without discard (one
+# isolated VM trial each, 2026-10-15): blocks freed in a transaction that never
+# reached the log were still discarded. Any file replaced or deleted in that
+# window is exposed. fstrim.timer trims free space weekly instead, so the
+# sparse disk image can still release what the guest no longer uses.
+# Only the base image's own root entry is rewritten; any other fstab is a new
+# input to review. The file is rewritten in place, keeping its owner and mode.
+ROOT_FSTAB=$WORK/root-fstab.sh
+cat >"$ROOT_FSTAB" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+fstab=$1
+if ! rewritten=$(awk -v OFS='\t' '
+    /^[[:space:]]*(#|$)/ { print; next }
+    $2 == "/" {
+        roots++
+        if ($3 != "ext4" || $4 != "discard,commit=30,errors=remount-ro")
+            unexpected = 1
+        $4 = "commit=30,errors=remount-ro"
+    }
+    ("," $4 ",") ~ /,discard(=[^,]*)?,/ { unexpected = 1 }
+    { print }
+    END { exit unexpected || roots != 1 }
+' "$fstab"); then
+    echo "hamn guest image: unexpected base image fstab: $fstab" >&2
+    exit 1
+fi
+printf '%s\n' "$rewritten" >"$fstab"
+EOF
+chmod 0755 "$ROOT_FSTAB"
 
 "$QEMU_IMG" create -q -f qcow2 "$STAGE" "$TARGET_SIZE"
 "$VIRT_RESIZE" --format qcow2 --output-format qcow2 \
@@ -173,7 +205,11 @@ fi
     --upload "$ROOT/guest/image/grub-hamn.cfg:/etc/default/grub.d/90-hamn.cfg" \
     --chmod '0644:/etc/default/grub.d/90-hamn.cfg' \
     --run-command 'update-grub' \
-    --run-command "grep -q 'console=hvc0 fsck.repair=yes' /boot/grub/grub.cfg"
+    --run-command "grep -q 'console=hvc0 fsck.repair=yes' /boot/grub/grub.cfg" \
+    --upload "$ROOT_FSTAB:/tmp/hamn-root-fstab.sh" \
+    --run-command 'bash /tmp/hamn-root-fstab.sh /etc/fstab' \
+    --run-command 'rm -f /tmp/hamn-root-fstab.sh' \
+    --run-command 'systemctl enable fstrim.timer'
 
 # Capture a compressed baseline before cleanup from this exact provisioned
 # filesystem; separate builds could resolve different apt package versions.

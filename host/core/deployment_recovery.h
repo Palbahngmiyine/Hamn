@@ -5,14 +5,16 @@
  * Guest-side recovery of an interrupted deployment transaction, run as root
  * under the guest deployment lock:
  *
- *     bash -c DEPLOYMENT_RECOVERY_SCRIPT -- ROOT HELPER RECORD
+ *     bash -c DEPLOYMENT_RECOVERY_SCRIPT -- ROOT HELPER RECORD [DIGEST...]
  *
  * ROOT is the transaction directory (/var/lib/hamn/deployment-transactions),
  * HELPER the image's guest-deployment-transaction script, and RECORD a file
  * (/var/lib/hamn/deployment-reapply) whose existence says that a recovery
  * changed the guest runtime and the whole runtime has not been applied
- * again since. The script is sent from the host because images that are
- * already installed have no recovery action of their own.
+ * again since. Each DIGEST is the SHA-256 of a helper that published ready
+ * without fsync (the host passes DEPLOYMENT_UNDURABLE_HELPERS). The script
+ * is sent from the host because images that are already installed have no
+ * recovery action of their own.
  *
  * Before a discard or a rollback removes the evidence of an interrupted
  * transaction, the script creates RECORD and makes it durable, so the need
@@ -25,16 +27,25 @@
  * restored:
  *   - exactly the bytes "ready\n": the backup is complete. systemd's start
  *     limits are cleared, then the helper restores and removes the backup.
- *   - missing, or a regular file holding anything else (empty, or
- *     zero-filled after a crash): the backup was never published, or commit
- *     or rollback had already retired it. Its begin changes nothing outside
- *     the entry and the host changes the guest only after begin publishes
- *     ready durably, so there is nothing to roll back. The entry is removed,
- *     the removal is made durable, and one line on stderr names it. Images
- *     before 0.1.1 published ready without fsync, so after a crash their
- *     empty phase can accompany applied changes; that backup cannot be
- *     restored either, and the start that follows applies the whole guest
- *     runtime over them.
+ *   - missing: the backup was never published, or commit or rollback had
+ *     already retired it. Its begin changes nothing outside the entry and
+ *     the host changes the guest only after begin publishes ready durably,
+ *     so there is nothing to roll back.
+ *   - exactly six zero bytes: a published phase whose removal a crash lost
+ *     after its freed block was discarded (observed with the guest root's
+ *     `discard` mount option). The phase is removed only after commit or
+ *     rollback decided the outcome, or by a failed begin, so there is
+ *     nothing to roll back either.
+ *   In both cases the entry is removed, the removal is made durable, and one
+ *   line on stderr names it. Both conclusions rest on a durable begin: when
+ *   HELPER's digest is a DIGEST, a crash can also lose an in-place phase
+ *   after the host changed the guest, so both states are refused and kept
+ *   as ambiguous instead (a missing helper is refused too).
+ *   - any other bytes (empty, truncated or foreign): no helper writes them
+ *     since 0.1.1, so they cannot show that the guest was left unchanged.
+ *     Images before 0.1.1 published ready without fsync, so an empty phase
+ *     there can accompany applied changes. Refused and kept; the message
+ *     names the entry and how to keep the current guest runtime.
  *   - a symlink or other non-regular file: refused.
  *   - a phase that cannot be read: refused. Its backup may be ready, so it
  *     is neither restored nor discarded.
@@ -48,14 +59,15 @@
  * may no longer be the deployment the host marker records. Nonzero, with a
  * reason on stderr: RECORD is unsafe or cannot be made durable (nothing is
  * removed then), the root is unsafe, more than one entry exists, the entry is
- * not an owned 32-hex directory, its phase is unsafe or unreadable, removing
- * a discarded entry failed, clearing systemd's start-limit state failed
- * (before any restore), or the rollback failed or left its backup behind
- * (the helper retains the backup for another attempt).
+ * not an owned 32-hex directory, its phase is unsafe, unreadable, damaged or
+ * ambiguous, the helper cannot be identified, removing a discarded entry
+ * failed, clearing systemd's start-limit state failed (before any restore),
+ * or the rollback failed or left its backup behind (the helper retains the
+ * backup for another attempt).
  */
 #define DEPLOYMENT_RECOVERY_SCRIPT \
     "set -euo pipefail; shopt -s nullglob dotglob; root=$1; helper=$2; " \
-    "record=$3; " \
+    "record=$3; shift 3; undurable=\" $* \"; " \
     "if test -L \"$record\" || { test -e \"$record\" && test ! -f \"$record\"; }; " \
     "then echo \"unsafe deployment reapply record; inspect $record\" >&2; " \
     "exit 1; fi; " \
@@ -83,9 +95,20 @@
     "bytes=$(head -c 7 \"$phase\" | od -An -tx1 | tr -d ' \\n') || " \
     "{ echo \"cannot read deployment backup phase; inspect $entry\" >&2; " \
     "exit 1; }; " \
-    "state='not ready'; test \"$bytes\" != 72656164790a || state=ready; fi; " \
-    "if test \"$state\" != ready; then remember; " \
-    "rm -rf -- \"$entry\"; sync -- \"$root\"; " \
+    "case $bytes in 72656164790a) state=ready ;; " \
+    "000000000000) state=zero-filled ;; " \
+    "*) echo \"damaged deployment backup phase; neither restored nor " \
+    "discarded: inspect $entry, and remove it to keep the current guest " \
+    "runtime\" >&2; exit 1 ;; esac; fi; " \
+    "if test \"$state\" != ready; then " \
+    "digest=$(sha256sum < \"$helper\") || { echo \"cannot identify the " \
+    "deployment helper $helper; inspect $entry\" >&2; exit 1; }; " \
+    "case $undurable in *\" ${digest%% *} \"*) echo \"ambiguous deployment " \
+    "backup (phase $state) from a helper that published without fsync " \
+    "(Hamn before 0.1.1): the guest may be partly configured, so it is " \
+    "neither restored nor discarded: inspect $entry, and remove it to keep " \
+    "the current guest runtime\" >&2; exit 1 ;; esac; " \
+    "remember; rm -rf -- \"$entry\"; sync -- \"$root\"; " \
     "echo \"discarded deployment backup $token (phase $state): it was never " \
     "published or was already retired, so it is never restored\" >&2; " \
     "exit 0; fi; " \
@@ -98,5 +121,18 @@
     "{ echo 'deployment recovery did not remove its backup' >&2; exit 1; }; " \
     "echo \"rolled back deployment backup $token: the guest runtime is the " \
     "one from before its transaction\" >&2"
+
+/*
+ * SHA-256 of the guest-deployment-transaction helpers that the Hamn 0.0.1
+ * and 0.1.0 guest images install, the DIGEST arguments above. They wrote
+ * phase in place without fsync before returning; every later helper
+ * publishes ready durably. Derived with
+ *     git show v0.0.1:guest/scripts/guest-deployment-transaction.sh |
+ *         shasum -a 256
+ * and likewise for v0.1.0; signed images install that file unchanged.
+ */
+#define DEPLOYMENT_UNDURABLE_HELPERS \
+    "1627767c1297df2c84e54c07adedef697b8766769e90b76a7627d21557e56540", \
+    "912bfb92669467768ae7eecae07ef2f405d4f6d0308eb81431595b101dd9c901"
 
 #endif

@@ -208,6 +208,7 @@ const RECOVER_PREFIX: &str = r#"
 #include <string.h>
 struct profile { int unused; };
 #define DEPLOYMENT_RECOVERY_SCRIPT "recover"
+#define DEPLOYMENT_UNDURABLE_HELPERS "old-a", "old-b"
 #define GUEST_DEPLOYMENT_TRANSACTION_SCRIPT "/helper"
 #define GUEST_DEPLOYMENT_REAPPLY_RECORD "/var/lib/hamn/deployment-reapply"
 #define GUEST_DEPLOYMENT_READY_TIMEOUT_SEC 30
@@ -240,7 +241,8 @@ static int remote_mutation_run(const struct profile *p, const char *ip, unsigned
  assert(!strcmp(command[3], "recover") && !strcmp(command[4], "--"));
  assert(!strcmp(command[5], "/var/lib/hamn/deployment-transactions"));
  assert(!strcmp(command[6], "/helper"));
- assert(!strcmp(command[7], "/var/lib/hamn/deployment-reapply") && command[8] == NULL);
+ assert(!strcmp(command[7], "/var/lib/hamn/deployment-reapply"));
+ assert(!strcmp(command[8], "old-a") && !strcmp(command[9], "old-b") && command[10] == NULL);
  if (++calls == 1) {
   assert(!depth && output[0] == '\0');
   if (first_prints) snprintf(output, capacity, "discarded deployment backup ...");

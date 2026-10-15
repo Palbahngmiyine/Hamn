@@ -165,15 +165,33 @@ static long long monotonic_milliseconds(void)
     return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
 }
 
+/* What is left of the wait until deadline for one status query, at most
+ * 300 ms: at least 1, 0 once the deadline has passed, or -1 if the clock
+ * fails. */
+static int vmrun_query_ms(long long deadline)
+{
+    long long now = monotonic_milliseconds();
+    if (now < 0)
+        return -1;
+    long long left = deadline - now;
+    if (left <= 0)
+        return 0;
+    return left < 300 ? (int)left : 300;
+}
+
 /* Polls vmrun's control socket every half second until timeout_sec (at
- * least 1) has passed on the monotonic clock. Each status query gets what is
- * left of the wait, at most 300 ms, for each send and receive, so a vmrun
- * that accepts and never answers ends the wait at its deadline; one that
- * closes the query's connections unanswered can make that last query retry
- * past it (ctlsock.h). 0 once vmrun reports running and its process is
- * alive; -1 with errno ETIMEDOUT when the time is up, ECANCELED at the next
- * poll after the operation is cancelled outside cleanup, or EINVAL for a
- * timeout_sec below 1. */
+ * least 1) has passed on the monotonic clock. Each status query, and the one
+ * that verifies vmrun's process once it reports running, ends within what
+ * is left of the wait, at most 300 ms, including any connection it opens
+ * again after an unanswered close (ctlsock_query_status_within()). So a
+ * vmrun that never answers, stops answering right after it reported
+ * running, or closes the connections unanswered ends the wait at its
+ * deadline. After the reply, verifying the process also reads process
+ * information and the profile's identity files; the deadline does not bound
+ * those. 0 once vmrun reports
+ * running and its process is verified; -1 with errno ETIMEDOUT when the time
+ * is up, ECANCELED at the next poll after the operation is cancelled outside
+ * cleanup, or EINVAL for a timeout_sec below 1. */
 static int wait_vmrun_running(const struct profile *p, const char *ctl,
                               int timeout_sec)
 {
@@ -191,24 +209,26 @@ static int wait_vmrun_running(const struct profile *p, const char *ctl,
             errno = ECANCELED;
             return -1;
         }
-        now = monotonic_milliseconds();
-        if (now < 0)
+        int query_ms = vmrun_query_ms(deadline);
+        if (query_ms < 0)
             return -1;
-        if (now >= deadline) {
+        if (query_ms == 0) {
             errno = ETIMEDOUT;
             return -1;
         }
-        long long left = deadline - now;
-        /* left is at least 1 here; a timeout of 0 would let the query
-         * block, as SO_RCVTIMEO and SO_SNDTIMEO of 0 mean no limit. */
-        int query_ms = left < 300 ? (int)left : 300;
-        if (ctlsock_query_status(ctl, resp, sizeof(resp), query_ms) == 0 &&
-            strstr(resp, "\"running\"") && vm_running_pid(p) > 0)
-            return 0;
+        if (ctlsock_query_status_within(ctl, resp, sizeof(resp),
+                                        query_ms) == 0 &&
+            strstr(resp, "\"running\"")) {
+            query_ms = vmrun_query_ms(deadline);
+            if (query_ms < 0)
+                return -1;
+            if (query_ms > 0 && vm_running_pid(p, query_ms) > 0)
+                return 0;
+        }
         now = monotonic_milliseconds();
         if (now < 0)
             return -1;
-        left = deadline - now;
+        long long left = deadline - now;
         if (left > 0) /* a cancellation signal ends the sleep early */
             usleep((useconds_t)(left < 500 ? left : 500) * 1000);
     }

@@ -20,10 +20,13 @@ CNI=$WORK/cni
 ETC=$WORK/etc/hamn
 mkdir -p "$BIN" "$CNI" "$ETC"
 for command in dockerd docker containerd ctr runc dnsmasq qemu-x86_64-static hamnd \
-    getent systemctl; do
+    getent; do
     printf '%s\n' '#!/bin/sh' 'exit 0' >"$BIN/$command"
     chmod 0755 "$BIN/$command"
 done
+# `systemctl is-enabled --quiet <unit>` fails for a unit marked disabled here.
+printf '%s\n' '#!/bin/sh' "test ! -e \"$WORK/disabled-\$3\"" >"$BIN/systemctl"
+chmod 0755 "$BIN/systemctl"
 # The contract never needs an interpreter; a python3 lookup records itself.
 printf '%s\n' '#!/bin/sh' ": >\"$WORK/python3-invoked\"" 'exit 97' >"$BIN/python3"
 chmod 0755 "$BIN/python3"
@@ -39,6 +42,13 @@ printf 'enabled\n' >"$ROSETTA_BINFMT"
 MANIFEST=$ETC/guest-image.json
 VALID_MANIFEST='{"schemaVersion":1,"distribution":"ubuntu-24.04","architecture":"arm64","components":["docker","buildkit","containerd","runc","cni","binfmt","dnsmasq","hamnd"]}'
 printf '%s' "$VALID_MANIFEST" >"$MANIFEST"
+# The image's fstab is what the image builder's rewrite makes of Ubuntu's
+# (test_guest_image_builder.sh checks that with the same fixtures).
+FIXTURES=$ROOT/tests/fixtures
+UBUNTU_FSTAB=$FIXTURES/ubuntu-24.04-cloudimg.fstab
+IMAGE_FSTAB=$FIXTURES/hamn-guest.fstab
+FSTAB=$WORK/fstab
+cp "$IMAGE_FSTAB" "$FSTAB"
 
 run_contract() {
     local mode=${1:-qemu}
@@ -49,6 +59,7 @@ run_contract() {
     HAMN_CNI_SOURCE_DIR="$CNI" \
     HAMN_HAMND_BIN="$HAMND" \
     HAMN_GUEST_JSON="$GUEST_JSON" \
+    HAMN_FSTAB="$FSTAB" \
     HAMN_BINFMT_MODE="$mode" \
     HAMN_BINFMT_ENTRY="$entry" \
         bash "$ROOT/scripts/verify-image-contract.sh"
@@ -126,8 +137,67 @@ grep -Fq 'required CNI plugin is unavailable: bridge' "$WORK/missing.err"
 printf '%s\n' '#!/bin/sh' 'exit 0' >"$CNI/bridge"
 chmod 0755 "$CNI/bridge"
 
+# The root ext4 is mounted without online discard: no fstab entry may use it,
+# and exactly one entry mounts / as ext4. Only an exact option name counts.
+reject_fstab() {
+    local reason=$1
+    cat >"$FSTAB"
+    if run_contract >"$WORK/fstab.out" 2>"$WORK/fstab.err"; then
+        echo "FAIL: image contract accepted fstab without '$reason':" >&2
+        cat "$FSTAB" >&2
+        exit 1
+    fi
+    grep -Fxq "hamn: guest image contract: $reason" "$WORK/fstab.err" || {
+        echo "FAIL: fstab was rejected without '$reason':" >&2
+        cat "$FSTAB" "$WORK/fstab.err" >&2
+        exit 1
+    }
+}
+DISCARD='guest fstab mounts with online discard'
+ROOT_ENTRY='guest fstab must mount the root filesystem once, as ext4'
+reject_fstab "$DISCARD: /" <"$UBUNTU_FSTAB"
+reject_fstab "$DISCARD: /" < <(sed '1s/errors=remount-ro/errors=remount-ro,discard/' "$IMAGE_FSTAB")
+reject_fstab "$DISCARD: /boot" < <(sed 's/defaults/defaults,discard=async/' "$IMAGE_FSTAB")
+reject_fstab "$DISCARD: /boot/efi" < <(sed 's/umask=0077/discard,umask=0077/' "$IMAGE_FSTAB")
+reject_fstab "$DISCARD: / /boot" < <(sed '1s/commit=30/discard,commit=30/; s/defaults/discard/' "$IMAGE_FSTAB")
+reject_fstab "$ROOT_ENTRY" < <(sed 1d "$IMAGE_FSTAB")
+reject_fstab "$ROOT_ENTRY" < <(cat "$IMAGE_FSTAB"; sed -n 1p "$IMAGE_FSTAB")
+reject_fstab "$ROOT_ENTRY" < <(sed '1s/ext4/xfs/' "$IMAGE_FSTAB")
+reject_fstab "$ROOT_ENTRY" </dev/null
+# nodiscard is not discard, and comments are not entries.
+sed '1s/commit=30/nodiscard,commit=30/' "$IMAGE_FSTAB" >"$FSTAB"
+run_contract >"$WORK/nodiscard.out"
+{ printf '#LABEL=cloudimg-rootfs / ext4 discard 0 1\n\t#LABEL=cloudimg-rootfs / ext4 discard 0 1\n\n'; cat "$IMAGE_FSTAB"; } >"$FSTAB"
+run_contract >"$WORK/comment.out"
+rm "$FSTAB"
+ln -s "$IMAGE_FSTAB" "$FSTAB"
+if run_contract >"$WORK/fstab.out" 2>"$WORK/fstab.err"; then
+    echo "FAIL: image contract accepted a symlinked fstab" >&2
+    exit 1
+fi
+grep -Fxq 'hamn: guest image contract: guest fstab is unavailable' "$WORK/fstab.err"
+rm "$FSTAB"
+if run_contract >"$WORK/fstab.out" 2>"$WORK/fstab.err"; then
+    echo "FAIL: image contract accepted a missing fstab" >&2
+    exit 1
+fi
+grep -Fxq 'hamn: guest image contract: guest fstab is unavailable' "$WORK/fstab.err"
+cp "$IMAGE_FSTAB" "$FSTAB"
+
+# Periodic trim replaces online discard.
+: >"$WORK/disabled-fstrim.timer"
+if run_contract >"$WORK/fstrim.out" 2>"$WORK/fstrim.err"; then
+    echo "FAIL: image contract accepted a disabled fstrim.timer" >&2
+    exit 1
+fi
+grep -Fxq 'hamn: guest image contract: fstrim.timer is not enabled in the guest image' \
+    "$WORK/fstrim.err"
+rm "$WORK/disabled-fstrim.timer"
+run_contract >"$WORK/fstrim.out"
+
 if PATH="$BIN:/usr/bin:/bin" HAMN_GUEST_ARCH=aarch64 \
     HAMN_GUEST_IMAGE_MANIFEST="$MANIFEST" HAMN_CNI_SOURCE_DIR="$CNI" \
+    HAMN_FSTAB="$FSTAB" \
     HAMN_HAMND_BIN="$HAMND" HAMN_GUEST_JSON="$WORK/missing-guest-json" \
     HAMN_BINFMT_ENTRY="$BINFMT" bash "$ROOT/scripts/verify-image-contract.sh" \
     >"$WORK/no-helper.out" 2>"$WORK/no-helper.err"; then

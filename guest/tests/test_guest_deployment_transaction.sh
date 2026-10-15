@@ -120,10 +120,9 @@ set -u
 printf '%s\n' "$*" >>"$SYSCTL_LOG"
 [ "${FAIL_SYSCTL:-0}" != 1 ]
 EOF
-# One line of operands per sync(1) call; FAIL_SYNC_AT=N fails the Nth call,
-# and FAIL_SYNC_AT="N M" each of those calls.
-# With SYNC_WATCH set to a transaction, each call also records whether its
-# phase and backup data still existed when that barrier ran.
+# One line of operands per sync(1) call; FAIL_SYNC_AT="N [M ...]" fails the
+# Nth (and Mth) call. With SYNC_WATCH set to a transaction, each call also
+# records whether its phase and backup data still existed when it ran.
 export SYNC_LOG="$WORK/sync.log"
 export SYNC_WATCH_LOG="$WORK/sync-watch.log"
 : >"$SYNC_LOG"
@@ -137,8 +136,9 @@ if [ -n "${SYNC_WATCH:-}" ]; then
     [ ! -e "$SYNC_WATCH/data" ] || data=1
     printf 'phase=%s data=%s\n' "$phase" "$data" >>"$SYNC_WATCH_LOG"
 fi
+call=$(wc -l <"$SYNC_LOG" | tr -d ' ')
 case " ${FAIL_SYNC_AT:-} " in
-*" $(wc -l <"$SYNC_LOG" | tr -d ' ') "*)
+*" $call "*)
     echo 'injected durability failure' >&2
     exit 1
     ;;
@@ -302,32 +302,44 @@ test ! -e "$TRANSACTION_ROOT/$INTERRUPTED"
 assert_file "$ROOT/usr/local/bin/hamnd" interrupted-hamnd
 write_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
 
-# A crash can leave a transaction whose phase is missing, empty or
-# zero-filled. It blocks the next begin with its own state, and neither
-# rollback nor commit acts on it.
+# A missing phase, or one whose six bytes read back as zeros (its removal was
+# lost), has no ready backup. Any other bytes no helper writes: the phase is
+# damaged and proves nothing. Each blocks the next begin with its own state,
+# and neither rollback nor commit acts on it.
 UNPUBLISHED=6123456789abcdef0123456789abcdef
-for damage in zero-filled empty missing trailing-nul; do
+for damage in zero-filled missing empty trailing-nul extra-newline; do
     HAMN_DEPLOYMENT_TEST_ROOT="$ROOT" bash "$SCRIPT" begin "$UNPUBLISHED"
     phase="$TRANSACTION_ROOT/$UNPUBLISHED/phase"
     case "$damage" in
     zero-filled) head -c 6 /dev/zero >"$phase" ;;
-    empty) : >"$phase" ;;
     missing) rm "$phase" ;;
+    empty) : >"$phase" ;;
     trailing-nul) printf 'ready\0' >"$phase" ;;
+    extra-newline) printf 'ready\n\n' >"$phase" ;;
+    esac
+    case "$damage" in
+    zero-filled|missing)
+        refusal="deployment transaction $UNPUBLISHED at $TRANSACTION_ROOT/$UNPUBLISHED has no ready backup; it is never restored"
+        incomplete='transaction is incomplete'
+        ;;
+    *)
+        refusal="deployment transaction $UNPUBLISHED has a damaged phase; inspect"
+        incomplete='transaction phase is damaged'
+        ;;
     esac
     write_file "$ROOT/usr/local/bin/hamnd" unpublished-hamnd
     if bash "$SCRIPT" begin 7123456789abcdef0123456789abcdef \
         >"$WORK/unpublished.out" 2>"$WORK/unpublished-begin.err"; then
         fail "begin accepted a $damage leftover"
     fi
-    grep -Fq "deployment transaction $UNPUBLISHED at $TRANSACTION_ROOT/$UNPUBLISHED has no ready backup; it is never restored" \
-        "$WORK/unpublished-begin.err" || fail "$damage leftover was not named"
+    grep -Fq "$refusal" "$WORK/unpublished-begin.err" ||
+        fail "$damage leftover was not named"
     for action in rollback commit; do
         if bash "$SCRIPT" "$action" "$UNPUBLISHED" >"$WORK/unpublished.out" \
             2>"$WORK/unpublished-$action.err"; then
             fail "$action accepted a $damage phase"
         fi
-        grep -Fq 'transaction is incomplete' "$WORK/unpublished-$action.err"
+        grep -Fq "$incomplete" "$WORK/unpublished-$action.err"
     done
     ! grep -Fq 'null byte' "$WORK"/unpublished-*.err ||
         fail "$damage phase was read through command substitution"
@@ -388,47 +400,38 @@ mv "$ROOT/etc/docker-real" "$ROOT/etc/docker"
 
 # A failed durability barrier must never publish a recoverable ready backup.
 # Each sync(1) call is one barrier: backup contents, the unpublished phase,
-# then the directories that hold the published phase. A failure at the third
-# barrier comes after ready was published: the failed begin then retires its
-# phase as commit and rollback do, removed and made durable (a fourth sync)
-# while the backup data still exists, and only then removes the rest.
-FAILED_BEGIN=4123456789abcdef0123456789abcdef
+# then the directories that hold the published phase. Cleanup then removes
+# any phase and syncs the transaction directory before it removes the rest.
+FAILED=4123456789abcdef0123456789abcdef
 for failure in 1 2 3; do
     : >"$SYNC_LOG"
     : >"$SYNC_WATCH_LOG"
-    if SYNC_WATCH="$TRANSACTION_ROOT/$FAILED_BEGIN" FAIL_SYNC_AT="$failure" \
-        bash "$SCRIPT" begin "$FAILED_BEGIN" >"$WORK/sync.out" 2>"$WORK/sync.err"; then
+    if FAIL_SYNC_AT="$failure" SYNC_WATCH="$TRANSACTION_ROOT/$FAILED" \
+        bash "$SCRIPT" begin "$FAILED" >"$WORK/sync.out" 2>"$WORK/sync.err"; then
         fail "accepted a failed durability barrier"
     fi
     grep -Fq 'injected durability failure' "$WORK/sync.err"
-    expected=$failure
-    [ "$failure" -ne 3 ] || expected=4
-    [ "$(wc -l <"$SYNC_LOG")" -eq "$expected" ] ||
-        fail "barrier $failure: unexpected sync barriers"
-    if [ "$failure" -eq 3 ]; then
-        [ "$(sed -n 4p "$SYNC_LOG")" = "-- $TRANSACTION_ROOT/$FAILED_BEGIN" ] ||
-            fail "the failed begin did not make its phase retirement durable"
-        [ "$(sed -n 4p "$SYNC_WATCH_LOG")" = "phase=0 data=1" ] ||
-            fail "the failed begin removed backup data before retiring its phase"
-    fi
-    test ! -e "$TRANSACTION_ROOT/$FAILED_BEGIN"
+    [ "$(wc -l <"$SYNC_LOG")" -eq $((failure + 1)) ] &&
+        [ "$(tail -n 1 "$SYNC_LOG")" = "-- $TRANSACTION_ROOT/$FAILED" ] &&
+        [ "$(tail -n 1 "$SYNC_WATCH_LOG")" = "phase=0 data=1" ] ||
+        fail "barrier $failure: cleanup did not sync the phase removal first"
+    test ! -e "$TRANSACTION_ROOT/$FAILED"
     assert_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
 done
-# When that retirement cannot be made durable either, the backup stays whole
-# without its phase: recovery discards it, and a crash that brought the phase
-# back would leave a complete backup, durable since before its publication.
+
+# When the phase removal cannot be made durable either, the rest of the
+# backup stays: a crash can then bring back only an intact backup, never a
+# ready phase over missing data. What is left has no ready phase.
 : >"$SYNC_LOG"
-if FAIL_SYNC_AT="3 4" bash "$SCRIPT" begin "$FAILED_BEGIN" \
+if FAIL_SYNC_AT="3 4" bash "$SCRIPT" begin "$FAILED" \
     >"$WORK/sync.out" 2>"$WORK/sync.err"; then
     fail "accepted a failed durability barrier"
 fi
-[ "$(wc -l <"$SYNC_LOG")" -eq 4 ] || fail "unexpected sync barriers"
-[ -d "$TRANSACTION_ROOT/$FAILED_BEGIN/data" ] &&
-    [ -d "$TRANSACTION_ROOT/$FAILED_BEGIN/meta" ] ||
-    fail "the failed begin removed a backup whose phase retirement was not durable"
-[ ! -e "$TRANSACTION_ROOT/$FAILED_BEGIN/phase" ] ||
-    fail "the failed begin kept a ready phase"
-rm -rf -- "${TRANSACTION_ROOT:?}/$FAILED_BEGIN"
+grep -Fq "left $TRANSACTION_ROOT/$FAILED for deployment recovery" "$WORK/sync.err"
+test ! -e "$TRANSACTION_ROOT/$FAILED/phase"
+test -d "$TRANSACTION_ROOT/$FAILED/data"
+test -d "$TRANSACTION_ROOT/$FAILED/meta"
+rm -rf "${TRANSACTION_ROOT:?}/$FAILED"
 assert_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
 
 echo "PASS: Docker/CRI guest deployment transactions roll back atomically"

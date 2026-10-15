@@ -230,6 +230,7 @@ int guest_deployment_recover(const struct profile *profile, const char *ip)
     const char *command[] = { "sudo", "bash", "-c", DEPLOYMENT_RECOVERY_SCRIPT,
         "--", "/var/lib/hamn/deployment-transactions",
         GUEST_DEPLOYMENT_TRANSACTION_SCRIPT, GUEST_DEPLOYMENT_REAPPLY_RECORD,
+        DEPLOYMENT_UNDURABLE_HELPERS,
         NULL };
     char reason[4096] = {0};
     int truncated = 0;
