@@ -561,10 +561,11 @@ impl State {
             _ => None,
         }
     }
-    /// Why `:get` completes only the built-in kinds, shown in the border of
-    /// the prompt while a Kubernetes command is typed: the last lookup of
-    /// the cluster's kinds failed, in one line (`cluster_kinds::reason`).
-    /// It never replaces the message line; `!` shows the whole failure.
+    /// What `:get` completes after the last lookup of the cluster's kinds
+    /// failed, wholly or partly, and why in one line
+    /// (`cluster_kinds::consequence` and `reason`): shown in the border of
+    /// the prompt while a Kubernetes command is typed. It never replaces the
+    /// message line; `!` shows the whole failure.
     pub fn completion_failure(&self) -> Option<String> {
         match &self.input {
             Some((':', typed))
@@ -572,9 +573,13 @@ impl State {
                     && crate::native::command_workspace(typed, self.workspace)
                         == Workspace::Kubernetes =>
             {
-                self.cluster_kinds
-                    .failure(&crate::cluster_kinds::Target::of(&self.request))
-                    .map(crate::cluster_kinds::reason)
+                let target = crate::cluster_kinds::Target::of(&self.request);
+                let failure = self.cluster_kinds.failure(&target)?;
+                Some(format!(
+                    "{}: {}",
+                    self.cluster_kinds.consequence(&target),
+                    crate::cluster_kinds::reason(failure)
+                ))
             }
             _ => None,
         }
@@ -1574,7 +1579,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
             let level = Level::Warning;
             prompt = prompt.title_bottom(Line::styled(
                 format!(
-                    " {} get completes built-in kinds only: {} ",
+                    " {} {} ",
                     theme::icon(level),
                     clean(&reason)
                 ),
@@ -1691,8 +1696,9 @@ fn operation_lines(state: &State) -> Vec<Line<'static>> {
     if let Some(failure) = state.cluster_kinds.failure(&target) {
         lines.push(Line::styled(
             format!(
-                "Kinds lookup failed ({}); get completes built-in kinds only",
-                clean(&failure.code)
+                "Kinds lookup failed ({}); {}",
+                clean(&failure.code),
+                state.cluster_kinds.consequence(&target)
             ),
             theme::level(Level::Warning),
         ));
@@ -3268,7 +3274,7 @@ mod tests {
     }
     #[test]
     fn the_clusters_kinds_complete_only_for_the_context_they_were_looked_up_for() {
-        use crate::cluster_kinds::Target;
+        use crate::cluster_kinds::{Listing, Target};
         let mut state = State::new(Request::default());
         state.workspace = Workspace::Kubernetes;
         state.request.context = Some("old-cluster".into());
@@ -3279,8 +3285,8 @@ mod tests {
         // While the lookup runs, the built-in kinds still complete.
         state.input = Some((':', "get dep".into()));
         assert_eq!(state.completion().as_deref(), Some("loyments"));
-        let kinds = crate::cluster_kinds::words(b"issuers.cert-manager.io\ndeployments.apps\n");
-        assert!(state.cluster_kinds.finish(ticket, kinds));
+        let kinds = crate::cluster_kinds::words(b"issuers.cert-manager.io\ndeployments.apps\n").unwrap();
+        assert!(state.cluster_kinds.finish(ticket, Listing::complete(kinds)));
         state.input = Some((':', "get iss".into()));
         assert_eq!(state.completion().as_deref(), Some("uers"));
         state.complete_input();
@@ -3298,7 +3304,7 @@ mod tests {
     }
     #[test]
     fn the_prompt_border_says_why_get_completes_only_built_in_kinds() {
-        use crate::cluster_kinds::Target;
+        use crate::cluster_kinds::{Listing, Target};
         let screen = |state: &State| -> Vec<String> {
             let mut terminal =
                 ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 32)).unwrap();
@@ -3319,7 +3325,7 @@ mod tests {
         state.fail(Failure::new("cliError", "kubectl exited 1: pods is forbidden"));
         let message = state.message.clone();
         let ticket = state.cluster_kinds.begin(Target::of(&state.request));
-        assert!(state.cluster_kinds.finish(ticket, Err(Failure::new("cliError", &raw))));
+        assert!(state.cluster_kinds.finish(ticket, Listing::failed(Failure::new("cliError", &raw))));
         state.input = Some((':', "get ".into()));
         let lines = screen(&state);
         let border = lines.iter().position(|line| line.contains(&hint)).unwrap_or_else(|| panic!("{lines:#?}"));
@@ -3353,14 +3359,42 @@ mod tests {
         // While the next prompt retries, the reason stays; success clears it.
         let retry = state.cluster_kinds.begin(Target::of(&state.request));
         assert!(screen(&state).iter().any(|line| line.contains(&hint)));
-        assert!(state.cluster_kinds.finish(retry, Ok(Vec::new())));
+        assert!(state.cluster_kinds.finish(retry, Listing::complete(Vec::new())));
         assert!(!screen(&state).iter().any(|line| line.contains("built-in kinds only")));
         let mut containers = State::new(Request::default());
         containers.native = Some(crate::native::parse("ps", &containers).unwrap());
         let ticket = containers.cluster_kinds.begin(Target::of(&containers.request));
-        assert!(containers.cluster_kinds.finish(ticket, Err(Failure::new("cliError", &raw))));
+        assert!(containers.cluster_kinds.finish(ticket, Listing::failed(Failure::new("cliError", &raw))));
         containers.input = Some((':', "kubectl get ".into()));
         assert!(!screen(&containers).iter().any(|line| line.contains("built-in kinds only")));
+    }
+    #[test]
+    fn a_partial_lookup_completes_what_kubectl_listed_and_names_the_missing_group_at_120_columns() {
+        use crate::cluster_kinds::{Listing, Target};
+        let mut state = State::new(Request::default());
+        state.workspace = Workspace::Kubernetes;
+        state.request.context = Some("old-cluster".into());
+        state.native = Some(crate::native::parse("get pods", &state).unwrap());
+        let ticket = state.cluster_kinds.begin(Target::of(&state.request));
+        let stderr = "E1015 16:03:48.475341   15898 memcache.go:403] \"Couldn't get resource list\" err=\"the server is currently unable to handle the request\" groupVersion=\"metrics.k8s.io/v1beta1\"\nerror: unable to retrieve the complete list of server APIs: metrics.k8s.io/v1beta1: the server is currently unable to handle the request\n";
+        let listing = Listing {
+            words: crate::cluster_kinds::words(b"issuers.cert-manager.io\n").unwrap(),
+            failure: Some(Failure::new("cliError", format!("kubectl exited exit status: 1: {stderr}"))),
+        };
+        assert!(state.cluster_kinds.finish(ticket, listing));
+        state.input = Some((':', "get iss".into()));
+        assert_eq!(state.completion().as_deref(), Some("uers"));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let lines: Vec<String> = (0..buffer.area.height)
+            .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect())
+            .collect();
+        // The group that did not answer is still on a terminal of 120 columns.
+        let border = "! get completes only the kinds kubectl listed: These API groups could not be listed: metrics.k8s.io/v1beta1";
+        let at = lines.iter().position(|line| line.contains(border)).unwrap_or_else(|| panic!("{lines:#?}"));
+        assert!(lines[at - 1].contains(":get issuers"), "{lines:#?}");
+        assert!(state.message.is_empty(), "{}", state.message);
     }
     #[test]
     fn a_failed_read_shows_its_summary_and_keeps_the_raw_failure_for_details() {

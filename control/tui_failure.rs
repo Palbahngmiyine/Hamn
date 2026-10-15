@@ -236,6 +236,20 @@ fn recognize(source: Source, text: &str) -> Option<(String, Option<&'static str>
             Some("n selects another namespace; e another context"),
         ));
     }
+    // A partial discovery: kubectl names each group that it could not list
+    // and why, after it listed the others.
+    if let Some(rest) = after(
+        text,
+        "unable to retrieve the complete list of server APIs: ",
+    ) {
+        return Some((
+            format!(
+                "These API groups could not be listed: {}",
+                rest.lines().next().unwrap_or(rest)
+            ),
+            Some(":get apiservices shows whether each group's service is available"),
+        ));
+    }
     if let Some(rest) = after(text, "the server doesn't have a resource type \"") {
         let kind = rest.split('"').next().unwrap_or(rest);
         return Some((
@@ -495,6 +509,24 @@ mod tests {
                 ),
                 "Context nope is not in the kubeconfig",
                 Some("e selects a context"),
+            ),
+            // Recorded from kubectl 1.37.1 running `api-resources -o name`
+            // against the tui-command-completion suite's fake API, whose
+            // group broken.fixture.hamn.dev/v1 answers 503: client log lines,
+            // then the groups it could not list. It exited 1 after printing
+            // the names of the other groups.
+            (
+                cli(
+                    "kubectl",
+                    "exit status: 1",
+                    concat!(
+                        "E1015 16:03:48.475341   15898 memcache.go:403] \"Couldn't get resource list\" err=\"the server is currently unable to handle the request\" groupVersion=\"broken.fixture.hamn.dev/v1\"\n",
+                        "E1015 16:03:48.525025   15898 memcache.go:133] \"Couldn't get resource list\" err=\"the server is currently unable to handle the request\" gv=\"broken.fixture.hamn.dev/v1\"\n",
+                        "error: unable to retrieve the complete list of server APIs: broken.fixture.hamn.dev/v1: the server is currently unable to handle the request\n",
+                    ),
+                ),
+                "These API groups could not be listed: broken.fixture.hamn.dev/v1: the server is currently unable to handle the request",
+                Some(":get apiservices shows whether each group's service is available"),
             ),
             // kubectl's wordings, not recorded here: an API refusal, a missing
             // object or type, rejected credentials, a server it cannot resolve,
