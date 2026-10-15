@@ -27,6 +27,7 @@ mod terminal_session;
 mod test_fixture;
 mod tui;
 mod tui_completion;
+mod tui_detail;
 mod tui_failure;
 mod tui_keys;
 mod tui_state;

@@ -1000,6 +1000,10 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         }
                     },
                     KeyCode::Char('c') if state.vm_panel() => state.edit_settings(),
+                    // A mutation: dispatch asks for confirmation with its impact.
+                    KeyCode::Char('x') if state.vm_panel() => {
+                        let request = state.action("reset"); job.dispatch(request, &mut state);
+                    },
                     KeyCode::Char('v') if !state.environment_picker && state.hamn_environment() => {
                         state.save_browser(); state.native = None; state.environment_picker = false;
                         let request = state.view("vm"); job.dispatch(request, &mut state);
