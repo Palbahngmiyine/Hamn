@@ -10,6 +10,9 @@
  * unreadable marker.
  */
 int guest_deployment_is_current(const struct profile *profile);
+/* Forget the deployment of a disk that is being replaced: the next start
+ * deploys again. Returns 0 when no marker remains, or -1 with errno. */
+int guest_deployment_forget(const struct profile *profile);
 /* Roll back a ready backup left by an interrupted guest transaction, or
  * discard one that is not ready (see core/deployment_recovery.h), under the
  * guest deployment lock; a discard is logged. Returns 0 when no backup

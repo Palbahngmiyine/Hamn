@@ -157,7 +157,7 @@ fn docker_all(docker: &Path) {
             harness.wait(|_| observed(value));
             harness.until(&format!("{}{suffix}", if value { "all" } else { "running" }));
             let screen = harness.text();
-            assert_eq!(screen.contains("Size"), show_size, "{command:?}\n{screen}");
+            assert_eq!(screen.contains("SIZE"), show_size, "{command:?}\n{screen}");
             if show_size {
                 assert!(screen.contains(&displayed_size), "{command:?} {displayed_size:?}\n{screen}");
             }

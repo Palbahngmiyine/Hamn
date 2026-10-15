@@ -28,6 +28,18 @@
  * not what it should be, and when memory or descriptors run out. */
 int hamn_control_query(const char *profile, char **result);
 void hamn_control_free(char *result);
+/* Start the VM of profile, or bring a running one back to ready. A zero
+ * resource keeps the profile's value. Returns 0; 2 for invalid arguments;
+ * HAMN_CONTROL_GUEST_FILESYSTEM_DAMAGED when the guest root filesystem is
+ * damaged (core/guest_filesystem.h): the start wrote nothing in the guest,
+ * stopped again a VM it booted and left a VM that was running as it was,
+ * and the status reports the damage as guestFilesystem; 130 when cancelled
+ * with the VM restored; and 1 or -1 for any other failure, after which the
+ * operation record says whether the outcome is known. A damage found while
+ * the VM this start booted could not be stopped is such a failure. An
+ * earlier operation whose outcome is unknown stays unknown in the record
+ * after any failure. */
+#define HAMN_CONTROL_GUEST_FILESYSTEM_DAMAGED 6
 int hamn_control_start(const char *profile, unsigned cpus,
                        unsigned memory_gib, unsigned disk_gib);
 /* A zero resource keeps the profile's value. rosetta is 1 or 0 to set Apple
@@ -78,6 +90,21 @@ int hamn_control_apply(const char *profile, const char *path, int dry_run,
                        char **result);
 int hamn_control_stop(const char *profile);
 int hamn_control_delete(const char *profile);
+/* Replace the VM disk of an existing profile: stop its VM, then delete
+ * disk.img and what belongs to that disk (its EFI variables, the marker of
+ * the guest deployment it received and the record of its damage). The next
+ * start creates a new disk from the signed guest image. Everything inside
+ * the VM is lost; config.yaml, the SSH key, the MAC address, the seed and
+ * the logs stay. A profile without a disk is reset all the same.
+ *
+ * Returns 0, 2 for an invalid name, and 1 for any other failure, with the
+ * reason in log_last_error(). The disk is deleted only after the VM is
+ * known to be stopped: when vm stop fails the operation record says
+ * outcomeUnknown and nothing is deleted. A removal that fails leaves the
+ * files after it, and a retry continues. A completed reset also settles an
+ * earlier operation whose outcome was unknown: no guest state of it is left.
+ * Takes the lifecycle lock, then the mutation lock. */
+int hamn_control_reset(const char *profile);
 int hamn_control_diagnostics(const char *profile, const char *path, char **result);
 /* manifest is optional borrowed NUL-terminated UTF-8. check_only and force are
  * booleans and cannot both be true. Result owns at most 16 KiB of UTF-8 JSON;

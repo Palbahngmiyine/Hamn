@@ -50,6 +50,7 @@ SEED_MOUNTS_TEST := $(BUILD)/tests/test_cloudinit_mounts
 PROVISION_TEST := $(BUILD)/tests/test_provision
 DEPLOYMENT_FINGERPRINT_TEST := $(BUILD)/tests/test_guest_deployment_fingerprint
 DEPLOYMENT_RECOVERY_TEST := $(BUILD)/tests/test_deployment_recovery
+GUEST_FILESYSTEM_TEST := $(BUILD)/tests/test_guest_filesystem
 MANAGED_GUEST_IMAGE_TEST := $(BUILD)/tests/test_managed_guest_image
 SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
 PROFILE_READ_TEST := $(BUILD)/tests/test_profile_read
@@ -180,6 +181,11 @@ $(SSH_OPTIONS_TEST): tests/host/test_ssh_options.c $(HOST_TEST_OBJS)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
 		$(LDFLAGS) -o $@
 
+$(GUEST_FILESYSTEM_TEST): tests/host/test_guest_filesystem.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
+		$(LDFLAGS) -o $@
+
 # Compiles every host source itself, including VERSIONED_OBJS' sources.
 $(START_DOCKER_CONTEXT_RETRY_TEST): tests/host/test_start_docker_context_retry.c \
 		host/cmd/cmd_start.c $(HOST_C_SRCS) $(VERSION_STAMP)
@@ -188,15 +194,20 @@ $(START_DOCKER_CONTEXT_RETRY_TEST): tests/host/test_start_docker_context_retry.c
 		$(filter-out host/main.c host/cmd/cmd_start.c,$(HOST_C_SRCS)) \
 		host/cmd/cmd_start.c $(HOST_M_SRCS) $(LDFLAGS) -o $@
 
-# guest_deployment.c is compiled into this test a second time, with readiness
-# and image-check budgets of seconds, so its deployment paths end quickly.
+# These sources are compiled into this test a second time, with readiness,
+# image-check, cloud-init and writer limits of seconds and no SSH client
+# margin, so their waits end quickly; cmd_start.c with its test seam.
+GUEST_WAIT_DEADLINES_SRCS := host/core/guest_deployment.c \
+	host/core/remote_mutation.c host/core/provision.c host/cmd/cmd_start.c
 $(GUEST_WAIT_DEADLINES_TEST): tests/host/test_guest_wait_deadlines.c \
-		host/core/guest_deployment.c $(HOST_TEST_OBJS)
+		$(GUEST_WAIT_DEADLINES_SRCS) $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
-	clang $(filter-out -MMD -MP,$(CFLAGS)) -DGUEST_DEPLOYMENT_READY_TIMEOUT_SEC=2 \
-		-DGUEST_IMAGE_VERIFY_TIMEOUT_SEC=1 \
-		tests/host/test_guest_wait_deadlines.c host/core/guest_deployment.c \
-		$(filter-out $(BUILD)/host/core/guest_deployment.o,$(HOST_TEST_OBJS)) \
+	clang $(filter-out -MMD -MP,$(CFLAGS)) -DHAMN_TEST \
+		-DGUEST_DEPLOYMENT_READY_TIMEOUT_SEC=2 \
+		-DGUEST_IMAGE_VERIFY_TIMEOUT_SEC=1 -DGUEST_CLOUD_INIT_TIMEOUT_SEC=1 \
+		-DREMOTE_MUTATION_SLACK_SEC=0 -DSSH_REMOTE_MARGIN_SEC=0 \
+		tests/host/test_guest_wait_deadlines.c $(GUEST_WAIT_DEADLINES_SRCS) \
+		$(filter-out $(patsubst %.c,$(BUILD)/%.o,$(GUEST_WAIT_DEADLINES_SRCS)),$(HOST_TEST_OBJS)) \
 		$(LDFLAGS) -o $@
 
 test-portable: hamn-dev
@@ -292,6 +303,7 @@ test-control-tui: host
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-workspaces
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-outcomes
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-native-regressions
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-command-completion
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-quoting
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-reload
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test tui-refresh
@@ -454,6 +466,7 @@ test-qcow2: host
 test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
+		$(GUEST_FILESYSTEM_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
 		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
 		$(PROFILE_YAML_FAULTS_TEST) $(GUEST_WAIT_DEADLINES_TEST)
@@ -467,6 +480,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(DEPLOYMENT_FINGERPRINT_TEST)
 	$(MANAGED_GUEST_IMAGE_TEST)
 	$(SSH_OPTIONS_TEST)
+	$(GUEST_FILESYSTEM_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
 	$(GUEST_WAIT_DEADLINES_TEST)
 	$(LIFECYCLE_LOCK_TEST)
@@ -476,6 +490,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(PROFILE_YAML_FAULTS_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-apply
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-reset
 	bash guest/tests/test_guest_deployment_transaction.sh
 
 test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)
