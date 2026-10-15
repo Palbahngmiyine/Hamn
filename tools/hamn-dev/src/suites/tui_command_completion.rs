@@ -2,9 +2,20 @@
 //! the dimmed completion follows the typed text, Tab or → takes it, Enter
 //! runs what the prompt holds, the session's history comes before the known
 //! commands, and Tab switches the workspace only while no command is typed.
+//! In Kubernetes, `get` also completes the kinds that the cluster serves,
+//! which `kubectl api-resources -o name` lists in the background: a lookup
+//! that blocks never delays typing, one that fails leaves the built-in kinds
+//! and says why in the prompt's border, and a lookup for a context the UI
+//! left, or one still running when the TUI quits, is killed.
+use super::tui_native_regressions::record;
 use crate::runner::{self, Case, case};
-use crate::support::tui::Harness;
+use crate::support::pty;
+use crate::support::tui::{self, Harness, Options, kinds_lookup};
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 pub fn main(filters: &[String]) -> ExitCode {
     let cases: Vec<Case> = vec![
@@ -12,10 +23,17 @@ pub fn main(filters: &[String]) -> ExitCode {
         case("right_arrow_takes_a_docker_command", right_arrow_takes_a_docker_command),
         case("history_completes_before_the_known_commands", history_completes_before_the_known_commands),
         case("tab_switches_the_workspace_after_the_prompt_closes", tab_switches_the_workspace_after_the_prompt_closes),
+        case(
+            "a_blocked_lookup_keeps_typing_responsive_and_a_failed_one_says_why",
+            a_blocked_lookup_keeps_typing_responsive_and_a_failed_one_says_why,
+        ),
+        case("a_lookup_for_a_context_the_ui_left_is_killed", a_lookup_for_a_context_the_ui_left_is_killed),
+        case("quitting_kills_a_running_lookup", quitting_kills_a_running_lookup),
     ];
     runner::run(
         "tui-command-completion",
-        "Tab and → complete : commands from history and known commands; Tab still switches workspaces",
+        "Tab and → complete : commands from history, known commands and the cluster's kinds; a slow or failed \
+         kinds lookup never delays typing; Tab still switches workspaces",
         cases,
         filters,
     )
@@ -55,6 +73,8 @@ fn right_arrow_takes_a_docker_command() {
     harness.wait(|harness| !calls_with(harness, "docker", "images").is_empty());
     assert!(harness.text().contains("[Containers]"), "{}", harness.text());
     assert!(calls_with(&harness, "docker", "ima").is_empty(), "{:?}", harness.calls());
+    // A `:` in Containers looks up no Kubernetes kinds.
+    assert!(harness.kinds_lookups().is_empty(), "{:?}", harness.calls());
 }
 
 fn history_completes_before_the_known_commands() {
@@ -73,6 +93,9 @@ fn history_completes_before_the_known_commands() {
     assert_eq!(queries[0], queries[1], "{queries:?}");
     let typed = ["get", "pods", "-l", "app=web"];
     assert!(queries[1].windows(typed.len()).any(|window| window == &typed[..]), "{queries:?}");
+    // The first prompt looked up the kinds; the second kept its answer.
+    harness.wait(|harness| !harness.kinds_lookups().is_empty());
+    assert_eq!(harness.kinds_lookups(), [kinds_lookup("old-cluster")]);
 }
 
 fn tab_switches_the_workspace_after_the_prompt_closes() {
@@ -86,4 +109,157 @@ fn tab_switches_the_workspace_after_the_prompt_closes() {
     harness.send(b"\t", "[Kubernetes]");
     harness.wait(|harness| !calls_with(harness, "kubectl", "get").is_empty());
     assert!(calls_with(&harness, "docker", "images").is_empty(), "{:?}", harness.calls());
+}
+
+/// What the peer prints on stderr when its first lookup fails.
+const LOOKUP_ERROR: &str = "error: You must be logged in to the server (Unauthorized)";
+
+/// A Kubernetes harness whose kinds lookups follow `mode`; see `kinds_peer`.
+fn kinds_harness(mode: &str) -> Harness {
+    let harness = Harness::with(Options { fixture: "tui-command-completion-kinds", ..Options::new("kubernetes") });
+    fs::write(harness.root.join("kinds-mode"), mode).unwrap();
+    harness
+}
+
+/// The PID that a blocked lookup wrote.
+fn lookup_pid(root: &Path) -> libc::pid_t {
+    fs::read_to_string(root.join("kinds-pid")).unwrap().trim().parse().unwrap()
+}
+
+/// Whether `pid` names no process, not even an unreaped one.
+fn gone(pid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    (unsafe { libc::kill(pid, 0) }) == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+fn a_blocked_lookup_keeps_typing_responsive_and_a_failed_one_says_why() {
+    let mut harness = kinds_harness("fail-first");
+    harness.until("old-target-row");
+    harness.send(b"p", "Paused");
+    harness.write(b":");
+    harness.noticed("kinds-blocked");
+    // While the lookup is blocked, the typed text is drawn and the built-in
+    // kinds complete; the completed command runs.
+    harness.send(b"get dep", ":get deployments");
+    harness.write(b"\t\r");
+    harness.wait(|harness| !calls_with(harness, "kubectl", "deployments").is_empty());
+    harness.wait(|harness| !harness.text().contains(" Command "));
+    // A prompt opened while it runs starts no second lookup and offers no
+    // kind that only the cluster could name: the completion would be drawn
+    // in the same frame as the typed text.
+    harness.send(b":get wid", ":get wid");
+    assert!(!harness.text().contains(":get widg"), "{}", harness.text());
+    assert_eq!(harness.kinds_lookups(), [kinds_lookup("old-cluster")]);
+    // The lookup fails while the prompt is open: the prompt's border says
+    // why, once, and the message line does not.
+    harness.release_gate();
+    harness.until(&format!(
+        "! get completes built-in kinds only: kubectl api-resources failed (exit status: 1): {LOOKUP_ERROR}"
+    ));
+    assert_eq!(harness.text().matches(LOOKUP_ERROR).count(), 1, "{}", harness.text());
+    assert!(!harness.text().contains(":get widg"), "{}", harness.text());
+    // The next prompt retries the lookup, which answers this time: the
+    // cluster's own kind completes and the border's reason is gone.
+    harness.write(b"\x1b");
+    harness.wait(|harness| !harness.text().contains(" Command "));
+    harness.write(b":get wid");
+    harness.until(":get widgets");
+    assert!(!harness.text().contains("built-in kinds only"), "{}", harness.text());
+    harness.write(b"\t\r");
+    harness.wait(|harness| !calls_with(harness, "kubectl", "widgets").is_empty());
+    let queries = calls_with(&harness, "kubectl", "widgets");
+    assert!(queries.iter().all(|args| args.iter().any(|arg| arg == "get")), "{queries:?}");
+    assert_eq!(harness.kinds_lookups(), [kinds_lookup("old-cluster"), kinds_lookup("old-cluster")]);
+}
+
+fn a_lookup_for_a_context_the_ui_left_is_killed() {
+    let mut harness = kinds_harness("old-blocks");
+    // The native peer answers the new context's query without blocking.
+    fs::write(harness.root.join("released"), "").unwrap();
+    harness.until("old-target-row");
+    harness.write(b":");
+    harness.noticed("kinds-blocked");
+    let pid = lookup_pid(&harness.root);
+    assert!(!gone(pid));
+    harness.write(b"\x1b");
+    harness.wait(|harness| !harness.text().contains(" Command "));
+    // Another context from the embedded terminal; the list reloads for it.
+    harness.send(b":kubectl config use-context new-cluster\r", "CONFIG_DONE");
+    harness.until("Exit code 0");
+    harness.write(b"\r");
+    harness.until("new-target-row");
+    // The lookup of the old context was killed and reaped.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !gone(pid) {
+        assert!(Instant::now() < deadline, "the lookup {pid} for old-cluster outlived its context");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // A prompt for the new context looks up its own kinds.
+    harness.write(b":get wid");
+    harness.until(":get widgets");
+    harness.write(b"\t\r");
+    harness.wait(|harness| !calls_with(harness, "kubectl", "widgets").is_empty());
+    let queries = calls_with(&harness, "kubectl", "widgets");
+    assert!(queries.iter().all(|args| args.iter().any(|arg| arg == "new-cluster")), "{queries:?}");
+    assert_eq!(harness.kinds_lookups(), [kinds_lookup("old-cluster"), kinds_lookup("new-cluster")]);
+}
+
+fn quitting_kills_a_running_lookup() {
+    let mut harness = kinds_harness("old-blocks");
+    harness.until("old-target-row");
+    harness.write(b":");
+    harness.noticed("kinds-blocked");
+    let pid = lookup_pid(&harness.root);
+    harness.write(b"\x1b");
+    harness.wait(|harness| !harness.text().contains(" Command "));
+    harness.write(b"q");
+    let master = harness.master();
+    let status = pty::wait_for_exit(&mut harness.child, master, Duration::from_secs(15));
+    assert!(status.is_some_and(|status| status.success()), "{status:?}");
+    // The TUI reaps its lookup before it exits.
+    assert!(gone(pid), "the lookup {pid} outlived the TUI");
+}
+
+/// The kubectl peer of the kinds cases: every call but a kinds lookup goes
+/// to the recorded native peer. A lookup is recorded, then follows
+/// `$FIXTURE_ROOT/kinds-mode`:
+/// - `fail-first`: the first lookup tells the test it is blocked, waits for
+///   the gate byte and fails with `LOOKUP_ERROR`; later ones answer.
+/// - `old-blocks`: a lookup of `old-cluster` writes its PID to `kinds-pid`,
+///   tells the test and blocks until it is killed; others answer.
+pub fn kinds_peer(program: &str, args: &[String]) -> ExitCode {
+    if !tui::is_kinds_lookup(args) {
+        return super::tui_native_regressions::fixture(program, args);
+    }
+    let root = PathBuf::from(std::env::var_os("FIXTURE_ROOT").expect("FIXTURE_ROOT"));
+    record(&root, program, args);
+    let lookups = fs::read_to_string(root.join("calls"))
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains("\"api-resources\""))
+        .count();
+    match fs::read_to_string(root.join("kinds-mode")).unwrap().trim() {
+        "fail-first" if lookups == 1 => {
+            notify_blocked(&root);
+            File::open(root.join("gate")).unwrap().read_exact(&mut [0u8]).unwrap();
+            eprintln!("{LOOKUP_ERROR}");
+            ExitCode::from(1)
+        }
+        "old-blocks" if args.iter().any(|arg| arg == "old-cluster") => {
+            let partial = root.join("kinds-pid.partial");
+            fs::write(&partial, std::process::id().to_string()).unwrap();
+            fs::rename(&partial, root.join("kinds-pid")).unwrap();
+            notify_blocked(&root);
+            loop {
+                std::thread::park();
+            }
+        }
+        "fail-first" | "old-blocks" => tui::answer_kinds_lookup(args).expect("a kinds lookup"),
+        mode => panic!("unknown kinds mode {mode:?}"),
+    }
+}
+
+fn notify_blocked(root: &Path) {
+    let mut notice = OpenOptions::new().write(true).open(root.join("notice")).unwrap();
+    notice.write_all(b"kinds-blocked\n").unwrap();
 }

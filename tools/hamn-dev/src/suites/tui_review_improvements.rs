@@ -178,6 +178,9 @@ pub fn compose_peer(program: &str, args: &[String]) -> ExitCode {
 fn serve(program: &str, args: &[String], compose: bool) -> ExitCode {
     let root = PathBuf::from(std::env::var_os("FIXTURE_ROOT").expect("FIXTURE_ROOT"));
     record(&root, program, args);
+    if let Some(code) = crate::support::tui::answer_kinds_lookup(args) {
+        return code;
+    }
     if compose && has(args, "compose") {
         println!("{}", json!([{"Name": "review-project", "Status": "running(1)", "ConfigFiles": "compose.yml"}]));
     } else if has(args, "get") || has(args, "ps") {

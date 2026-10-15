@@ -221,6 +221,63 @@ impl Job {
     }
 }
 
+/// The background lookup of the kinds that the Kubernetes state's cluster
+/// serves (`cluster_kinds`). Its task sends `(ticket, kinds)` to the
+/// select loop; it never holds a keystroke. Aborting the task drops the
+/// lookup's future, which kills and reaps its kubectl.
+struct KindsLookup {
+    task: Option<tokio::task::JoinHandle<()>>,
+    sender: mpsc::Sender<(u64, Result<Vec<String>>)>,
+}
+
+impl KindsLookup {
+    /// Starts a lookup when the opened prompt of `state` wants one, in place
+    /// of the previous one, bounded by the state's query timeout.
+    fn start(&mut self, state: &mut State) {
+        let target = crate::cluster_kinds::Target::of(&state.request);
+        if !state.cluster_kinds.wanted(&target) {
+            return;
+        }
+        self.abort();
+        let ticket = state.cluster_kinds.begin(target.clone());
+        let deadline = state.refresh.timeout;
+        let sender = self.sender.clone();
+        self.task = Some(tokio::spawn(async move {
+            let kinds = crate::cluster_kinds::lookup(&target, deadline).await;
+            let _ = sender.send((ticket, kinds)).await;
+        }));
+    }
+    /// Stops a lookup for a kubeconfig or context that `state` no longer has.
+    fn retarget(&mut self, state: &mut State) {
+        let target = crate::cluster_kinds::Target::of(&state.request);
+        if state.cluster_kinds.retarget(&target) {
+            self.abort();
+        }
+    }
+    fn abort(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+    /// Stops the lookup and waits until its kubectl is reaped, so that none
+    /// outlives the TUI.
+    async fn stop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+/// The state of the Kubernetes workspace, whichever of the two is shown.
+fn kubernetes<'a>(state: &'a mut State, other: &'a mut State) -> &'a mut State {
+    if state.workspace == Workspace::Kubernetes {
+        state
+    } else {
+        other
+    }
+}
+
 /// The result of a typed read, as the screen takes it. A dry run of
 /// `vm apply` asks what the apply would do, and why it would be refused is
 /// that answer: it is shown like one, as text of the detail that stays until
@@ -600,6 +657,11 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         sender: mutation_sender,
         mutation: None,
     };
+    let (kinds_sender, mut kinds_results) = mpsc::channel(4);
+    let mut kinds = KindsLookup {
+        task: None,
+        sender: kinds_sender,
+    };
     let mut exit_after_cancel = false;
     if state.request.operation() != "k8s contexts list" {
         state.native = crate::native::parse("", &state).ok();
@@ -618,6 +680,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(libc::SIGTSTP))?;
     let mut draw_error = None;
     loop {
+        // Every change of the Kubernetes context or kubeconfig passes here
+        // before the next draw or key: a lookup for the previous one stops.
+        kinds.retarget(kubernetes(&mut state, &mut other));
         if let Err(error) = terminal.draw(|frame| {
             if let Some(session) = &cli {
                 session.draw(frame);
@@ -737,6 +802,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     else if finished { state.refresh.complete(result.is_ok(), std::time::Instant::now()); }
                     state.accept(result);
                 }
+            }
+            Some((ticket, result)) = kinds_results.recv() => {
+                kubernetes(&mut state, &mut other).cluster_kinds.finish(ticket, result);
             }
             _ = refresh.tick() => {
                 if state.refresh.due(std::time::Instant::now()) && cli.is_none() && menu.is_none() && !sessions_open && !choosing && !state.loading && !state.refreshing && state.pending.is_none() && state.pending_native.is_none() && state.input.is_none() && state.detail.is_none() {
@@ -1020,7 +1088,11 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                         state.open_picker();
                         let request = state.view("ns"); job.dispatch(request, &mut state);
                     },
-                    KeyCode::Char(':') => { state.history_index = None; state.input = Some((':', String::new())); },
+                    KeyCode::Char(':') => {
+                        state.history_index = None; state.input = Some((':', String::new()));
+                        // Lazily, once per cluster: `get` then completes its kinds too.
+                        if state.workspace == Workspace::Kubernetes { kinds.start(&mut state); }
+                    },
                     KeyCode::Char('/') => state.input = Some(('/', String::new())),
                     KeyCode::Esc if state.help => { state.help = false; state.scroll = 0; },
                     KeyCode::Esc => {
@@ -1077,6 +1149,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     cli.take();
     sessions.clear();
     job.cancel(&mut state);
+    kinds.stop().await;
     if mutation_job.mutation.is_some() {
         mutation_job.cancel.cancel();
         // Keep draining progress so the worker can finish rollback before exit.

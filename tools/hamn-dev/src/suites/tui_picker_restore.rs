@@ -6,7 +6,7 @@ use super::tui_native_regressions::record;
 use crate::runner::{self, Case, case};
 use crate::support::harness_peers::select_peer;
 use crate::support::http::{Options as HttpOptions, Response, Server};
-use crate::support::tui::Harness;
+use crate::support::tui::{Harness, kinds_lookup};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
@@ -79,7 +79,8 @@ fn cancel_preserves_query(workspace: &str, command: &str, key: &[u8; 1], title: 
     prepare(&mut harness);
     let before_config = fs::read(harness.root.join("kubeconfig")).unwrap();
     harness.send(format!(":{command}\r").as_bytes(), "row-two");
-    let original = harness.calls().pop().expect("the query was recorded");
+    // The kinds lookup of the first Kubernetes `:` runs beside the query.
+    let original = harness.queries().pop().expect("the query was recorded");
     harness.send(b"/row\rj:SELECTION_BARRIER", ":SELECTION_BARRIER");
     harness.write(b"\x1b");
     harness.wait(|harness| !harness.text().contains(":SELECTION_BARRIER"));
@@ -109,6 +110,19 @@ fn cancel_preserves_query(workspace: &str, command: &str, key: &[u8; 1], title: 
     assert!(!harness.calls().iter().any(|(_, args)| has(args, "delete") || has(args, "rm")), "{:?}", harness.calls());
     harness.send(b"n", if workspace == "containers" { "[Containers]" } else { "[Kubernetes]" });
     assert_eq!(fs::read(harness.root.join("kubeconfig")).unwrap(), before_config);
+    assert_one_kinds_lookup_in_kubernetes(&mut harness, workspace);
+}
+
+/// The first `:` in Kubernetes looked up the kinds of its context once:
+/// neither a picker nor a typed `--context` changes the context the UI
+/// targets. A `:` in Containers looks up nothing.
+fn assert_one_kinds_lookup_in_kubernetes(harness: &mut Harness, workspace: &str) {
+    if workspace == "kubernetes" {
+        harness.wait(|harness| !harness.kinds_lookups().is_empty());
+        assert_eq!(harness.kinds_lookups(), [kinds_lookup("old-cluster")]);
+    } else {
+        assert!(harness.kinds_lookups().is_empty(), "{:?}", harness.calls());
+    }
 }
 
 fn committed_navigation_is_not_undone(workspace: &str, key: &[u8; 1], title: &str, typed: bool) {
@@ -180,7 +194,7 @@ fn committed_navigation_is_not_undone(workspace: &str, key: &[u8; 1], title: &st
     }
     harness.until("outside");
     harness.wait(|harness| !harness.text().contains("[loading]"));
-    let (_, current) = harness.calls().pop().expect("a query was recorded");
+    let (_, current) = harness.queries().pop().expect("a query was recorded");
     assert!(!has(&current, "explicit"), "{current:?}");
     assert!(!["label=old", "app=old"].iter().any(|value| has(&current, value)), "{current:?}");
     if !typed && key == b"n" {
@@ -197,6 +211,7 @@ fn committed_navigation_is_not_undone(workspace: &str, key: &[u8; 1], title: &st
         assert!(text.contains("--context replacement"), "{text}");
     }
     assert_eq!(fs::read(harness.root.join("kubeconfig")).unwrap(), original_config);
+    assert_one_kinds_lookup_in_kubernetes(&mut harness, workspace);
     drop(harness);
     drop(server);
 }
@@ -206,6 +221,9 @@ fn committed_navigation_is_not_undone(workspace: &str, key: &[u8; 1], title: &st
 pub fn peer(program: &str, args: &[String]) -> ExitCode {
     let root = PathBuf::from(std::env::var_os("FIXTURE_ROOT").expect("FIXTURE_ROOT"));
     record(&root, program, args);
+    if let Some(code) = crate::support::tui::answer_kinds_lookup(args) {
+        return code;
+    }
     let names = ["row-one", "row-two", "outside"];
     if has(args, "context") {
         println!("{}", json!({"Name": "external", "DockerEndpoint": "unix:///external.sock"}));

@@ -7,7 +7,7 @@ use crate::support::kube_api;
 use crate::support::py_http;
 use crate::support::py_text;
 use crate::support::real_cli::{self, run};
-use crate::support::tui::Harness;
+use crate::support::tui::{self, Harness};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
@@ -75,7 +75,7 @@ fn cluster_target(kubectl: &Path) {
         .push(json!({"name": "alternate", "cluster": {"server": format!("http://127.0.0.1:{}", servers[1].port())}}));
     fs::write(&config, content.to_string()).unwrap();
     let before = fs::read(&config).unwrap();
-    real_cli::wrap(&root, "kubectl", kubectl, "exec-real");
+    real_cli::wrap(&root, "kubectl", kubectl, "tui-cluster-target-kubectl");
     let last = || requests.lock().unwrap().last().cloned().expect("a request");
     for (index, flag) in ["--cluster alternate", "--cluster=alternate"].into_iter().enumerate() {
         // Unique response names prevent a previous rendered query passing a new case.
@@ -118,8 +118,25 @@ fn cluster_target(kubectl: &Path) {
         assert!(label == "alternate" && target.contains(&format!("/pods/{name}")), "{:?}", requests.lock().unwrap());
         harness.send(b"\r", "[Kubernetes]");
     }
+    // The first `:` looked up the kinds of the context's own cluster once;
+    // the wrapper answered it, so every API request above is a query's.
+    harness.wait(|harness| !harness.kinds_lookups().is_empty());
+    assert_eq!(harness.kinds_lookups(), [tui::kinds_lookup("old-cluster")]);
     assert_eq!(fs::read(&config).unwrap(), before);
     assert_hamn_directory_holds_preferences_only(&root);
+}
+
+/// The suite's `kubectl` wrapper: records and answers the TUI's kinds
+/// lookup, whose discovery requests would otherwise reach the default API
+/// in any order relative to the queries whose API the suite checks, and
+/// execs the installed kubectl for every other call.
+pub fn kubectl_wrapper(program: &str, args: &[String]) -> ExitCode {
+    if tui::is_kinds_lookup(args) {
+        let root = std::path::PathBuf::from(std::env::var_os("FIXTURE_ROOT").expect("FIXTURE_ROOT"));
+        super::tui_native_regressions::record(&root, program, args);
+        return tui::answer_kinds_lookup(args).expect("a kinds lookup");
+    }
+    real_cli::exec_real(program, args)
 }
 
 /// Only the preferences (and their lock) remain in `root/.hamn`.

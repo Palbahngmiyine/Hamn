@@ -2,11 +2,15 @@
 //! typed, the first command that extends it is shown dimmed after the
 //! cursor, and Tab or → takes it.
 //!
-//! Contract: `suggestion(typed, workspace, history)` returns the text that
-//! taking the completion appends to `typed`; it is never empty, and `None`
-//! means that nothing extends `typed`. The candidates are, in this order,
-//! the session's command `history`, newest first, and then the `commands`
-//! of the workspace that `typed` addresses (`native::command_workspace`).
+//! Contract: `suggestion(typed, workspace, history, cluster_kinds)` returns
+//! the text that taking the completion appends to `typed`; it is never
+//! empty, and `None` means that nothing extends `typed`. The candidates are,
+//! in this order, the session's command `history`, newest first, and then
+//! the `commands` of the workspace that `typed` addresses
+//! (`native::command_workspace`). In Kubernetes, `get` completes the
+//! built-in kinds and then the `cluster_kinds` that are not among them: the
+//! words `cluster_kinds::words` made from the cluster's own list, which the
+//! caller passes only for its current cluster (Containers passes none).
 //! A candidate extends `typed` when it starts with all of `typed`, compared
 //! exactly: taking it only appends, so the typed text, its case and its
 //! Unicode are never rewritten. Empty input has no suggestion; Up recalls
@@ -29,7 +33,7 @@ const DOCKER_COMMANDS: &[&str] = &[
 ];
 
 /// Kinds offered after `get`, the most used first: built-in Kubernetes API
-/// resources only. Custom resource kinds would need the cluster's discovery.
+/// resources, offered for every cluster and before the cluster's own kinds.
 const KUBE_GET_KINDS: &[&str] = &[
     "pods",
     "deployments",
@@ -62,8 +66,9 @@ const KUBE_GET_KINDS: &[&str] = &[
 /// The commands that complete in `workspace`, in the order they are
 /// offered: the Docker or kubectl commands that open a resource view, the
 /// Hamn views that `:` opens by name, and the same Docker or kubectl
-/// commands after their program word.
-pub fn commands(workspace: Workspace) -> Vec<String> {
+/// commands after their program word. Kubernetes `get` takes the built-in
+/// kinds, then the `cluster_kinds` that are not built in, in their order.
+pub fn commands(workspace: Workspace, cluster_kinds: &[String]) -> Vec<String> {
     let (program, hamn_views, native): (&str, &[&str], Vec<String>) = match workspace {
         Workspace::Containers => (
             "docker",
@@ -80,11 +85,22 @@ pub fn commands(workspace: Workspace) -> Vec<String> {
             KUBE_VIEW_ALIASES
                 .iter()
                 .map(|alias| alias.to_string())
-                .chain(KUBE_GET_KINDS.iter().flat_map(|kind| {
-                    let get = format!("get {kind}");
-                    let all_namespaces = (*kind == "pods").then(|| format!("{get} -A"));
-                    std::iter::once(get).chain(all_namespaces)
-                }))
+                .chain(
+                    KUBE_GET_KINDS
+                        .iter()
+                        .copied()
+                        .chain(
+                            cluster_kinds
+                                .iter()
+                                .map(String::as_str)
+                                .filter(|kind| !KUBE_GET_KINDS.contains(kind)),
+                        )
+                        .flat_map(|kind| {
+                            let get = format!("get {kind}");
+                            let all_namespaces = (kind == "pods").then(|| format!("{get} -A"));
+                            std::iter::once(get).chain(all_namespaces)
+                        }),
+                )
                 .collect(),
         ),
     };
@@ -100,11 +116,16 @@ pub fn commands(workspace: Workspace) -> Vec<String> {
 }
 
 /// What Tab or → appends to the typed `:` command; see the module contract.
-pub fn suggestion(typed: &str, workspace: Workspace, history: &[String]) -> Option<String> {
+pub fn suggestion(
+    typed: &str,
+    workspace: Workspace,
+    history: &[String],
+    cluster_kinds: &[String],
+) -> Option<String> {
     if typed.is_empty() {
         return None;
     }
-    let commands = commands(command_workspace(typed, workspace));
+    let commands = commands(command_workspace(typed, workspace), cluster_kinds);
     history
         .iter()
         .rev()
@@ -129,8 +150,8 @@ mod tests {
     fn empty_input_suggests_nothing_even_with_history() {
         let history = history(&["ps -a", "get pods"]);
         for workspace in [Workspace::Containers, Workspace::Kubernetes] {
-            assert_eq!(suggestion("", workspace, &history), None);
-            assert_eq!(suggestion("", workspace, &[]), None);
+            assert_eq!(suggestion("", workspace, &history, &[]), None);
+            assert_eq!(suggestion("", workspace, &[], &[]), None);
         }
     }
 
@@ -138,19 +159,25 @@ mod tests {
     fn input_that_no_candidate_extends_suggests_nothing() {
         let history = history(&["ps -a"]);
         // No candidate starts with it.
-        assert_eq!(suggestion("zz", Workspace::Containers, &history), None);
-        assert_eq!(suggestion("get zz", Workspace::Kubernetes, &history), None);
+        assert_eq!(suggestion("zz", Workspace::Containers, &history, &[]), None);
+        assert_eq!(
+            suggestion("get zz", Workspace::Kubernetes, &history, &[]),
+            None
+        );
         // A complete command that nothing longer starts with.
-        assert_eq!(suggestion("ps -a", Workspace::Containers, &history), None);
-        assert_eq!(suggestion("pods", Workspace::Kubernetes, &[]), None);
+        assert_eq!(
+            suggestion("ps -a", Workspace::Containers, &history, &[]),
+            None
+        );
+        assert_eq!(suggestion("pods", Workspace::Kubernetes, &[], &[]), None);
         // Matching is exact: no case folding and no leading space.
-        assert_eq!(suggestion("PS", Workspace::Containers, &[]), None);
-        assert_eq!(suggestion(" ps", Workspace::Containers, &[]), None);
+        assert_eq!(suggestion("PS", Workspace::Containers, &[], &[]), None);
+        assert_eq!(suggestion(" ps", Workspace::Containers, &[], &[]), None);
         // The commands of the other workspace are not offered without the
         // word that addresses it.
-        assert_eq!(suggestion("dep", Workspace::Containers, &[]), None);
-        assert_eq!(suggestion("ima", Workspace::Kubernetes, &[]), None);
-        assert_eq!(suggestion("v", Workspace::Kubernetes, &[]), None);
+        assert_eq!(suggestion("dep", Workspace::Containers, &[], &[]), None);
+        assert_eq!(suggestion("ima", Workspace::Kubernetes, &[], &[]), None);
+        assert_eq!(suggestion("v", Workspace::Kubernetes, &[], &[]), None);
     }
 
     #[test]
@@ -185,7 +212,7 @@ mod tests {
         ] {
             // "" marks a complete command that nothing longer starts with.
             assert_eq!(
-                suggestion(typed, workspace, &[]).as_deref(),
+                suggestion(typed, workspace, &[], &[]).as_deref(),
                 Some(rest).filter(|rest| !rest.is_empty()),
                 "{typed:?} in {workspace:?}"
             );
@@ -197,30 +224,30 @@ mod tests {
         // Both the history and a command extend "get p": the history wins.
         let entries = history(&["get pods -l app=web"]);
         assert_eq!(
-            suggestion("get p", Workspace::Kubernetes, &entries).as_deref(),
+            suggestion("get p", Workspace::Kubernetes, &entries, &[]).as_deref(),
             Some("ods -l app=web")
         );
         // The newest of two matching entries wins.
         let entries = history(&["ps -a", "ps --filter status=exited", "images"]);
         assert_eq!(
-            suggestion("ps", Workspace::Containers, &entries).as_deref(),
+            suggestion("ps", Workspace::Containers, &entries, &[]).as_deref(),
             Some(" --filter status=exited")
         );
         // An entry equal to the input extends nothing; the commands still do.
         let entries = history(&["ps"]);
         assert_eq!(
-            suggestion("ps", Workspace::Containers, &entries).as_deref(),
+            suggestion("ps", Workspace::Containers, &entries, &[]).as_deref(),
             Some(" -a")
         );
         // An entry that addresses the other workspace is offered too: the
         // history holds what was run from this prompt.
         let entries = history(&["docker ps -a"]);
         assert_eq!(
-            suggestion("d", Workspace::Kubernetes, &entries).as_deref(),
+            suggestion("d", Workspace::Kubernetes, &entries, &[]).as_deref(),
             Some("ocker ps -a")
         );
         assert_eq!(
-            suggestion("d", Workspace::Kubernetes, &[]).as_deref(),
+            suggestion("d", Workspace::Kubernetes, &[], &[]).as_deref(),
             Some("eployments")
         );
     }
@@ -229,19 +256,102 @@ mod tests {
     fn unicode_input_completes_after_whole_characters() {
         let entries = history(&["get pods -l app=작업", "logs é-api"]);
         assert_eq!(
-            suggestion("get pods -l app=작", Workspace::Kubernetes, &entries).as_deref(),
+            suggestion("get pods -l app=작", Workspace::Kubernetes, &entries, &[]).as_deref(),
             Some("업")
         );
         assert_eq!(
-            suggestion("logs ", Workspace::Kubernetes, &entries).as_deref(),
+            suggestion("logs ", Workspace::Kubernetes, &entries, &[]).as_deref(),
             Some("é-api")
         );
         // Unicode that nothing starts with, and a decomposed "é" that differs
         // from the stored one, suggest nothing.
-        assert_eq!(suggestion("작", Workspace::Kubernetes, &entries), None);
+        assert_eq!(suggestion("작", Workspace::Kubernetes, &entries, &[]), None);
         assert_eq!(
-            suggestion("logs e\u{301}", Workspace::Kubernetes, &entries),
+            suggestion("logs e\u{301}", Workspace::Kubernetes, &entries, &[]),
             None
+        );
+    }
+
+    fn sample_kinds() -> Vec<String> {
+        crate::cluster_kinds::words(crate::cluster_kinds::SAMPLE_OUTPUT.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn get_completes_the_clusters_kinds_after_the_built_in_ones() {
+        let kinds = sample_kinds();
+        for (typed, rest) in [
+            // Custom resources, the shortest that extends the input first.
+            ("get cert", "ificates"),
+            ("get certificater", "equests"),
+            ("get certificates", "igningrequests"),
+            ("get iss", "uers"),
+            ("kubectl get iss", "uers"),
+            ("get cha", "llenges"),
+            // A built-in kind comes first, even where a cluster's sorts before.
+            ("get p", "ods"),
+            ("get pods", " -A"),
+            ("get ev", "ents"),
+            ("get cu", "stomresourcedefinitions"),
+            // A plural that two groups serve is completed with its group.
+            ("get pods.", "metrics.k8s.io"),
+            ("get events.", "events.k8s.io"),
+            ("get lim", "itranges"),
+        ] {
+            assert_eq!(
+                suggestion(typed, Workspace::Kubernetes, &[], &kinds).as_deref(),
+                Some(rest),
+                "{typed:?}"
+            );
+            // Without the cluster's kinds (none looked up yet, a failed
+            // lookup, or the Containers prompt) only built-in kinds complete.
+            assert_eq!(
+                suggestion(typed, Workspace::Kubernetes, &[], &[]).is_some(),
+                ["get p", "get pods", "get ev", "get cu"].contains(&typed),
+                "{typed:?}"
+            );
+        }
+        // History still comes first.
+        let entries = history(&["get issuers -A"]);
+        assert_eq!(
+            suggestion("get iss", Workspace::Kubernetes, &entries, &kinds).as_deref(),
+            Some("uers -A")
+        );
+        // A built-in kind that the cluster serves is offered once, in its
+        // built-in place, before every kind of the cluster's.
+        let offered = commands(Workspace::Kubernetes, &kinds);
+        for kind in [
+            "get pods",
+            "get pods -A",
+            "get deployments",
+            "get events",
+            "get customresourcedefinitions",
+        ] {
+            assert_eq!(
+                offered.iter().filter(|command| *command == kind).count(),
+                1,
+                "{kind}"
+            );
+        }
+        let position = |command: &str| {
+            offered
+                .iter()
+                .position(|offered| offered == command)
+                .unwrap()
+        };
+        let last_built_in = position("get customresourcedefinitions");
+        for kind in ["get issuers", "get bindings", "get pods.metrics.k8s.io"] {
+            assert!(position(kind) > last_built_in, "{kind}");
+        }
+        // `jobs` is built in: it keeps its place although the cluster serves it.
+        assert!(position("get jobs") < last_built_in);
+        // Docker commands do not change.
+        assert_eq!(
+            commands(Workspace::Containers, &kinds),
+            commands(Workspace::Containers, &[])
+        );
+        assert_eq!(
+            suggestion("docker im", Workspace::Kubernetes, &[], &kinds).as_deref(),
+            Some("ages")
         );
     }
 
@@ -250,7 +360,7 @@ mod tests {
         for workspace in [Workspace::Containers, Workspace::Kubernetes] {
             let mut state = State::new(Request::default());
             state.workspace = workspace;
-            let commands = commands(workspace);
+            let commands = commands(workspace, &sample_kinds());
             assert!(commands.len() > 10, "{commands:?}");
             for command in &commands {
                 assert_eq!(

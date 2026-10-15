@@ -485,6 +485,9 @@ pub fn management_kubectl(_program: &str, args: &[String]) -> ExitCode {
     exec::python_exit(|| {
         let root = PathBuf::from(std::env::var_os("FIXTURE_ROOT").expect("FIXTURE_ROOT"));
         crate::suites::tui_native_regressions::record(&root, "kubectl", args);
+        if let Some(code) = crate::support::tui::answer_kinds_lookup(args) {
+            return code;
+        }
         let get = args.iter().position(|arg| arg == "get").expect("a get query");
         let kind = &args[get + 1];
         let objects: Value = serde_json::from_str(&fs::read_to_string(root.join("objects")).unwrap()).unwrap();

@@ -250,6 +250,9 @@ pub struct State {
     pub show_operation: bool,
     /// The help screen covers the view; keys keep their meaning.
     pub help: bool,
+    /// What the cluster of this state serves beyond the built-in kinds, for
+    /// `:get <kind>` completion. Only the Kubernetes state looks it up.
+    pub cluster_kinds: crate::cluster_kinds::ClusterKinds,
 }
 
 impl State {
@@ -293,6 +296,7 @@ impl State {
             operation_log: String::new(),
             show_operation: false,
             help: false,
+            cluster_kinds: Default::default(),
         }
     }
     pub fn for_workspace(request: Request, workspace: Workspace) -> Self {
@@ -542,10 +546,34 @@ impl State {
         self.input = Some((':', self.history.get(index).cloned().unwrap_or_default()));
     }
     /// What Tab or → appends to the `:` command being typed, shown dimmed
-    /// after the cursor; `None` for the filter. See `tui_completion`.
+    /// after the cursor; `None` for the filter. See `tui_completion`. The
+    /// cluster's kinds are those looked up for this state's kubeconfig and
+    /// context, so a lookup for another target is never offered.
     pub fn completion(&self) -> Option<String> {
         match &self.input {
-            Some((':', typed)) => crate::tui_completion::suggestion(typed, self.workspace, &self.history),
+            Some((':', typed)) => crate::tui_completion::suggestion(
+                typed,
+                self.workspace,
+                &self.history,
+                self.cluster_kinds
+                    .offered(&crate::cluster_kinds::Target::of(&self.request)),
+            ),
+            _ => None,
+        }
+    }
+    /// Why `:get` completes only the built-in kinds, shown in the border of
+    /// the prompt while a Kubernetes command is typed: the last lookup of
+    /// the cluster's kinds failed. It never replaces the message line.
+    pub fn completion_failure(&self) -> Option<&str> {
+        match &self.input {
+            Some((':', typed))
+                if self.workspace == Workspace::Kubernetes
+                    && crate::native::command_workspace(typed, self.workspace)
+                        == Workspace::Kubernetes =>
+            {
+                self.cluster_kinds
+                    .failure(&crate::cluster_kinds::Target::of(&self.request))
+            }
             _ => None,
         }
     }
@@ -1536,17 +1564,27 @@ pub fn draw(frame: &mut Frame, state: &State) {
         let text = format!("{prefix}{}", clean(input));
         // The completion follows the cursor, dimmed, until Tab takes it.
         let completion = state.completion().map(|rest| clean(&rest)).unwrap_or_default();
+        let mut prompt = Block::bordered()
+            .border_style(theme::border(workspace))
+            .title(Line::styled(name, theme::key(workspace)))
+            .title(Line::styled(keys, theme::dim()).right_aligned());
+        if let Some(reason) = state.completion_failure() {
+            let level = Level::Warning;
+            prompt = prompt.title_bottom(Line::styled(
+                format!(
+                    " {} get completes built-in kinds only: {} ",
+                    theme::icon(level),
+                    clean(reason)
+                ),
+                theme::level(level),
+            ));
+        }
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::raw(text.clone()),
                 Span::styled(completion, theme::dim()),
             ]))
-            .block(
-                Block::bordered()
-                    .border_style(theme::border(workspace))
-                    .title(Line::styled(name, theme::key(workspace)))
-                    .title(Line::styled(keys, theme::dim()).right_aligned()),
-            ),
+            .block(prompt),
             areas[2],
         );
         let column = Line::raw(text).width() as u16;
@@ -3212,6 +3250,91 @@ mod tests {
         assert_eq!((cell.symbol(), cell.fg), ("업", Color::DarkGray));
         kubernetes.complete_input();
         assert_eq!(kubernetes.input, Some((':', "get pods -l app=작업".into())));
+    }
+    #[test]
+    fn the_clusters_kinds_complete_only_for_the_context_they_were_looked_up_for() {
+        use crate::cluster_kinds::Target;
+        let mut state = State::new(Request::default());
+        state.workspace = Workspace::Kubernetes;
+        state.request.context = Some("old-cluster".into());
+        state.request.kubeconfig = Some("/fixture/config".into());
+        state.input = Some((':', "get iss".into()));
+        assert_eq!(state.completion(), None);
+        let ticket = state.cluster_kinds.begin(Target::of(&state.request));
+        // While the lookup runs, the built-in kinds still complete.
+        state.input = Some((':', "get dep".into()));
+        assert_eq!(state.completion().as_deref(), Some("loyments"));
+        let kinds = crate::cluster_kinds::words(b"issuers.cert-manager.io\ndeployments.apps\n");
+        assert!(state.cluster_kinds.finish(ticket, kinds));
+        state.input = Some((':', "get iss".into()));
+        assert_eq!(state.completion().as_deref(), Some("uers"));
+        state.complete_input();
+        assert_eq!(state.input, Some((':', "get issuers".into())));
+        // Another context or kubeconfig never gets them, even before the
+        // TUI loop stops the lookup or forgets its kinds.
+        state.input = Some((':', "get iss".into()));
+        for (context, config) in [("new-cluster", "/fixture/config"), ("old-cluster", "/fixture/other")] {
+            state.request.context = Some(context.into());
+            state.request.kubeconfig = Some(config.into());
+            assert_eq!(state.completion(), None, "{context} {config}");
+        }
+        state.request.kubeconfig = Some("/fixture/config".into());
+        assert_eq!(state.completion().as_deref(), Some("uers"));
+    }
+    #[test]
+    fn the_prompt_border_says_why_get_completes_only_built_in_kinds() {
+        use crate::cluster_kinds::Target;
+        let screen = |state: &State| -> Vec<String> {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 32)).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect()
+        };
+        let reason = "kubectl api-resources failed (exit status: 1): error: Forbidden";
+        let hint = format!("! get completes built-in kinds only: {reason}");
+        let mut state = State::new(Request::default());
+        state.workspace = Workspace::Kubernetes;
+        state.request.context = Some("old-cluster".into());
+        state.native = Some(crate::native::parse("get pods", &state).unwrap());
+        // A message the user's own command left stays where it is.
+        state.fail(Failure::new("cliError", "kubectl exited 1: pods is forbidden"));
+        let message = state.message.clone();
+        let ticket = state.cluster_kinds.begin(Target::of(&state.request));
+        assert!(state.cluster_kinds.finish(ticket, Err(Failure::new("cliError", reason))));
+        state.input = Some((':', "get ".into()));
+        let lines = screen(&state);
+        let border = lines.iter().position(|line| line.contains(&hint)).unwrap_or_else(|| panic!("{lines:#?}"));
+        // The bottom border of the prompt, right under the typed command.
+        assert!(lines[border - 1].contains(":get pods"), "{lines:#?}");
+        assert!(lines[border - 2].contains(" Command "), "{lines:#?}");
+        assert_eq!(state.message, message);
+        assert!(lines.iter().any(|line| line.contains(&message)), "{lines:#?}");
+        // Only Kubernetes commands of the state whose lookup failed show it.
+        for typed in ["docker ps", ""] {
+            state.input = Some((':', typed.into()));
+            let shown = screen(&state).iter().any(|line| line.contains(&hint));
+            assert_eq!(shown, typed.is_empty(), "{typed:?}");
+        }
+        state.input = Some(('/', "get".into()));
+        assert!(!screen(&state).iter().any(|line| line.contains("built-in kinds only")));
+        state.input = Some((':', "get ".into()));
+        state.request.context = Some("new-cluster".into());
+        assert!(!screen(&state).iter().any(|line| line.contains("built-in kinds only")));
+        state.request.context = Some("old-cluster".into());
+        // While the next prompt retries, the reason stays; success clears it.
+        let retry = state.cluster_kinds.begin(Target::of(&state.request));
+        assert!(screen(&state).iter().any(|line| line.contains(&hint)));
+        assert!(state.cluster_kinds.finish(retry, Ok(Vec::new())));
+        assert!(!screen(&state).iter().any(|line| line.contains("built-in kinds only")));
+        let mut containers = State::new(Request::default());
+        containers.native = Some(crate::native::parse("ps", &containers).unwrap());
+        let ticket = containers.cluster_kinds.begin(Target::of(&containers.request));
+        assert!(containers.cluster_kinds.finish(ticket, Err(Failure::new("cliError", reason))));
+        containers.input = Some((':', "kubectl get ".into()));
+        assert!(!screen(&containers).iter().any(|line| line.contains("built-in kinds only")));
     }
     #[test]
     fn a_failed_read_shows_its_summary_and_keeps_the_raw_failure_for_details() {

@@ -231,7 +231,8 @@ const COMMANDS: &[&str] = &[
     "  docker and kubectl prefixes are accepted; output options are kept.",
     "  Other commands run in the internal terminal, without confirmation.",
     "  :refresh-timeout 30 sets a 1..300 second query deadline.",
-    "  Tab or → takes the dimmed completion: history, then known commands.",
+    "  Tab or → takes the dimmed completion: history, then known commands;",
+    "  get <type> also completes the kinds the cluster serves, CRDs too.",
     "  Up / Down recall this session's command history.",
     "  Shell pipelines, redirections and aliases are not interpreted.",
 ];
