@@ -49,13 +49,14 @@ int guest_deployment_runtime_ready(const struct profile *profile,
 /* Caller must hold the profile mutation lock. */
 int guest_deployment_refresh_locked(const struct profile *profile,
                                     const struct vm_state *state);
-/* Reapply network-dependent Docker settings without modifying the guest image,
- * for a current marker. Like a refresh, it first recovers a backup that an
- * interrupted transaction left (guest_deployment_recover), so a leftover does
- * not fail it; when that recovery fails, it returns -1 before any change with
- * the recovery's cleanup state. When the recovery discarded or rolled back a
- * backup, it applies the whole runtime configuration instead of Docker's
- * alone. Returns 0 when the runtime is reconciled. */
+/* Reapply what a boot resets, without modifying the guest image, for a current
+ * marker: the profile's x86_64 translation (a boot registers only qemu) and
+ * network-dependent Docker settings. Like a refresh, it first recovers a
+ * backup that an interrupted transaction left (guest_deployment_recover), so a
+ * leftover does not fail it; when that recovery fails, it returns -1 before
+ * any change with the recovery's cleanup state. When the recovery discarded
+ * or rolled back a backup, it applies the whole runtime configuration
+ * instead. Returns 0 when the runtime is reconciled. */
 int guest_deployment_reconcile_runtime_locked(
     const struct profile *profile, const struct vm_state *state);
 int guest_deployment_repair_locked(const struct profile *profile,

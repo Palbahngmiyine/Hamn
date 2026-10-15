@@ -76,8 +76,8 @@ static int fixture_current, transactions, recovery_calls;
 static int leftover, first_recovery;
 /* recovered: what guest_deployment_recovered_backup reports after a recovery
  * that succeeded, that is, whether it found a leftover. The counters tell
- * Docker's settings from the whole runtime configuration. */
-static int recovered, runtime_configs, docker_configs;
+ * x86_64 translation and Docker's settings from the whole runtime. */
+static int recovered, runtime_configs, rosetta_configs, docker_configs;
 static const char *fault;
 #define logerr(...) ((void)0)
 #define logmsg(...) ((void)0)
@@ -88,6 +88,7 @@ static const char *fault;
 #define operation_phase(...) 0
 #define remote_mutation_cleanup_pending() 0
 #define guest_deployment_configure_runtime(...) (runtime_configs++, 0)
+#define guest_deployment_configure_rosetta(...) (rosetta_configs++, 0)
 #define guest_deployment_configure_docker(...) (docker_configs++, 0)
 #define guest_deployment_recovered_backup() recovered
 #define guest_deployment_forward_sockets(...) 0
@@ -131,7 +132,7 @@ int main(void) {
  for (int failure=0; failure<3; failure++) {
   fault=phases[phase]; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=docker_configs=0;
+  runtime_configs=rosetta_configs=docker_configs=0;
   fail_barrier=failure==1; fail_recovery=failure==2; leftover=first_recovery=0;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==-1 && cancelled && depth==0 && barriers==1);
@@ -140,22 +141,25 @@ int main(void) {
    * cancellation only once the barrier has settled the writer. */
   assert(recovery_calls==1 + !fail_barrier && recovery_complete==(failure==0));
   assert(transactions==(phase ? 2 : 1));
-  assert(runtime_configs==(phase && !reconcile) && docker_configs==(phase && reconcile));
+  assert(runtime_configs==(phase && !reconcile));
+  assert(rosetta_configs==(phase && reconcile) && docker_configs==(phase && reconcile));
  }
  /* A leftover transaction would make begin refuse; the recovery before begin
   * removes it, so neither path fails on it. A refresh always configures the
   * whole runtime; a reconcile does so only after recovering a leftover, and
-  * otherwise Docker's settings alone. */
+  * otherwise applies the x86_64 translation a boot resets and Docker's
+  * settings. */
  for (int reconcile=0; reconcile<2; reconcile++)
  for (int left=0; left<2; left++) {
   fault="none"; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=docker_configs=0;
+  runtime_configs=rosetta_configs=docker_configs=0;
   fail_barrier=fail_recovery=first_recovery=0; leftover=left;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==0 && !leftover && recovery_calls==1 && transactions==2);
   assert(!cancelled && depth==0 && barriers==0 && !cleanup_pending && !recovery_complete);
-  assert(runtime_configs==(!reconcile || left) && docker_configs==(reconcile && !left));
+  assert(runtime_configs==(!reconcile || left));
+  assert(rosetta_configs==(reconcile && !left) && docker_configs==(reconcile && !left));
  }
  /* A recovery that fails or is cancelled begins nothing, and the caller keeps
   * what the recovery reported: nothing, a finished retry, or pending cleanup. */
@@ -163,11 +167,11 @@ int main(void) {
  for (int outcome=1; outcome<=3; outcome++) {
   fault="none"; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=docker_configs=0;
+  runtime_configs=rosetta_configs=docker_configs=0;
   fail_barrier=fail_recovery=0; leftover=1; first_recovery=outcome;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==-1 && recovery_calls==1 && transactions==0 && barriers==0 && depth==0);
-  assert(runtime_configs==0 && docker_configs==0);
+  assert(runtime_configs==0 && rosetta_configs==0 && docker_configs==0);
   assert(cleanup_pending==(outcome==3) && recovery_complete==(outcome==2));
  }
  puts("PASS: refresh/reconcile recover before begin; begin/commit cancellation, barrier failure and recovery failure");

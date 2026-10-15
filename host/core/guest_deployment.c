@@ -630,11 +630,10 @@ int guest_deployment_reconcile_runtime_locked(
         return -1;
     /* A recovered backup leaves the runtime of before its transaction, or of
      * a deployment whose last writes a crash may have lost: an image without
-     * the durable commit loses them together with the backup's removal,
-     * including the x86_64 translation state, which no backup holds. Then
-     * the whole runtime is applied again, not only Docker's settings. A disk
-     * whose marker is current has finished its first boot, so this needs no
-     * cloud-init wait, as Docker's settings alone do not. */
+     * the durable commit loses them together with the backup's removal. Then
+     * the whole runtime is applied again. A disk whose marker is current has
+     * finished its first boot, so neither case needs the cloud-init wait of
+     * a refresh. */
     int whole_runtime = guest_deployment_recovered_backup();
 
     char token[GUEST_DEPLOYMENT_TOKEN_CAP];
@@ -645,12 +644,20 @@ int guest_deployment_reconcile_runtime_locked(
         return -1;
     }
 
-    if (whole_runtime)
+    /* Every boot registers only qemu's x86_64 handler: systemd-binfmt and
+     * binfmt-support load qemu, and nothing loads the Rosetta handler from
+     * its own database. Like Docker's network settings, the profile's x86_64
+     * translation is applied on every cold start; configure-rosetta checks
+     * the handler it leaves enabled. */
+    int configured;
+    if (whole_runtime) {
         logmsg("deployment recovery changed the guest runtime; applying the "
                "whole guest runtime configuration again");
-    int configured = whole_runtime ?
-        guest_deployment_configure_runtime(profile, state->ip) :
-        guest_deployment_configure_docker(profile, state->ip);
+        configured = guest_deployment_configure_runtime(profile, state->ip);
+    } else {
+        configured = guest_deployment_configure_rosetta(profile, state->ip) == 0 &&
+            guest_deployment_configure_docker(profile, state->ip) == 0 ? 0 : -1;
+    }
     if (configured == 0 &&
         guest_deployment_forward_sockets(profile, state->ip) == 0 &&
         guest_deployment_runtime_ready(
@@ -659,7 +666,8 @@ int guest_deployment_reconcile_runtime_locked(
             logmsg(whole_runtime ?
                    "warm start applied the whole guest runtime and confirmed "
                    "its readiness" :
-                   "warm start reconciled Docker networking and readiness");
+                   "warm start reconciled x86_64 translation, Docker "
+                   "networking and readiness");
             return 0;
         }
         logerr("guest runtime reconciliation succeeded but backup commit failed "
