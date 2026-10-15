@@ -477,6 +477,24 @@ static int cmd_start_execute(const struct start_options *options,
                 logerr("cannot refresh the running VM guest deployment");
                 goto out;
             }
+            /* A rolled back or discarded backup leaves a runtime the marker
+             * does not vouch for: an interrupted cold start's reconciliation
+             * rolls back to the previous boot's Docker settings. Apply the
+             * whole runtime before reporting a running VM; if that fails,
+             * forget the marker, so a later start redeploys it in full. */
+            if (deployment_current == 1 && guest_deployment_recovered_backup()) {
+                start_trace_stage(&trace, "reapplying-deployment");
+                if (guest_deployment_reapply_runtime_locked(
+                        &p, &running_state) != 0) {
+                    int forgotten = guest_deployment_forget(&p) == 0;
+                    if (!forgotten)
+                        logerr("cannot forget the guest deployment marker: %s",
+                               strerror(errno));
+                    logerr("cannot apply the running VM guest runtime again%s",
+                           forgotten ? "; the next start redeploys it" : "");
+                    goto out;
+                }
+            }
             if (!running_start_ready(&running_profile) && !proc_cancelled()) {
                 start_trace_stage(&trace, "repairing-forwarding");
                 if (guest_deployment_forward_sockets(&p, running_state.ip) != 0)

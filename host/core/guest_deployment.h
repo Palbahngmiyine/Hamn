@@ -59,8 +59,15 @@ int guest_deployment_refresh_locked(const struct profile *profile,
  * leftover does not fail it; when that recovery fails, it returns -1 before
  * any change with the recovery's cleanup state. When the recovery discarded
  * or rolled back a backup, it applies the whole runtime configuration
- * instead. Returns 0 when the runtime is reconciled. */
+ * instead. Returns 0 when the runtime is reconciled. A failure rolls back the
+ * files and services the transaction's backup holds; the x86_64 translation
+ * stays as the profile sets it. */
 int guest_deployment_reconcile_runtime_locked(
+    const struct profile *profile, const struct vm_state *state);
+/* The reconciliation above, applying the whole runtime configuration: for a
+ * running VM whose guest_deployment_recover rolled back or discarded a
+ * backup, so its runtime is no longer the deployment its marker records. */
+int guest_deployment_reapply_runtime_locked(
     const struct profile *profile, const struct vm_state *state);
 int guest_deployment_repair_locked(const struct profile *profile,
                                    const struct vm_state *state);

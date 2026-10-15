@@ -26,7 +26,8 @@ pub fn main(filters: &[String]) -> ExitCode {
 fn deployment_refresh_and_reconcile() {
     let file = Path::new("host/core/guest_deployment.c");
     let functions: String =
-        ["deployment_cancel_recover", "deployment_refresh_locked", "guest_deployment_reconcile_runtime_locked"]
+        ["deployment_cancel_recover", "deployment_refresh_locked", "deployment_reconcile_locked",
+         "guest_deployment_reconcile_runtime_locked", "guest_deployment_reapply_runtime_locked"]
             .iter()
             .map(|name| c_extract::function_in(file, name))
             .collect();
@@ -174,7 +175,21 @@ int main(void) {
   assert(runtime_configs==0 && rosetta_configs==0 && docker_configs==0);
   assert(cleanup_pending==(outcome==3) && recovery_complete==(outcome==2));
  }
- puts("PASS: refresh/reconcile recover before begin; begin/commit cancellation, barrier failure and recovery failure");
+ /* The reapplication a running VM's start asks for after its own recovery
+  * changed the guest: the whole runtime even when this recovery finds
+  * nothing, and as a reconcile otherwise. */
+ for (int left=0; left<2; left++) {
+  fault="none"; fixture_current=1; cancelled=remote_active=depth=barriers=0;
+  recovery_complete=cleanup_pending=recovery_calls=transactions=0;
+  runtime_configs=rosetta_configs=docker_configs=0;
+  fail_barrier=fail_recovery=first_recovery=0; leftover=left;
+  assert(guest_deployment_reapply_runtime_locked(&p,&state)==0);
+  assert(!leftover && recovery_calls==1 && transactions==2 && barriers==0 && depth==0);
+  assert(runtime_configs==1 && rosetta_configs==0 && docker_configs==0);
+ }
+ fixture_current=0;
+ assert(guest_deployment_reapply_runtime_locked(&p,&state)==-1 && errno==ESTALE);
+ puts("PASS: refresh/reconcile recover before begin; begin/commit cancellation, barrier failure and recovery failure; reapply applies the whole runtime");
 }
 "#;
 

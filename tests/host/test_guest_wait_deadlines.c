@@ -602,7 +602,8 @@ static void reconcile_rolls_back_when_translation_fails(void)
     fflush(NULL);
     char *output = read_file(fixture.out);
     assert(strstr(output, "cannot configure qemu x86_64 translation"));
-    assert(strstr(output, "warm start reconciliation failed; restoring"));
+    assert(strstr(output, "guest runtime reconciliation failed; restoring the "
+                          "runtime files and services its backup holds"));
     free(output);
     ssh_clients_reaped();
 }
@@ -637,10 +638,37 @@ static void reconcile_recovers_a_leftover_and_applies_the_whole_runtime(void)
     assert(strstr(output, "deployment recovery: discarded deployment backup "
                           "0123456789abcdef0123456789abcdef (phase not ready)"));
     assert(strstr(output, "applying the whole guest runtime configuration"));
-    assert(strstr(output, "warm start applied the whole guest runtime"));
+    assert(strstr(output, "applied the whole guest runtime again"));
     assert(!strstr(output, "has no ready backup"));
     assert(!strstr(output, "cannot create a safe guest runtime"));
     assert(!strstr(output, "reconciliation failed"));
+    free(output);
+    ssh_clients_reaped();
+}
+
+/* A start that finds the VM running has already recovered: when that
+ * recovery rolled back or discarded a backup, the start reapplies the whole
+ * runtime, although the reapplication's own recovery then finds nothing. */
+static void reapply_applies_the_whole_runtime_without_a_leftover(void)
+{
+    struct vm_state state;
+    leave_a_transaction(&state);
+    assert(unsetenv(ENV_LEFTOVER) == 0 && unlink(fixture.leftover) == 0);
+    assert(guest_deployment_reapply_runtime_locked(&fixture.profile,
+                                                   &state) == 0);
+    assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
+    assert(ssh_calls("configure-rosetta disable") == 1);
+    assert(ssh_calls("verify-image-contract") == 1);
+    assert(ssh_calls("configure-containerd") == 1);
+    assert(ssh_calls("configure-docker") == 1);
+    assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
+    assert(ssh_calls("cloud-init") == 0);
+    fflush(NULL);
+    char *output = read_file(fixture.out);
+    assert(!strstr(output, "deployment recovery:"));
+    assert(strstr(output, "applying the whole guest runtime configuration"));
+    assert(strstr(output, "applied the whole guest runtime again"));
     free(output);
     ssh_clients_reaped();
 }
@@ -1008,6 +1036,9 @@ int main(int argc, char **argv)
              READY_MS + WATCHDOG_EXTRA_MS);
     run_case("reconcile_recovers_a_leftover_and_applies_the_whole_runtime",
              reconcile_recovers_a_leftover_and_applies_the_whole_runtime,
+             API_ANSWERS, READY_MS + VERIFY_MS + WATCHDOG_EXTRA_MS);
+    run_case("reapply_applies_the_whole_runtime_without_a_leftover",
+             reapply_applies_the_whole_runtime_without_a_leftover,
              API_ANSWERS, READY_MS + VERIFY_MS + WATCHDOG_EXTRA_MS);
     run_case("reconcile_begins_nothing_when_recovery_fails",
              reconcile_begins_nothing_when_recovery_fails, API_ANSWERS,

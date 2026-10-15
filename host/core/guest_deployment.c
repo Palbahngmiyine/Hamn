@@ -625,8 +625,11 @@ int guest_deployment_refresh_locked(const struct profile *profile,
     return deployment_refresh_locked(profile, state, 0);
 }
 
-int guest_deployment_reconcile_runtime_locked(
-    const struct profile *profile, const struct vm_state *state)
+/* The reconciliation of a current deployment; whole_runtime asks for the
+ * whole runtime even when its own recovery finds nothing. */
+static int deployment_reconcile_locked(const struct profile *profile,
+                                       const struct vm_state *state,
+                                       int whole_runtime)
 {
     recovery_complete = cleanup_pending = 0;
     if (guest_deployment_is_current(profile) != 1) {
@@ -651,7 +654,7 @@ int guest_deployment_reconcile_runtime_locked(
      * the whole runtime is applied again. A disk whose marker is current has
      * finished its first boot, so neither case needs the cloud-init wait of
      * a refresh. */
-    int whole_runtime = guest_deployment_recovered_backup();
+    whole_runtime = whole_runtime || guest_deployment_recovered_backup();
 
     char token[GUEST_DEPLOYMENT_TOKEN_CAP];
     deployment_token_generate(token);
@@ -666,6 +669,11 @@ int guest_deployment_reconcile_runtime_locked(
      * its own database. Like Docker's network settings, the profile's x86_64
      * translation is applied on every cold start; configure-rosetta checks
      * the handler it leaves enabled. */
+    /* The translation lives outside the backup (binfmt databases and kernel
+     * registrations, the Rosetta mount), so a rollback below leaves it as
+     * configure-rosetta set it: the profile's mode, which the marker records,
+     * and not the qemu-only state a boot leaves. A refresh's rollback does
+     * the same. */
     int configured;
     if (whole_runtime) {
         logmsg("deployment recovery changed the guest runtime; applying the "
@@ -681,8 +689,8 @@ int guest_deployment_reconcile_runtime_locked(
             profile, state->ip, GUEST_DEPLOYMENT_READY_TIMEOUT_SEC) == 0) {
         if (deployment_transaction(profile, state->ip, "commit", token) == 0) {
             logmsg(whole_runtime ?
-                   "warm start applied the whole guest runtime and confirmed "
-                   "its readiness" :
+                   "applied the whole guest runtime again and confirmed its "
+                   "readiness" :
                    "warm start reconciled x86_64 translation, Docker "
                    "networking and readiness");
             return 0;
@@ -695,7 +703,9 @@ int guest_deployment_reconcile_runtime_locked(
 
     proc_cleanup_begin();
     (void)operation_phase("recovering");
-    logerr("warm start reconciliation failed; restoring the previous guest runtime");
+    logerr("guest runtime reconciliation failed; restoring the runtime files "
+           "and services its backup holds (x86_64 translation stays as the "
+           "profile sets it)");
     if (deployment_transaction(profile, state->ip, "rollback", token) != 0) {
         logerr("guest runtime reconciliation rollback failed for operation %s; "
                "the guest backup was retained for manual recovery", token);
@@ -708,6 +718,18 @@ int guest_deployment_reconcile_runtime_locked(
                "could not be re-established");
     proc_cleanup_end();
     return -1;
+}
+
+int guest_deployment_reconcile_runtime_locked(
+    const struct profile *profile, const struct vm_state *state)
+{
+    return deployment_reconcile_locked(profile, state, 0);
+}
+
+int guest_deployment_reapply_runtime_locked(
+    const struct profile *profile, const struct vm_state *state)
+{
+    return deployment_reconcile_locked(profile, state, 1);
 }
 
 int guest_deployment_repair_locked(const struct profile *profile,
