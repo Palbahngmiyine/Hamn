@@ -18,6 +18,7 @@
 #include "cli.h"
 #include "core/control.h"
 #include "core/guest_deployment.h"
+#include "core/guest_filesystem.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/operation.h"
@@ -156,17 +157,61 @@ static int rollback_incomplete_start(const struct profile *p)
     return 0;
 }
 
+static long long monotonic_milliseconds(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+/* Polls vmrun's control socket every half second until timeout_sec (at
+ * least 1) has passed on the monotonic clock. Each status query gets what is
+ * left of the wait, at most 300 ms, for each send and receive, so a vmrun
+ * that accepts and never answers ends the wait at its deadline; one that
+ * closes the query's connections unanswered can make that last query retry
+ * past it (ctlsock.h). 0 once vmrun reports running and its process is
+ * alive; -1 with errno ETIMEDOUT when the time is up, ECANCELED at the next
+ * poll after the operation is cancelled outside cleanup, or EINVAL for a
+ * timeout_sec below 1. */
 static int wait_vmrun_running(const struct profile *p, const char *ctl,
                               int timeout_sec)
 {
+    if (timeout_sec < 1) {
+        errno = EINVAL;
+        return -1;
+    }
+    long long now = monotonic_milliseconds();
+    if (now < 0)
+        return -1;
+    long long deadline = now + (long long)timeout_sec * 1000;
     char resp[256];
-    for (int i = 0; i < timeout_sec * 2; i++) {
-        if (ctlsock_query_status(ctl, resp, sizeof(resp), 300) == 0 &&
+    for (;;) {
+        if (proc_cancelled()) {
+            errno = ECANCELED;
+            return -1;
+        }
+        now = monotonic_milliseconds();
+        if (now < 0)
+            return -1;
+        if (now >= deadline) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        long long left = deadline - now;
+        /* left is at least 1 here; a timeout of 0 would let the query
+         * block, as SO_RCVTIMEO and SO_SNDTIMEO of 0 mean no limit. */
+        int query_ms = left < 300 ? (int)left : 300;
+        if (ctlsock_query_status(ctl, resp, sizeof(resp), query_ms) == 0 &&
             strstr(resp, "\"running\"") && vm_running_pid(p) > 0)
             return 0;
-        usleep(500 * 1000);
+        now = monotonic_milliseconds();
+        if (now < 0)
+            return -1;
+        left = deadline - now;
+        if (left > 0) /* a cancellation signal ends the sleep early */
+            usleep((useconds_t)(left < 500 ? left : 500) * 1000);
     }
-    return -1;
 }
 
 static int test_identity_timeout_dsec(void)
@@ -299,9 +344,48 @@ int hamn_test_start_ensure_signed_guest_image(char *image, size_t capacity,
 {
     return ensure_signed_guest_image(image, capacity, updated);
 }
+
+int hamn_test_start_wait_vmrun_running(const struct profile *p,
+                                       const char *ctl, int timeout_sec)
+{
+    return wait_vmrun_running(p, ctl, timeout_sec);
+}
 #endif
 
-static int start_spawned, start_restored, start_unchanged;
+static int start_spawned, start_restored, start_unchanged, start_guest_damaged;
+
+#define GUEST_FILESYSTEM_CHECK_MS 15000
+
+/* The first guest command of a start, before any guest write. A damaged
+ * guest root filesystem fails every later step in a way a start cannot
+ * repair: the deployment's writes fail, and so does their fencing, which
+ * leaves only an unknown outcome. Reporting it as itself, before those
+ * steps, keeps the outcome known. A check that cannot tell lets the start
+ * go on. Returns -1 when the filesystem is damaged. */
+static int check_guest_filesystem(const struct profile *p, const char *ip)
+{
+    struct guest_filesystem_check check;
+    guest_filesystem_probe(p, ip, GUEST_FILESYSTEM_CHECK_MS, &check);
+    if (guest_filesystem_damaged(&check)) {
+        start_guest_damaged = 1;
+        if (guest_filesystem_record(p, &check) != 0)
+            logmsg("warning: cannot record the damaged guest filesystem "
+                   "for vm status: %s", strerror(errno));
+        logerr("the guest root filesystem of profile %s is damaged: %s; "
+               "starting the VM cannot repair it, and vm reset --profile %s "
+               "--yes deletes the disk and everything in the VM so that the "
+               "next start creates a new one", p->name, check.detail,
+               p->name);
+        return -1;
+    }
+    if (check.state == GUEST_FILESYSTEM_UNKNOWN)
+        logmsg("warning: cannot check the guest root filesystem: %s",
+               check.detail);
+    else if (guest_filesystem_forget(p) != 0)
+        logmsg("warning: cannot remove the earlier record of a damaged "
+               "guest filesystem: %s", strerror(errno));
+    return 0;
+}
 
 static int cmd_start_execute(const struct start_options *options,
                             const char *profile_name)
@@ -378,6 +462,13 @@ static int cmd_start_execute(const struct start_options *options,
              * committed. Validate and recover its backup before early success. */
             if (ssh_master_start(&p, running_state.ip, 15) != 0)
                 goto out;
+            start_trace_stage(&trace, "checking-guest-filesystem");
+            if (check_guest_filesystem(&p, running_state.ip) != 0) {
+                /* The check wrote nothing in the guest; the VM keeps
+                 * running as it was. */
+                start_unchanged = 1;
+                goto out;
+            }
             start_trace_stage(&trace, "recovering-deployment");
             if (guest_deployment_recover(&p, running_state.ip) != 0)
                 goto out;
@@ -641,7 +732,10 @@ static int cmd_start_execute(const struct start_options *options,
     }
 
     if (wait_vmrun_running(&p, ctl, 20) != 0) {
-        logerr("vm did not start; check %s", vmlog);
+        if (proc_cancelled())
+            logerr("cancelled while waiting for the vm to run");
+        else
+            logerr("vm did not start; check %s", vmlog);
         goto rollback;
     }
     start_trace_stage(&trace, "vm-running");
@@ -681,6 +775,9 @@ static int cmd_start_execute(const struct start_options *options,
         goto rollback;
     }
     start_trace_stage(&trace, "ssh-ready");
+    start_trace_stage(&trace, "checking-guest-filesystem");
+    if (check_guest_filesystem(&p, ip) != 0)
+        goto rollback;
 
     if (provision_run_stage(&p, ip, "system") != 0 ||
         provision_run_stage(&p, ip, "user") != 0)
@@ -759,9 +856,13 @@ out:
 
 static int cmd_start_locked(const struct start_options *options, const char *profile)
 {
-    start_spawned = start_restored = start_unchanged = 0;
+    start_spawned = start_restored = start_unchanged = start_guest_damaged = 0;
     int rc = cmd_start_execute(options, profile);
     if (rc == START_REEXEC_AFTER_SIGNED_UPDATE) return operation_restart_required();
+    /* The damage is the result only while this start's own effect is known:
+     * it changed nothing, or it stopped again the VM it booted. */
+    if (rc != 0 && start_guest_damaged && (start_unchanged || start_restored))
+        rc = HAMN_CONTROL_GUEST_FILESYSTEM_DAMAGED;
     if (start_unchanged) return operation_finish_unchanged(rc);
     return operation_finish(rc, !remote_mutation_cleanup_pending() &&
         (start_restored || (!start_spawned &&

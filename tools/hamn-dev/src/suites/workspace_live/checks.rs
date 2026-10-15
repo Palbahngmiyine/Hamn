@@ -450,13 +450,14 @@ fn live_menu_helpers() {
         let terminal = &mut HarnessDriver(&mut harness);
         query(terminal, "probes.example.test", "read-only", Some("review"));
         terminal.send(b"m", Some("Resource actions"));
-        assert!(terminal.text().contains("inspect") && !terminal.text().contains("delete"), "{}", terminal.text());
-        choose(terminal, "Resource actions", "inspect");
+        let menu = terminal.text();
+        assert!(menu.contains("describe") && menu.contains("yaml") && !menu.contains("delete"), "{menu}");
+        choose(terminal, "Resource actions", "yaml");
         terminal.until("custom-uid");
         terminal.until("Exit code 0");
         terminal.send(b"\r", None);
-        // The same query again, from the list the inspection returned to:
-        // that list already shows the heading and the row. Then `d` on a
+        // The same query again, from the list the YAML returned to: that
+        // list already shows the heading and the row. Then Ctrl+D on a
         // resource without a delete action.
         query(terminal, "probes.example.test", "read-only", Some("review"));
         delete_is_not_offered(terminal);

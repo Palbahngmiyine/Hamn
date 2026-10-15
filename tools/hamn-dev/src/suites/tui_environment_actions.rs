@@ -92,14 +92,29 @@ fn check_environment_actions(kind: &str) {
         harness.send(b"j:ROW_BARRIER", ":ROW_BARRIER");
         close_input(&mut harness, ":ROW_BARRIER");
     }
-    for key in *b"tsdrgl" {
+    // The row keys, Ctrl+D included, do nothing to an environment row; the
+    // Hamn actions among them say to select an environment first.
+    let keys: [(&[u8], bool); 9] = [
+        (b"t", true),
+        (b"s", true),
+        (b"d", false),
+        (b"r", true),
+        (b"g", true),
+        (b"l", true),
+        (b"y", false),
+        (b"F", false),
+        (b"\x04", true),
+    ];
+    for (key, refused) in keys {
         let marker = ":ACTION_BARRIER";
-        harness.write(&[&[key][..], marker.as_bytes()].concat());
+        harness.write(&[key, marker.as_bytes()].concat());
         harness.wait(|harness| harness.text().contains(marker) || harness.text().contains("Confirm vm"));
         assert!(!harness.text().contains("Confirm vm"), "{}", harness.text());
         assert!(harness.text().contains("Container environments"), "{}", harness.text());
         close_input(&mut harness, marker);
-        harness.until("Select an environment with Enter");
+        if refused {
+            harness.until("Select an environment with Enter");
+        }
     }
     for key in *b"cv" {
         harness.send(&[&[key][..], b":PANEL_BARRIER"].concat(), ":PANEL_BARRIER");
@@ -111,8 +126,8 @@ fn check_environment_actions(kind: &str) {
     assert!(text.contains("external  Hamn profile"), "{text}");
     assert!(text.contains("external  Docker context"), "{text}");
     assert!(text.contains("unix:///external/docker.sock"), "{text}");
-    assert!(!text.contains("t stop"), "{text}");
-    assert!(!text.contains("v VM settings"), "{text}");
+    assert!(!text.contains("<t> stop"), "{text}");
+    assert!(!text.contains("<v> VM settings"), "{text}");
     harness.send(b"\r", if kind == "docker" { "new-target-row" } else { "old-target-row" });
     harness.wait(|harness| !harness.text().contains("[loading]"));
     if kind == "docker" {
@@ -121,7 +136,7 @@ fn check_environment_actions(kind: &str) {
         // must not enable the configure shortcut either.
         harness.send(b"c:EXTERNAL_BARRIER", ":EXTERNAL_BARRIER");
         assert!(!harness.text().contains("vm configure"), "{}", harness.text());
-        assert!(!harness.text().contains("v VM settings"), "{}", harness.text());
+        assert!(!harness.text().contains("<v> VM settings"), "{}", harness.text());
         close_input(&mut harness, ":EXTERNAL_BARRIER");
     } else {
         harness.send(b"v", "vm list");

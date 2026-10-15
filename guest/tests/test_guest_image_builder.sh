@@ -72,6 +72,14 @@ if grep -Eq '^path-exclude=.*(docker|containerd$|/runc$|dnsmasq|hamn)' "$EXCLUDE
     echo "FAIL: dpkg path filters exclude a required runtime component" >&2
     exit 1
 fi
+# The kernel command line keeps the cloud image's consoles, makes the
+# virtio console that the host logs /dev/console, and repairs the root
+# filesystem at boot instead of stopping at "RUN fsck MANUALLY".
+GRUB_SETTINGS=$GUEST_ROOT/image/grub-hamn.cfg
+COMMAND_LINE=$(GRUB_CMDLINE_LINUX_DEFAULT='console=tty1 console=ttyAMA0'
+    . "$GRUB_SETTINGS"
+    printf '%s' "$GRUB_CMDLINE_LINUX_DEFAULT")
+[ "$COMMAND_LINE" = 'console=tty1 console=ttyAMA0 console=hvc0 fsck.repair=yes' ]
 grep -Fq 'for name in snapd lxd-installer ubuntu-cloud-minimal; do' "$SLIM"
 grep -Fq 'for command in cloud-init sshd sudo netplan git; do' "$SLIM"
 grep -Fq 'if installed dnsmasq; then' "$SLIM"
@@ -86,7 +94,8 @@ git -C "$PROJECT_ROOT" archive --format=tar -o "$WORK/sources.tar" HEAD -- \
     guest vendor host/image
 tar -C "$REPO" -xf "$WORK/sources.tar"
 cp "$GUEST_ROOT"/image/*.sh "$GUEST_ROOT"/image/*.c "$GUEST_ROOT"/image/*.h \
-    "$GUEST_ROOT"/image/*.json "$GUEST_ROOT"/image/dpkg-excludes "$REPO/guest/image/"
+    "$GUEST_ROOT"/image/*.json "$GUEST_ROOT"/image/dpkg-excludes \
+    "$GUEST_ROOT"/image/grub-hamn.cfg "$REPO/guest/image/"
 mkdir -p "$REPO/guest/json"
 cp "$GUEST_ROOT"/json/*.c "$GUEST_ROOT"/json/*.h "$REPO/guest/json/"
 cp "$GUEST_ROOT/Makefile" "$REPO/guest/Makefile"
@@ -281,6 +290,33 @@ awk -v expected="$EXPECTED_CLOCK_COMMAND" '
     END { exit !(clock > 0 && dns > clock && excludes > dns && install > excludes) }
 ' "$VIRT_ARGUMENTS" || {
     echo "FAIL: guest image builder must set its clock, check DNS and install its dpkg path filters before package installation" >&2
+    exit 1
+}
+
+# The command line is installed into the provisioned image, before the
+# baseline that size variations start from, and the build fails unless
+# update-grub put it into grub.cfg.
+awk '
+    $0 == "--run-command" {
+        getline
+        if ($0 == "bash /tmp/hamn-image-provision.sh") provision = NR
+        if ($0 == "update-grub") grub = NR
+        if ($0 == "grep -q '\''console=hvc0 fsck.repair=yes'\'' /boot/grub/grub.cfg") check = NR
+        next
+    }
+    $0 == "--upload" {
+        getline
+        if ($0 ~ /\/guest\/image\/grub-hamn\.cfg:\/etc\/default\/grub\.d\/90-hamn\.cfg$/) settings = NR
+        next
+    }
+    $0 == "--chmod" {
+        getline
+        if ($0 == "0644:/etc/default/grub.d/90-hamn.cfg") mode = NR
+        next
+    }
+    END { exit !(provision > 0 && settings > provision && mode > settings && grub > mode && check > grub) }
+' "$VIRT_ARGUMENTS" || {
+    echo "FAIL: guest image builder must install and verify its kernel command line after provisioning" >&2
     exit 1
 }
 

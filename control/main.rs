@@ -26,7 +26,12 @@ mod terminal_session;
 #[cfg(test)]
 mod test_fixture;
 mod tui;
+mod tui_completion;
+mod tui_detail;
+mod tui_failure;
+mod tui_keys;
 mod tui_state;
+mod tui_theme;
 mod upgrade;
 
 unsafe extern "C" {

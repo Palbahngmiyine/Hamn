@@ -250,14 +250,14 @@ pub(crate) fn query(terminal: &mut impl Driver, kind: &str, name: &str, namespac
     });
 }
 
-/// Presses `d` on the selected row of a resource that has no delete action
-/// and requires that no confirmation opens.
+/// Presses Ctrl+D, the delete key, on the selected row of a resource that
+/// has no delete action and requires that no confirmation opens.
 ///
-/// A confirmation takes every key, so text typed after `d` is drawn only
+/// A confirmation takes every key, so text typed after Ctrl+D is drawn only
 /// when none opened. The wait ends on either outcome: waiting for the typed
 /// text alone would end a regression in a timeout, not in this assertion.
 pub(crate) fn delete_is_not_offered(terminal: &mut impl Driver) {
-    terminal.write(b"d:READ_ONLY_BARRIER");
+    terminal.write(b"\x04:READ_ONLY_BARRIER");
     terminal.wait_for(&|text| text.contains(":READ_ONLY_BARRIER") || text.contains("Confirm delete"));
     assert!(!terminal.text().contains("Confirm delete"), "{}", terminal.text());
     // Esc is read by itself before a caller types on.
@@ -464,11 +464,14 @@ impl Review<'_> {
             terminal.send(b"m", Some("Resource actions"));
             let menu = terminal.text();
             assert!(
-                menu.contains("inspect")
-                    && ["delete", "restart", "logs", "related-"].iter().all(|action| !menu.contains(action)),
+                menu.contains("yaml")
+                    && ["delete", "restart", "logs", "related-", "shell", "port-forward"]
+                        .iter()
+                        .all(|action| !menu.contains(action)),
                 "{menu}"
             );
-            terminal.send(b"\r", Some("Exit code 0"));
+            choose(terminal, "Resource actions", "yaml");
+            terminal.until("Exit code 0");
             // The exit footer can be drawn before the output, and Page Up
             // scrolls only output that has arrived.
             terminal.until(&last_line);

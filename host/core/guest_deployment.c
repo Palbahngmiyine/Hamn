@@ -37,6 +37,10 @@
 #ifndef GUEST_IMAGE_VERIFY_TIMEOUT_SEC
 #define GUEST_IMAGE_VERIFY_TIMEOUT_SEC 30
 #endif
+/* The guest's limit for cloud-init before a deployment refresh. */
+#ifndef GUEST_CLOUD_INIT_TIMEOUT_SEC
+#define GUEST_CLOUD_INIT_TIMEOUT_SEC 600
+#endif
 
 static int deployment_fingerprint(const struct profile *profile,
                                   char output[65]);
@@ -121,6 +125,14 @@ int guest_deployment_is_current(const struct profile *profile)
            memcmp(actual, expected, offset) == 0 ? 1 : 0;
 }
 
+int guest_deployment_forget(const struct profile *profile)
+{
+    char path[PATH_MAX];
+    if (!profile_path(profile, GUEST_DEPLOYMENT_MARKER, path, sizeof(path)))
+        return -1;
+    return fs_unlink_if_exists(path);
+}
+
 int guest_deployment_mark_current(const struct profile *profile)
 {
     char text[256];
@@ -161,7 +173,7 @@ static int guest_deployment_wait_cloud_init(const struct profile *profile,
                                             const char *ip,
                                             int timeout_sec)
 {
-    if (timeout_sec < 1) {
+    if (timeout_sec < 1 || timeout_sec > 3600) {
         errno = EINVAL;
         return -1;
     }
@@ -172,10 +184,14 @@ static int guest_deployment_wait_cloud_init(const struct profile *profile,
         return -1;
     }
     const char *wait[] = {
-        "sudo", "timeout", "--kill-after=5s", duration,
+        "sudo", "timeout", SSH_REMOTE_KILL_AFTER, duration,
         "cloud-init", "status", "--wait", "--long", NULL
     };
-    int rc = ssh_exec(profile, ip, wait, 0);
+    /* Its report stays on the operation's output. A client that outlives
+     * the guest's limit is reaped and reported as that limit's timeout:
+     * either way cloud-init was not seen to finish. */
+    int rc = ssh_exec_bounded_shown(profile, ip, wait,
+                                    SSH_REMOTE_CLIENT_MS(timeout_sec));
     if (rc == 0)
         return 0;
     if (rc == 2) {
@@ -531,7 +547,8 @@ static int deployment_refresh_locked(const struct profile *profile,
            force ? "failed readiness" : "fingerprint changed");
     if (ssh_master_start(profile, state->ip, 15) != 0 ||
         guest_deployment_recover(profile, state->ip) != 0 ||
-        guest_deployment_wait_cloud_init(profile, state->ip, 600) != 0)
+        guest_deployment_wait_cloud_init(profile, state->ip,
+                                         GUEST_CLOUD_INIT_TIMEOUT_SEC) != 0)
         return -1;
 
     char token[GUEST_DEPLOYMENT_TOKEN_CAP];

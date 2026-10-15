@@ -23,6 +23,11 @@ int main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "silent") == 0) {
         for (;;) pause();
     }
+    if (argc == 2 && strcmp(argv[1], "partial") == 0) {
+        printf("partial reason\n");
+        fflush(stdout);
+        for (;;) pause();
+    }
     char output[128];
     const char *success[] = {"/bin/sh", "-c", "printf ready; exit 7", NULL};
     assert(proc_run_bounded(success, output, sizeof(output), 5000, NULL, NULL) == 7);
@@ -46,6 +51,26 @@ int main(int argc, char **argv)
     assert(proc_run_bounded(silent, NULL, 0, 100, NULL, NULL) == PROC_RUN_TIMEOUT);
     const char *absent[] = {"/hamn-no-such-command", NULL};
     assert(proc_run_bounded(absent, output, sizeof(output), 5000, NULL, NULL) == 127);
+
+    /* The checked variant reports a capture cut at the buffer and keeps
+     * what a command printed before its deadline. */
+    int truncated = -1;
+    char small[4];
+    assert(proc_run_bounded_checked(success, small, sizeof(small), &truncated,
+                                    5000) == 7);
+    assert(strcmp(small, "rea") == 0 && truncated == 1);
+    truncated = -1;
+    assert(proc_run_bounded_checked(success, output, sizeof(output),
+                                    &truncated, 5000) == 7);
+    assert(strcmp(output, "ready") == 0 && truncated == 0);
+    const char *partial[] = {argv[0], "partial", NULL};
+    truncated = -1;
+    assert(proc_run_bounded_checked(partial, output, sizeof(output),
+                                    &truncated, 1000) == PROC_RUN_TIMEOUT);
+    assert(strcmp(output, "partial reason") == 0 && truncated == 0);
+    errno = 0;
+    assert(proc_run_bounded_checked(success, output, sizeof(output),
+                                    &truncated, 0) == -1 && errno == EINVAL);
     puts("PASS: process deadlines reap blocked children and retain completion semantics");
     return 0;
 }
