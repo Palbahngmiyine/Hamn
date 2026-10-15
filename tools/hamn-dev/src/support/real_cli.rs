@@ -327,21 +327,50 @@ pub(crate) mod tests {
         }
     }
 
-    /// Kills a test child's whole process group when dropped, so a
+    /// Kills the process group a test child leads when dropped, so a
     /// descendant holding its pipes cannot outlive the test.
-    struct GroupKill(libc::pid_t);
+    ///
+    /// The group id is only a number, which the system can give to another
+    /// group once every member is gone. So the cleanup owns a member: a
+    /// child of the test in that group, reaped only after the kill. Until
+    /// then the group exists (an unreaped member stays in it), its id cannot
+    /// be reused, and the kill reaches no other group.
+    pub(crate) struct GroupCleanup {
+        group: libc::pid_t,
+        member: Child,
+    }
 
-    impl Drop for GroupKill {
+    impl GroupCleanup {
+        /// Joins the group that `leader` leads. The leader must be the
+        /// test's unreaped child, so that the group exists.
+        pub(crate) fn join(leader: u32) -> Self {
+            let member = Command::new("/bin/sleep")
+                .arg("3600")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(leader as i32)
+                .spawn()
+                .unwrap_or_else(|error| panic!("join process group {leader}: {error}"));
+            Self { group: leader as libc::pid_t, member }
+        }
+    }
+
+    impl Drop for GroupCleanup {
         fn drop(&mut self) {
-            // SAFETY: killpg takes no pointers; ESRCH (group gone) is fine.
-            unsafe { libc::killpg(self.0, libc::SIGKILL) };
+            // SAFETY: killpg only sends a signal; the unreaped member keeps
+            // `group` naming this group.
+            unsafe { libc::killpg(self.group, libc::SIGKILL) };
+            // SIGKILL cannot be caught, so the wait ends.
+            let _ = self.member.kill();
+            let _ = self.member.wait();
         }
     }
 
     /// Starts `script` (`$1` names a marker it must create once everything
     /// it writes before that is written) under /bin/sh in a new process
     /// group with piped output, and waits for the marker.
-    fn started(directory: &Path, script: &str) -> (Child, GroupKill) {
+    fn started(directory: &Path, script: &str) -> (Child, GroupCleanup) {
         let marker = directory.join("marker");
         let child = Command::new("/bin/sh")
             .args(["-c", script, "sh"])
@@ -351,7 +380,7 @@ pub(crate) mod tests {
             .process_group(0)
             .spawn()
             .unwrap();
-        let group = GroupKill(child.id() as libc::pid_t);
+        let group = GroupCleanup::join(child.id());
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() {
             assert!(Instant::now() < deadline, "{script:?} did not reach its marker");

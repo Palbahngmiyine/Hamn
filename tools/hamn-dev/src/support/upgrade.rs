@@ -446,18 +446,8 @@ impl Releases {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::support::real_cli::tests::panic_message;
+    use crate::support::real_cli::tests::{GroupCleanup, panic_message};
     use crate::support::tmp::TempDir;
-
-    /// Kills a process group when dropped, so a test that fails cannot leave
-    /// the group's descendants running.
-    struct GroupCleanup(u32);
-
-    impl Drop for GroupCleanup {
-        fn drop(&mut self) {
-            pty::kill_group(self.0, libc::SIGKILL);
-        }
-    }
 
     #[test]
     fn a_timed_out_group_ends_with_its_descendants() {
@@ -467,7 +457,8 @@ mod tests {
         // frontend's worker does.
         let script = "sleep 30 & echo $! > \"$1.new\" && mv \"$1.new\" \"$1\"; exec sleep 30";
         let group = Group::spawn(Command::new("/bin/sh").args(["-c", script, "sh"]).arg(&marker));
-        let _cleanup = GroupCleanup(group.id());
+        // A failed check below must not leave the descendant running.
+        let _cleanup = GroupCleanup::join(group.id());
         let deadline = Instant::now() + Duration::from_secs(30);
         while !marker.exists() {
             assert!(Instant::now() < deadline, "the descendant was not started");
