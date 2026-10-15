@@ -26,18 +26,20 @@
  *     empty phase can accompany applied changes; that backup cannot be
  *     restored either, and the start that follows redeploys over them.
  *   - a symlink or other non-regular file: refused.
+ *   - a phase that cannot be read: refused. Its backup may be ready, so it
+ *     is neither restored nor discarded.
  *
  * Exit 0: no backup remains, either because none existed, because a backup
  * that was not ready was discarded, or because the single ready backup was
  * rolled back and removed. Nonzero, with a reason on stderr: the root is
  * unsafe, more than one entry exists, the entry is not an owned 32-hex
- * directory, its phase is unsafe, removing a discarded entry failed,
- * clearing systemd's start-limit state failed (before any restore), or the
- * rollback failed or left its backup behind (the helper retains the backup
- * for another attempt).
+ * directory, its phase is unsafe or unreadable, removing a discarded entry
+ * failed, clearing systemd's start-limit state failed (before any restore),
+ * or the rollback failed or left its backup behind (the helper retains the
+ * backup for another attempt).
  */
 #define DEPLOYMENT_RECOVERY_SCRIPT \
-    "set -eu; shopt -s nullglob dotglob; root=$1; helper=$2; " \
+    "set -euo pipefail; shopt -s nullglob dotglob; root=$1; helper=$2; " \
     "test -e \"$root\" || test -L \"$root\" || exit 0; " \
     "test -d \"$root\" && test ! -L \"$root\" || " \
     "{ echo \"unsafe deployment backup root $root\" >&2; exit 1; }; " \
@@ -52,9 +54,11 @@
     "then echo \"unsafe deployment backup phase; inspect $entry\" >&2; " \
     "exit 1; fi; " \
     /* Bytes are compared because command substitution would drop NULs. */ \
-    "state=missing; if test -f \"$phase\"; then state='not ready'; " \
-    "test \"$(head -c 7 \"$phase\" | od -An -tx1 | tr -d ' \\n')\" != " \
-    "72656164790a || state=ready; fi; " \
+    "state=missing; if test -f \"$phase\"; then " \
+    "bytes=$(head -c 7 \"$phase\" | od -An -tx1 | tr -d ' \\n') || " \
+    "{ echo \"cannot read deployment backup phase; inspect $entry\" >&2; " \
+    "exit 1; }; " \
+    "state='not ready'; test \"$bytes\" != 72656164790a || state=ready; fi; " \
     "if test \"$state\" != ready; then " \
     "rm -rf -- \"$entry\"; sync -- \"$root\"; " \
     "echo \"discarded deployment backup $token (phase $state): it was never " \

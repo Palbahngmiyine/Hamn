@@ -51,11 +51,13 @@ run_watched() {
     SYNC_WATCH="$TRANSACTION_ROOT/$2" bash "$SCRIPT" "$1" "$2"
 }
 
-# Commit and rollback retire a backup in three barriers: the runtime while the
-# backup is still ready, then the removed phase alone, then everything else.
+# Commit and rollback retire a backup in four barriers: the protected items,
+# then the whole root filesystem (systemd enablement links and binfmt
+# databases are outside the backup), both while the backup is still ready;
+# then the removed phase alone; then everything else.
 assert_retired_in_order() {
     local transaction="$TRANSACTION_ROOT/$1" path
-    [ "$(wc -l <"$SYNC_LOG")" -eq 3 ] || fail "unexpected retirement barriers"
+    [ "$(wc -l <"$SYNC_LOG")" -eq 4 ] || fail "unexpected retirement barriers"
     for path in "$ROOT/usr/local/bin" "$ROOT/usr/local/bin/hamnd" \
         "$ROOT/etc/docker/daemon.json" "$ROOT/opt/cni/bin"; do
         head -n 1 "$SYNC_LOG" | tr ' ' '\n' | grep -Fqx -- "$path" ||
@@ -63,11 +65,14 @@ assert_retired_in_order() {
     done
     [ "$(sed -n 1p "$SYNC_WATCH_LOG")" = "phase=1 data=1" ] ||
         fail "runtime was not durable before the backup was retired"
-    [ "$(sed -n 2p "$SYNC_LOG")" = "-- $transaction" ] &&
-        [ "$(sed -n 2p "$SYNC_WATCH_LOG")" = "phase=0 data=1" ] ||
+    [ "$(sed -n 2p "$SYNC_LOG")" = "-f -- $ROOT/" ] &&
+        [ "$(sed -n 2p "$SYNC_WATCH_LOG")" = "phase=1 data=1" ] ||
+        fail "root filesystem was not durable before the backup was retired"
+    [ "$(sed -n 3p "$SYNC_LOG")" = "-- $transaction" ] &&
+        [ "$(sed -n 3p "$SYNC_WATCH_LOG")" = "phase=0 data=1" ] ||
         fail "phase was not retired durably before the backup data"
-    [ "$(sed -n 3p "$SYNC_LOG")" = "-- $TRANSACTION_ROOT" ] &&
-        [ "$(sed -n 3p "$SYNC_WATCH_LOG")" = "phase=0 data=0" ] ||
+    [ "$(sed -n 4p "$SYNC_LOG")" = "-- $TRANSACTION_ROOT" ] &&
+        [ "$(sed -n 4p "$SYNC_WATCH_LOG")" = "phase=0 data=0" ] ||
         fail "backup removal was not made durable"
 }
 
@@ -251,21 +256,23 @@ test ! -e "$TRANSACTION_ROOT/$COMMIT"
 # An interrupted commit leaves either a ready, intact backup (its runtime was
 # not yet durable) or a retired one that is never restored.
 INTERRUPTED=5123456789abcdef0123456789abcdef
-HAMN_DEPLOYMENT_TEST_ROOT="$ROOT" bash "$SCRIPT" begin "$INTERRUPTED"
-write_file "$ROOT/usr/local/bin/hamnd" interrupted-hamnd
-if FAIL_SYNC_AT=1 run_watched commit "$INTERRUPTED" \
-    >"$WORK/commit.out" 2>"$WORK/commit.err"; then
-    fail "commit accepted a runtime that was not durable"
-fi
-grep -Fq 'cannot make the deployed runtime durable; backup retained' "$WORK/commit.err"
-[ "$(cat "$TRANSACTION_ROOT/$INTERRUPTED/phase")" = ready ] ||
-    fail "commit retired a backup before its runtime was durable"
-bash "$SCRIPT" rollback "$INTERRUPTED"
-assert_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
+for failure in 1 2; do
+    HAMN_DEPLOYMENT_TEST_ROOT="$ROOT" bash "$SCRIPT" begin "$INTERRUPTED"
+    write_file "$ROOT/usr/local/bin/hamnd" interrupted-hamnd
+    if FAIL_SYNC_AT="$failure" run_watched commit "$INTERRUPTED" \
+        >"$WORK/commit.out" 2>"$WORK/commit.err"; then
+        fail "commit accepted a runtime that was not durable at barrier $failure"
+    fi
+    grep -Fq 'cannot make the deployed runtime durable; backup retained' "$WORK/commit.err"
+    [ "$(cat "$TRANSACTION_ROOT/$INTERRUPTED/phase")" = ready ] ||
+        fail "commit retired a backup before its runtime was durable"
+    bash "$SCRIPT" rollback "$INTERRUPTED"
+    assert_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
+done
 
 HAMN_DEPLOYMENT_TEST_ROOT="$ROOT" bash "$SCRIPT" begin "$INTERRUPTED"
 write_file "$ROOT/usr/local/bin/hamnd" interrupted-hamnd
-if FAIL_SYNC_AT=2 run_watched commit "$INTERRUPTED" \
+if FAIL_SYNC_AT=3 run_watched commit "$INTERRUPTED" \
     >"$WORK/commit.out" 2>"$WORK/commit.err"; then
     fail "commit accepted a retirement that was not durable"
 fi
@@ -282,7 +289,7 @@ assert_file "$ROOT/usr/local/bin/hamnd" interrupted-hamnd
 rm -rf "${TRANSACTION_ROOT:?}/$INTERRUPTED"
 
 HAMN_DEPLOYMENT_TEST_ROOT="$ROOT" bash "$SCRIPT" begin "$INTERRUPTED"
-if FAIL_SYNC_AT=3 run_watched commit "$INTERRUPTED" \
+if FAIL_SYNC_AT=4 run_watched commit "$INTERRUPTED" \
     >"$WORK/commit.out" 2>"$WORK/commit.err"; then
     fail "commit accepted a removal that was not durable"
 fi
@@ -337,6 +344,32 @@ grep -Fq "deployment transaction $UNPUBLISHED has an unsafe phase; inspect" \
     "$WORK/unpublished.err"
 rm -rf "${TRANSACTION_ROOT:?}/$UNPUBLISHED"
 write_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
+
+# A phase that cannot be read may belong to a ready backup. begin, rollback
+# and commit name it and neither restore nor remove anything; once it reads
+# again, the intact backup still rolls back.
+HAMN_DEPLOYMENT_TEST_ROOT="$ROOT" bash "$SCRIPT" begin "$UNPUBLISHED"
+write_file "$ROOT/usr/local/bin/hamnd" unreadable-hamnd
+chmod 000 "$TRANSACTION_ROOT/$UNPUBLISHED/phase"
+if bash "$SCRIPT" begin 7123456789abcdef0123456789abcdef \
+    >"$WORK/unreadable.out" 2>"$WORK/unreadable-begin.err"; then
+    fail "begin accepted an unreadable phase"
+fi
+grep -Fq "cannot read the phase of deployment transaction $UNPUBLISHED; inspect" \
+    "$WORK/unreadable-begin.err"
+for action in rollback commit; do
+    if bash "$SCRIPT" "$action" "$UNPUBLISHED" >"$WORK/unreadable.out" \
+        2>"$WORK/unreadable-$action.err"; then
+        fail "$action accepted an unreadable phase"
+    fi
+    grep -Fq 'cannot read the transaction phase' "$WORK/unreadable-$action.err"
+done
+assert_file "$ROOT/usr/local/bin/hamnd" unreadable-hamnd
+test -d "$TRANSACTION_ROOT/$UNPUBLISHED/data"
+chmod 0600 "$TRANSACTION_ROOT/$UNPUBLISHED/phase"
+bash "$SCRIPT" rollback "$UNPUBLISHED"
+assert_file "$ROOT/usr/local/bin/hamnd" committed-hamnd
+test ! -e "$TRANSACTION_ROOT/$UNPUBLISHED"
 
 # Protected source symlinks are rejected before backup mutation.
 mv "$ROOT/etc/docker" "$ROOT/etc/docker-real"

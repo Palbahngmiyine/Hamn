@@ -290,19 +290,26 @@ int main(void)
     assert_discarded(TOKEN, "missing");
     assert_hamnd("new");
 
-    /* An interrupted commit. Before its runtime is durable the backup stays
-     * ready and intact, and recovery restores it. Once the phase is retired,
-     * recovery never restores it: it discards what is left, or finds nothing. */
-    write_file(hamnd, "old", 0755);
+    /* An interrupted commit. Before its runtime (the protected items, then
+     * the root filesystem) is durable the backup stays ready and intact, and
+     * recovery restores it. Once the phase is retired, recovery never
+     * restores it: it discards what is left, or finds nothing. */
+    static const char *const runtime_barriers[] = {
+        "FAIL_SYNC_AT=1", "FAIL_SYNC_AT=2",
+    };
+    for (size_t index = 0; index < 2; index++) {
+        write_file(hamnd, "old", 0755);
+        begin(TOKEN);
+        write_file(hamnd, "new", 0755);
+        assert(commit(TOKEN, runtime_barriers[index]) != 0 &&
+               strstr(error, "backup retained"));
+        assert(recover(NULL) == 0);
+        assert_hamnd("old");
+        assert(!exists(TOKEN));
+    }
     begin(TOKEN);
     write_file(hamnd, "new", 0755);
-    assert(commit(TOKEN, "FAIL_SYNC_AT=1") != 0 && strstr(error, "backup retained"));
-    assert(recover(NULL) == 0);
-    assert_hamnd("old");
-    assert(!exists(TOKEN));
-    begin(TOKEN);
-    write_file(hamnd, "new", 0755);
-    assert(commit(TOKEN, "FAIL_SYNC_AT=2") != 0 &&
+    assert(commit(TOKEN, "FAIL_SYNC_AT=3") != 0 &&
            strstr(error, "but cannot make that durable"));
     assert(exists(TOKEN));
     assert(recover(NULL) == 0);
@@ -311,12 +318,28 @@ int main(void)
     write_file(hamnd, "old", 0755);
     begin(TOKEN);
     write_file(hamnd, "new", 0755);
-    assert(commit(TOKEN, "FAIL_SYNC_AT=3") != 0 &&
+    assert(commit(TOKEN, "FAIL_SYNC_AT=4") != 0 &&
            strstr(error, "cannot make the removal durable"));
     assert(!exists(TOKEN));
     assert(recover(NULL) == 0);
     assert_no_systemctl();
     assert_hamnd("new");
+
+    /* A phase that cannot be read (here: no read permission) may belong to a
+     * ready backup: it is neither discarded nor restored. Once it reads
+     * again, the intact backup rolls back. */
+    write_file(hamnd, "old", 0755);
+    begin(TOKEN);
+    write_file(hamnd, "new", 0755);
+    assert(chmod(phase, 0) == 0);
+    assert(recover(NULL) == 1 && strstr(error, "cannot read deployment backup phase"));
+    assert_no_systemctl();
+    assert_hamnd("new");
+    assert(exists(TOKEN));
+    assert(chmod(phase, 0600) == 0);
+    assert(recover(NULL) == 0);
+    assert_hamnd("old");
+    assert(!exists(TOKEN));
 
     /* A phase that is a directory or a symlink is not a state any helper
      * writes: it is refused and kept, and nothing is restored. */
