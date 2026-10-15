@@ -692,7 +692,8 @@ static void test_status_within_a_spent_budget_stops(const char *path)
 /* A supervisor whose queue no longer accepts connections: once the listen
  * backlog is full, macOS refuses a further connection at once instead of
  * letting connect() wait for room, so both queries end at once, unavailable.
- * alarm() turns a connect() that waited into a failure instead of a hang. */
+ * alarm(), armed before the backlog is filled, turns a connect() that waits,
+ * there or in a query, into a failure instead of a hang. */
 static void test_status_ends_at_once_when_the_backlog_is_full(
     const char *path)
 {
@@ -701,6 +702,7 @@ static void test_status_ends_at_once_when_the_backlog_is_full(
         fail("full backlog fixture");
     int queued[32];
     size_t count = 0;
+    alarm(FAILURE_DEADLINE_SEC);
     while (count < sizeof(queued) / sizeof(queued[0]) &&
            (queued[count] = connect_unix_socket(path)) >= 0)
         count++;
@@ -712,17 +714,16 @@ static void test_status_ends_at_once_when_the_backlog_is_full(
                                                QUERY_WITHIN };
     for (size_t i = 0; i < sizeof(queries) / sizeof(queries[0]); i++) {
         char response[256];
-        alarm(FAILURE_DEADLINE_SEC);
         long long started = monotonic_ms();
         int result = queries[i] == QUERY_WITHIN ?
             ctlsock_query_status_within(path, response, sizeof(response),
                                         1000) :
             ctlsock_query_status(path, response, sizeof(response), 1000);
         long long elapsed = monotonic_ms() - started;
-        alarm(0);
         require(result == CTLSOCK_QUERY_UNAVAILABLE && elapsed < 500,
                 "a full backlog must end a query at once");
     }
+    alarm(0);
     for (size_t i = 0; i < count; i++)
         close(queued[i]);
     require(close(listener) == 0 && unlink(path) == 0,
