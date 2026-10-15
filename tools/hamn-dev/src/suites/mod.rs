@@ -52,6 +52,7 @@ mod tui;
 #[cfg(target_os = "macos")]
 mod tui_backpressure;
 mod tui_cluster_target;
+mod tui_command_completion;
 mod tui_create_plugins;
 mod tui_docker_all;
 mod tui_docker_config;
@@ -82,6 +83,7 @@ mod upgrade_native;
 mod upgrade_properties;
 mod upgrade_recovery_ownership;
 mod vm_apply;
+mod vm_reset;
 #[cfg(target_os = "macos")]
 mod workspace_live;
 
@@ -112,8 +114,10 @@ const SUITES: &[Suite] = &[
     ("kubernetes-api", kubernetes_api::main),
     ("profile-yaml", profile_yaml::main),
     ("vm-apply", vm_apply::main),
+    ("vm-reset", vm_reset::main),
     ("start-preflight", start_preflight::main),
     ("tui-native-regressions", tui_native_regressions::main),
+    ("tui-command-completion", tui_command_completion::main),
     ("udp-proxy", udp_proxy::main),
     ("tui-review-improvements", tui_review_improvements::main),
     ("tui-session-management", tui_session_management::main),
@@ -177,6 +181,7 @@ const SUITES: &[Suite] = &[
 const FIXTURES: &[(&str, Fixture)] = &[
     ("control-signed-bootstrap", control_signed_bootstrap::updater_fixture),
     ("core-worker-external-cli", core_worker::external_cli_fixture),
+    ("core-worker-signal-mask", core_worker::signal_mask_fixture),
     ("docker-context-failing-transport", docker_context::failing_transport),
     ("exec-auth", exec_auth::fixture),
     ("native-regressions", tui_native_regressions::fixture),

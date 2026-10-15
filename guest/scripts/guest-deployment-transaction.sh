@@ -113,15 +113,18 @@ validate_item_type() {
 # A published phase is exactly the bytes "ready\n". A missing, empty or
 # zero-filled phase (a crash can leave any of them) is not ready, and its
 # backup is never restored. Bytes are compared because command substitution
-# would drop NULs.
+# would drop NULs. Returns 0 when ready, 1 when not, and 2 when the phase
+# cannot be read: its backup may be ready, so it is neither restored nor
+# treated as not ready.
 phase_is_ready() {
-    local phase=$1
-    [ -f "$phase" ] && [ ! -L "$phase" ] &&
-        [ "$(head -c 7 -- "$phase" | od -An -tx1 | tr -d ' \n')" = 72656164790a ]
+    local phase=$1 bytes
+    [ -f "$phase" ] && [ ! -L "$phase" ] || return 1
+    bytes=$(head -c 7 -- "$phase" | od -An -tx1 | tr -d ' \n') || return 2
+    [ "$bytes" = 72656164790a ]
 }
 
 refuse_pending_transaction() {
-    local entry name
+    local entry name ready=0
     local -a entries
     shopt -s nullglob dotglob
     entries=("$TRANSACTION_ROOT"/*)
@@ -133,7 +136,10 @@ refuse_pending_transaction() {
            [ ! -d "$entry" ] || [ -L "$entry" ] || [ ! -O "$entry" ]; then
             fail "transaction root contains an unsafe entry; inspect $TRANSACTION_ROOT"
         fi
-        if phase_is_ready "$entry/phase"; then
+        phase_is_ready "$entry/phase" || ready=$?
+        [ "$ready" -ne 2 ] ||
+            fail "cannot read the phase of deployment transaction $name; inspect $entry"
+        if [ "$ready" -eq 0 ]; then
             fail "pending deployment transaction $name exists at $entry; "\
 "recover it before retrying: sudo bash $RECOVERY_SCRIPT "\
 "rollback $name"
@@ -227,6 +233,7 @@ begin_transaction() {
 }
 
 load_transaction() {
+    local ready=0
     [ -d "$TRANSACTION" ] && [ ! -L "$TRANSACTION" ] ||
         fail "transaction does not exist"
     [ -O "$TRANSACTION" ] || fail "transaction has the wrong owner"
@@ -237,7 +244,9 @@ load_transaction() {
     [ ! -L "$TRANSACTION/phase" ] &&
         { [ ! -e "$TRANSACTION/phase" ] || [ -f "$TRANSACTION/phase" ]; } ||
         fail "transaction phase is unsafe"
-    phase_is_ready "$TRANSACTION/phase" || fail "transaction is incomplete"
+    phase_is_ready "$TRANSACTION/phase" || ready=$?
+    [ "$ready" -ne 2 ] || fail "cannot read the transaction phase"
+    [ "$ready" -eq 0 ] || fail "transaction is incomplete"
 }
 
 # Make each protected item, and the directory that holds it, durable. find(1)
@@ -260,10 +269,13 @@ sync_protected_items() {
 # Removing phase is the decision point: from then on the backup is never
 # restored. It follows a durable runtime and precedes every other removal, so
 # a crash that loses part of the removal leaves an entry that recovery
-# discards, never a ready backup with missing or zero-filled data.
+# discards, never a ready backup with missing or zero-filled data. The
+# runtime also includes what the backup does not hold, such as systemd's
+# enablement links under /etc/systemd/system and the binfmt databases under
+# /var/lib, so the root filesystem as a whole (syncfs) follows the items.
 retire_transaction() {
     local runtime=$1
-    sync_protected_items ||
+    sync_protected_items && sync -f -- "$(rooted /)" ||
         fail "cannot make the $runtime runtime durable; backup retained at $TRANSACTION"
     rm -f -- "$TRANSACTION/phase" ||
         fail "cannot retire the backup; it is retained at $TRANSACTION"

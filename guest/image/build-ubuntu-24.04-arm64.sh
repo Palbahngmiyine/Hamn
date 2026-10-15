@@ -169,7 +169,11 @@ fi
     --upload "$SOURCE_ARCHIVE:/tmp/hamn-guest-sources.tar.gz" \
     --upload "$PROVISION:/tmp/hamn-image-provision.sh" \
     --run-command 'bash /tmp/hamn-image-provision.sh' \
-    --run-command 'rm -f /tmp/hamn-image-provision.sh'
+    --run-command 'rm -f /tmp/hamn-image-provision.sh' \
+    --upload "$ROOT/guest/image/grub-hamn.cfg:/etc/default/grub.d/90-hamn.cfg" \
+    --chmod '0644:/etc/default/grub.d/90-hamn.cfg' \
+    --run-command 'update-grub' \
+    --run-command "grep -q 'console=hvc0 fsck.repair=yes' /boot/grub/grub.cfg"
 
 # Capture a compressed baseline before cleanup from this exact provisioned
 # filesystem; separate builds could resolve different apt package versions.

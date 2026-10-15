@@ -1,10 +1,13 @@
 use crate::model::{Failure, Request, Result};
 use crate::preferences::Workspace;
+use crate::tui_failure::Level;
 use clap::Parser;
+use crate::tui_theme as theme;
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout},
-    style::{Color, Style},
+    layout::{Alignment, Constraint, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, List, ListItem, ListState, Paragraph, Wrap},
 };
 use serde_json::Value;
@@ -121,6 +124,27 @@ impl Refresh {
 /// The failure code of a Hamn profile Docker query while its VM is not ready.
 pub const VM_NOT_READY: &str = "vmNotReady";
 
+/// What the latest start found wrong with a Hamn profile's guest disk, from
+/// `guestFilesystem` of `vm status` (core/guest_filesystem.h): Some((damaged,
+/// evidence)), or None when that start found nothing wrong or the status does
+/// not say. damaged is false for a record that cannot be validated: it is no
+/// evidence, and the next start checks the disk again. The evidence already
+/// says what failed.
+pub(crate) fn guest_disk_problem(status: &Value) -> Option<(bool, String)> {
+    let record = status.get("guestFilesystem").filter(|v| v.is_object())?;
+    let evidence = record["detail"].as_str().unwrap_or("").to_owned();
+    let damaged = matches!(
+        record["state"].as_str(),
+        Some("errorsRecorded" | "unreadable" | "readOnly")
+    );
+    Some((damaged, evidence))
+}
+
+/// Whether the guest disk of a profile is known to be damaged.
+pub(crate) fn guest_disk_damaged(status: &Value) -> bool {
+    guest_disk_problem(status).is_some_and(|(damaged, _)| damaged)
+}
+
 /// A Hamn profile's Docker socket answers only once its VM runs and guest
 /// Docker is ready. The Docker CLI proves that it could not reach the daemon
 /// (`DOCKER_UNREACHABLE`); the VM status observed by the same refresh then
@@ -129,7 +153,8 @@ pub const VM_NOT_READY: &str = "vmNotReady";
 /// Docker check. Every other failure, such as a usage error, an unknown
 /// command or the output limit, keeps its message because starting the VM
 /// cannot fix it. Without an observed status (the profile could not be read),
-/// or while Docker reports ready, the failure also stays unchanged.
+/// or while Docker reports ready, the failure also stays unchanged. A guest
+/// disk that a start found damaged comes first: starting cannot repair it.
 pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure) -> Failure {
     let Some(status) = status else {
         return error;
@@ -137,6 +162,14 @@ pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure)
     let docker = status["dockerStatus"].as_str().unwrap_or("unavailable");
     if error.code != crate::native::DOCKER_UNREACHABLE || docker == "ready" {
         return error;
+    }
+    // The message area holds one line, and the header already shows the
+    // evidence: say what is wrong and the one action that helps.
+    if let Some((true, _)) = guest_disk_problem(status) {
+        return Failure::new(
+            VM_NOT_READY,
+            format!("The guest disk of Hamn VM {profile} is damaged. v, then x resets the disk."),
+        );
     }
     let vm = status["state"].as_str().unwrap_or("unknown");
     let message = match (vm, docker) {
@@ -187,7 +220,16 @@ pub struct State {
     pub input: Option<(char, String)>,
     pub history: Vec<String>,
     pub history_index: Option<usize>,
+    /// The one-line message under the view. Written only through `notify`,
+    /// `warn`, `fail` and `clear_message`, which keep it, its level and
+    /// the failure behind it consistent.
     pub message: String,
+    pub message_level: Level,
+    /// What helps next, shown after the message.
+    pub message_hint: Option<&'static str>,
+    /// The failure that `message` summarizes, kept whole for the
+    /// diagnostics view (`!`): the summary never replaces the raw text.
+    pub last_error: Option<Failure>,
     pub detail: Option<String>,
     pub pending: Option<Request>,
     pub pending_native: Option<crate::native_actions::Action>,
@@ -206,6 +248,8 @@ pub struct State {
     pub operation_status: String,
     pub operation_log: String,
     pub show_operation: bool,
+    /// The help screen covers the view; keys keep their meaning.
+    pub help: bool,
 }
 
 impl State {
@@ -232,6 +276,9 @@ impl State {
             history: Vec::new(),
             history_index: None,
             message: String::new(),
+            message_level: Level::Info,
+            message_hint: None,
+            last_error: None,
             detail: None,
             pending: None,
             pending_native: None,
@@ -245,6 +292,7 @@ impl State {
             operation_status: String::new(),
             operation_log: String::new(),
             show_operation: false,
+            help: false,
         }
     }
     pub fn for_workspace(request: Request, workspace: Workspace) -> Self {
@@ -280,6 +328,39 @@ impl State {
             state.request.namespace = None;
         }
         state
+    }
+    /// Reports a result or a step that the user asked for.
+    pub fn notify(&mut self, text: impl Into<String>) {
+        self.set_message(Level::Info, text.into(), None, None);
+    }
+    /// Says why a key did nothing, or which state blocks it.
+    pub fn warn(&mut self, text: impl Into<String>) {
+        self.set_message(Level::Warning, text.into(), None, None);
+    }
+    /// Shows the summary of a failure. The failure itself stays available
+    /// to the diagnostics view until another message replaces it.
+    pub fn fail(&mut self, failure: Failure) {
+        let summary = crate::tui_failure::summarize(&failure);
+        self.set_message(summary.level, summary.title, summary.hint, Some(failure));
+    }
+    /// Rows are drawn whose last refresh failed: they may no longer be true.
+    pub fn showing_stale_rows(&self) -> bool {
+        self.stale && self.data.as_array().is_some_and(|rows| !rows.is_empty())
+    }
+    pub fn clear_message(&mut self) {
+        self.set_message(Level::Info, String::new(), None, None);
+    }
+    fn set_message(
+        &mut self,
+        level: Level,
+        text: String,
+        hint: Option<&'static str>,
+        failure: Option<Failure>,
+    ) {
+        self.message = text;
+        self.message_level = level;
+        self.message_hint = hint;
+        self.last_error = failure;
     }
     pub fn hamn_environment(&self) -> bool {
         self.workspace == Workspace::Containers
@@ -460,13 +541,27 @@ impl State {
         self.history_index = (index < self.history.len()).then_some(index);
         self.input = Some((':', self.history.get(index).cloned().unwrap_or_default()));
     }
+    /// What Tab or → appends to the `:` command being typed, shown dimmed
+    /// after the cursor; `None` for the filter. See `tui_completion`.
+    pub fn completion(&self) -> Option<String> {
+        match &self.input {
+            Some((':', typed)) => crate::tui_completion::suggestion(typed, self.workspace, &self.history),
+            _ => None,
+        }
+    }
+    /// Takes the completion as if it were typed; without one, nothing changes.
+    pub fn complete_input(&mut self) {
+        if let Some(rest) = self.completion() {
+            self.edit_input(&rest, false);
+        }
+    }
     pub fn clear_filter(&mut self) {
         let key = self.selected().and_then(|row| identity(&row));
         self.filter.clear();
         self.selected = key.and_then(|key| self.find_identity(&key));
     }
     pub fn move_by(&mut self, delta: isize) {
-        if self.detail.is_some() || self.show_operation {
+        if self.detail.is_some() || self.show_operation || self.help {
             self.scroll = self
                 .scroll
                 .saturating_add_signed(delta.clamp(-32768, 32767) as i16);
@@ -677,7 +772,7 @@ impl State {
             if value["ended"] == true {
                 self.loading = false;
                 self.refreshing = false;
-                self.message = "log stream ended".into();
+                self.notify("Log stream ended");
                 return;
             }
         }
@@ -694,30 +789,31 @@ impl State {
                 } else {
                     identity.and_then(|key| self.find_identity(&key))
                 };
-                self.message.clear();
+                self.clear_message();
             }
             Ok(value) => {
+                // A detail that arrives is shown, not kept behind the help.
+                self.help = false;
                 self.detail = Some(
                     value["yaml"]
                         .as_str()
                         .map(String::from)
                         .unwrap_or_else(|| serde_json::to_string_pretty(&value).unwrap()),
                 );
-                self.message.clear();
+                self.clear_message();
             }
             Err(error) if error.code == VM_NOT_READY => {
                 // Docker lists nothing until the VM is ready. Old rows would
                 // look live, so drop them and show how to start the VM.
                 self.data = Value::Null;
                 self.stale = true;
-                self.message = error.message;
+                self.fail(error);
             }
             Err(error) => {
+                // The rows stay visible and are marked stale where they are
+                // drawn; actions on them are refused until a read succeeds.
                 self.stale = true;
-                self.message = format!(
-                    "{}: {} (previous data may be stale)",
-                    error.code, error.message
-                )
+                self.fail(error);
             }
         }
     }
@@ -756,23 +852,37 @@ impl State {
 /// be read has no settings to show: the detail says why and where the file
 /// is, because every operation on the profile is refused until it reads.
 fn profile_detail(row: &Value) -> String {
+    // Strings are shown as text, not as JSON with quotes.
+    let value = |key: &str| row[key].as_str().map_or_else(|| row[key].to_string(), String::from);
     if let Some(error) = row["configurationError"].as_str() {
         return format!(
-            "Hamn profile {}\nVM: {}\nConfiguration: cannot be read: {error}\nFile: {}/config.yaml\n\nStart, stop, delete and settings are refused until the file is corrected.\nEsc returns to containers",
-            row["name"],
-            row["state"],
+            "Profile: {}\nVM: {}\nConfiguration: cannot be read: {error}\nFile: {}/config.yaml\n\nStart, stop, delete and settings are refused until the file is corrected.",
+            value("name"),
+            value("state"),
             row["directory"].as_str().unwrap_or("~/.hamn/<profile>")
         );
     }
-    format!(
-        "Hamn profile {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB\n\ns start / repair   t stop   c edit CPU, memory and disk\nEsc returns to containers",
-        row["name"],
-        row["state"],
-        row["dockerStatus"],
-        row["cpus"],
-        row["memoryMiB"],
-        row["diskGiB"]
-    )
+    // The keys that act on the profile are the hints above the view.
+    let mut detail = format!(
+        "Profile: {}\nVM: {}\nDocker: {}\nCPU: {}\nMemory: {} MiB\nDisk: {} GiB",
+        value("name"),
+        value("state"),
+        value("dockerStatus"),
+        value("cpus"),
+        value("memoryMiB"),
+        value("diskGiB")
+    );
+    // A damaged guest disk is a state of its own: starting cannot repair it.
+    match guest_disk_problem(row) {
+        Some((true, evidence)) => detail.push_str(&format!(
+            "\nGuest disk: damaged\nEvidence: {evidence}\n\nStarting the VM cannot repair this disk; x deletes it and everything in the VM, and the next start creates a new one."
+        )),
+        Some((false, evidence)) => detail.push_str(&format!(
+            "\nGuest disk: not known to be damaged\nEvidence: {evidence}"
+        )),
+        None => {}
+    }
+    detail
 }
 
 // Identity is independent of row order and mutable status/resourceVersion.
@@ -830,7 +940,13 @@ fn label(value: &Value) -> String {
                 .or_else(|| value["status"]["phase"].as_str())
         })
         .unwrap_or("");
-    let docker = value["dockerStatus"].as_str().unwrap_or("");
+    let docker = match guest_disk_problem(value) {
+        Some((true, _)) => format!(
+            "{}  guest disk damaged",
+            value["dockerStatus"].as_str().unwrap_or("")
+        ),
+        _ => value["dockerStatus"].as_str().unwrap_or("").to_owned(),
+    };
     // A Hamn profile whose config.yaml cannot be read is listed with the
     // state of its VM and this reason, in the VM panel and in the picker.
     let status = match value["configurationError"].as_str() {
@@ -923,66 +1039,119 @@ pub fn native_confirmation_visible(
         && wrap_lines(&native_confirmation(action), area.width - 2).len()
             <= usize::from(area.height - 2)
 }
-pub fn draw(frame: &mut Frame, state: &State) {
-    if let Some(action) = &state.pending_native {
-        let text = if native_confirmation_visible(action, frame.area()) {
-            native_confirmation(action)
-        } else {
-            "Resize terminal to review the full target. Execution disabled. Esc cancels.".into()
-        };
-        frame.render_widget(
-            Paragraph::new(clean(&text))
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title("Hamn confirmation")),
-            frame.area(),
-        );
-        return;
+/// The text of a confirmation in the style of a detail, its first line bold:
+/// what is confirmed.
+fn confirmation_lines(text: &str) -> Vec<Line<'static>> {
+    let mut lines = crate::tui_detail::lines(text);
+    if let Some(first) = lines.first_mut() {
+        first.style = first.style.add_modifier(Modifier::BOLD);
     }
-    if state.quit_confirmation {
-        frame.render_widget(Paragraph::new("Cancel the active operation and exit?\nHamn will wait for rollback and resource cleanup.\ny = cancel then exit; n / Esc = keep working")
-            .wrap(Wrap { trim: false }).block(Block::bordered().title("Active operation")), frame.area());
-        return;
+    lines
+}
+
+/// A confirmation covers the screen; a deletion is framed in red.
+fn confirm_block(title: &'static str, danger: bool) -> Block<'static> {
+    Block::bordered()
+        .title(Line::styled(
+            format!(" {title} "),
+            Style::default().add_modifier(Modifier::BOLD),
+        ))
+        .border_style(Style::default().fg(if danger { Color::Red } else { Color::Yellow }))
+}
+
+/// Lines of styled text broken at `width` columns, character by character as
+/// [`wrap_lines`] breaks text, so the height of a header is known before it
+/// is drawn. Control characters become spaces.
+fn wrap_spans(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let mut wrapped = Vec::new();
+    for line in lines {
+        let mut current: Vec<Span<'static>> = Vec::new();
+        let mut used = 0;
+        for span in line.spans {
+            let mut text = String::new();
+            for c in span.content.chars() {
+                let c = if c.is_control() { ' ' } else { c };
+                let size = Line::raw(c.to_string()).width();
+                if used + size > width && used > 0 {
+                    if !text.is_empty() {
+                        current.push(Span::styled(std::mem::take(&mut text), span.style));
+                    }
+                    wrapped.push(Line::from(std::mem::take(&mut current)));
+                    used = 0;
+                }
+                text.push(c);
+                used += size;
+            }
+            if !text.is_empty() {
+                current.push(Span::styled(text, span.style));
+            }
+        }
+        wrapped.push(Line::from(current));
     }
-    if let Some(pending) = &state.pending {
-        let area = frame.area();
-        let text = if confirmation_visible(pending, area) {
-            confirmation(pending, area.width - 2).join("\n")
-        } else {
-            "Resize terminal to review the full target and impact.\nExecution disabled. Esc cancels.".into()
-        };
-        frame.render_widget(
-            Paragraph::new(text)
-                .wrap(Wrap { trim: false })
-                .block(Block::bordered().title("Hamn confirmation")),
-            area,
-        );
-        return;
+    wrapped
+}
+
+fn field(name: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{name}: "), theme::label()),
+        Span::styled(value, theme::value()),
+    ])
+}
+
+/// The header's account of the target: what the view reads, whether it
+/// answered, and changes that are running or whose outcome is unknown.
+/// The first lines are wrapped at `width`, beside the keys; the second,
+/// which can be long, such as a kubeconfig path, at `full_width` under them.
+fn info_lines(state: &State, width: u16, full_width: u16) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let mut lines = Vec::new();
+    match state.workspace {
+        Workspace::Containers if state.environment_picker => {
+            lines.push(Line::styled("Choose a Hamn profile or Docker context", theme::value()));
+            lines.push(Line::styled("Enter selects the environment; Esc cancels", theme::dim()));
+        }
+        Workspace::Containers => lines.push(field(
+            "Environment",
+            if state.hamn_environment() {
+                format!("Hamn profile {}", state.request.profile.as_deref().unwrap_or("default"))
+            } else {
+                state
+                    .docker_context
+                    .as_ref()
+                    .map(|c| format!("Docker context {c}"))
+                    .unwrap_or_else(|| "Explicit Docker CLI target".into())
+            },
+        )),
+        Workspace::Kubernetes => {
+            lines.push(field(
+                "Context",
+                state.request.context.as_deref().unwrap_or("choose a context").into(),
+            ));
+            lines.push(field(
+                "Namespace",
+                if state.request.all_namespaces {
+                    "all namespaces".into()
+                } else {
+                    state.request.namespace.as_deref().unwrap_or("default").into()
+                },
+            ));
+        }
     }
-    let header = match state.workspace {
-        Workspace::Containers if state.environment_picker => "Hamn | [Containers]   Kubernetes   Tab switch   , settings\nChoose a Hamn profile or Docker context\nEnter selects the environment; Esc cancels".into(),
-        Workspace::Containers => format!("Hamn | [Containers]   Kubernetes   Tab switch   , settings\nEnvironment: {}\n{}",
-            if state.hamn_environment() { format!("Hamn profile {}", state.request.profile.as_deref().unwrap_or("default")) }
-            else { state.docker_context.as_ref().map(|c| format!("Docker context {c}")).unwrap_or_else(|| "Explicit Docker CLI target".into()) },
-            if state.hamn_environment() { "e environments   v VM settings   a running/all" } else { "e environments   a running/all" }),
-        Workspace::Kubernetes => format!("Hamn | Containers   [Kubernetes]   Tab switch   , settings\nContext: {}   Namespace: {}\ne contexts   n namespaces",
-            state.request.context.as_deref().unwrap_or("choose a context"),
-            if state.request.all_namespaces { "all namespaces" } else { state.request.namespace.as_deref().unwrap_or("default") }),
-    };
-    let header = if state.workspace == Workspace::Containers
-        && state
-            .native
-            .as_ref()
-            .is_some_and(|i| i.hamn_profile.is_some())
-        && !state.runtime.is_null()
-    {
-        let ready = match state.runtime["dockerStatus"]
-            .as_str()
-            .unwrap_or("unavailable")
-        {
-            "ready" => "Available",
-            "preparing" => "Docker connection preparing",
-            "recoveryRequired" => "Recovery required",
-            _ => "Connection unavailable",
+    let hamn_view = state.workspace == Workspace::Containers
+        && state.native.as_ref().is_some_and(|i| i.hamn_profile.is_some())
+        && !state.runtime.is_null();
+    let mut wrapped = wrap_spans(std::mem::take(&mut lines), width);
+    // Why the status is unavailable is a sentence: it takes the full width.
+    let mut reason_lines = Vec::new();
+    if hamn_view {
+        let vm_line = |vm: String, docker: Span<'static>| {
+            Line::from(vec![
+                Span::styled("VM: ", theme::label()),
+                Span::styled(vm, theme::value()),
+                Span::styled(" | ", theme::dim()),
+                Span::styled("Docker: ", theme::label()),
+                docker,
+            ])
         };
         // A status that could not be read observed neither the VM nor
         // Docker: the header says so and gives the reason below. The reason
@@ -991,168 +1160,519 @@ pub fn draw(frame: &mut Frame, state: &State) {
         // and has to stay readable at 80 columns.
         match state.runtime["statusError"].as_str() {
             Some(failure) => {
-                let width = frame.area().width.saturating_sub(2);
-                let mut reason = wrap_lines(&format!("Status: {failure}"), width);
-                if reason.len() > 2 {
-                    let second = wrap_lines(&reason[1], width.saturating_sub(2))
-                        .first()
-                        .cloned()
-                        .unwrap_or_default();
-                    reason.truncate(1);
-                    reason.push(format!("{second} …"));
+                let unavailable = Span::styled("status unavailable", theme::level(Level::Warning));
+                wrapped.extend(wrap_spans(vec![vm_line("status unavailable".into(), unavailable)], width));
+                let reason = at_most_two_lines(&format!("Status: {failure}"), full_width);
+                for (index, line) in reason.into_iter().enumerate() {
+                    reason_lines.push(match line.strip_prefix("Status: ").filter(|_| index == 0) {
+                        Some(rest) => Line::from(vec![
+                            Span::styled("Status: ", theme::label()),
+                            Span::styled(rest.to_owned(), theme::level(Level::Warning)),
+                        ]),
+                        None => Line::styled(line, theme::level(Level::Warning)),
+                    });
                 }
-                format!(
-                    "{header}\nVM: status unavailable | Docker: status unavailable | s starts / repairs this Hamn environment\n{}",
-                    reason.join("\n")
-                )
             }
-            None => format!(
-                "{header}\nVM: {} | Docker: {ready} | s starts / repairs this Hamn environment",
-                state.runtime["state"].as_str().unwrap_or("not created")
-            ),
+            None => {
+                let (docker, level) = match state.runtime["dockerStatus"].as_str().unwrap_or("unavailable") {
+                    "ready" => ("Available", Level::Info),
+                    "preparing" => ("Docker connection preparing", Level::Warning),
+                    "recoveryRequired" => ("Recovery required", Level::Error),
+                    _ => ("Connection unavailable", Level::Warning),
+                };
+                let vm = state.runtime["state"].as_str().unwrap_or("not created").to_owned();
+                wrapped.extend(wrap_spans(
+                    vec![vm_line(vm, Span::styled(docker, theme::level(level)))],
+                    width,
+                ));
+                // A damaged guest disk is why Docker is unavailable, and a start
+                // cannot change that: the evidence follows at full width, and
+                // the keys offer the reset of the disk instead of the start.
+                if let Some((damaged, evidence)) = guest_disk_problem(&state.runtime) {
+                    let (sentence, level) = if damaged {
+                        (format!("Guest disk damaged: {evidence}"), Level::Error)
+                    } else {
+                        (format!("Guest disk not known to be damaged: {evidence}"), Level::Warning)
+                    };
+                    reason_lines.extend(
+                        at_most_two_lines(&sentence, full_width)
+                            .into_iter()
+                            .map(|line| Line::styled(line, theme::level(level))),
+                    );
+                }
+            }
         }
-    } else {
-        header
-    };
-    let header = if let Some(command) = &state.native {
-        format!("{header}\n{}: {}", command.target, state.connection_status)
-    } else {
-        header
-    };
-    let header = if state.uncertain.is_empty() {
-        header
-    } else {
-        format!(
-            "{header}\noutcomeUnknown: {} operation(s). ! shows targets; inspect before retry.",
-            state.uncertain.len()
-        )
-    };
+    }
+    let side = std::mem::replace(&mut wrapped, reason_lines);
+    let width = full_width;
+    if let Some(command) = &state.native {
+        let level = match state.connection_status.as_str() {
+            "Available" => Level::Info,
+            "Connecting" | "" => Level::Warning,
+            status if status.starts_with("Waiting") => Level::Warning,
+            _ => Level::Error,
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Target: ", theme::label()),
+            Span::raw(clean(&command.target)),
+            Span::styled(": ", theme::dim()),
+            Span::styled(state.connection_status.clone(), theme::level(level)),
+        ]));
+    }
+    if !state.uncertain.is_empty() {
+        lines.push(Line::styled(
+            format!(
+                "outcomeUnknown: {} operation(s). ! shows targets; inspect before retry.",
+                state.uncertain.len()
+            ),
+            theme::level(Level::Error),
+        ));
+    }
+    wrapped.extend(wrap_spans(lines, width));
     // Full diagnostics belong in the scrollable log, not the fixed header.
-    let width = frame.area().width.saturating_sub(2);
-    let summary = if wrap_lines(&state.operation_status, width).len() > 1 {
-        format!(
-            "{} … (! log)",
-            wrap_lines(&state.operation_status, width.saturating_sub(10))
-                .first()
-                .cloned()
-                .unwrap_or_default()
-        )
-    } else {
-        state.operation_status.clone()
+    if !state.operation_status.is_empty() {
+        let status = &state.operation_status;
+        let summary = if wrap_lines(status, width).len() > 1 {
+            format!(
+                "{} … (! log)",
+                wrap_lines(status, width.saturating_sub(10)).first().cloned().unwrap_or_default()
+            )
+        } else {
+            status.clone()
+        };
+        wrapped.push(Line::styled(summary, theme::level(operation_level(status))));
+    }
+    (side, wrapped)
+}
+
+/// A sentence broken between words at `width`, cut after its second line
+/// with an ellipsis: the header must leave room for the rows.
+fn at_most_two_lines(text: &str, width: u16) -> Vec<String> {
+    let words = |text: &str, width: u16| -> Vec<String> {
+        wrap_words(Line::raw(text.to_owned()), width)
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect()
     };
-    let header = format!("{header}\n{summary}");
-    let header = wrap_lines(&header, frame.area().width.saturating_sub(2));
-    let header_height = header.len().saturating_add(2).min(u16::MAX as usize) as u16;
-    if frame.area().width < 20 || header_height.saturating_add(6) > frame.area().height {
+    let mut lines = words(text, width);
+    if lines.len() > 2 {
+        let second = words(&lines[1], width.saturating_sub(2))
+            .first()
+            .cloned()
+            .unwrap_or_default();
+        lines.truncate(1);
+        lines.push(format!("{second} …"));
+    }
+    lines
+}
+
+/// The scope of the rows, as k9s writes it after the resource: the
+/// namespace, or the profile or context of Docker.
+fn scope(state: &State) -> Option<String> {
+    let invocation = state.native.as_ref()?;
+    if let Some(profile) = &invocation.hamn_profile {
+        return Some(profile.clone());
+    }
+    if invocation.target.contains("all namespaces") {
+        return Some("all".into());
+    }
+    let names: &[&str] = if invocation.workspace == Workspace::Kubernetes {
+        &["--namespace", "-n"]
+    } else {
+        &["--context", "-c"]
+    };
+    invocation.target.split("  ").find_map(|part| {
+        names.iter().find_map(|name| {
+            part.strip_prefix(&format!("{name} "))
+                .or_else(|| part.strip_prefix(&format!("{name}=")))
+                .map(String::from)
+        })
+    })
+}
+
+/// The view's place, for the crumbs: the resource, then what covers it.
+fn crumbs(state: &State) -> Vec<String> {
+    let resource = if state.environment_picker {
+        "environments".into()
+    } else if let Some(invocation) = &state.native {
+        invocation.resource.clone().unwrap_or_else(|| "command".into())
+    } else {
+        let words = &state.request.words;
+        words.get(words.len().saturating_sub(2)).cloned().unwrap_or_default()
+    };
+    let mut names = vec![resource];
+    if state.help {
+        names.push("help".into());
+    } else if state.show_operation {
+        names.push("operation log".into());
+    } else if state.detail.is_some() {
+        names.push("detail".into());
+    }
+    names
+}
+
+/// The title of the main view: `resource(scope)[count]`, the filter and
+/// whether the rows are loading or stale.
+fn title(state: &State) -> Line<'static> {
+    let workspace = state.workspace;
+    let mut spans = vec![Span::raw(" ")];
+    if state.help {
+        spans.push(Span::styled("Help", theme::key(workspace)));
+    } else if state.show_operation {
+        spans.push(Span::styled("Operation log", theme::key(workspace)));
+    } else if state.detail.is_some() && state.vm_panel() {
+        let profile = state.request.profile.as_deref().unwrap_or("default");
+        spans.push(Span::styled(format!("Profile {}", clean(profile)), theme::key(workspace)));
+    } else if state.detail.is_some() {
+        spans.push(Span::styled("Detail", theme::key(workspace)));
+    } else {
+        let name = if state.environment_picker {
+            "Container environments".into()
+        } else if let Some(invocation) = &state.native {
+            format!(
+                "{} {}",
+                invocation.program(),
+                invocation.resource.as_deref().unwrap_or("command")
+            )
+        } else {
+            state.request.operation()
+        };
+        spans.push(Span::styled(name, theme::key(workspace)));
+        if let Some(scope) = scope(state) {
+            spans.push(Span::styled(format!("({scope})"), theme::label()));
+        }
+        spans.push(Span::styled(format!("[{}]", state.rows().len()), theme::value()));
+        if !state.filter.is_empty() {
+            spans.push(Span::styled(
+                format!(" </{}>", clean(&state.filter)),
+                Style::default().fg(Color::Green),
+            ));
+        }
+    }
+    if state.loading {
+        spans.push(Span::styled(" [loading]", theme::level(Level::Warning)));
+    } else if state.showing_stale_rows() {
+        spans.push(Span::styled(" [stale]", theme::level(Level::Error)));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
+/// Styled text broken at spaces where it can be, so that words stay whole;
+/// only a word longer than the line is broken inside. The space at a break
+/// is dropped.
+fn wrap_words(line: Line<'static>, width: u16) -> Vec<Line<'static>> {
+    let width = usize::from(width.max(1));
+    let cells: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|span| {
+            let style = span.style;
+            span.content
+                .chars()
+                .map(move |c| (if c.is_control() { ' ' } else { c }, style))
+        })
+        .collect();
+    let size = |c: char| Line::raw(c.to_string()).width();
+    let mut rows: Vec<&[(char, Style)]> = Vec::new();
+    let mut start = 0;
+    while start < cells.len() {
+        let (mut end, mut used) = (start, 0);
+        while end < cells.len() && used + size(cells[end].0) <= width {
+            used += size(cells[end].0);
+            end += 1;
+        }
+        if end < cells.len() {
+            if let Some(space) = (start + 1..=end).rev().find(|&i| cells[i].0 == ' ') {
+                rows.push(&cells[start..space]);
+                start = space + 1;
+                continue;
+            }
+            end = end.max(start + 1);
+        }
+        rows.push(&cells[start..end]);
+        start = end;
+    }
+    if rows.is_empty() {
+        rows.push(&[]);
+    }
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for &(c, style) in row {
+                match spans.last_mut() {
+                    Some(span) if span.style == style => span.content.to_mut().push(c),
+                    _ => spans.push(Span::styled(c.to_string(), style)),
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// The message line: an icon of its level, the message, what helps and
+/// where the details are; at most two lines.
+fn message_lines(state: &State, width: u16) -> Vec<Line<'static>> {
+    if state.message.is_empty() {
+        return vec![Line::raw("")];
+    }
+    let style = theme::level(state.message_level);
+    let mut spans = vec![
+        Span::styled(format!("{} ", theme::icon(state.message_level)), style),
+        Span::styled(clean(&state.message), style),
+    ];
+    if let Some(hint) = state.message_hint {
+        spans.push(Span::styled(format!(" — {hint}"), theme::dim()));
+    }
+    if state.last_error.is_some() && state.message_level == Level::Error {
+        spans.push(Span::styled(" (! details)", theme::dim()));
+    }
+    let mut lines = wrap_words(Line::from(spans), width);
+    if lines.len() > 2 {
+        lines.truncate(2);
+        let last = &mut lines[1];
+        let text: String = last.spans.iter().map(|span| span.content.as_ref()).collect();
+        let kept: String = text.chars().take(text.chars().count().saturating_sub(2)).collect();
+        *last = Line::from(vec![Span::styled(format!("{kept} …"), style)]);
+    }
+    lines
+}
+
+pub fn draw(frame: &mut Frame, state: &State) {
+    let area = frame.area();
+    if let Some(action) = &state.pending_native {
+        let text = if native_confirmation_visible(action, area) {
+            native_confirmation(action)
+        } else {
+            "Resize terminal to review the full target. Execution disabled. Esc cancels.".into()
+        };
         frame.render_widget(
-            Paragraph::new("Hamn: resize terminal to show the selected target. q exits.")
-                .wrap(Wrap { trim: false }),
-            frame.area(),
+            Paragraph::new(confirmation_lines(&text))
+                .wrap(Wrap { trim: false })
+                .block(confirm_block("Hamn confirmation", action.description.contains("delete"))),
+            area,
         );
         return;
     }
-    let areas = Layout::vertical([
-        Constraint::Length(header_height),
-        Constraint::Min(3),
-        Constraint::Length(3),
-        Constraint::Length(1),
-    ])
-    .split(frame.area());
-    frame.render_widget(
-        Paragraph::new(header.join("\n")).block(Block::bordered()),
-        areas[0],
-    );
-    let title = format!(
-        "{} {} | {}",
-        state
-            .native
-            .as_ref()
-            .map(|c| format!(
-                "{} {}",
-                c.program(),
-                c.resource.as_deref().unwrap_or("command")
-            ))
-            .unwrap_or_else(|| if state.environment_picker {
-                "Container environments".into()
-            } else {
-                state.request.operation()
-            }),
-        if state.loading { "[loading]" } else { "" },
-        state.refresh.label()
-    );
-    let operation_detail = format!(
-        "{}\n{}\n{}",
-        state.operation_status,
-        state.operation_log,
-        serde_json::to_string_pretty(&state.uncertain).unwrap()
-    );
-    if let Some(detail) = if state.show_operation {
-        Some(&operation_detail)
-    } else {
-        state.detail.as_ref()
-    } {
+    if state.quit_confirmation {
+        frame.render_widget(Paragraph::new("Cancel the active operation and exit?\nHamn will wait for rollback and resource cleanup.\ny = cancel then exit; n / Esc = keep working")
+            .wrap(Wrap { trim: false }).block(confirm_block("Active operation", false)), area);
+        return;
+    }
+    if let Some(pending) = &state.pending {
+        let text = if confirmation_visible(pending, area) {
+            confirmation(pending, area.width - 2).join("\n")
+        } else {
+            "Resize terminal to review the full target and impact.\nExecution disabled. Esc cancels.".into()
+        };
         frame.render_widget(
-            Paragraph::new(clean(detail))
+            Paragraph::new(confirmation_lines(&text))
+                .wrap(Wrap { trim: false })
+                // A change that deletes data is framed in red, whatever its name.
+                .block(confirm_block(
+                    "Hamn confirmation",
+                    pending.operation().ends_with("delete")
+                        || pending.impact().to_lowercase().contains("delete"),
+                )),
+            area,
+        );
+        return;
+    }
+    let workspace = state.workspace;
+    let hints = crate::tui_keys::hints(state);
+    // As in k9s, wide terminals show the keys beside the target; narrow
+    // ones keep the target at full width and list the keys under the view.
+    let (info_width, header_hints, footer_hints) = if area.width >= 104 {
+        let column = usize::from(theme::hint_grid_width(&hints, 1)).max(1);
+        let columns = (usize::from(area.width - 60) / column).clamp(1, 4);
+        let width = theme::hint_grid_width(&hints, columns);
+        (area.width - width - 2, theme::hint_grid(&hints, workspace, width, 4), Vec::new())
+    } else {
+        (area.width, Vec::new(), theme::hint_flow(&hints, workspace, area.width, 2))
+    };
+    let (info, details) = info_lines(state, info_width, area.width);
+    let beside = info.len().max(header_hints.len());
+    let header_height = beside + details.len();
+    let prompt_height = if state.input.is_some() { 3 } else { 0 };
+    let message = message_lines(state, area.width);
+    let fixed = 1 + header_height + prompt_height + footer_hints.len() + 1 + message.len();
+    if area.width < 20 || fixed + 3 > usize::from(area.height) {
+        frame.render_widget(
+            Paragraph::new("Hamn: resize terminal to show the selected target. q exits.")
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let length = |n: usize| Constraint::Length(n as u16);
+    let areas = Layout::vertical([
+        Constraint::Length(1),
+        length(header_height),
+        length(prompt_height),
+        Constraint::Min(3),
+        length(footer_hints.len()),
+        Constraint::Length(1),
+        length(message.len()),
+    ])
+    .split(area);
+    frame.render_widget(Paragraph::new(theme::tabs(workspace)), areas[0]);
+    let header = Layout::vertical([length(beside), length(details.len())]).split(areas[1]);
+    frame.render_widget(Paragraph::new(details), header[1]);
+    if header_hints.is_empty() {
+        frame.render_widget(Paragraph::new(info), header[0]);
+    } else {
+        let header = Layout::horizontal([Constraint::Length(info_width), Constraint::Min(0)])
+            .spacing(2)
+            .split(header[0]);
+        frame.render_widget(Paragraph::new(info), header[0]);
+        frame.render_widget(Paragraph::new(header_hints), header[1]);
+    }
+    if let Some((prefix, input)) = &state.input {
+        let (name, keys) = if *prefix == ':' {
+            (" Command ", " Enter runs · Tab completes · ↑/↓ history · Esc cancels ")
+        } else {
+            (" Filter ", " Enter keeps · Esc closes ")
+        };
+        let text = format!("{prefix}{}", clean(input));
+        // The completion follows the cursor, dimmed, until Tab takes it.
+        let completion = state.completion().map(|rest| clean(&rest)).unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(text.clone()),
+                Span::styled(completion, theme::dim()),
+            ]))
+            .block(
+                Block::bordered()
+                    .border_style(theme::border(workspace))
+                    .title(Line::styled(name, theme::key(workspace)))
+                    .title(Line::styled(keys, theme::dim()).right_aligned()),
+            ),
+            areas[2],
+        );
+        let column = Line::raw(text).width() as u16;
+        if column + 2 < areas[2].width {
+            frame.set_cursor_position((areas[2].x + 1 + column, areas[2].y + 1));
+        }
+    }
+    let block = Block::bordered()
+        .border_style(theme::border(workspace))
+        .title(title(state))
+        .title_alignment(Alignment::Center);
+    let detail: Option<Vec<Line<'static>>> = if state.show_operation {
+        Some(operation_lines(state))
+    } else {
+        state.detail.as_deref().map(crate::tui_detail::lines)
+    };
+    if state.help {
+        let columns = crate::tui_keys::help(workspace, areas[3].width);
+        let inner = block.inner(areas[3]);
+        frame.render_widget(block, areas[3]);
+        let parts = Layout::horizontal(vec![Constraint::Fill(1); columns.len()])
+            .spacing(2)
+            .split(inner);
+        for (lines, part) in columns.into_iter().zip(parts.iter()) {
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((state.scroll, 0)),
+                *part,
+            );
+        }
+    } else if let Some(detail) = detail {
+        frame.render_widget(
+            Paragraph::new(detail)
                 .scroll((state.scroll, 0))
                 .wrap(Wrap { trim: false })
-                .block(Block::bordered().title(title)),
-            areas[1],
+                .block(block),
+            areas[3],
         );
     } else if state.native.is_some() {
-        crate::resource_table::draw(frame, areas[1], state, title);
+        crate::resource_table::draw(frame, areas[3], state, block);
     } else {
+        let stale = state.showing_stale_rows();
         let rows: Vec<_> = state
             .rows()
             .into_iter()
-            .map(|row| ListItem::new(label(row)))
+            .map(|row| {
+                let style = if stale { theme::dim() } else { theme::tone(label_tone(row)) };
+                ListItem::new(label(row)).style(style)
+            })
             .collect();
         frame.render_stateful_widget(
             List::new(rows)
-                .block(Block::bordered().title(title))
-                .highlight_style(Style::default().fg(Color::Cyan))
+                .block(block)
+                .highlight_style(theme::badge(workspace))
                 .highlight_symbol("> "),
-            areas[1],
+            areas[3],
             &mut ListState::default().with_selected(state.selected),
         );
     }
-    let message = if let Some((prefix, input)) = &state.input {
-        format!("{prefix}{input}")
-    } else {
-        state.message.clone()
-    };
+    frame.render_widget(Paragraph::new(footer_hints), areas[4]);
+    let crumbs = Line::from(theme::crumbs(&crumbs(state), workspace));
+    let bottom = Layout::horizontal([Constraint::Length(crumbs.width() as u16), Constraint::Min(0)])
+        .split(areas[5]);
+    frame.render_widget(Paragraph::new(crumbs), bottom[0]);
     frame.render_widget(
-        Paragraph::new(clean(&message))
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered()),
-        areas[2],
+        Paragraph::new(Line::styled(state.refresh.label(), theme::dim()).right_aligned()),
+        bottom[1],
     );
-    let keys = if state.environment_picker {
-        ": command  / filter  Enter select  Esc cancel  Tab workspace  q quit"
-    } else if state.workspace == Workspace::Kubernetes {
-        ": command  / filter  Enter detail  l logs  g metrics  r rollout  d delete  m actions  ? help  q quit"
+    frame.render_widget(Paragraph::new(message), areas[6]);
+}
+
+/// How the status of the latest change reads: running, done, or failed.
+fn operation_level(status: &str) -> Level {
+    if status.contains("in progress") || status.starts_with("Cancelling") {
+        Level::Warning
+    } else if status == "Operation completed" {
+        Level::Info
     } else {
-        ": command  / filter  Enter detail  s start  t stop  r restart  d delete  l logs  g stats  m actions  ? help  q quit"
+        Level::Error
+    }
+}
+
+/// The operation log: the last failure as it was received, the status of
+/// the latest change and its output, and the targets of changes whose
+/// outcome is unknown.
+fn operation_lines(state: &State) -> Vec<Line<'static>> {
+    let raw = |text: &str| -> Vec<Line<'static>> {
+        clean(text).lines().map(|line| Line::raw(line.to_owned())).collect()
     };
-    frame.render_widget(Paragraph::new(keys), areas[3]);
+    let mut lines = Vec::new();
+    if let Some(error) = &state.last_error {
+        lines.push(Line::styled(
+            format!("Last error ({})", clean(&error.code)),
+            theme::level(Level::Error),
+        ));
+        lines.extend(raw(&error.message));
+        lines.push(Line::raw(""));
+    }
+    lines.push(Line::styled(
+        clean(&state.operation_status),
+        theme::level(operation_level(&state.operation_status)),
+    ));
+    lines.extend(raw(&state.operation_log));
+    lines.extend(crate::tui_detail::lines(
+        &serde_json::to_string_pretty(&state.uncertain).unwrap(),
+    ));
+    lines
+}
+
+/// The state that a row of a Hamn profile or environment reports.
+fn label_tone(row: &Value) -> theme::Tone {
+    if row["configurationError"].is_string() || row["dockerStatus"] == "recoveryRequired" || guest_disk_damaged(row) {
+        return theme::Tone::Failed;
+    }
+    if row["disabled"] == true {
+        return theme::Tone::Done;
+    }
+    match row["state"].as_str().or_else(|| row["State"].as_str()).unwrap_or("") {
+        "stopped" | "exited" | "not created" => theme::Tone::Done,
+        "starting" | "stopping" | "created" | "paused" | "restarting" => theme::Tone::Pending,
+        _ => theme::Tone::Normal,
+    }
 }
 
 pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &str) {
-    let text = format!(
-        "{}\n\n{} Containers — Docker containers, images, volumes and networks\n{} Kubernetes — resources in your kubeconfig context\n\n1 / 2 or arrows to select, Enter to save\n{}\n\n{}",
-        if settings {
-            "Choose the workspace to open by default"
-        } else {
-            "Choose your default workspace"
-        },
-        if selected == 0 { ">" } else { " " },
-        if selected == 1 { ">" } else { " " },
-        if settings {
-            "Esc returns without changing the default"
-        } else {
-            "q exits"
-        },
-        clean(error)
-    );
     let dependency = |name: &str| {
         use std::os::unix::fs::PermissionsExt;
         std::env::var_os("PATH").is_some_and(|path| {
@@ -1163,23 +1683,75 @@ pub fn draw_choice(frame: &mut Frame, selected: usize, settings: bool, error: &s
             })
         })
     };
-    let text = format!(
-        "{text}\n\nDocker CLI: {} | kubectl: {}\nContainers: install Docker CLI, then e selects a Docker context or Hamn profile.\nKubernetes: install kubectl and configure kubeconfig; e selects an external cluster.\nConnection and credentials are checked by the first resource query.",
-        if dependency("docker") {
-            "found"
+    let found = |name: &str| {
+        if dependency(name) {
+            Span::styled("found", theme::level(Level::Info))
         } else {
-            "missing"
-        },
-        if dependency("kubectl") {
-            "found"
-        } else {
-            "missing"
+            Span::styled("missing", theme::level(Level::Error))
         }
+    };
+    let option = |index: usize, workspace: Workspace, name: &'static str, about: &'static str| {
+        let chosen = index == selected;
+        Line::from(vec![
+            Span::raw(if chosen { "> " } else { "  " }),
+            Span::styled(
+                format!(" {} {name} ", index + 1),
+                if chosen { theme::badge(workspace) } else { theme::value() },
+            ),
+            Span::raw(format!(" — {about}")),
+        ])
+    };
+    let workspace = if selected == 0 { Workspace::Containers } else { Workspace::Kubernetes };
+    let mut lines = vec![
+        Line::styled(
+            if settings {
+                "Choose the workspace to open by default"
+            } else {
+                "Choose your default workspace"
+            },
+            theme::value(),
+        ),
+        Line::raw(""),
+        option(0, Workspace::Containers, "Containers", "Docker containers, images, volumes and networks"),
+        option(1, Workspace::Kubernetes, "Kubernetes", "resources in your kubeconfig context"),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("<1>/<2>", theme::key(workspace)),
+            Span::raw(" or arrows to select, "),
+            Span::styled("<Enter>", theme::key(workspace)),
+            Span::raw(" to save"),
+        ]),
+        Line::from(if settings {
+            vec![Span::styled("<Esc>", theme::key(workspace)), Span::raw(" returns without changing the default")]
+        } else {
+            vec![Span::styled("<q>", theme::key(workspace)), Span::raw(" exits")]
+        }),
+        Line::raw(""),
+    ];
+    lines.extend(
+        clean(error)
+            .lines()
+            .map(|line| Line::styled(line.to_owned(), theme::level(Level::Error))),
     );
+    lines.extend([
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("Docker CLI: ", theme::label()),
+            found("docker"),
+            Span::styled(" | ", theme::dim()),
+            Span::styled("kubectl: ", theme::label()),
+            found("kubectl"),
+        ]),
+        Line::raw("Containers: install Docker CLI, then e selects a Docker context or Hamn profile."),
+        Line::raw("Kubernetes: install kubectl and configure kubeconfig; e selects an external cluster."),
+        Line::styled("Connection and credentials are checked by the first resource query.", theme::dim()),
+    ]);
     frame.render_widget(
-        Paragraph::new(text)
-            .wrap(Wrap { trim: false })
-            .block(Block::bordered().title("Hamn settings")),
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::bordered()
+                .border_style(theme::border(workspace))
+                .title(Line::styled(" Hamn settings ", theme::key(workspace))),
+        ),
         frame.area(),
     );
 }
@@ -1208,7 +1780,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(rendered.contains("Docker context remote"));
-        assert!(!rendered.contains("v VM settings"));
+        assert!(!rendered.contains("<v> VM settings"));
         let inherited = state.view("docker containers list").unwrap();
         assert_eq!(inherited.context, remote.context);
         assert_eq!(inherited.docker_config, remote.docker_config);
@@ -1250,7 +1822,7 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(rendered.contains("Hamn profile local"));
-        assert!(rendered.contains("v VM settings"));
+        assert!(rendered.contains("<v> VM settings"));
         let inherited = state.view("docker containers list").unwrap();
         assert_eq!(inherited.profile.as_deref(), Some("local"));
         assert!(inherited.context.is_none());
@@ -1568,13 +2140,14 @@ mod tests {
         // VM, which can be running, nor Docker was observed.
         let lines = header(serde_json::json!({"statusError": unreadable}), 120);
         assert!(lines.iter().any(|line| line.contains("VM: status unavailable | Docker: status unavailable")), "{lines:?}");
+        // The reason takes the full width, under the keys of a wide terminal.
         assert!(lines.iter().any(|line| line.contains(&format!("Status: {unreadable}"))), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains("not created") || line.contains("Connection unavailable")), "{lines:?}");
         // At 80 columns the sentence takes a second line and keeps the rule,
         // which is its end.
         let lines = header(serde_json::json!({"statusError": unreadable}), 80);
         let first = lines.iter().position(|line| line.contains("Status: cannot read the configuration")).unwrap();
-        assert!(lines[first + 1].contains("n key: kubernetes"), "{lines:?}");
+        assert!(lines[first + 1].starts_with("key: kubernetes"), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains('…')), "{lines:?}");
         // A longer reason is cut after its second line: the header must
         // leave room for the rows.
@@ -1582,12 +2155,135 @@ mod tests {
         let lines = header(serde_json::json!({"statusError": long}), 80);
         let reason: Vec<_> = lines.iter().filter(|line| line.contains("Status: ") || line.contains("xxxx") || line.contains("kubernetes")).collect();
         assert_eq!(reason.len(), 2, "{lines:?}");
-        assert!(reason[1].contains("n key: kubernetes xxxx") && reason[1].contains('…'), "{lines:?}");
+        assert!(reason[1].starts_with("key: kubernetes") && reason[1].contains('…'), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains("resize terminal")), "{lines:?}");
         // An observed status is shown as before.
         let lines = header(serde_json::json!({"state": "stopped", "dockerStatus": "unavailable"}), 120);
         assert!(lines.iter().any(|line| line.contains("VM: stopped | Docker: Connection unavailable")), "{lines:?}");
         assert!(!lines.iter().any(|line| line.contains("Status:")), "{lines:?}");
+    }
+    #[test]
+    fn x_in_the_vm_panel_asks_to_reset_the_selected_profile_disk() {
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        state.accept(Ok(serde_json::json!([
+            {"name": "other", "state": "stopped", "dockerStatus": "unavailable"},
+            {"name": "work", "state": "running", "dockerStatus": "recoveryRequired"}
+        ])));
+        assert!(state.vm_panel());
+        state.selected = Some(1);
+        let request = state.action("reset").unwrap();
+        assert_eq!(request.operation(), "vm reset");
+        assert_eq!(request.profile.as_deref(), Some("work"));
+        // A mutation: the TUI confirms it with this impact before it runs.
+        assert!(request.mutates() && request.yes);
+        let impact = request.impact();
+        assert!(impact.contains("permanently delete its disk") && impact.contains("every container, image, volume and file"), "{impact}");
+        assert!(impact.contains("profile settings and shared host directories are kept"), "{impact}");
+    }
+    #[test]
+    fn a_damaged_guest_disk_is_shown_instead_of_the_repair_offer() {
+        let header = |runtime: Value, width: u16| {
+            let mut state = State::new(Request::default());
+            state.native = Some(crate::native::parse("ps", &state).unwrap());
+            state.runtime = runtime;
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|f| draw(f, &state)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+        };
+        let evidence = "the guest cannot read its disk: /bin/bash: Input/output error";
+        let damaged = serde_json::json!({"state": "running", "dockerStatus": "recoveryRequired",
+            "guestFilesystem": {"state": "unreadable", "detail": evidence, "observedAt": 1}});
+        // The VM line stays; the evidence follows at full width, and the
+        // keys offer the VM panel, where x resets the disk, instead of a
+        // start that cannot repair it.
+        for width in [120, 80] {
+            let lines = header(damaged.clone(), width);
+            assert!(lines.iter().any(|line| line.contains("VM: running | Docker: Recovery required")), "{lines:?}");
+            // At 80 columns the sentence breaks between words onto a second line.
+            let joined = lines.iter().map(|line| line.trim_end()).collect::<Vec<_>>().join(" ");
+            assert!(joined.contains(&format!("Guest disk damaged: {evidence}")), "{lines:?}");
+            assert!(!lines.iter().any(|line| line.trim_end().ends_with("erro")), "{lines:?}");
+            let text = lines.join("\n");
+            assert!(text.contains("<v> VM: reset disk") && !text.contains("<s> start"), "{text}");
+        }
+        // Each damaged state is evidence. The sentence gets two lines at
+        // full width and is cut after them.
+        for state in ["errorsRecorded", "readOnly"] {
+            let mut status = damaged.clone();
+            status["guestFilesystem"]["state"] = state.into();
+            status["guestFilesystem"]["detail"] = "ext4 recorded 3 errors since its last complete check, the first at 2026-10-01T01:43:12Z and the last at 2026-10-14T09:00:00Z".into();
+            let lines = header(status.clone(), 80);
+            let first = lines.iter().position(|line| line.contains("Guest disk damaged: ext4 recorded 3")).unwrap();
+            assert!(lines[first + 1].contains("2026-10-14T09:00:00Z"), "{state}: {lines:?}");
+            assert!(!lines.iter().any(|line| line.contains('…')), "{state}: {lines:?}");
+            status["guestFilesystem"]["detail"] = format!("{} {}", status["guestFilesystem"]["detail"].as_str().unwrap(), "x".repeat(300)).into();
+            let lines = header(status, 80);
+            let first = lines.iter().position(|line| line.contains("Guest disk damaged: ext4 recorded 3")).unwrap();
+            assert!(lines[first + 1].contains('…') && !lines[first + 2].contains("xxxx"), "{state}: {lines:?}");
+        }
+        // A record that cannot be validated is no evidence: a start checks
+        // the disk again, so the keys keep offering it.
+        let mut unknown = damaged.clone();
+        unknown["guestFilesystem"] = serde_json::json!({"state": "unknown",
+            "detail": "cannot validate guest-filesystem.json: Invalid argument", "observedAt": null});
+        let text = header(unknown, 120).join("\n");
+        assert!(text.contains("Guest disk not known to be damaged: cannot validate guest-filesystem.json"), "{text}");
+        assert!(text.contains("<s> start VM") && !text.contains("reset disk"), "{text}");
+        // Without a record, the header is as it was.
+        let mut clean = damaged.clone();
+        clean["guestFilesystem"] = Value::Null;
+        let text = header(clean, 120).join("\n");
+        assert!(text.contains("VM: running | Docker: Recovery required") && text.contains("<s> start VM"), "{text}");
+        assert!(!text.contains("Guest disk"), "{text}");
+
+        // A Docker list that fails names the damage instead of `s`.
+        let failure = hamn_query_failure("work", Some(&damaged), Failure::new(crate::native::DOCKER_UNREACHABLE, "docker exited 1: Cannot connect"));
+        assert_eq!(failure.code, VM_NOT_READY);
+        assert_eq!(failure.message, "The guest disk of Hamn VM work is damaged. v, then x resets the disk.");
+        // It fits the one-line message area of an 80-column terminal.
+        assert!(failure.message.chars().count() <= 78, "{}", failure.message);
+        // Errors that a start could not fix anyway keep their message.
+        let usage = hamn_query_failure("work", Some(&damaged), Failure::new("cliError", "docker exited 125: unknown flag"));
+        assert_eq!(usage.message, "docker exited 125: unknown flag");
+
+        // The VM panel row, its detail and their keys.
+        let mut row = damaged.clone();
+        row["name"] = "work".into();
+        row["cpus"] = 2.into();
+        row["memoryMiB"] = 2048.into();
+        row["diskGiB"] = 60.into();
+        assert_eq!(label(&row), "work  running  recoveryRequired  guest disk damaged");
+        assert_eq!(label_tone(&row), theme::Tone::Failed);
+        let detail = profile_detail(&row);
+        assert!(detail.contains(&format!("Disk: 60 GiB\nGuest disk: damaged\nEvidence: {evidence}\n\nStarting the VM cannot repair this disk; x deletes it and everything in the VM, and the next start creates a new one.")), "{detail}");
+        let mut panel = State::new(Request::default());
+        panel.view("vm").unwrap();
+        panel.accept(Ok(serde_json::json!([row.clone()])));
+        let keys = crate::tui_keys::hints(&panel);
+        assert!(keys.contains(&("x", "reset disk")) && keys.contains(&("s", "start")), "{keys:?}");
+        assert!(panel.enter().unwrap().is_none());
+        let keys = crate::tui_keys::hints(&panel);
+        assert!(keys.contains(&("x", "reset disk")) && keys.contains(&("s", "start")), "{keys:?}");
+        // The detail shows the damage as a red state.
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &panel)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        let start = text.find("Guest disk: damaged").unwrap() + "Guest disk: ".len();
+        let index = text[..start].chars().count();
+        let width = usize::from(buffer.area.width);
+        assert_eq!(buffer[((index % width) as u16, (index / width) as u16)].fg, Color::Red);
+        // Without damage the keys offer the repair, and the detail is as it was.
+        row["guestFilesystem"] = Value::Null;
+        assert_eq!(label(&row), "work  running  recoveryRequired");
+        assert!(profile_detail(&row).ends_with("Disk: 60 GiB"));
+        panel.detail = None;
+        panel.accept(Ok(serde_json::json!([row])));
+        assert!(crate::tui_keys::hints(&panel).contains(&("s", "start/repair")));
     }
     #[test]
     fn failed_hamn_query_keeps_errors_that_starting_the_vm_cannot_fix() {
@@ -1754,12 +2450,12 @@ mod tests {
             "shared  Hamn profile",
             "shared  Docker context",
             "unix:///external.sock",
-            "Enter select",
+            "<Enter> select",
         ] {
             assert!(screen.contains(marker), "{screen}");
         }
-        assert!(!screen.contains("v VM settings"));
-        assert!(!screen.contains("t stop"));
+        assert!(!screen.contains("<v> VM settings"));
+        assert!(!screen.contains("<t> stop"));
         assert!(state.cancel_picker());
         assert!(state.vm_panel());
         state.data = serde_json::json!([{"name":"shared"}]);
@@ -1964,7 +2660,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect::<String>();
         assert!(!text.contains("Hamn profile"));
-        assert!(!text.contains("v VM settings"));
+        assert!(!text.contains("<v> VM settings"));
         assert!(text.contains("--context external"));
         state.native = Some(crate::native::parse("ps", &state).unwrap());
         assert!(state.hamn_environment());
@@ -2188,6 +2884,48 @@ mod tests {
         }
     }
     #[test]
+    fn confirmations_read_like_details_and_frame_deletions_in_red() {
+        let render = |words: &[&str]| {
+            let mut state = State::new(Request::default());
+            let mut request = Request {
+                words: words.iter().map(|word| (*word).into()).collect(),
+                profile: Some("work".into()),
+                yes: true,
+                ..Default::default()
+            };
+            if words[0] == "k8s" {
+                request.profile = None;
+                request.context = Some("dev".into());
+                request.namespace = Some("default".into());
+                request.name = Some("api".into());
+            }
+            state.pending = Some(request);
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, &state)).unwrap();
+            terminal.backend().buffer().clone()
+        };
+        for (words, red) in [
+            (&["vm", "delete"][..], true),
+            (&["k8s", "pods", "delete"], true),
+            (&["vm", "stop"], false),
+        ] {
+            let buffer = render(words);
+            let border = buffer[(0, 0)].fg;
+            assert_eq!(border, if red { Color::Red } else { Color::Yellow }, "{words:?}");
+            // The first line says what is confirmed, in bold; field names stand out.
+            assert!(buffer[(1, 1)].modifier.contains(Modifier::BOLD), "{words:?}");
+            let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+            let impact = text.find("Impact:").unwrap();
+            let index = text[..impact].chars().count();
+            let width = usize::from(buffer.area.width);
+            assert_eq!(
+                buffer[((index % width) as u16, (index / width) as u16)].fg,
+                crate::tui_detail::key_style().fg.unwrap(),
+                "{words:?}"
+            );
+        }
+    }
+    #[test]
     fn confirmation_requires_complete_target_and_impact_to_fit() {
         let mut request = Request::try_parse_from([
             "hamn",
@@ -2274,6 +3012,252 @@ mod tests {
         // No terminal input is a definition file.
         let refused = state.view("vm apply --file -").unwrap_err();
         assert_eq!(refused.code, "invalidRequest");
+    }
+    #[test]
+    fn a_profile_detail_reads_as_fields_with_the_keys_that_act_on_it() {
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        state.accept(Ok(serde_json::json!([{"name": "work", "state": "running",
+            "dockerStatus": "ready", "cpus": 4, "memoryMiB": 8192, "diskGiB": 80}])));
+        assert!(state.enter().unwrap().is_none());
+        let detail = state.detail.clone().unwrap();
+        // Text values without JSON quotes; the keys are hints, not text.
+        assert_eq!(detail, "Profile: work\nVM: running\nDocker: ready\nCPU: 4\nMemory: 8192 MiB\nDisk: 80 GiB");
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        for marker in ["Profile work", "<Esc> back", "<s> start/repair", "<t> stop", "<c> settings", "VM: running"] {
+            assert!(text.contains(marker), "{marker}: {text}");
+        }
+        assert!(!text.contains('"'), "{text}");
+        // Field names stand out and a known state takes its color.
+        let at = |needle: &str, offset: usize| {
+            let start = text.find(needle).unwrap() + offset;
+            let index = text[..start].chars().count();
+            let width = usize::from(buffer.area.width);
+            buffer[((index % width) as u16, (index / width) as u16)].clone()
+        };
+        assert_eq!(at("Memory:", 0).fg, crate::tui_detail::key_style().fg.unwrap());
+        assert_eq!(at("VM: running", 4).fg, Color::Green);
+    }
+    #[test]
+    fn messages_break_between_words_and_keep_their_styles() {
+        let text = |lines: &[Line]| -> Vec<String> {
+            lines
+                .iter()
+                .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+                .collect()
+        };
+        let plain = |text: &str, width| wrap_words(Line::raw(text.to_owned()), width);
+        assert_eq!(text(&plain("aaa bbb cccc dddddddddddd", 10)), ["aaa bbb", "cccc", "dddddddddd", "dd"]);
+        assert_eq!(text(&plain("exactly ten", 11)), ["exactly ten"]);
+        assert_eq!(text(&plain("", 10)), [""]);
+        // Wide characters count two columns and are never split.
+        assert_eq!(text(&plain("작업 상태", 6)), ["작업", "상태"]);
+        assert_eq!(text(&plain("ab", 1)), ["a", "b"]);
+        let styled = Line::from(vec![
+            Span::styled("✗ Cannot reach", theme::level(Level::Error)),
+            Span::styled(" — e selects another context", theme::dim()),
+        ]);
+        let lines = wrap_words(styled, 20);
+        assert_eq!(text(&lines), ["✗ Cannot reach — e", "selects another", "context"]);
+        assert_eq!(lines[0].spans[0].style, theme::level(Level::Error));
+        assert_eq!(lines[1].spans[0].style, theme::dim());
+        // On screen, the message's second line starts with a whole word.
+        let mut state = State::new(Request::default());
+        state.workspace = Workspace::Kubernetes;
+        state.fail(Failure::new("cliError", "kubectl exited exit status: 1: The connection to the server 127.0.0.1:63621 was refused - did you specify the right host or port?\n"));
+        let rendered = message_lines(&state, 132);
+        assert_eq!(rendered.len(), 2);
+        assert_eq!(text(&rendered)[1], "another context (! details)");
+        assert!(text(&rendered)[0].ends_with("; e selects"), "{:?}", text(&rendered));
+    }
+    #[test]
+    fn workspaces_differ_in_tab_text_and_color_and_keys_stand_out() {
+        let render = |state: &State, width: u16| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            terminal.backend().buffer().clone()
+        };
+        let find = |buffer: &ratatui::buffer::Buffer, text: &str| {
+            let width = usize::from(buffer.area.width);
+            let cells: Vec<&str> = buffer.content().iter().map(|cell| cell.symbol()).collect();
+            let chars: Vec<String> = text.chars().map(String::from).collect();
+            let start = (0..cells.len())
+                .find(|&i| chars.iter().enumerate().all(|(n, c)| cells.get(i + n) == Some(&c.as_str())))
+                .unwrap_or_else(|| panic!("{text} not on screen"));
+            buffer[((start % width) as u16, (start / width) as u16)].clone()
+        };
+        let mut containers = State::new(Request::default());
+        containers.native = Some(crate::native::parse("ps", &containers).unwrap());
+        let mut kubernetes = State::new(Request::default());
+        kubernetes.workspace = Workspace::Kubernetes;
+        kubernetes.request.context = Some("dev".into());
+        kubernetes.native = Some(crate::native::parse("get pods", &kubernetes).unwrap());
+        for width in [80, 160] {
+            for (state, active, inactive) in [
+                (&containers, "[Containers]", "[Kubernetes]"),
+                (&kubernetes, "[Kubernetes]", "[Containers]"),
+            ] {
+                let accent = theme::accent(state.workspace);
+                let buffer = render(state, width);
+                let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+                assert!(!text.contains(inactive), "{text}");
+                let tab = find(&buffer, active);
+                assert_eq!(tab.bg, accent, "{tab:?}");
+                // The frame of the view and the keys take the same color.
+                assert_eq!(find(&buffer, "┌").fg, accent);
+                // The row count in the title keeps the text color, not the pale border.
+                let count = format!("[{}]", state.rows().len());
+                assert_eq!(find(&buffer, &count).fg, Color::Reset);
+                assert_eq!(find(&buffer, "<:>").bg, accent);
+                assert!(text.contains("<Tab> switch") && text.contains("<?> help"), "{text}");
+            }
+        }
+        assert_ne!(
+            find(&render(&containers, 80), "┌").fg,
+            find(&render(&kubernetes, 80), "┌").fg
+        );
+        // A failure is marked by its icon as well as its color.
+        containers.fail(Failure::new("cliError", "docker exited exit status: 1: Error response from daemon: No such container: web"));
+        let buffer = render(&containers, 80);
+        let icon = find(&buffer, "✗ No such container: web");
+        assert_eq!(icon.fg, Color::Red);
+        // The command prompt opens above the view and shows the cursor.
+        containers.input = Some((':', "get po".into()));
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &containers)).unwrap();
+        let text: String = terminal.backend().buffer().content().iter().map(|cell| cell.symbol()).collect();
+        assert!(text.contains(" Command ") && text.contains(":get po"), "{text}");
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(terminal.backend().buffer()[(cursor.x - 1, cursor.y)].symbol(), "o");
+        // Help covers the view and names every group of keys.
+        containers.input = None;
+        containers.help = true;
+        let text: String = render(&containers, 80).content().iter().map(|cell| cell.symbol()).collect();
+        for marker in ["GENERAL", "Commands:", "<Esc> close help", " help "] {
+            assert!(text.contains(marker), "{marker}: {text}");
+        }
+        containers.move_by(40);
+        assert_eq!(containers.scroll, 40);
+        let text: String = render(&containers, 80).content().iter().map(|cell| cell.symbol()).collect();
+        assert!(!text.contains("GENERAL") && text.contains("INTERNAL TERMINAL"), "{text}");
+        // A detail that arrives replaces the help.
+        containers.accept(Ok(serde_json::json!({"yaml": "kind: Pod"})));
+        assert!(!containers.help && containers.detail.as_deref() == Some("kind: Pod"));
+    }
+    #[test]
+    fn the_command_prompt_dims_its_completion_after_the_cursor_and_tab_takes_it() {
+        let render = |state: &State| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            let cursor = terminal.get_cursor_position().unwrap();
+            (terminal.backend().buffer().clone(), cursor)
+        };
+        let row = |buffer: &ratatui::buffer::Buffer, y: u16| -> String {
+            (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect()
+        };
+        let mut state = State::new(Request::default());
+        state.native = Some(crate::native::parse("ps", &state).unwrap());
+        state.input = Some((':', "ima".into()));
+        let (buffer, cursor) = render(&state);
+        assert!(row(&buffer, cursor.y).contains(":images"), "{}", row(&buffer, cursor.y));
+        assert!(row(&buffer, cursor.y - 1).contains("Tab completes"), "{}", row(&buffer, cursor.y - 1));
+        // The typed text ends at the cursor; the completion starts there, dimmed.
+        let typed = &buffer[(cursor.x - 1, cursor.y)];
+        assert_eq!(typed.symbol(), "a");
+        assert_ne!(typed.fg, Color::DarkGray);
+        for (offset, symbol) in ["g", "e", "s"].into_iter().enumerate() {
+            let cell = &buffer[(cursor.x + offset as u16, cursor.y)];
+            assert_eq!((cell.symbol(), cell.fg), (symbol, Color::DarkGray), "{offset}");
+        }
+        assert_eq!(buffer[(cursor.x + 3, cursor.y)].symbol(), " ");
+        // Tab takes it as typed text: the cursor moves past it, and a complete
+        // command that nothing extends shows no completion.
+        state.complete_input();
+        assert_eq!(state.input, Some((':', "images".into())));
+        let (buffer, after) = render(&state);
+        assert_eq!((after.x, after.y), (cursor.x + 3, cursor.y));
+        assert_eq!(buffer[(after.x - 1, after.y)].symbol(), "s");
+        assert_eq!(buffer[(after.x, after.y)].symbol(), " ");
+        // Without a completion, Tab changes nothing; Up still recalls history.
+        state.complete_input();
+        assert_eq!(state.input, Some((':', "images".into())));
+        state.history = vec!["ps -a".into()];
+        state.recall_command(true);
+        assert_eq!(state.input, Some((':', "ps -a".into())));
+        // The filter prompt has no completion.
+        state.input = Some(('/', "p".into()));
+        assert_eq!(state.completion(), None);
+        state.complete_input();
+        assert_eq!(state.input, Some(('/', "p".into())));
+        let (buffer, cursor) = render(&state);
+        assert_eq!(buffer[(cursor.x - 1, cursor.y)].symbol(), "p");
+        assert_eq!(buffer[(cursor.x, cursor.y)].symbol(), " ");
+        // Wide characters: the cursor follows the display width of the typed
+        // text, and the completion from history starts at it.
+        let mut kubernetes = State::new(Request::default());
+        kubernetes.workspace = Workspace::Kubernetes;
+        kubernetes.native = Some(crate::native::parse("get pods", &kubernetes).unwrap());
+        kubernetes.history = vec!["get pods -l app=작업".into()];
+        kubernetes.input = Some((':', "get pods -l app=작".into()));
+        let (buffer, cursor) = render(&kubernetes);
+        // A wide character takes two cells; the second is left blank.
+        assert!(row(&buffer, cursor.y).contains(":get pods -l app=작"), "{}", row(&buffer, cursor.y));
+        assert_eq!(buffer[(cursor.x - 2, cursor.y)].symbol(), "작");
+        let cell = &buffer[(cursor.x, cursor.y)];
+        assert_eq!((cell.symbol(), cell.fg), ("업", Color::DarkGray));
+        kubernetes.complete_input();
+        assert_eq!(kubernetes.input, Some((':', "get pods -l app=작업".into())));
+    }
+    #[test]
+    fn a_failed_read_shows_its_summary_and_keeps_the_raw_failure_for_details() {
+        let screen = |state: &State| {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 32)).unwrap();
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let raw = "kubectl exited exit status: 1: E1015 01:17:26.408480   67207 memcache.go:381] \"Couldn't get current server API group list\" err=\"dial tcp 127.0.0.1:63621: connect: connection refused\"\nThe connection to the server 127.0.0.1:63621 was refused - did you specify the right host or port?\n";
+        let mut state = State::new(Request::default());
+        state.workspace = Workspace::Kubernetes;
+        state.native = Some(crate::native::parse("get pods", &state).unwrap());
+        state.accept(Ok(serde_json::json!([{"metadata":{"name":"api", "namespace":"work", "uid":"1"}}])));
+        assert!(!screen(&state).contains("[stale]"));
+        state.accept(Err(Failure::new("cliError", raw)));
+        // The message is one sentence with the key that helps; the client
+        // log lines and the failure code stay off the list screen.
+        assert_eq!(
+            state.message,
+            "Cannot reach the Kubernetes API server at 127.0.0.1:63621: connection refused"
+        );
+        assert_eq!(state.message_level, Level::Error);
+        let text = screen(&state);
+        assert!(text.contains("Cannot reach the Kubernetes API server at 127.0.0.1:63621"), "{text}");
+        assert!(text.contains("e selects another context") && text.contains("(! details)"), "{text}");
+        assert!(!text.contains("cliError") && !text.contains("memcache.go"), "{text}");
+        // The rows of the last good read stay and say that they may be old.
+        assert!(text.contains("api") && text.contains("[stale]"), "{text}");
+        assert_eq!(state.action("delete").unwrap_err().code, "staleData");
+        // ! shows the failure as it was received.
+        state.show_operation = true;
+        let text = screen(&state);
+        assert!(text.contains("Last error (cliError)") && text.contains("memcache.go:381"), "{text}");
+        state.show_operation = false;
+        // Another message replaces the failure; a successful read clears both.
+        state.warn("Refresh before reading previous data");
+        assert!(state.last_error.is_none() && state.message_level == Level::Warning);
+        state.accept(Err(Failure::new("cliError", raw)));
+        state.accept(Ok(serde_json::json!([])));
+        assert!(state.message.is_empty() && state.last_error.is_none() && state.message_hint.is_none());
+        assert!(!screen(&state).contains("[stale]"));
     }
     #[test]
     fn failed_refresh_blocks_actions_and_view_switch_clears_old_rows() {
