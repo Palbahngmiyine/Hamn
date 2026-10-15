@@ -5,8 +5,10 @@
 //! In Kubernetes, `get` also completes the kinds that the cluster serves,
 //! which `kubectl api-resources -o name` lists in the background: a lookup
 //! that blocks never delays typing, one that fails leaves the built-in kinds
-//! and says why in the prompt's border, and a lookup for a context the UI
-//! left, or one still running when the TUI quits, is killed.
+//! and says why in the prompt's border, one that kubectl ends unsuccessfully
+//! after listing some kinds offers those and says why others may be missing,
+//! and a lookup for a context the UI left, or one still running when the TUI
+//! quits, is killed.
 use super::tui_native_regressions::record;
 use crate::runner::{self, Case, case};
 use crate::support::http::{Options as HttpOptions, Server};
@@ -31,13 +33,23 @@ pub fn main(filters: &[String]) -> ExitCode {
             a_blocked_lookup_keeps_typing_responsive_and_a_failed_one_says_why,
         ),
         case("a_lookup_for_a_context_the_ui_left_is_killed", a_lookup_for_a_context_the_ui_left_is_killed),
+        case(
+            "a_partial_lookup_offers_what_kubectl_listed_and_says_why_kinds_are_missing",
+            a_partial_lookup_offers_what_kubectl_listed_and_says_why_kinds_are_missing,
+        ),
         case("quitting_kills_a_running_lookup", quitting_kills_a_running_lookup),
     ];
     match real_cli::which("kubectl") {
-        Some(kubectl) => cases.push(case("the_installed_kubectl_lists_the_kinds_that_complete", move || {
-            the_installed_kubectl_lists_the_kinds_that_complete(&kubectl)
-        })),
-        None => println!("SKIP: installed kubectl unavailable for the_installed_kubectl_lists_the_kinds_that_complete"),
+        Some(kubectl) => {
+            let partial = kubectl.clone();
+            cases.push(case("the_installed_kubectl_lists_the_kinds_that_complete", move || {
+                the_installed_kubectl_lists_the_kinds_that_complete(&kubectl)
+            }));
+            cases.push(case("the_installed_kubectl_lists_what_it_can_when_an_api_group_fails", move || {
+                the_installed_kubectl_lists_what_it_can_when_an_api_group_fails(&partial)
+            }));
+        }
+        None => println!("SKIP: installed kubectl unavailable for the cases that run it against a fake API"),
     }
     runner::run(
         "tui-command-completion",
@@ -122,6 +134,9 @@ fn tab_switches_the_workspace_after_the_prompt_closes() {
 
 /// What the peer prints on stderr when its first lookup fails.
 const LOOKUP_ERROR: &str = "error: You must be logged in to the server (Unauthorized)";
+
+/// What the peer prints on stderr when its first lookup finds only some kinds.
+const PARTIAL_ERROR: &str = "error: unable to retrieve the complete list of server APIs: metrics.k8s.io/v1beta1: the server is currently unable to handle the request";
 
 /// A Kubernetes harness whose kinds lookups follow `mode`; see `kinds_peer`.
 fn kinds_harness(mode: &str) -> Harness {
@@ -217,6 +232,32 @@ fn a_lookup_for_a_context_the_ui_left_is_killed() {
     assert_eq!(harness.kinds_lookups(), [kinds_lookup("old-cluster"), kinds_lookup("new-cluster")]);
 }
 
+fn a_partial_lookup_offers_what_kubectl_listed_and_says_why_kinds_are_missing() {
+    let mut harness = kinds_harness("partial");
+    harness.until("old-target-row");
+    // kubectl printed names and exited 1: the names complete, and the
+    // border says that some kinds may be missing, and why.
+    harness.send(b":get wid", ":get widgets");
+    harness.until("! get completes only the kinds kubectl listed: These API groups could not be listed: metrics.k8s.io/v1beta1");
+    let text = harness.text();
+    assert_eq!(text.matches("metrics.k8s.io/v1beta1").count(), 1, "{text}");
+    // The diagnostics view keeps kubectl's own words, wrapped at its width.
+    harness.write(b"\x1b");
+    harness.wait(|harness| !harness.text().contains(" Command "));
+    harness.send(b"!", "Kinds lookup failed (cliError); get completes only the kinds kubectl listed");
+    let words = "error: unable to retrieve the complete list of server APIs";
+    harness.until(words);
+    harness.write(b"!");
+    harness.wait(|harness| !harness.text().contains(words));
+    // The next prompt retries it. The kinds kubectl listed stay offered while
+    // the retry runs, and its complete answer clears the border.
+    harness.send(b":get wid", ":get widgets");
+    harness.wait(|harness| !harness.text().contains("kinds kubectl listed"));
+    harness.write(b"\t\r");
+    harness.wait(|harness| !calls_with(harness, "kubectl", "widgets").is_empty());
+    assert_eq!(harness.kinds_lookups(), [kinds_lookup("old-cluster"), kinds_lookup("old-cluster")]);
+}
+
 fn quitting_kills_a_running_lookup() {
     let mut harness = kinds_harness("old-blocks");
     harness.until("old-target-row");
@@ -235,8 +276,10 @@ fn quitting_kills_a_running_lookup() {
 
 /// A fake API whose discovery serves pods in the core group, `widgets` in
 /// `fixture.hamn.dev` and pods again in `metrics.k8s.io`, and one widget.
+/// With `broken`, it also lists the group `broken.fixture.hamn.dev`, whose
+/// resources answer 503, as an aggregated API whose service is down does.
 /// Every request target is recorded.
-fn kinds_api(requests: Arc<Mutex<Vec<String>>>) -> Server {
+fn kinds_api(requests: Arc<Mutex<Vec<String>>>, broken: bool) -> Server {
     let group = |name: &str, version: &str| {
         let version = json!({"groupVersion": format!("{name}/{version}"), "version": version});
         json!({"name": name, "versions": [version], "preferredVersion": version})
@@ -252,8 +295,14 @@ fn kinds_api(requests: Arc<Mutex<Vec<String>>>) -> Server {
             requests.lock().unwrap().push(request.target.clone());
             let path = request.target.split('?').next().unwrap_or_default();
             let body = match path {
-                "/apis" => json!({"apiVersion": "v1", "kind": "APIGroupList", "groups": [
-                    group("fixture.hamn.dev", "v1"), group("metrics.k8s.io", "v1beta1")]}),
+                "/apis" => {
+                    let mut groups = vec![group("fixture.hamn.dev", "v1"), group("metrics.k8s.io", "v1beta1")];
+                    if broken {
+                        groups.push(group("broken.fixture.hamn.dev", "v1"));
+                    }
+                    json!({"apiVersion": "v1", "kind": "APIGroupList", "groups": groups})
+                }
+                "/apis/broken.fixture.hamn.dev/v1" if broken => return py_http::send_error(request, 503, None),
                 "/apis/fixture.hamn.dev/v1" => resources("fixture.hamn.dev/v1", "widgets", "Widget"),
                 "/apis/metrics.k8s.io/v1beta1" => resources("metrics.k8s.io/v1beta1", "pods", "PodMetrics"),
                 "/apis/fixture.hamn.dev/v1/namespaces/test/widgets" => {
@@ -269,7 +318,7 @@ fn kinds_api(requests: Arc<Mutex<Vec<String>>>) -> Server {
 fn the_installed_kubectl_lists_the_kinds_that_complete(kubectl: &Path) {
     let requests: Arc<Mutex<Vec<String>>> = Arc::default();
     // Declared before the harness so that it stops after Hamn does.
-    let server = kinds_api(Arc::clone(&requests));
+    let server = kinds_api(Arc::clone(&requests), false);
     let mut harness = Harness::new("kubernetes");
     harness.until("old-target-row");
     let config = harness.root.join("kubeconfig");
@@ -295,6 +344,31 @@ fn the_installed_kubectl_lists_the_kinds_that_complete(kubectl: &Path) {
     drop(server);
 }
 
+fn the_installed_kubectl_lists_what_it_can_when_an_api_group_fails(kubectl: &Path) {
+    let requests: Arc<Mutex<Vec<String>>> = Arc::default();
+    // Declared before the harness so that it stops after Hamn does.
+    let server = kinds_api(Arc::clone(&requests), true);
+    let mut harness = Harness::new("kubernetes");
+    harness.until("old-target-row");
+    let config = harness.root.join("kubeconfig");
+    let mut content: Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+    content["clusters"][0]["cluster"]["server"] = json!(server.url("http"));
+    fs::write(&config, content.to_string()).unwrap();
+    real_cli::wrap(&harness.root, "kubectl", kubectl, "exec-real");
+    // kubectl exits 1 after it printed the kinds of the groups that
+    // answered: those complete, and the border names the group that did not.
+    harness.send(b":get wid", ":get widgets");
+    harness.until("! get completes only the kinds kubectl listed: These API groups could not be listed: broken.fixture.hamn.dev/v1");
+    harness.write(b"\x1b");
+    harness.wait(|harness| !harness.text().contains(" Command "));
+    harness.send(b"!", "Kinds lookup failed (cliError); get completes only the kinds kubectl listed");
+    assert!(harness.text().contains("unable to retrieve the complete list of server APIs"), "{}", harness.text());
+    let requests = requests.lock().unwrap().clone();
+    assert!(requests.iter().any(|target| target.starts_with("/apis/broken.fixture.hamn.dev/v1")), "{requests:?}");
+    drop(harness);
+    drop(server);
+}
+
 /// The kubectl peer of the kinds cases: every call but a kinds lookup goes
 /// to the recorded native peer. A lookup is recorded, then follows
 /// `$FIXTURE_ROOT/kinds-mode`:
@@ -302,6 +376,9 @@ fn the_installed_kubectl_lists_the_kinds_that_complete(kubectl: &Path) {
 ///   the gate byte and fails with `LOOKUP_ERROR`; later ones answer.
 /// - `old-blocks`: a lookup of `old-cluster` writes its PID to `kinds-pid`,
 ///   tells the test and blocks until it is killed; others answer.
+/// - `partial`: the first lookup prints `CLUSTER_KINDS` and fails with
+///   `PARTIAL_ERROR`, as kubectl does when one API group does not answer;
+///   later ones answer.
 pub fn kinds_peer(program: &str, args: &[String]) -> ExitCode {
     if !tui::is_kinds_lookup(args) {
         return super::tui_native_regressions::fixture(program, args);
@@ -329,7 +406,12 @@ pub fn kinds_peer(program: &str, args: &[String]) -> ExitCode {
                 std::thread::park();
             }
         }
-        "fail-first" | "old-blocks" => tui::answer_kinds_lookup(args).expect("a kinds lookup"),
+        "partial" if lookups == 1 => {
+            print!("{}", tui::CLUSTER_KINDS);
+            eprintln!("{PARTIAL_ERROR}");
+            ExitCode::from(1)
+        }
+        "fail-first" | "old-blocks" | "partial" => tui::answer_kinds_lookup(args).expect("a kinds lookup"),
         mode => panic!("unknown kinds mode {mode:?}"),
     }
 }

@@ -7,18 +7,25 @@
 //! - `ClusterKinds` is the lookup state of one `State`. It holds no process
 //!   and reads no clock. `tui.rs` starts a lookup when the `:` prompt opens
 //!   in Kubernetes and `wanted` says so, runs `lookup` in a task, and hands
-//!   its result to `finish` with the ticket that `begin` returned. At most
+//!   its `Listing` to `finish` with the ticket that `begin` returned. At most
 //!   one lookup runs at a time; a keystroke never waits for one.
 //! - A lookup belongs to one `Target`. Its kinds are offered only while the
 //!   state's kubeconfig and context are still that target. `retarget` drops
 //!   a running lookup for another target, and a result whose ticket is not
 //!   the running lookup's is discarded.
-//! - A lookup that fails offers nothing beyond the built-in kinds. `reason`
-//!   says why in one line, which the border of the prompt shows; the whole
-//!   `failure`, kubectl's stderr included, is kept for the diagnostics view
-//!   (`!`). Neither is the message under the view, which belongs to what the
-//!   user ran. The next prompt retries the lookup, and the failure stays
-//!   shown while the retry runs.
+//! - A `Listing` holds the words a lookup found and, when it failed, why.
+//!   kubectl exits unsuccessfully on a partial discovery (an aggregated API
+//!   such as `metrics.k8s.io` that does not answer) after it printed the
+//!   names of the other groups: those names are offered, and the failure is
+//!   reported as well. A lookup that found no names offers nothing beyond
+//!   the built-in kinds.
+//! - `reason` says why a lookup failed in one line, which the border of the
+//!   prompt shows after `consequence`; the whole `failure`, kubectl's stderr
+//!   included, is kept for the diagnostics view (`!`). Neither is the message
+//!   under the view, which belongs to what the user ran.
+//! - The next prompt retries a lookup that failed, wholly or partly. The
+//!   last listing stays offered and shown while the retry runs, and the
+//!   retry's listing replaces it, whatever it found.
 //! - `lookup` runs kubectl as an owned `QueryProcess`, bounded by
 //!   `deadline`: when the deadline passes, or the future is dropped because
 //!   the target changed or the TUI quits, the process group is killed and
@@ -26,12 +33,14 @@
 //!   Its failures are `cliUnavailable` (kubectl did not start), `cliError`
 //!   (it exited unsuccessfully, reported as `native::query` reports one),
 //!   `cliOutput` (its output could not be read or was too long),
-//!   `queryTimeout` and `cliProtocol` (`words` refused the output).
+//!   `queryTimeout` and `cliProtocol` (`words` refused the output of a
+//!   successful exit).
 //! - `words` turns the output into the words that `get` completes.
 
 use crate::model::{Failure, Request, Result};
 use crate::query_process::QueryProcess;
 use std::collections::{BTreeMap, BTreeSet};
+use std::process::ExitStatus;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -57,18 +66,42 @@ impl Target {
     }
 }
 
+/// What a lookup found: the words that `get` completes, and why the list
+/// may lack kinds. A complete listing has no failure, a failed one no
+/// words, and a partial discovery both.
+#[derive(Debug, Default)]
+pub struct Listing {
+    pub words: Vec<String>,
+    pub failure: Option<Failure>,
+}
+
+impl Listing {
+    pub fn complete(words: Vec<String>) -> Self {
+        Self {
+            words,
+            failure: None,
+        }
+    }
+
+    pub fn failed(failure: Failure) -> Self {
+        Self {
+            words: Vec::new(),
+            failure: Some(failure),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 enum Status {
     #[default]
     Idle,
-    /// `failed` is why the previous lookup of the same target failed, still
-    /// shown while this one retries it.
+    /// `previous` is the last listing of the same target, which failed and
+    /// stays offered and shown while this lookup retries it.
     Running {
         ticket: u64,
-        failed: Option<Failure>,
+        previous: Option<Listing>,
     },
-    Ready(Vec<String>),
-    Failed(Failure),
+    Finished(Listing),
 }
 
 #[derive(Debug, Default)]
@@ -82,45 +115,43 @@ pub struct ClusterKinds {
 
 impl ClusterKinds {
     /// Whether opening the prompt for `target` starts a lookup: none has
-    /// run for it, or the last one failed. A running lookup is waited for
-    /// and the kinds of a finished one are kept.
+    /// run for it, or the last one failed, wholly or partly. A running
+    /// lookup is waited for, and a complete listing is kept.
     pub fn wanted(&self, target: &Target) -> bool {
         self.target.as_ref() != Some(target)
-            || matches!(self.status, Status::Idle | Status::Failed(_))
+            || match &self.status {
+                Status::Idle => true,
+                Status::Running { .. } => false,
+                Status::Finished(listing) => listing.failure.is_some(),
+            }
     }
 
     /// Records that a lookup of `target` starts, in place of anything known
     /// before, and returns its ticket for `finish`.
     pub fn begin(&mut self, target: Target) -> u64 {
         let same = self.target.as_ref() == Some(&target);
-        let failed = match std::mem::take(&mut self.status) {
-            Status::Failed(failure)
-            | Status::Running {
-                failed: Some(failure),
-                ..
-            } if same => Some(failure),
+        let previous = match std::mem::take(&mut self.status) {
+            Status::Finished(listing) if same && listing.failure.is_some() => Some(listing),
+            Status::Running { previous, .. } if same => previous,
             _ => None,
         };
         self.tickets += 1;
         self.target = Some(target);
         self.status = Status::Running {
             ticket: self.tickets,
-            failed,
+            previous,
         };
         self.tickets
     }
 
-    /// Takes the result of the lookup with `ticket` and returns whether it
-    /// was the running lookup. The result of any other lookup is stale and
+    /// Takes the listing of the lookup with `ticket` and returns whether it
+    /// was the running lookup. The listing of any other lookup is stale and
     /// changes nothing.
-    pub fn finish(&mut self, ticket: u64, result: Result<Vec<String>>) -> bool {
+    pub fn finish(&mut self, ticket: u64, listing: Listing) -> bool {
         if !matches!(self.status, Status::Running { ticket: running, .. } if running == ticket) {
             return false;
         }
-        self.status = match result {
-            Ok(words) => Status::Ready(words),
-            Err(failure) => Status::Failed(failure),
-        };
+        self.status = Status::Finished(listing);
         true
     }
 
@@ -134,28 +165,40 @@ impl ClusterKinds {
         matches!(std::mem::take(&mut self.status), Status::Running { .. })
     }
 
-    /// The words, beyond the built-in kinds, that `get` completes for
-    /// `target`: those of its last lookup, when that one succeeded.
-    pub fn offered(&self, target: &Target) -> &[String] {
-        match &self.status {
-            Status::Ready(words) if self.target.as_ref() == Some(target) => words,
-            _ => &[],
-        }
-    }
-
-    /// Why `get` completes only the built-in kinds for `target`, when the
-    /// reason is that its last lookup failed.
-    pub fn failure(&self, target: &Target) -> Option<&Failure> {
+    /// The last listing of `target`: the finished one, or while a retry
+    /// runs, the one it retries.
+    fn listing(&self, target: &Target) -> Option<&Listing> {
         if self.target.as_ref() != Some(target) {
             return None;
         }
         match &self.status {
-            Status::Failed(failure)
+            Status::Finished(listing)
             | Status::Running {
-                failed: Some(failure),
+                previous: Some(listing),
                 ..
-            } => Some(failure),
+            } => Some(listing),
             _ => None,
+        }
+    }
+
+    /// The words, beyond the built-in kinds, that `get` completes for
+    /// `target`: those its last listing found.
+    pub fn offered(&self, target: &Target) -> &[String] {
+        self.listing(target).map_or(&[], |listing| &listing.words)
+    }
+
+    /// Why the last lookup of `target` failed, wholly or partly.
+    pub fn failure(&self, target: &Target) -> Option<&Failure> {
+        self.listing(target)?.failure.as_ref()
+    }
+
+    /// What a failed lookup of `target` leaves `get` to complete, as the
+    /// border of the prompt and the diagnostics view say it.
+    pub fn consequence(&self, target: &Target) -> &'static str {
+        if self.offered(target).is_empty() {
+            "get completes built-in kinds only"
+        } else {
+            "get completes only the kinds kubectl listed"
         }
     }
 }
@@ -173,8 +216,8 @@ pub fn reason(failure: &Failure) -> String {
 
 /// Runs `kubectl [--kubeconfig K] [--context C] api-resources -o name`
 /// for `target`; see the module contract.
-pub async fn lookup(target: &Target, deadline: Duration) -> Result<Vec<String>> {
-    words(&output(command(target), deadline).await?)
+pub async fn lookup(target: &Target, deadline: Duration) -> Listing {
+    listing(command(target), deadline).await
 }
 
 fn command(target: &Target) -> tokio::process::Command {
@@ -189,8 +232,41 @@ fn command(target: &Target) -> tokio::process::Command {
     command
 }
 
-/// The stdout of `command`, which must exit successfully before `deadline`.
-async fn output(command: tokio::process::Command, deadline: Duration) -> Result<Vec<u8>> {
+/// What `command` lists before `deadline`. After a successful exit, stdout
+/// must be a list of names. After an unsuccessful one, stdout that is a
+/// list of names is still offered, as kubectl's partial discovery prints
+/// one; stdout that is not is not offered, and the failure reported is the
+/// exit's, since kubectl's stderr says more than its stray output.
+async fn listing(command: tokio::process::Command, deadline: Duration) -> Listing {
+    let (status, stdout, stderr) = match output(command, deadline).await {
+        Ok(output) => output,
+        Err(failure) => return Listing::failed(failure),
+    };
+    let words = words(&stdout);
+    if status.success() {
+        return match words {
+            Ok(words) => Listing::complete(words),
+            Err(failure) => Listing::failed(failure),
+        };
+    }
+    Listing {
+        words: words.unwrap_or_default(),
+        failure: Some(Failure::new(
+            "cliError",
+            format!(
+                "kubectl exited {status}: {}",
+                String::from_utf8_lossy(&stderr)
+            ),
+        )),
+    }
+}
+
+/// The exit status, stdout and stderr of `command`, which must exit before
+/// `deadline`.
+async fn output(
+    command: tokio::process::Command,
+    deadline: Duration,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>)> {
     async fn read(stream: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
         let mut bytes = Vec::new();
         stream
@@ -210,17 +286,8 @@ async fn output(command: tokio::process::Command, deadline: Duration) -> Result<
         // the deadline drops this future, kills its group and reaps it.
         let (mut process, stdout, stderr) = QueryProcess::spawn(command)
             .map_err(|error| Failure::new("cliUnavailable", format!("kubectl: {error}")))?;
-        let (status, out, err) = tokio::try_join!(process.wait(), read(stdout), read(stderr))
-            .map_err(|error| {
-                Failure::new("cliOutput", format!("kubectl api-resources: {error}"))
-            })?;
-        if !status.success() {
-            return Err(Failure::new(
-                "cliError",
-                format!("kubectl exited {status}: {}", String::from_utf8_lossy(&err)),
-            ));
-        }
-        Ok(out)
+        tokio::try_join!(process.wait(), read(stdout), read(stderr))
+            .map_err(|error| Failure::new("cliOutput", format!("kubectl api-resources: {error}")))
     };
     tokio::time::timeout(deadline, run)
         .await
@@ -557,17 +624,17 @@ mod tests {
         assert!(kinds.retarget(&new));
         assert!(kinds.wanted(&new));
         // Its result arrives anyway, and changes nothing.
-        assert!(!kinds.finish(first, Ok(strings(&["certificates"]))));
+        assert!(!kinds.finish(first, Listing::complete(strings(&["certificates"]))));
         assert!(kinds.offered(&old).is_empty() && kinds.offered(&new).is_empty());
         let second = kinds.begin(new.clone());
         assert_ne!(first, second);
-        assert!(!kinds.finish(first, Ok(strings(&["certificates"]))));
-        assert!(kinds.finish(second, Ok(strings(&["issuers"]))));
+        assert!(!kinds.finish(first, Listing::complete(strings(&["certificates"]))));
+        assert!(kinds.finish(second, Listing::complete(strings(&["issuers"]))));
         assert_eq!(kinds.offered(&new), strings(&["issuers"]));
         assert!(kinds.offered(&old).is_empty());
         // Finished kinds are kept; a second result for them is stale too.
         assert!(!kinds.wanted(&new));
-        assert!(!kinds.finish(second, Ok(strings(&["other"]))));
+        assert!(!kinds.finish(second, Listing::complete(strings(&["other"]))));
         assert!(!kinds.retarget(&new));
         assert_eq!(kinds.offered(&new), strings(&["issuers"]));
         // A different kubeconfig is a different target with the same name.
@@ -582,8 +649,8 @@ mod tests {
         // A lookup that `begin` replaces without `retarget` is stale as well.
         let replaced = kinds.begin(old.clone());
         let current = kinds.begin(new.clone());
-        assert!(!kinds.finish(replaced, Ok(strings(&["certificates"]))));
-        assert!(kinds.finish(current, Ok(strings(&["issuers"]))));
+        assert!(!kinds.finish(replaced, Listing::complete(strings(&["certificates"]))));
+        assert!(kinds.finish(current, Listing::complete(strings(&["issuers"]))));
         assert!(kinds.offered(&old).is_empty());
     }
 
@@ -596,7 +663,7 @@ mod tests {
             kinds.failure(target).map(|failure| failure.message.clone())
         };
         let reason = "kubectl exited exit status: 1: error: forbidden";
-        assert!(kinds.finish(ticket, Err(Failure::new("cliError", reason))));
+        assert!(kinds.finish(ticket, Listing::failed(Failure::new("cliError", reason))));
         assert_eq!(message(&kinds, &cluster).as_deref(), Some(reason));
         assert!(kinds.offered(&cluster).is_empty());
         assert_eq!(message(&kinds, &other), None);
@@ -605,12 +672,15 @@ mod tests {
         let retry = kinds.begin(cluster.clone());
         assert!(!kinds.wanted(&cluster));
         assert_eq!(message(&kinds, &cluster).as_deref(), Some(reason));
-        assert!(kinds.finish(retry, Ok(strings(&["certificates"]))));
+        assert!(kinds.finish(retry, Listing::complete(strings(&["certificates"]))));
         assert_eq!(message(&kinds, &cluster), None);
         assert_eq!(kinds.offered(&cluster), strings(&["certificates"]));
         // A failure is not carried over to another target.
         let failed = kinds.begin(cluster.clone());
-        assert!(kinds.finish(failed, Err(Failure::new("queryTimeout", "slow"))));
+        assert!(kinds.finish(
+            failed,
+            Listing::failed(Failure::new("queryTimeout", "slow"))
+        ));
         kinds.begin(other.clone());
         assert_eq!(
             (message(&kinds, &cluster), message(&kinds, &other)),
@@ -618,10 +688,88 @@ mod tests {
         );
         // Nor kept after the target changes and comes back.
         let failed = kinds.begin(cluster.clone());
-        assert!(kinds.finish(failed, Err(Failure::new("queryTimeout", "slow"))));
+        assert!(kinds.finish(
+            failed,
+            Listing::failed(Failure::new("queryTimeout", "slow"))
+        ));
         assert!(!kinds.retarget(&other));
         assert!(!kinds.retarget(&cluster));
         assert_eq!(message(&kinds, &cluster), None);
+    }
+
+    #[test]
+    fn a_partial_listing_is_offered_reported_and_retried() {
+        let (cluster, other) = (target("old-cluster"), target("new-cluster"));
+        let mut kinds = ClusterKinds::default();
+        let partly = "kubectl exited exit status: 1: error: unable to retrieve the complete list of server APIs: metrics.k8s.io/v1beta1: the server is currently unable to handle the request";
+        let ticket = kinds.begin(cluster.clone());
+        assert!(kinds.finish(
+            ticket,
+            Listing {
+                words: strings(&["certificates"]),
+                failure: Some(Failure::new("cliError", partly)),
+            }
+        ));
+        // What kubectl listed is offered, and why the list may lack kinds is
+        // reported with it.
+        assert_eq!(kinds.offered(&cluster), strings(&["certificates"]));
+        assert_eq!(
+            kinds
+                .failure(&cluster)
+                .map(|failure| failure.message.as_str()),
+            Some(partly)
+        );
+        assert_eq!(
+            kinds.consequence(&cluster),
+            "get completes only the kinds kubectl listed"
+        );
+        // The next prompt retries it; meanwhile both stay.
+        assert!(kinds.wanted(&cluster));
+        let retry = kinds.begin(cluster.clone());
+        assert!(!kinds.wanted(&cluster));
+        assert_eq!(kinds.offered(&cluster), strings(&["certificates"]));
+        assert_eq!(
+            kinds
+                .failure(&cluster)
+                .map(|failure| failure.message.as_str()),
+            Some(partly)
+        );
+        // The retry's listing replaces it, even one that found nothing.
+        let refused = "kubectl exited exit status: 1: The connection to the server 127.0.0.1:6443 was refused";
+        assert!(kinds.finish(retry, Listing::failed(Failure::new("cliError", refused))));
+        assert!(kinds.offered(&cluster).is_empty());
+        assert_eq!(
+            kinds
+                .failure(&cluster)
+                .map(|failure| failure.message.as_str()),
+            Some(refused)
+        );
+        assert_eq!(
+            kinds.consequence(&cluster),
+            "get completes built-in kinds only"
+        );
+        // A complete listing clears the failure and is kept.
+        let again = kinds.begin(cluster.clone());
+        assert!(kinds.finish(
+            again,
+            Listing::complete(strings(&["certificates", "issuers"]))
+        ));
+        assert!(kinds.failure(&cluster).is_none() && !kinds.wanted(&cluster));
+        assert_eq!(
+            kinds.offered(&cluster),
+            strings(&["certificates", "issuers"])
+        );
+        // A partial listing of another target is nothing to this one.
+        let partial = kinds.begin(other.clone());
+        assert!(kinds.finish(
+            partial,
+            Listing {
+                words: strings(&["widgets"]),
+                failure: Some(Failure::new("cliError", partly)),
+            }
+        ));
+        assert!(kinds.offered(&cluster).is_empty() && kinds.failure(&cluster).is_none());
+        assert!(kinds.wanted(&cluster));
     }
 
     #[test]
@@ -652,6 +800,13 @@ mod tests {
                     "Error from server (Forbidden): the server does not allow this method on the requested resource\n",
                 ),
                 "The server does not allow this method on the requested resource",
+            ),
+            // A partial discovery names the groups it could not list.
+            (
+                exited(
+                    "error: unable to retrieve the complete list of server APIs: metrics.k8s.io/v1beta1: the server is currently unable to handle the request\n",
+                ),
+                "These API groups could not be listed: metrics.k8s.io/v1beta1: the server is currently unable to handle the request",
             ),
             (
                 exited(""),
@@ -714,9 +869,10 @@ mod tests {
         );
     }
 
-    /// `names`, `fail`, `flood`, or `hang LEADER MEMBER`, which writes the
-    /// PIDs of itself and of a child in its process group to those files
-    /// and waits for a signal in both.
+    /// `names`, `garbage` (not only names, exit 0), `fail` (names, then
+    /// exit 1 with an error), `garbage-fail`, `empty-fail`, `flood`, or
+    /// `hang LEADER MEMBER`, which writes the PIDs of itself and of a child in
+    /// its process group to those files and waits for a signal in both.
     const PEER_SOURCE: &str = r#"
 #include <signal.h>
 #include <stdio.h>
@@ -737,8 +893,14 @@ int main(int argc, char **argv) {
         fputs("pods\ncertificates.cert-manager.io\n", stdout);
         return 0;
     }
-    if (argc == 2 && strcmp(argv[1], "fail") == 0) {
-        fputs("pods\n", stdout);
+    if (argc == 2 && strcmp(argv[1], "garbage") == 0) {
+        fputs("NAME\npods\n", stdout);
+        return 0;
+    }
+    if (argc == 2 && (strcmp(argv[1], "fail") == 0 || strcmp(argv[1], "garbage-fail") == 0
+                      || strcmp(argv[1], "empty-fail") == 0)) {
+        if (strcmp(argv[1], "fail") == 0) fputs("pods\n", stdout);
+        if (strcmp(argv[1], "garbage-fail") == 0) fputs("NAME\npods\n", stdout);
         fputs("\n  error: unable to retrieve the complete list of server APIs  \nmore\n", stderr);
         return 1;
     }
@@ -773,42 +935,58 @@ int main(int argc, char **argv) {
     }
 
     #[tokio::test]
-    async fn a_successful_lookup_gives_words_and_a_failed_one_keeps_kubectls_stderr() {
+    async fn a_lookup_offers_the_names_kubectl_listed_even_when_it_failed() {
         let fixture = peer("results");
-        let names = output(
-            peer_command(&fixture, &["names".as_ref()]),
-            Duration::from_secs(20),
-        )
-        .await;
-        assert_eq!(
-            words(&names.unwrap()).unwrap(),
-            strings(&["pods", "certificates"])
-        );
-        // A nonzero exit fails even with names on stdout: kubectl reports a
-        // partial discovery that way, and its list is not the whole one.
-        let failure = output(
-            peer_command(&fixture, &["fail".as_ref()]),
-            Duration::from_secs(20),
-        )
-        .await
-        .unwrap_err();
-        // The whole stderr is kept, in the form `native::query` reports an
-        // exit, and the border shows its first meaningful line.
+        let run = |mode: &str| {
+            listing(
+                peer_command(&fixture, &[mode.as_ref()]),
+                Duration::from_secs(20),
+            )
+        };
+        let complete = run("names").await;
+        assert_eq!(complete.words, strings(&["pods", "certificates"]));
+        assert!(complete.failure.is_none(), "{complete:?}");
+        // A partial discovery: names on stdout and exit 1. The names are
+        // offered, and the failure is kept whole, in the form
+        // `native::query` reports an exit; the border shows its first
+        // meaningful line.
+        let stderr = "\n  error: unable to retrieve the complete list of server APIs  \nmore\n";
+        let partial = run("fail").await;
+        assert_eq!(partial.words, strings(&["pods"]));
+        let failure = partial.failure.as_ref().unwrap();
         assert_eq!(failure.code, "cliError");
         assert_eq!(
             failure.message,
-            "kubectl exited exit status: 1: \n  error: unable to retrieve the complete list of server APIs  \nmore\n"
+            format!("kubectl exited exit status: 1: {stderr}")
         );
         assert_eq!(
-            reason(&failure),
+            reason(failure),
             "kubectl: unable to retrieve the complete list of server APIs"
         );
-        let missing = output(
+        // Stdout that is not a list of names is not offered after exit 1,
+        // and neither is empty stdout; the failure is the exit's either way.
+        for mode in ["garbage-fail", "empty-fail"] {
+            let failed = run(mode).await;
+            assert!(failed.words.is_empty(), "{mode}: {failed:?}");
+            let failure = failed.failure.as_ref().unwrap();
+            assert_eq!(failure.code, "cliError", "{mode}");
+            assert_eq!(
+                failure.message,
+                format!("kubectl exited exit status: 1: {stderr}"),
+                "{mode}"
+            );
+        }
+        // After exit 0, stdout that is not a list of names is refused.
+        let refused = run("garbage").await;
+        assert!(refused.words.is_empty(), "{refused:?}");
+        assert_eq!(refused.failure.as_ref().unwrap().code, "cliProtocol");
+        let missing = listing(
             tokio::process::Command::new(fixture.program().with_file_name("missing")),
             Duration::from_secs(20),
         )
-        .await
-        .unwrap_err();
+        .await;
+        assert!(missing.words.is_empty());
+        let missing = missing.failure.unwrap();
         assert_eq!(missing.code, "cliUnavailable");
         assert_eq!(reason(&missing), "kubectl is not installed or not on PATH");
         assert!(
@@ -822,12 +1000,13 @@ int main(int argc, char **argv) {
     async fn output_past_the_limit_fails_without_waiting_for_the_deadline() {
         let fixture = peer("flood");
         let started = std::time::Instant::now();
-        let failure = output(
+        let flooded = listing(
             peer_command(&fixture, &["flood".as_ref()]),
             Duration::from_secs(60),
         )
-        .await
-        .unwrap_err();
+        .await;
+        assert!(flooded.words.is_empty(), "{flooded:?}");
+        let failure = flooded.failure.unwrap();
         assert_eq!(failure.code, "cliOutput");
         assert_eq!(
             failure.message,
@@ -859,7 +1038,7 @@ int main(int argc, char **argv) {
                 member_file.as_os_str(),
             ],
         );
-        let lookup = tokio::spawn(output(command, Duration::from_secs(3)));
+        let lookup = tokio::spawn(listing(command, Duration::from_secs(3)));
         let read = |path: &std::path::Path| -> Option<libc::pid_t> {
             std::fs::read_to_string(path).ok()?.trim().parse().ok()
         };
@@ -875,7 +1054,9 @@ int main(int argc, char **argv) {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert!(!gone(leader) && !gone(member));
-        let failure = lookup.await.unwrap().unwrap_err();
+        let stopped = lookup.await.unwrap();
+        assert!(stopped.words.is_empty(), "{stopped:?}");
+        let failure = stopped.failure.unwrap();
         assert!(
             started.elapsed() >= Duration::from_secs(2),
             "{:?}",

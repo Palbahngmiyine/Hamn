@@ -228,7 +228,7 @@ impl Job {
 /// lookup's future, which kills and reaps its kubectl.
 struct KindsLookup {
     task: Option<tokio::task::JoinHandle<()>>,
-    sender: mpsc::Sender<(u64, Result<Vec<String>>)>,
+    sender: mpsc::Sender<(u64, crate::cluster_kinds::Listing)>,
 }
 
 impl KindsLookup {
