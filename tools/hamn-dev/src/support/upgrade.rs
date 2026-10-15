@@ -292,9 +292,13 @@ impl Group {
         pty::kill_group(self.id(), signal);
     }
 
-    /// Reads all output and waits within `timeout` (`communicate`).
+    /// Reads all output and waits within `timeout` (`communicate`). A leader
+    /// still running then is killed with its whole group (SIGKILL), as when
+    /// a running `Group` is dropped, and reaped.
     pub fn finish(mut self, timeout: Duration) -> Output {
-        real_cli::communicate(self.0.take().expect("child"), timeout)
+        real_cli::communicate_killing(self.0.take().expect("child"), timeout, |child| {
+            pty::kill_group(child.id(), libc::SIGKILL)
+        })
     }
 }
 
@@ -436,5 +440,44 @@ impl Releases {
     /// The pending update journal of this HOME.
     pub fn journal(&self) -> PathBuf {
         self.home.join(".hamn/cache/.hamn-update-transaction")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::support::real_cli::tests::{GroupCleanup, panic_message};
+    use crate::support::tmp::TempDir;
+
+    #[test]
+    fn a_timed_out_group_ends_with_its_descendants() {
+        let directory = TempDir::new("hamn-group-");
+        let marker = directory.path().join("descendant");
+        // The descendant shares the leader's group and holds its pipes, as a
+        // frontend's worker does.
+        let script = "sleep 30 & echo $! > \"$1.new\" && mv \"$1.new\" \"$1\"; exec sleep 30";
+        let group = Group::spawn(Command::new("/bin/sh").args(["-c", script, "sh"]).arg(&marker));
+        // A failed check below must not leave the descendant running.
+        let _cleanup = GroupCleanup::join(group.id());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() {
+            assert!(Instant::now() < deadline, "the descendant was not started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let descendant: libc::pid_t = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        let message = panic_message(|| {
+            group.finish(Duration::from_millis(100));
+        });
+        // Its pipes closed with it: both streams ended within the drain.
+        assert!(message.contains("--- stdout: last 0 of 0 bytes, ended ---\n"), "{message}");
+        assert!(message.contains("--- stderr: last 0 of 0 bytes, ended ---\n"), "{message}");
+        // The orphaned descendant is reaped by launchd once it was killed.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // SAFETY: kill with signal 0 only checks for the process.
+        while unsafe { libc::kill(descendant, 0) } == 0 {
+            assert!(Instant::now() < deadline, "descendant {descendant} outlived its timed-out group");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
     }
 }
