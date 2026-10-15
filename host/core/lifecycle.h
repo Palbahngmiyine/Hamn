@@ -73,12 +73,11 @@ int vm_process_abort_spawned(struct vm_spawned_process *spawned,
                              int timeout_dsec);
 
 /* 검증된 vmrun 프로세스이면 pid, 아니면 -1.
- * vm_process_probe() gives each send and each receive of the status query on
- * the control socket 300 ms; this gives them timeout_ms (at least 1), so a
- * caller can keep the check inside a deadline of its own. A supervisor that
- * closes the query's connections unanswered can still make it retry past
- * that (ctlsock.h). */
-int vm_running_pid(const struct profile *p, int timeout_ms);
+ * vm_process_probe()'s status query on the control socket waits 300 ms for
+ * each send and each receive of each connection it opens; this one's ends
+ * within budget_ms (at least 1) in all (ctlsock_query_status_within()), so a
+ * caller can keep the check inside a deadline of its own. */
+int vm_running_pid(const struct profile *p, int budget_ms);
 
 /* 살아 있는 hamn vmrun이 없을 때만 stale host artifacts를 정리한다. */
 int vm_cleanup_stale(const struct profile *p);
