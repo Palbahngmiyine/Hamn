@@ -3,10 +3,12 @@
  * budget that is left, the guest image check has its own bound, the client
  * of a guest writer, of the cloud-init wait and of a provisioning hook is
  * reaped once the guest's own limit for that command has passed, the vmrun
- * wait ends at its deadline when vmrun's control socket never answers, and
- * the vmrun and DHCP lease waits end when the operation is cancelled. Each
- * case runs in a child that this test kills when it outlives its limit, so a
- * wait without a deadline fails its case instead of hanging the test.
+ * wait returns once vmrun is verified and ends at its deadline when vmrun's
+ * control socket never answers or stops answering right after it reports
+ * running, and the vmrun and DHCP lease waits end when the operation is
+ * cancelled. Each case runs in a child that this test kills when it outlives
+ * its limit, so a wait without a deadline fails its case instead of hanging
+ * the test.
  *
  * `ssh` is this test executable, first in PATH. It answers control requests
  * (-O) with success, links a forwarded Docker socket to a fake Docker API,
@@ -25,7 +27,9 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +47,7 @@
 #include "core/provision.h"
 #include "core/remote_mutation.h"
 #include "util/dhcp_leases.h"
+#include "util/fs.h"
 #include "util/proc.h"
 
 /* Test-only seam from host/cmd/cmd_start.c. */
@@ -680,6 +685,231 @@ static void silent_vmrun_socket_ends_the_wait_at_its_deadline(void)
     assert(saved == ETIMEDOUT && !proc_cancelled());
 }
 
+/* A fake vmrun on the profile's control socket. It reports running with its
+ * own pid and start token, as vmrun does: at once on every connection
+ * (VMRUN_RUNNING), or only on the second one, RUNNING_LATE_MS after it
+ * accepted the first or at once if that time has passed, holding every other
+ * connection open unanswered (VMRUN_RUNNING_LATE). It writes 'R' to its
+ * events for each reply it has sent and 'H' for each connection it holds,
+ * and exits when the case closes life. */
+enum vmrun_mode { VMRUN_RUNNING, VMRUN_RUNNING_LATE };
+
+/* A 1-second wait queries at once and, after that query's 300 ms and a sleep
+ * of 500 ms, again about 800 ms in, until its deadline at 1000 ms. */
+#define RUNNING_LATE_MS 940
+/* Verifying the process after "running" with a query of its own 300 ms ends
+ * the wait at least 1240 ms in; one that gets what is left ends it at 1000. */
+#define RUNNING_LATE_SLACK_MS 200
+
+struct vmrun_fake {
+    pid_t pid;
+    int life;   /* the case's end; closing it ends the fake */
+    int events; /* the read end of the fake's events */
+};
+
+static void vmrun_fake_serve(enum vmrun_mode mode, int listener, int life,
+                             int events)
+{
+    signal(SIGPIPE, SIG_IGN);
+    uint64_t sec = 0, usec = 0;
+    if (proc_start_identity(getpid(), &sec, &usec) != 0)
+        _exit(1);
+    char reply[128];
+    int length = snprintf(reply, sizeof(reply),
+                          "{\"state\":\"running\",\"pid\":%d,\"start_sec\":%"
+                          PRIu64 ",\"start_usec\":%" PRIu64 "}\n",
+                          (int)getpid(), sec, usec);
+    if (length <= 0 || (size_t)length >= sizeof(reply))
+        _exit(1);
+    int accepted = 0, pending = -1;
+    long long reply_at = 0;
+    for (;;) {
+        int timeout = -1;
+        if (pending >= 0) {
+            long long left = reply_at - now_ms();
+            timeout = left > 0 ? (int)left : 0;
+        }
+        struct pollfd fds[2] = {
+            { .fd = listener, .events = POLLIN },
+            { .fd = life, .events = POLLIN },
+        };
+        if (poll(fds, 2, timeout) < 0) {
+            if (errno == EINTR)
+                continue;
+            _exit(1);
+        }
+        if (fds[1].revents)
+            _exit(0);
+        if (pending >= 0 && now_ms() >= reply_at) {
+            if (proc_write_all(pending, reply, (size_t)length) == 0 &&
+                write(events, "R", 1) != 1)
+                _exit(1);
+            pending = -1; /* held open and never answered again */
+        }
+        if (!(fds[0].revents & POLLIN))
+            continue;
+        int connection = accept(listener, NULL, NULL);
+        if (connection < 0) {
+            if (errno == EINTR || errno == ECONNABORTED)
+                continue;
+            _exit(1);
+        }
+        accepted++;
+        if (mode == VMRUN_RUNNING) {
+            /* Read the request first: closing before it arrived would make
+             * the client retry as with an old vmrun (ctlsock.h). */
+            char request[512];
+            if (read(connection, request, sizeof(request)) <= 0 ||
+                proc_write_all(connection, reply, (size_t)length) != 0 ||
+                write(events, "R", 1) != 1)
+                _exit(1);
+            close(connection);
+            continue;
+        }
+        if (accepted == 1)
+            reply_at = now_ms() + RUNNING_LATE_MS;
+        if (accepted == 2)
+            pending = connection;
+        else if (write(events, "H", 1) != 1)
+            _exit(1);
+    }
+}
+
+static void vmrun_fake_start(const char *path, enum vmrun_mode mode,
+                             struct vmrun_fake *vmrun)
+{
+    (void)unlink(path);
+    struct sockaddr_un address = { .sun_family = AF_UNIX };
+    assert(strlen(path) < sizeof(address.sun_path));
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    assert(bind(listener, (struct sockaddr *)&address, sizeof(address)) == 0);
+    assert(listen(listener, 16) == 0);
+    int life[2], events[2];
+    assert(pipe(life) == 0 && pipe(events) == 0);
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (pid == 0) {
+        close(life[1]);
+        close(events[0]);
+        vmrun_fake_serve(mode, listener, life[0], events[1]);
+    }
+    close(listener);
+    close(life[0]);
+    close(events[1]);
+    vmrun->pid = pid;
+    vmrun->life = life[1];
+    vmrun->events = events[0];
+}
+
+/* Records the fake as the profile's vmrun, as vmrun itself does. */
+static void vmrun_fake_record(const struct vmrun_fake *vmrun)
+{
+    uint64_t sec = 0, usec = 0;
+    unsigned char uuid[16];
+    assert(proc_start_identity(vmrun->pid, &sec, &usec) == 0);
+    assert(proc_executable_identity(vmrun->pid, uuid) == 0);
+    char hex[33], text[160], path[PATH_MAX];
+    proc_executable_uuid_format(uuid, hex);
+    int length = snprintf(text, sizeof(text), "%d %" PRIu64 " %" PRIu64
+                          " %s\n", (int)vmrun->pid, sec, usec, hex);
+    assert(length > 0 && (size_t)length < sizeof(text));
+    assert(profile_path(&fixture.profile, "vmrun.identity", path,
+                        sizeof(path)));
+    assert(fs_write_file_atomic(path, text, (size_t)length, 0600) == 0);
+    length = snprintf(text, sizeof(text), "%d\n", (int)vmrun->pid);
+    assert(profile_path(&fixture.profile, "vmrun.pid", path, sizeof(path)));
+    assert(fs_write_file_atomic(path, text, (size_t)length, 0600) == 0);
+}
+
+/* What the fake did: its first expected events, waiting at most 2 s for
+ * them, then any others until it has exited. */
+static void vmrun_fake_stop(struct vmrun_fake *vmrun, size_t expected,
+                            char *seen, size_t capacity)
+{
+    assert(expected < capacity);
+    size_t length = 0;
+    long long deadline = now_ms() + 2000;
+    while (length < expected) {
+        long long left = deadline - now_ms();
+        struct pollfd fd = { .fd = vmrun->events, .events = POLLIN };
+        int ready = poll(&fd, 1, left > 0 ? (int)left : 0);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready <= 0)
+            break;
+        ssize_t n = read(vmrun->events, seen + length, expected - length);
+        if (n <= 0)
+            break;
+        length += (size_t)n;
+    }
+    close(vmrun->life);
+    while (waitpid(vmrun->pid, NULL, 0) < 0 && errno == EINTR) {}
+    for (ssize_t n; length < capacity - 1 &&
+         (n = read(vmrun->events, seen + length,
+                   capacity - 1 - length)) > 0;)
+        length += (size_t)n;
+    seen[length] = '\0';
+    close(vmrun->events);
+}
+
+static void remove_profile_file(const char *name)
+{
+    char path[PATH_MAX];
+    assert(profile_path(&fixture.profile, name, path, sizeof(path)));
+    assert(unlink(path) == 0 || errno == ENOENT);
+}
+
+/* A vmrun that reports running and is the profile's recorded vmrun: the
+ * wait verifies its process and returns at once. */
+static void verified_vmrun_ends_the_wait_at_once(void)
+{
+    char ctl[PATH_MAX];
+    assert(profile_path(&fixture.profile, "vmrun.sock", ctl, sizeof(ctl)));
+    struct vmrun_fake vmrun;
+    vmrun_fake_start(ctl, VMRUN_RUNNING, &vmrun);
+    vmrun_fake_record(&vmrun);
+    long long started = now_ms();
+    int rc = hamn_test_start_wait_vmrun_running(&fixture.profile, ctl, 2);
+    long long elapsed = now_ms() - started;
+    char seen[16];
+    vmrun_fake_stop(&vmrun, 2, seen, sizeof(seen));
+    remove_profile_file("vmrun.sock");
+    remove_profile_file("vmrun.identity");
+    remove_profile_file("vmrun.pid");
+    printf("wait ended after %lld ms; vmrun events %s\n", elapsed, seen);
+    /* It answered the status query and the one that verifies it. */
+    assert(strcmp(seen, "RR") == 0);
+    assert(rc == 0 && elapsed < 1000);
+}
+
+/* A vmrun that reports running 60 ms before the wait's deadline and then
+ * stops answering. Verifying its process queries the control socket again;
+ * that query gets what is left of the wait, so the wait still ends at its
+ * deadline. */
+static void silent_vmrun_after_running_ends_the_wait_at_its_deadline(void)
+{
+    char ctl[PATH_MAX];
+    assert(profile_path(&fixture.profile, "vmrun.sock", ctl, sizeof(ctl)));
+    struct vmrun_fake vmrun;
+    vmrun_fake_start(ctl, VMRUN_RUNNING_LATE, &vmrun);
+    long long started = now_ms();
+    errno = 0;
+    int rc = hamn_test_start_wait_vmrun_running(&fixture.profile, ctl, 1);
+    int saved = errno;
+    long long elapsed = now_ms() - started;
+    char seen[16];
+    vmrun_fake_stop(&vmrun, 3, seen, sizeof(seen));
+    remove_profile_file("vmrun.sock");
+    printf("wait ended after %lld ms; vmrun events %s\n", elapsed, seen);
+    /* It held the first status query, reported running on the second, and
+     * held the one that verifies it. */
+    assert(strcmp(seen, "HRH") == 0);
+    assert(rc == -1 && saved == ETIMEDOUT && !proc_cancelled());
+    assert(elapsed >= 1000 && elapsed < 1000 + RUNNING_LATE_SLACK_MS);
+}
+
 /* ---- DHCP lease wait ------------------------------------------------- */
 
 static void cancelled_lease_wait_returns_at_once(void)
@@ -824,6 +1054,12 @@ int main(int argc, char **argv)
     run_case("silent_vmrun_socket_ends_the_wait_at_its_deadline",
              silent_vmrun_socket_ends_the_wait_at_its_deadline, API_SILENT,
              2000 + WATCHDOG_EXTRA_MS);
+    run_case("verified_vmrun_ends_the_wait_at_once",
+             verified_vmrun_ends_the_wait_at_once, API_ANSWERS,
+             2000 + WATCHDOG_EXTRA_MS);
+    run_case("silent_vmrun_after_running_ends_the_wait_at_its_deadline",
+             silent_vmrun_after_running_ends_the_wait_at_its_deadline,
+             API_ANSWERS, 1000 + WATCHDOG_EXTRA_MS);
     run_case("cancelled_lease_wait_returns_at_once",
              cancelled_lease_wait_returns_at_once, API_ANSWERS, 5000);
     run_case("cancellation_ends_the_lease_wait",
