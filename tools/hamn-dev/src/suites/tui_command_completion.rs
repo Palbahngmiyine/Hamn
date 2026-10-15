@@ -9,16 +9,19 @@
 //! left, or one still running when the TUI quits, is killed.
 use super::tui_native_regressions::record;
 use crate::runner::{self, Case, case};
-use crate::support::pty;
+use crate::support::http::{Options as HttpOptions, Server};
 use crate::support::tui::{self, Harness, Options, kinds_lookup};
+use crate::support::{kube_api, pty, py_http, real_cli};
+use serde_json::{Value, json};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 pub fn main(filters: &[String]) -> ExitCode {
-    let cases: Vec<Case> = vec![
+    let mut cases: Vec<Case> = vec![
         case("tab_takes_a_kubectl_alias_and_keeps_the_workspace", tab_takes_a_kubectl_alias_and_keeps_the_workspace),
         case("right_arrow_takes_a_docker_command", right_arrow_takes_a_docker_command),
         case("history_completes_before_the_known_commands", history_completes_before_the_known_commands),
@@ -30,6 +33,12 @@ pub fn main(filters: &[String]) -> ExitCode {
         case("a_lookup_for_a_context_the_ui_left_is_killed", a_lookup_for_a_context_the_ui_left_is_killed),
         case("quitting_kills_a_running_lookup", quitting_kills_a_running_lookup),
     ];
+    match real_cli::which("kubectl") {
+        Some(kubectl) => cases.push(case("the_installed_kubectl_lists_the_kinds_that_complete", move || {
+            the_installed_kubectl_lists_the_kinds_that_complete(&kubectl)
+        })),
+        None => println!("SKIP: installed kubectl unavailable for the_installed_kubectl_lists_the_kinds_that_complete"),
+    }
     runner::run(
         "tui-command-completion",
         "Tab and → complete : commands from history, known commands and the cluster's kinds; a slow or failed \
@@ -218,6 +227,68 @@ fn quitting_kills_a_running_lookup() {
     assert!(status.is_some_and(|status| status.success()), "{status:?}");
     // The TUI reaps its lookup before it exits.
     assert!(gone(pid), "the lookup {pid} outlived the TUI");
+}
+
+/// A fake API whose discovery serves pods in the core group, `widgets` in
+/// `fixture.hamn.dev` and pods again in `metrics.k8s.io`, and one widget.
+/// Every request target is recorded.
+fn kinds_api(requests: Arc<Mutex<Vec<String>>>) -> Server {
+    let group = |name: &str, version: &str| {
+        let version = json!({"groupVersion": format!("{name}/{version}"), "version": version});
+        json!({"name": name, "versions": [version], "preferredVersion": version})
+    };
+    let resources = |group_version: &str, plural: &str, kind: &str| {
+        json!({"apiVersion": "v1", "kind": "APIResourceList", "groupVersion": group_version, "resources": [
+            {"name": plural, "singularName": "", "namespaced": true, "kind": kind, "verbs": ["get", "list"]}]})
+    };
+    let widget = json!({"apiVersion": "fixture.hamn.dev/v1", "kind": "Widget", "metadata": {
+        "name": "listed-widget", "namespace": "test", "uid": "widget-uid", "resourceVersion": "1"}});
+    Server::tcp(HttpOptions::default(), move |request| {
+        py_http::dispatch(request, &["GET"], || {
+            requests.lock().unwrap().push(request.target.clone());
+            let path = request.target.split('?').next().unwrap_or_default();
+            let body = match path {
+                "/apis" => json!({"apiVersion": "v1", "kind": "APIGroupList", "groups": [
+                    group("fixture.hamn.dev", "v1"), group("metrics.k8s.io", "v1beta1")]}),
+                "/apis/fixture.hamn.dev/v1" => resources("fixture.hamn.dev/v1", "widgets", "Widget"),
+                "/apis/metrics.k8s.io/v1beta1" => resources("metrics.k8s.io/v1beta1", "pods", "PodMetrics"),
+                "/apis/fixture.hamn.dev/v1/namespaces/test/widgets" => {
+                    json!({"apiVersion": "fixture.hamn.dev/v1", "kind": "WidgetList", "items": [widget.clone()]})
+                }
+                _ => return kube_api::discovery(&request.target).into(),
+            };
+            kube_api::json_response(&body).into()
+        })
+    })
+}
+
+fn the_installed_kubectl_lists_the_kinds_that_complete(kubectl: &Path) {
+    let requests: Arc<Mutex<Vec<String>>> = Arc::default();
+    // Declared before the harness so that it stops after Hamn does.
+    let server = kinds_api(Arc::clone(&requests));
+    let mut harness = Harness::new("kubernetes");
+    harness.until("old-target-row");
+    let config = harness.root.join("kubeconfig");
+    let mut content: Value = serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+    content["clusters"][0]["cluster"]["server"] = json!(server.url("http"));
+    fs::write(&config, content.to_string()).unwrap();
+    real_cli::wrap(&harness.root, "kubectl", kubectl, "exec-real");
+    // What the installed kubectl printed for the fake API is what completes:
+    // the custom resource by its plural, and the plural that two groups
+    // serve with its group.
+    harness.send(b":get wid", ":get widgets");
+    harness.write(b"\x1b");
+    harness.wait(|harness| !harness.text().contains(" Command "));
+    harness.send(b":get pods.", ":get pods.metrics.k8s.io");
+    harness.write(b"\x1b");
+    harness.wait(|harness| !harness.text().contains(" Command "));
+    // The completed custom kind opens its view from the same API.
+    harness.write(b":get wid\t\r");
+    harness.until("listed-widget");
+    let requests = requests.lock().unwrap().clone();
+    assert!(requests.iter().any(|target| target.starts_with("/apis/fixture.hamn.dev/v1/namespaces/test/widgets")), "{requests:?}");
+    drop(harness);
+    drop(server);
 }
 
 /// The kubectl peer of the kinds cases: every call but a kinds lookup goes
