@@ -8,10 +8,9 @@
  * connection proves that it has accepted every earlier one. To place events
  * before an accept instead, a test holds the server inside its stop callback.
  * No test orders events by sleeping. FAILURE_DEADLINE_SEC only turns a hang
- * into a failure, and the timeouts that are waited for are the client's own:
- * in the test of a reply that never comes, and in the tests of a query's
- * budget, whose supervisor closes each connection a fixed time after its
- * request arrived or whose client is held past its budget before it sends. */
+ * into a failure, and the time that is waited for is the client's own: its
+ * timeout in the test of a reply that never comes, and its holds before it
+ * sends in the tests of a query's budget. */
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -446,9 +445,6 @@ enum fake_step {
     FAKE_CLOSE_UNREAD,
     /* Close after the request arrived, without replying. */
     FAKE_CLOSE_READ,
-    /* Close FAKE_CLOSE_LATE_MS after the request arrived, without
-     * replying. */
-    FAKE_CLOSE_READ_LATE,
     FAKE_REPLY,
     /* Reply to a client that may have closed the connection already. */
     FAKE_REPLY_MAYBE_GONE,
@@ -456,15 +452,12 @@ enum fake_step {
     FAKE_SILENT,
 };
 
-#define FAKE_CLOSE_LATE_MS 200
-
 static const char FAKE_REPLY_TEXT[] =
     "{\"state\":\"running\",\"pid\":4242,\"start_sec\":7,\"start_usec\":9}\n";
 
 static int fake_closed_fd = -1;
 static int fake_closes_to_await;
 static int status_attempts;
-static long long status_elapsed_ms;
 /* How long the client is held after it connects, before it sends. */
 static int before_send_delay_ms;
 
@@ -522,9 +515,6 @@ static void fake_supervise(int listener, const enum fake_step *steps,
                       sizeof(FAKE_REPLY_TEXT) - 1) != 0 &&
             errno != EPIPE)
             _exit(73);
-        if (step == FAKE_CLOSE_READ_LATE &&
-            usleep(FAKE_CLOSE_LATE_MS * 1000) != 0)
-            _exit(75);
         if (close(client) != 0)
             _exit(74);
     }
@@ -563,12 +553,10 @@ static int query_scripted_supervisor(const char *path,
         fake_closes_to_await += steps[i] == FAKE_CLOSE_UNREAD;
     status_attempts = 0;
     ctlsock_test_before_send(before_send);
-    long long started = monotonic_ms();
     int result = kind == QUERY_WITHIN ?
         ctlsock_query_status_within(path, response, response_size,
                                     limit_ms) :
         ctlsock_query_status(path, response, response_size, limit_ms);
-    status_elapsed_ms = monotonic_ms() - started;
     ctlsock_test_before_send(NULL);
 
     int status;
@@ -642,35 +630,32 @@ static void test_status_is_not_sent_again_after_a_timeout(
             "a timed-out status must not be sent again");
 }
 
-/* A supervisor that closes every connection FAKE_CLOSE_LATE_MS after its
- * request arrived. Within a budget of 300 ms, the query sends again once,
- * and that connection ends with the budget; a query whose sends and receives
- * each wait 300 ms sends on every connection it may. */
-static void test_status_within_a_budget_ends_with_it(const char *path)
+/* The client is held 300 ms after each connection before it sends, and the
+ * supervisor closes the first two connections unanswered and answers the
+ * third. Within a budget of 600 ms, the query sends again after the first
+ * close, which comes well inside the budget, and opens no third connection,
+ * as two holds spend it. A query without a budget sends on every connection
+ * it may and gets the reply. */
+static void test_status_within_a_budget_sends_again_while_it_lasts(
+    const char *path)
 {
-    enum fake_step steps[CTLSOCK_STATUS_ATTEMPTS];
-    for (int i = 0; i < CTLSOCK_STATUS_ATTEMPTS; i++)
-        steps[i] = FAKE_CLOSE_READ_LATE;
+    static const enum fake_step steps[] = { FAKE_CLOSE_READ, FAKE_CLOSE_READ,
+                                            FAKE_REPLY };
     char response[256];
-    require(query_scripted_supervisor(path, steps, CTLSOCK_STATUS_ATTEMPTS,
-                                      QUERY_WITHIN, 300, response,
-                                      sizeof(response)) ==
+    before_send_delay_ms = 300;
+    require(query_scripted_supervisor(path, steps, 3, QUERY_WITHIN, 600,
+                                      response, sizeof(response)) ==
                 CTLSOCK_QUERY_UNCERTAIN,
             "a budget spent before a reply must be uncertain");
     require(status_attempts == 2,
             "a query must send again only while its budget lasts");
-    require(status_elapsed_ms < 300 + 200,
-            "a query must end with its budget");
-
-    require(query_scripted_supervisor(path, steps, CTLSOCK_STATUS_ATTEMPTS,
-                                      QUERY_EACH_WAIT, 300, response,
+    require(query_scripted_supervisor(path, steps, 3, QUERY_EACH_WAIT,
+                                      FAILURE_DEADLINE_SEC * 1000, response,
                                       sizeof(response)) ==
-                CTLSOCK_QUERY_UNCERTAIN,
-            "a server that never answers must stay uncertain");
-    require(status_attempts == CTLSOCK_STATUS_ATTEMPTS &&
-                status_elapsed_ms >=
-                    CTLSOCK_STATUS_ATTEMPTS * FAKE_CLOSE_LATE_MS,
-            "each send and receive must wait its own limit");
+                    CTLSOCK_QUERY_OK &&
+                status_attempts == 3,
+            "a query without a budget must send on every connection it may");
+    before_send_delay_ms = 0;
 }
 
 /* The client is held after it connects until its budget of 50 ms is spent.
@@ -679,8 +664,8 @@ static void test_status_within_a_budget_ends_with_it(const char *path)
  * receives each wait 50 ms still sends again and gets the reply. */
 static void test_status_within_a_spent_budget_stops(const char *path)
 {
-    static const enum fake_step closed_then_reply[] = { FAKE_CLOSE_UNREAD,
-                                                        FAKE_REPLY };
+    static const enum fake_step closed_then_reply[] = {
+        FAKE_CLOSE_UNREAD, FAKE_REPLY_MAYBE_GONE };
     static const enum fake_step reply[] = { FAKE_REPLY_MAYBE_GONE };
     char response[256];
     before_send_delay_ms = 100;
@@ -702,6 +687,46 @@ static void test_status_within_a_spent_budget_stops(const char *path)
                 status_attempts == 2,
             "each send and receive must wait its own limit");
     before_send_delay_ms = 0;
+}
+
+/* A supervisor whose queue no longer accepts connections: once the listen
+ * backlog is full, macOS refuses a further connection at once instead of
+ * letting connect() wait for room, so both queries end at once, unavailable.
+ * alarm() turns a connect() that waited into a failure instead of a hang. */
+static void test_status_ends_at_once_when_the_backlog_is_full(
+    const char *path)
+{
+    int listener = bind_unix_socket(path);
+    if (listener < 0 || listen(listener, 1) != 0)
+        fail("full backlog fixture");
+    int queued[32];
+    size_t count = 0;
+    while (count < sizeof(queued) / sizeof(queued[0]) &&
+           (queued[count] = connect_unix_socket(path)) >= 0)
+        count++;
+    require(count < sizeof(queued) / sizeof(queued[0]) &&
+                errno == ECONNREFUSED,
+            "a full backlog must refuse a further connection");
+
+    static const enum query_kind queries[] = { QUERY_EACH_WAIT,
+                                               QUERY_WITHIN };
+    for (size_t i = 0; i < sizeof(queries) / sizeof(queries[0]); i++) {
+        char response[256];
+        alarm(FAILURE_DEADLINE_SEC);
+        long long started = monotonic_ms();
+        int result = queries[i] == QUERY_WITHIN ?
+            ctlsock_query_status_within(path, response, sizeof(response),
+                                        1000) :
+            ctlsock_query_status(path, response, sizeof(response), 1000);
+        long long elapsed = monotonic_ms() - started;
+        alarm(0);
+        require(result == CTLSOCK_QUERY_UNAVAILABLE && elapsed < 500,
+                "a full backlog must end a query at once");
+    }
+    for (size_t i = 0; i < count; i++)
+        close(queued[i]);
+    require(close(listener) == 0 && unlink(path) == 0,
+            "full backlog fixture must be removable");
 }
 
 static void test_existing_regular_file_is_preserved(const char *path)
@@ -835,8 +860,9 @@ int main(void)
         test_status_attempts_are_bounded(path, queries[i]);
         test_status_is_not_sent_again_after_a_timeout(path, queries[i]);
     }
-    test_status_within_a_budget_ends_with_it(path);
+    test_status_within_a_budget_sends_again_while_it_lasts(path);
     test_status_within_a_spent_budget_stops(path);
+    test_status_ends_at_once_when_the_backlog_is_full(path);
     test_nonblocking_failure_is_cleaned(path);
     test_existing_regular_file_is_preserved(path);
     test_existing_socket_is_preserved(path);

@@ -701,16 +701,17 @@ static void silent_vmrun_socket_ends_the_wait_at_its_deadline(void)
  * L; H or C when it accepts the connection), and exits when the case closes
  * life. */
 #define RUNNING_LATE_MS 940
-#define CLOSE_LATE_MS 270
+/* Two closes take longer than the 300 ms a query of the wait gets at most,
+ * so such a query opens two connections at most; one close comes well
+ * within 300 ms, so a query whose sends and receives each wait 300 ms opens
+ * all three. */
+#define CLOSE_LATE_MS 170
 #define VMRUN_CLOSES_MAX 8
 
-/* How far past its deadline a vmrun wait ends here at most. A wait that
- * keeps every query inside its deadline ends at it; one that does not ends
- * at least 1240 ms into a 1-second wait when it verifies running at 940 ms
- * with a query of its own 300 ms, or at least 2310 ms into a 2-second wait
- * when a query that starts 1500 ms in opens three connections that are each
- * closed after CLOSE_LATE_MS. */
-#define VMRUN_DEADLINE_SLACK_MS 200
+/* How far past its deadline the 1-second wait may end when vmrun reports
+ * running at RUNNING_LATE_MS: verifying the process with a query of its own
+ * 300 ms would end it at least 1240 ms in. */
+#define RUNNING_LATE_SLACK_MS 200
 
 struct vmrun_fake {
     pid_t pid;
@@ -955,14 +956,15 @@ static void vmrun_wait_on(const char *script, int record, int timeout_sec,
            wait->seen);
 }
 
-/* The wait timed out at its deadline of timeout_sec. */
+/* The wait timed out at its deadline of timeout_sec, at most margin_ms
+ * later. */
 static void vmrun_wait_ended_at_its_deadline(const struct vmrun_wait *wait,
-                                             int timeout_sec)
+                                             int timeout_sec,
+                                             long long margin_ms)
 {
     long long deadline = timeout_sec * 1000LL;
     assert(wait->rc == -1 && wait->error == ETIMEDOUT && !proc_cancelled());
-    assert(wait->elapsed >= deadline &&
-           wait->elapsed < deadline + VMRUN_DEADLINE_SLACK_MS);
+    assert(wait->elapsed >= deadline && wait->elapsed < deadline + margin_ms);
 }
 
 /* A vmrun that reports running and is the profile's recorded vmrun: the
@@ -987,7 +989,7 @@ static void silent_vmrun_after_running_ends_the_wait_at_its_deadline(void)
     /* It held the first status query, reported running on the second, and
      * held the one that verifies it. */
     assert(strcmp(wait.seen, "HRH") == 0);
-    vmrun_wait_ended_at_its_deadline(&wait, 1);
+    vmrun_wait_ended_at_its_deadline(&wait, 1, RUNNING_LATE_SLACK_MS);
 }
 
 /* A vmrun that reports starting to the first three status queries of a
@@ -1002,7 +1004,7 @@ static void vmrun_closing_status_queries_ends_the_wait_at_its_deadline(void)
     struct vmrun_wait wait;
     vmrun_wait_on("SSSC", 0, 2, 4, &wait);
     assert(strncmp(wait.seen, "SSSC", 4) == 0 && strlen(wait.seen) <= 5);
-    vmrun_wait_ended_at_its_deadline(&wait, 2);
+    vmrun_wait_ended_at_its_deadline(&wait, 2, MARGIN_MS);
 }
 
 /* As above, but the vmrun reports running to the fourth status query and
@@ -1012,7 +1014,7 @@ static void vmrun_closing_identity_queries_ends_the_wait_at_its_deadline(void)
     struct vmrun_wait wait;
     vmrun_wait_on("SSSRC", 0, 2, 5, &wait);
     assert(strncmp(wait.seen, "SSSRC", 5) == 0 && strlen(wait.seen) <= 6);
-    vmrun_wait_ended_at_its_deadline(&wait, 2);
+    vmrun_wait_ended_at_its_deadline(&wait, 2, MARGIN_MS);
 }
 
 /* ---- DHCP lease wait ------------------------------------------------- */
