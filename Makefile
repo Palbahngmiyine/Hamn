@@ -2,7 +2,7 @@ BUILD      := build
 HOST_BIN   := $(BUILD)/hamn
 CARGO_PROFILE ?= release
 # x-release-please-start-version
-VERSION    ?= 0.2.1
+VERSION    ?= 0.3.0
 # x-release-please-end
 VERSION_STAMP := $(BUILD)/.hamn-version
 # tools/hamn-dev publishes build/hamn and runs the host regression suites.
@@ -53,6 +53,7 @@ DEPLOYMENT_FINGERPRINT_TEST := $(BUILD)/tests/test_guest_deployment_fingerprint
 DEPLOYMENT_RECOVERY_TEST := $(BUILD)/tests/test_deployment_recovery
 GUEST_FILESYSTEM_TEST := $(BUILD)/tests/test_guest_filesystem
 GUEST_PANIC_TEST := $(BUILD)/tests/test_guest_panic
+VZ_DISK_CONFIG_TEST := $(BUILD)/tests/test_vz_disk_config
 MANAGED_GUEST_IMAGE_TEST := $(BUILD)/tests/test_managed_guest_image
 SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
 PROFILE_READ_TEST := $(BUILD)/tests/test_profile_read
@@ -197,6 +198,12 @@ $(GUEST_FILESYSTEM_TEST): tests/host/test_guest_filesystem.c $(HOST_TEST_OBJS)
 $(GUEST_PANIC_TEST): tests/host/test_guest_panic.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
+		$(LDFLAGS) -o $@
+
+# Objective-C, so it can read the disk attachments back from the framework.
+$(VZ_DISK_CONFIG_TEST): tests/host/test_vz_disk_config.m $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(OBJCFLAGS)) $< $(HOST_TEST_OBJS) \
 		$(LDFLAGS) -o $@
 
 # Compiles every host source itself, including VERSIONED_OBJS' sources.
@@ -479,7 +486,7 @@ test-qcow2: host
 test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
-		$(GUEST_FILESYSTEM_TEST) $(GUEST_PANIC_TEST) \
+		$(GUEST_FILESYSTEM_TEST) $(GUEST_PANIC_TEST) $(VZ_DISK_CONFIG_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
 		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
 		$(PROFILE_YAML_FAULTS_TEST) $(GUEST_WAIT_DEADLINES_TEST)
@@ -496,6 +503,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 	$(SSH_OPTIONS_TEST)
 	$(GUEST_FILESYSTEM_TEST)
 	$(GUEST_PANIC_TEST)
+	$(VZ_DISK_CONFIG_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
 	$(GUEST_WAIT_DEADLINES_TEST)
 	$(LIFECYCLE_LOCK_TEST)

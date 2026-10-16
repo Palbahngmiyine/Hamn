@@ -79,15 +79,28 @@ static VZGenericPlatformConfiguration *make_platform(const vz_vm_spec *spec,
     return platform;
 }
 
+/*
+ * Disk images are attached with host caching on and full synchronization.
+ *
+ * The plain initializer picks VZDiskImageCachingModeAutomatic, which has
+ * corrupted Linux ext4/btrfs guests on virtio-blk under sustained mixed I/O
+ * (utmapp/UTM#4840; Lima pins Cached for the same reason). In a Hamn guest
+ * that damage shows up as an ext4 error on the root filesystem and EIO from
+ * the containerd content store. Full synchronization is what the plain
+ * initializer already used: data the guest flushes is not lost on a host
+ * panic or power loss, so the journal survives a forced stop.
+ */
 static VZVirtioBlockDeviceConfiguration *make_disk(const char *path,
                                                    BOOL readOnly,
                                                    NSError **outErr)
 {
     VZDiskImageStorageDeviceAttachment *att =
         [[VZDiskImageStorageDeviceAttachment alloc]
-            initWithURL:[NSURL fileURLWithPath:@(path)]
-               readOnly:readOnly
-                  error:outErr];
+                    initWithURL:[NSURL fileURLWithPath:@(path)]
+                       readOnly:readOnly
+                    cachingMode:VZDiskImageCachingModeCached
+            synchronizationMode:VZDiskImageSynchronizationModeFull
+                          error:outErr];
     if (!att)
         return nil;
     return [[VZVirtioBlockDeviceConfiguration alloc] initWithAttachment:att];

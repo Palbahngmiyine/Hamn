@@ -24,7 +24,10 @@ int docker_observer_parse_inspect(const char *json,
 int docker_observer_parse_list(const char *json, struct port_spec specs[],
                                int *count, size_t capacity);
 
-/* One bounded list request through the private profile socket. */
+/* One bounded list request through the private profile socket. Fails with
+ * EOVERFLOW for a list over the limits above or a reply too large for its
+ * 512 KiB body limit, and with EPROTO for a reply that holds no usable list,
+ * including a connection closed before any byte of reply. */
 int docker_observer_read_snapshot(const struct profile *profile,
                                   struct port_spec specs[], int *count,
                                   size_t capacity);
