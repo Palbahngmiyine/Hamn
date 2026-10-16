@@ -129,6 +129,9 @@ pub fn fixture(program: &str, args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     record(&root, program, args);
+    if let Some(code) = crate::support::tui::answer_kinds_lookup(args) {
+        return code;
+    }
     let has = |value: &str| args.iter().any(|arg| arg == value);
     if let Ok(alias) = fs::read_to_string(root.join("plugin-alias"))
         && args.first().map(String::as_str) == Some(alias.as_str())
