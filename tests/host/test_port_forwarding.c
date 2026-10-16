@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -321,6 +322,96 @@ static int fixture_replace_master_socket(const char *path)
     return fd >= 0 && close(fd) == 0 ? 0 : -1;
 }
 
+/* What the fixture Engine answers to the observer's requests. */
+enum fixture_engine {
+    FIXTURE_ENGINE_SNAPSHOT,        /* a container list, then an event */
+    FIXTURE_ENGINE_EMPTY_REPLY,     /* no reply: the connection is closed */
+    FIXTURE_ENGINE_OVERSIZED_REPLY, /* a list over the observer's limits */
+};
+
+/* Twice the 512 KiB that the observer's over-limit message names. */
+#define FIXTURE_OVERSIZED_BODY_BYTES (1024 * 1024)
+
+/* Binds the fixture Engine's socket at `path` with the 0600 mode that the
+ * observer requires, and tells the parent on `ready_fd` that it accepts
+ * connections. Returns the listener, or -1 with no socket left at `path`. */
+static int fixture_engine_listen(const char *path, int ready_fd)
+{
+    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    struct sockaddr_un address = { .sun_family = AF_UNIX };
+    if (listener < 0 || strlen(path) >= sizeof(address.sun_path)) {
+        if (listener >= 0)
+            close(listener);
+        return -1;
+    }
+    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
+    unlink(path);
+    mode_t old_mask = umask(0077);
+    int bound = bind(listener, (struct sockaddr *)&address, sizeof(address));
+    umask(old_mask);
+    if (bound != 0 || chmod(path, 0600) != 0 || listen(listener, 3) != 0 ||
+        fixture_write_all(ready_fd, "1", 1) != 0) {
+        close(listener);
+        unlink(path);
+        return -1;
+    }
+    close(ready_fd);
+    return listener;
+}
+
+/* A 200 response whose body is more than the observer reads. The reader
+ * closes the connection at its limit, so a failed write is the expected end. */
+static void fixture_write_oversized_reply(int client)
+{
+    char header[128], filler[64 * 1024];
+    int length = snprintf(header, sizeof(header),
+                          "HTTP/1.1 200 OK\r\nContent-Length: %d\r\n"
+                          "Connection: close\r\n\r\n",
+                          FIXTURE_OVERSIZED_BODY_BYTES);
+    memset(filler, ' ', sizeof(filler));
+    if (length < 0 || length >= (int)sizeof(header) ||
+        fixture_write_all(client, header, (size_t)length) != 0)
+        return;
+    for (size_t sent = 0; sent < FIXTURE_OVERSIZED_BODY_BYTES;
+         sent += sizeof(filler)) {
+        if (fixture_write_all(client, filler, sizeof(filler)) != 0)
+            return;
+    }
+}
+
+/* Serves `cycles` observer passes that each request the container list and
+ * get no usable one. Each request is read before the reply, so the reader has
+ * sent it whole. FIXTURE_ENGINE_EMPTY_REPLY then closes the connection
+ * without a byte, as an SSH-forwarded socket does when the forward behind it
+ * fails; FIXTURE_ENGINE_OVERSIZED_REPLY answers with more than the limits. */
+static int failed_list_fixture_server(const char *path, int ready_fd,
+                                      unsigned cycles,
+                                      enum fixture_engine engine)
+{
+    /* An oversized reply outlasts the reader's connection. */
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR)
+        return -1;
+    int listener = fixture_engine_listen(path, ready_fd);
+    if (listener < 0)
+        return -1;
+    int valid = 1;
+    for (unsigned cycle = 0; valid && cycle < cycles; cycle++) {
+        int client = accept(listener, NULL, NULL);
+        char request[512] = {0};
+        ssize_t read_count = client < 0 ? -1 : read(client, request,
+                                                     sizeof(request) - 1);
+        valid = read_count > 0 &&
+            strstr(request, "GET /containers/json HTTP/1.1") != NULL;
+        if (valid && engine == FIXTURE_ENGINE_OVERSIZED_REPLY)
+            fixture_write_oversized_reply(client);
+        if (client >= 0)
+            close(client);
+    }
+    close(listener);
+    unlink(path);
+    return valid ? 0 : -1;
+}
+
 /* Serves `cycles` observer passes, each a container list and an event. The
  * list publishes TCP 48250 on 127.0.0.1, UDP 48251 on all addresses, and UDP
  * 48252 on 127.0.0.1, which no relay can carry. The master socket is replaced
@@ -337,22 +428,9 @@ static int snapshot_fixture_server(const char *path, int ready_fd,
         "{\"Type\":\"container\",\"Action\":\"start\"}",
     };
     static const char *const targets[] = { "GET /containers/json HTTP/1.1" };
-    int listener = socket(AF_UNIX, SOCK_STREAM, 0);
-    struct sockaddr_un address = { .sun_family = AF_UNIX };
-    if (listener < 0 || strlen(path) >= sizeof(address.sun_path))
+    int listener = fixture_engine_listen(path, ready_fd);
+    if (listener < 0)
         return -1;
-    snprintf(address.sun_path, sizeof(address.sun_path), "%s", path);
-    unlink(path);
-    mode_t old_mask = umask(0077);
-    int bound = bind(listener, (struct sockaddr *)&address, sizeof(address));
-    umask(old_mask);
-    if (bound != 0 || chmod(path, 0600) != 0 || listen(listener, 3) != 0 ||
-        fixture_write_all(ready_fd, "1", 1) != 0) {
-        close(listener);
-        unlink(path);
-        return -1;
-    }
-    close(ready_fd);
     size_t requests = (size_t)cycles * 2;
     for (size_t request_index = 0; request_index < requests; request_index++) {
         size_t i = request_index % 2;
@@ -400,7 +478,8 @@ static const char fixture_lease[] = "0123456789abcdef0123456789abcdef";
 /* Runs the observer's watch loop for `cycles` passes against the fixture
  * Engine on PROFILE/docker.sock. Returns 0 when every pass was served. */
 static int watch_fixture(struct profile *profile, const char *directory,
-                         unsigned cycles, unsigned replace_at_cycle)
+                         enum fixture_engine engine, unsigned cycles,
+                         unsigned replace_at_cycle)
 {
     char socket_path[PATH_MAX], lease_path[PATH_MAX], master_socket[PATH_MAX];
     memset(profile, 0, sizeof(*profile));
@@ -422,9 +501,11 @@ static int watch_fixture(struct profile *profile, const char *directory,
         return -1;
     if (child == 0) {
         close(ready[0]);
-        _exit(snapshot_fixture_server(socket_path, ready[1], cycles,
-                                      master_socket, replace_at_cycle) == 0 ?
-              0 : 1);
+        int served = engine == FIXTURE_ENGINE_SNAPSHOT ?
+            snapshot_fixture_server(socket_path, ready[1], cycles,
+                                    master_socket, replace_at_cycle) :
+            failed_list_fixture_server(socket_path, ready[1], cycles, engine);
+        _exit(served == 0 ? 0 : 1);
     }
     close(ready[1]);
     char marker = '\0';
@@ -464,7 +545,8 @@ static int inspect_snapshot_fixture(const char *directory)
     /* The pass counts as synchronized although UDP 48252 is not forwarded:
      * the watch loop goes on to wait for an event, which the fixture serves,
      * instead of retrying a pass that cannot change. */
-    int synchronized = watch_fixture(&profile, directory, 1, 0) == 0;
+    int synchronized = watch_fixture(&profile, directory,
+                                     FIXTURE_ENGINE_SNAPSHOT, 1, 0) == 0;
     char state[1024] = {0};
     FILE *f = fopen(state_path, "r");
     int state_ok = f && fread(state, 1, sizeof(state) - 1, f) > 0 &&
@@ -482,6 +564,29 @@ static int inspect_snapshot_fixture(const char *directory)
         docker_observer_sync_once(&profile, "192.0.2.10",
                                   fixture_lease) == 1;
     return synchronized && state_ok && reported_ok && cleaned ? 0 : 1;
+}
+
+/* Prints what ports.c's process_is_zombie reads of the PID in `text`: the
+ * kp_proc.p_stat that sysctl reports, or "-" when it reports no such process.
+ * libproc stops describing a process as soon as it starts to exit, before it
+ * is a zombie (SZOMB); only this tells the two apart. */
+static int print_process_state(const char *text)
+{
+    char *end = NULL;
+    errno = 0;
+    long pid = strtol(text, &end, 10);
+    if (errno || !end || end == text || *end || pid <= 1 || pid > INT_MAX)
+        return 2;
+    int name[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid };
+    struct kinfo_proc info;
+    size_t size = sizeof(info);
+    if (sysctl(name, 4, &info, &size, NULL, 0) != 0)
+        return 1;
+    if (size == 0)
+        return puts("-") >= 0 ? 0 : 1;
+    if (size != sizeof(info) || info.kp_proc.p_pid != (pid_t)pid)
+        return 1;
+    return printf("%d\n", info.kp_proc.p_stat) >= 0 ? 0 : 1;
 }
 
 static int parse_count(const char *text, unsigned *count)
@@ -514,6 +619,8 @@ int main(int argc, char **argv)
         return ignore_sigterm();
     if (argc == 2 && strcmp(argv[1], "spawn-ignore-sigterm") == 0)
         return spawn_ignore_sigterm();
+    if (argc == 3 && strcmp(argv[1], "process-state") == 0)
+        return print_process_state(argv[2]);
     if (argc == 3 && strcmp(argv[1], "parse") == 0) {
         struct port_spec parsed;
         return load_spec(argv[2], &parsed) == 0 ? 0 : 2;
@@ -531,8 +638,8 @@ int main(int argc, char **argv)
         if (parse_count(argv[3], &cycles) != 0 ||
             parse_count(argv[4], &replace_at_cycle) != 0)
             return 2;
-        return watch_fixture(&profile, argv[2], cycles,
-                             replace_at_cycle) == 0 ? 0 : 1;
+        return watch_fixture(&profile, argv[2], FIXTURE_ENGINE_SNAPSHOT,
+                             cycles, replace_at_cycle) == 0 ? 0 : 1;
     }
 
     const char *directory = getenv("PORT_TEST_DIR");
@@ -568,6 +675,16 @@ int main(int argc, char **argv)
                                     sizeof(lease), 0600) == 0 &&
                docker_observer_watch(&profile, guest_ip, lease, 3) == 0 ?
                0 : 1;
+    }
+    if ((strcmp(argv[1], "watch-empty-reply") == 0 ||
+         strcmp(argv[1], "watch-oversized-reply") == 0) && argc == 2) {
+        /* Three passes of the watch loop against a fixture Engine that
+         * closes each connection without a reply, or answers with a list
+         * over the observer's limits. Fails unless every pass connected. */
+        enum fixture_engine engine =
+            strcmp(argv[1], "watch-empty-reply") == 0 ?
+            FIXTURE_ENGINE_EMPTY_REPLY : FIXTURE_ENGINE_OVERSIZED_REPLY;
+        return watch_fixture(&profile, directory, engine, 3, 0) == 0 ? 0 : 1;
     }
     if (strcmp(argv[1], "unconfirm") == 0 && argc == 2) {
         int operation_lock = port_forward_operation_lock(&profile);
