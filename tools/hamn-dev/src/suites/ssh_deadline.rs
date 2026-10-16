@@ -1,7 +1,9 @@
 //! A real OpenSSH client must not wait forever on an unresponsive master:
 //! build/tests/test_ssh_deadline drives each SSH operation against a
 //! control socket that accepts and never answers, and a fresh-master start
-//! shares its total deadline with an `ssh` that never authenticates.
+//! shares its total deadline with an `ssh` that never authenticates. The
+//! exec case also runs with the delays of a loaded machine: a master that
+//! accepts only after the client's deadline, and an `ssh` slow to start.
 use crate::runner::{self, Case, case};
 use crate::support::bounded_process;
 use crate::support::pty;
@@ -11,7 +13,6 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -19,13 +20,42 @@ use std::time::{Duration, Instant};
 /// The fixture that stands in for `ssh` in the fresh-master case.
 pub const UNRESPONSIVE_SSH: &str = "ssh-deadline-unresponsive";
 
+/// The fixture that stands in for `ssh` in the slow-start case: it waits
+/// `SLOW_SSH_START`, then runs `/usr/bin/ssh`.
+pub const SLOW_START_SSH: &str = "ssh-deadline-slow-start";
+
+/// How long the slow-start `ssh` takes before it can connect.
+const SLOW_SSH_START: Duration = Duration::from_millis(300);
+
+/// What a case adds to an unresponsive master: the delays a loaded machine
+/// can put between the client's start, its connection and the master's
+/// accept.
+#[derive(Clone, Copy, Debug)]
+enum Hazard {
+    None,
+    /// The master accepts this long after the connection arrives.
+    LateAccept(Duration),
+    /// `ssh` takes `SLOW_SSH_START` to start before it connects.
+    SlowSshStart,
+}
+
 pub fn main(filters: &[String]) -> ExitCode {
     let mut cases: Vec<Case> = Vec::new();
-    for (operation, budget) in [("alive", 5.0), ("exit", 5.0), ("start", 1.0), ("forward", 5.0), ("cancel", 5.0), ("exec", 0.2)] {
+    // The exec deadline (tests/host/test_ssh_deadline.c) also covers starting
+    // ssh. At 200 ms a start that a loaded machine delayed left no time to
+    // reach the master, and the case no longer tested an unresponsive one.
+    for (operation, budget) in [("alive", 5.0), ("exit", 5.0), ("start", 1.0), ("forward", 5.0), ("cancel", 5.0), ("exec", 1.0)] {
         cases.push(case(format!("unresponsive_master/{operation}"), move || {
-            unresponsive_master(operation, Duration::from_secs_f64(budget))
+            unresponsive_master(operation, Duration::from_secs_f64(budget), Hazard::None)
         }));
     }
+    let exec = Duration::from_secs(1);
+    cases.push(case("unresponsive_master/exec/late_accept", move || {
+        unresponsive_master("exec", exec, Hazard::LateAccept(exec + Duration::from_millis(500)))
+    }));
+    cases.push(case("unresponsive_master/exec/slow_ssh_start", move || {
+        unresponsive_master("exec", exec, Hazard::SlowSshStart)
+    }));
     cases.push(case("fresh_master_start_shares_the_total_deadline", fresh_master_start_shares_the_total_deadline));
     for operation in ["cancel", "forward"] {
         cases.push(case(format!("absent_master/{operation}_is_quiet"), move || absent_master_request_is_quiet(operation)));
@@ -40,17 +70,32 @@ fn binary() -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-fn unresponsive_master(operation: &str, budget: Duration) {
+fn unresponsive_master(operation: &str, budget: Duration, hazard: Hazard) {
     let binary = binary();
     let directory = TempDir::new("hamn-ssh-");
-    let server = SilentMaster::start(&directory.path().join("ssh.sock"));
+    let accept_delay = match hazard {
+        Hazard::LateAccept(delay) => delay,
+        Hazard::None | Hazard::SlowSshStart => Duration::ZERO,
+    };
+    let server = SilentMaster::start(&directory.path().join("ssh.sock"), accept_delay);
+    let mut command = Command::new(&binary);
+    command.arg(directory.path()).arg(operation).env("PATH", "/usr/bin:/bin");
+    if let Hazard::SlowSshStart = hazard {
+        let bin = directory.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        install_fixture(&bin, "ssh");
+        command
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .env("HAMN_DEV_FIXTURE", SLOW_START_SSH)
+            .env_remove("FIXTURE_ROOT");
+    }
     let started = Instant::now();
-    let result = bounded_process::output(
-        Command::new(&binary).arg(directory.path()).arg(operation).env("PATH", "/usr/bin:/bin"),
-        budget + Duration::from_secs(4),
-    );
+    let result = bounded_process::output(&mut command, budget + Duration::from_secs(4));
     let elapsed = started.elapsed();
-    assert!(server.accepted(), "{operation}: {result:?}");
+    assert!(
+        server.accepted_within(Duration::from_secs(5)),
+        "{operation}: the client ended without reaching the master: {result:?}"
+    );
     assert_eq!(result.status.code(), Some(0), "{operation}: {result:?}");
     assert!(budget <= elapsed && elapsed < budget + Duration::from_secs(4), "{operation}: {elapsed:?}");
     if operation == "forward" {
@@ -112,34 +157,45 @@ pub fn unresponsive_ssh(_program: &str, args: &[String]) -> ExitCode {
     }
 }
 
+/// `ssh` that takes `SLOW_SSH_START` to start, as a loaded machine can make
+/// it, then becomes `/usr/bin/ssh` with the same arguments and process.
+pub fn slow_start_ssh(_program: &str, args: &[String]) -> ExitCode {
+    std::thread::sleep(SLOW_SSH_START);
+    crate::support::real_cli::exec(Command::new("/usr/bin/ssh").args(args))
+}
+
 /// An SSH control socket that accepts one connection and holds it, without
 /// a byte, until released (at most 12 seconds). No connection within 10
 /// seconds is an error.
 struct SilentMaster {
-    accepted: Arc<AtomicBool>,
+    /// Sent once the connection is accepted.
+    accepted: mpsc::Receiver<()>,
     errors: Arc<Mutex<Vec<String>>>,
     release: mpsc::Sender<()>,
     done: mpsc::Receiver<()>,
 }
 
 impl SilentMaster {
-    fn start(path: &Path) -> Self {
+    /// Listens at `path` and accepts `accept_delay` after a connection
+    /// arrives.
+    fn start(path: &Path, accept_delay: Duration) -> Self {
         let listener = UnixListener::bind(path).unwrap_or_else(|error| panic!("bind {}: {error}", path.display()));
         // The Python fixture listened with a backlog of one; std uses 128.
         // SAFETY: listen on a descriptor this listener owns only changes
         // its backlog.
         assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0, "listen: {}", std::io::Error::last_os_error());
-        let accepted = Arc::new(AtomicBool::new(false));
+        let (accept, accepted) = mpsc::channel();
         let errors = Arc::new(Mutex::new(Vec::new()));
         let (release, released) = mpsc::channel::<()>();
         let (finished, done) = mpsc::channel();
-        let (flag, failures) = (Arc::clone(&accepted), Arc::clone(&errors));
+        let failures = Arc::clone(&errors);
         std::thread::spawn(move || {
             let result = if pty::readable(&[listener.as_raw_fd()], Duration::from_secs(10)).is_empty() {
                 Err("no connection within 10 seconds".to_owned())
             } else {
+                std::thread::sleep(accept_delay);
                 listener.accept().map_err(|error| format!("accept: {error}")).and_then(|(connection, _)| {
-                    flag.store(true, Ordering::SeqCst);
+                    let _ = accept.send(());
                     let outcome = match released.recv_timeout(Duration::from_secs(12)) {
                         Err(RecvTimeoutError::Timeout) => Err("not released within 12 seconds".to_owned()),
                         Ok(()) | Err(RecvTimeoutError::Disconnected) => Ok(()),
@@ -157,8 +213,12 @@ impl SilentMaster {
         Self { accepted, errors, release, done }
     }
 
-    fn accepted(&self) -> bool {
-        self.accepted.load(Ordering::SeqCst)
+    /// Whether the master accepts a connection within `timeout`. A client
+    /// that connected waits in the listener's backlog until the master's
+    /// thread accepts it, which can happen after the client has ended, so
+    /// the moment the client is done is too early to look.
+    fn accepted_within(&self, timeout: Duration) -> bool {
+        self.accepted.recv_timeout(timeout).is_ok()
     }
 
     /// Releases the held connection and requires the server to finish

@@ -107,6 +107,53 @@ static int append_vm_share(char entries[VZ_MAX_SHARES][PATH_MAX + 32],
     return 0;
 }
 
+/* The directories the VM shares: HOME when mountHome is set, then each
+ * custom mount. A mount must be an owned directory whose path is already
+ * canonical, and a writable one must lie beneath the resolved HOME. Reads
+ * the host filesystem only and changes nothing. Returns -1 after logging
+ * the reason. */
+static int prepare_vm_shares(const struct profile *p,
+                             char entries[VZ_MAX_SHARES][PATH_MAX + 32],
+                             int read_only[VZ_MAX_SHARES], size_t *count)
+{
+    char home_real[PATH_MAX];
+    *count = 0;
+    const char *home = getenv("HOME");
+    if (!home) {
+        logerr("HOME is not set");
+        return -1;
+    }
+    if (p->mount_home) {
+        if (canonical_owned_directory(home, home_real, 0) != 0 ||
+            append_vm_share(entries, read_only, count, "home", home_real,
+                            p->home_read_only) != 0) {
+            logerr("cannot prepare the home mount: %s", strerror(errno));
+            return -1;
+        }
+    } else if (!realpath(home, home_real)) {
+        logerr("cannot resolve HOME: %s", strerror(errno));
+        return -1;
+    }
+    for (size_t index = 0; index < p->mount_count; index++) {
+        char source[PATH_MAX], tag[32];
+        const struct profile_mount *mount = &p->mounts[index];
+        if (canonical_owned_directory(mount->location, source, 1) != 0 ||
+            (mount->writable && !path_is_within(home_real, source))) {
+            logerr("mount %s must be an owned non-symlink directory%s",
+                   mount->location, mount->writable ? " beneath HOME" : "");
+            return -1;
+        }
+        int written = snprintf(tag, sizeof(tag), "mount%zu", index);
+        if (written < 0 || written >= (int)sizeof(tag) ||
+            append_vm_share(entries, read_only, count, tag, source,
+                            !mount->writable) != 0) {
+            logerr("cannot prepare custom mount %s", mount->location);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int append_vm_argument(const char **arguments, size_t *count,
                               size_t capacity, const char *argument)
 {
@@ -464,6 +511,9 @@ static int cmd_start_execute(const struct start_options *options,
         goto out;
     }
     start_trace_stage(&trace, "profile-ready");
+    char vm_shares[VZ_MAX_SHARES][PATH_MAX + 32];
+    int vm_share_read_only[VZ_MAX_SHARES] = {0};
+    size_t vm_share_count = 0;
     if (already_running) {
         if (running_profile.cpus != p.cpus ||
             running_profile.mem_mib != p.mem_mib ||
@@ -497,6 +547,20 @@ static int cmd_start_execute(const struct start_options *options,
                 logerr("cannot refresh the running VM guest deployment");
                 goto out;
             }
+            /* A rolled back or discarded backup leaves a runtime the marker
+             * does not vouch for: an interrupted cold start's reconciliation
+             * rolls back to the previous boot's Docker settings. Apply the
+             * whole runtime before reporting a running VM. If that fails, the
+             * guest keeps its record of the recovery, so the next start asks
+             * for the whole runtime again. */
+            if (deployment_current == 1 && guest_deployment_recovered_backup()) {
+                start_trace_stage(&trace, "reapplying-deployment");
+                if (guest_deployment_reapply_runtime_locked(
+                        &p, &running_state) != 0) {
+                    logerr("cannot apply the running VM guest runtime again");
+                    goto out;
+                }
+            }
             if (!running_start_ready(&running_profile) && !proc_cancelled()) {
                 start_trace_stage(&trace, "repairing-forwarding");
                 if (guest_deployment_forward_sockets(&p, running_state.ip) != 0)
@@ -521,9 +585,19 @@ static int cmd_start_execute(const struct start_options *options,
         if (proc_cancelled()) goto out;
         if (rollback_incomplete_start(&running_profile) != 0)
             goto out;
-    } else if (vm_cleanup_stale(&running_profile) != 0) {
-        logerr("cannot clean stale VM state before start");
-        goto out;
+    } else {
+        /* A stopped VM's start refuses an unusable share before its first
+         * change, so the refusal is a known failure that changed nothing.
+         * The shares are prepared again just before the spawn. */
+        if (prepare_vm_shares(&p, vm_shares, vm_share_read_only,
+                              &vm_share_count) != 0) {
+            start_unchanged = 1;
+            goto out;
+        }
+        if (vm_cleanup_stale(&running_profile) != 0) {
+            logerr("cannot clean stale VM state before start");
+            goto out;
+        }
     }
     if (profile_save(&p) != 0)
         die("cannot save profile config: %s", strerror(errno));
@@ -549,47 +623,15 @@ static int cmd_start_execute(const struct start_options *options,
     char mac[32];
     if (mac_ensure(&p, mac, sizeof(mac)) != 0)
         goto out;
-    /* 3. 공유/로그 디렉토리. Guest runtime itself is image-owned. */
-    char logs[PATH_MAX], home_real[PATH_MAX];
-    char vm_shares[VZ_MAX_SHARES][PATH_MAX + 32];
-    int vm_share_read_only[VZ_MAX_SHARES] = {0};
-    size_t vm_share_count = 0;
+    /* 3. 공유/로그 디렉토리. Guest runtime itself is image-owned. The shares
+     * are checked again here, the closest point to the spawn that uses them. */
+    char logs[PATH_MAX];
     profile_path(&p, "logs", logs, sizeof(logs));
     if (fs_mkdirs(logs, 0755) != 0)
         goto out;
-    const char *home = getenv("HOME");
-    if (!home) {
-        logerr("HOME is not set");
+    if (prepare_vm_shares(&p, vm_shares, vm_share_read_only,
+                          &vm_share_count) != 0)
         goto out;
-    }
-    if (p.mount_home) {
-        if (canonical_owned_directory(home, home_real, 0) != 0 ||
-            append_vm_share(vm_shares, vm_share_read_only, &vm_share_count,
-                            "home", home_real, p.home_read_only) != 0) {
-            logerr("cannot prepare the home mount: %s", strerror(errno));
-            goto out;
-        }
-    } else if (!realpath(home, home_real)) {
-        logerr("cannot resolve HOME: %s", strerror(errno));
-        goto out;
-    }
-    for (size_t index = 0; index < p.mount_count; index++) {
-        char source[PATH_MAX], tag[32];
-        const struct profile_mount *mount = &p.mounts[index];
-        if (canonical_owned_directory(mount->location, source, 1) != 0 ||
-            (mount->writable && !path_is_within(home_real, source))) {
-            logerr("mount %s must be an owned non-symlink directory%s",
-                   mount->location, mount->writable ? " beneath HOME" : "");
-            goto out;
-        }
-        int written = snprintf(tag, sizeof(tag), "mount%zu", index);
-        if (written < 0 || written >= (int)sizeof(tag) ||
-            append_vm_share(vm_shares, vm_share_read_only, &vm_share_count,
-                            tag, source, !mount->writable) != 0) {
-            logerr("cannot prepare custom mount %s", mount->location);
-            goto out;
-        }
-    }
     if (cloudinit_seed_ensure(&p, 0) != 0)
         goto out;
     start_trace_stage(&trace, deployment_current == 1 ?

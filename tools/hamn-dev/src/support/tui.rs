@@ -9,7 +9,7 @@ use std::fs;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitCode};
 use std::time::{Duration, Instant};
 
 /// Installs `root/bin/<name>` as a link to this executable, which then acts
@@ -19,6 +19,36 @@ pub fn install_fixture(bin: &Path, name: &str) {
     let _ = fs::remove_file(&path);
     std::os::unix::fs::symlink(std::env::current_exe().expect("current executable"), &path)
         .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+}
+
+/// The arguments that end the TUI's lookup of the kinds a cluster serves
+/// (`control/cluster_kinds.rs`). The TUI starts it in the background when
+/// `:` opens in Kubernetes, so it runs beside the query of a typed command
+/// in an order that no test sets.
+pub const KINDS_LOOKUP: [&str; 3] = ["api-resources", "-o", "name"];
+
+/// What the recorded kubectl peers print for a kinds lookup: kinds of the
+/// core group and of a named group, and one custom resource.
+pub const CLUSTER_KINDS: &str = "pods\nservices\ndeployments.apps\nwidgets.fixture.hamn.dev\n";
+
+/// Whether recorded kubectl arguments are a kinds lookup.
+pub fn is_kinds_lookup(args: &[String]) -> bool {
+    args.len() >= KINDS_LOOKUP.len() && args[args.len() - KINDS_LOOKUP.len()..] == KINDS_LOOKUP
+}
+
+/// The arguments of the kinds lookup for `context` with the kubeconfig
+/// that `KUBECONFIG` names, as the peers record them.
+pub fn kinds_lookup(context: &str) -> Vec<String> {
+    ["--context", context].into_iter().chain(KINDS_LOOKUP).map(String::from).collect()
+}
+
+/// In a recorded kubectl peer: answers a kinds lookup with
+/// `CLUSTER_KINDS`, and every other call with `None`.
+pub fn answer_kinds_lookup(args: &[String]) -> Option<ExitCode> {
+    is_kinds_lookup(args).then(|| {
+        print!("{CLUSTER_KINDS}");
+        ExitCode::SUCCESS
+    })
 }
 
 /// Selects the fixture behavior of `root/bin/<cli>` for this harness only.
@@ -174,6 +204,21 @@ impl Harness {
 
     pub fn text(&self) -> String {
         self.screen.text()
+    }
+
+    /// The recorded calls other than kinds lookups, so that the last one is
+    /// the last query whenever a lookup ran.
+    pub fn queries(&self) -> Vec<(String, Vec<String>)> {
+        self.calls().into_iter().filter(|(_, args)| !is_kinds_lookup(args)).collect()
+    }
+
+    /// The arguments of the recorded kubectl kinds lookups, in their order.
+    pub fn kinds_lookups(&self) -> Vec<Vec<String>> {
+        self.calls()
+            .into_iter()
+            .filter(|(program, args)| program == "kubectl" && is_kinds_lookup(args))
+            .map(|(_, args)| args)
+            .collect()
     }
 
     /// The fixture invocations so far, as (program name, arguments).

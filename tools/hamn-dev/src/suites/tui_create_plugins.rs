@@ -107,9 +107,12 @@ fn create_plugins(kubectl: &Path) {
                         && serde_json::from_str::<Vec<String>>(calls[calls.len() - 1]).unwrap() == suffix,
                     "{calls:?}"
                 );
+                // The kinds lookup of the first `:` runs beside the command,
+                // in either order; the command is the last call besides it.
                 let native = native_calls();
+                let last = native.iter().rev().find(|call| !tui::is_kinds_lookup(call));
                 assert!(
-                    native.last().is_some_and(|last| *last == args) && harness.text().contains("Plugin-defined target"),
+                    last.is_some_and(|last| *last == args) && harness.text().contains("Plugin-defined target"),
                     "{native:?}"
                 );
                 harness.send(b"\r", "[Kubernetes]");
@@ -234,6 +237,10 @@ fn create_plugins(kubectl: &Path) {
     harness.send(b"\r", "Namespace: test");
     assert!(harness.text().contains("Context: old-cluster"), "{}", harness.text());
     assert_eq!(fs::read(&kubeconfig).unwrap(), fs::read(&direct_config).unwrap());
+    // The first `:` looked up the cluster's kinds and the answer was kept:
+    // every later prompt was for the same context, so none looked again.
+    let lookups: Vec<Vec<String>> = native_calls().into_iter().filter(|call| tui::is_kinds_lookup(call)).collect();
+    assert_eq!(lookups, [tui::kinds_lookup("old-cluster")]);
     assert_hamn_directory_holds_preferences_only(&root);
 }
 
@@ -242,9 +249,13 @@ fn home() -> PathBuf {
 }
 
 /// The `kubectl` wrapper: appends its argv to `$HOME/native-calls`, then
-/// execs the installed kubectl.
+/// answers the TUI's kinds lookup itself and execs the installed kubectl
+/// for every other call.
 pub fn kubectl_recorded(_program: &str, args: &[String]) -> ExitCode {
     real_cli::append_line(&home().join("native-calls"), &json_list(args));
+    if let Some(code) = crate::support::tui::answer_kinds_lookup(args) {
+        return code;
+    }
     real_cli::exec(Command::new(real_cli::real("kubectl")).args(args))
 }
 

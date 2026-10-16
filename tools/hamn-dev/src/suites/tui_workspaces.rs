@@ -214,6 +214,9 @@ pub fn fixture(program: &str, args: &[String]) -> ExitCode {
         // append here: one write per call keeps every line a record.
         let record = std::env::var_os("CLI_RECORD").expect("CLI_RECORD");
         real_cli::append_line(Path::new(&record), &json!([program, args]).to_string());
+        if let Some(code) = crate::support::tui::answer_kinds_lookup(args) {
+            return code;
+        }
         let has = |value: &str| args.iter().any(|arg| arg == value);
         if has("ps") {
             if has("-q") {

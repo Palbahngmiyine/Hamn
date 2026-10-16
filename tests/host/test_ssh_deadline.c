@@ -40,7 +40,9 @@ int main(int argc, char **argv)
     else {
         assert(strcmp(op, "exec") == 0);
         const char *command[] = {"sudo", "systemctl", "poweroff", NULL};
-        assert(ssh_exec_bounded(&p, "127.0.0.1", command, 200) == PROC_RUN_TIMEOUT);
+        /* The deadline also covers starting ssh; tools/hamn-dev's ssh-deadline
+           suite expects 1 s and that ssh reached the master within it. */
+        assert(ssh_exec_bounded(&p, "127.0.0.1", command, 1000) == PROC_RUN_TIMEOUT);
     }
     return 0;
 }
