@@ -299,7 +299,7 @@ static void status_with_start_identity_is_verified(const char *root)
     int pid = -1;
     assert(vm_process_probe(&p, &pid) == VM_PROCESS_VERIFIED &&
            pid == supervisor.pid);
-    assert(vm_running_pid(&p) == supervisor.pid);
+    assert(vm_running_pid(&p, 300) == supervisor.pid);
     assert(!supervisor_kill(&supervisor));
 }
 
@@ -329,7 +329,7 @@ static void status_without_matching_start_identity_is_unverified(
         int pid = -1;
         assert(vm_process_probe(&p, &pid) == VM_PROCESS_UNVERIFIED &&
                pid == -1);
-        assert(vm_running_pid(&p) == -1);
+        assert(vm_running_pid(&p, 300) == -1);
         /* Neither stale cleanup nor stop may act on it. */
         assert(vm_cleanup_stale(&p) == -1);
         int was_running = 1;
