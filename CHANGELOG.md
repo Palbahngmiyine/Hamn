@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.3.0 (2026-10-16)
+
+## What's Changed
+* fix: keep the TUI still during refresh and explain a stopped Hamn VM by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/60
+* fix: answer a control request that arrives after its connection is accepted by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/62
+* fix: keep published ports forwarded after failed requests, ended relays and a new SSH master by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/63
+* fix: report a UDP port that is published on one address by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/64
+* feat: apply a profile definition with vm apply and say why a profile cannot be read by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/65
+* chore: reset docs and retain declarative VM regressions by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/66
+* Update README.md by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/67
+* ci: wait for github.com before a macOS shard checks out by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/68
+* fix: bound guest readiness probes and the image check, and cancel the DHCP wait by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/70
+* fix: deliver a cancellation that reaches a starting worker to its handler by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/69
+* feat: report a damaged guest disk, add vm reset, and repair the root filesystem at boot by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/73
+* fix: bound the guest writer, cloud-init and hook SSH clients, and cancel the vmrun wait by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/75
+* feat: complete : commands in the TUI from history and known commands by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/74
+* feat: describe, YAML, shell and port-forward on k9s row keys by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/72
+* fix: end the vmrun wait of vm start at a monotonic deadline by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/79
+* fix: end upgrade-cli timeouts from a lost signal at the updater test barrier by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/78
+* fix: mount the guest root ext4 without online discard and trim it weekly by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/84
+* fix: keep the vmrun identity check of vm start inside its deadline by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/81
+* fix: end the vmrun status queries of vm start, retries included, at its deadline by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/85
+* fix: discard unpublished guest deployment backups and retire them durably by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/80
+* fix: recover a leftover transaction on cold start and reapply what a boot resets by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/86
+* test: make the physical workspace-live suite pass on main again by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/83
+* fix: refuse an unusable share before a stopped VM's start changes anything by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/87
+* feat: complete the kinds the cluster serves after :get, custom resources included by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/77
+* test: wait for the fake SSH master's accept, and give exec time to start ssh by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/88
+* fix: report an empty Docker socket reply as unreadable, and deflake the relay kill wait by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/90
+* fix: attach guest disks with host caching instead of the automatic mode by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/89
+* chore: release 0.3.0 by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/91
+
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.2.1...v0.3.0
+
 ## 0.2.1 (2026-09-29)
 
 ## What's Changed
