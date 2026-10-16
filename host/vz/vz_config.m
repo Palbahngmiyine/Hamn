@@ -155,7 +155,7 @@ VZVirtualMachineConfiguration *hamn_vz_build_config(const vz_vm_spec *spec,
     cfg.networkDevices = @[ net ];
 
     /* Guest console (hvc0) → the caller's descriptor (vmrun's console relay) */
-    if (spec->serial_fd >= 0) {
+    if (spec->serial_fd > 0) {
         int fd = fcntl(spec->serial_fd, F_DUPFD_CLOEXEC, 0);
         if (fd < 0) {
             *outErr = mk_err(@"cannot duplicate the serial console descriptor");

@@ -369,6 +369,10 @@ static int serial_console_open(const char *serial_log)
         fcntl(pipe_fds[1], F_SETFD, FD_CLOEXEC) != 0)
         die("vmrun: cannot create the guest console pipe: %s",
             strerror(errno));
+    /* vz_vm_spec reads descriptor 0 as "no console"; vmrun's standard
+     * descriptors are open, so the pipe never gets it. */
+    if (pipe_fds[0] <= STDERR_FILENO || pipe_fds[1] <= STDERR_FILENO)
+        die("vmrun: the guest console pipe got a standard descriptor");
     if (console_relay_start(pipe_fds[0], log_fd, on_console_panic, NULL) != 0)
         die("vmrun: cannot relay the guest console to %s", serial_log);
     return pipe_fds[1];
@@ -591,7 +595,7 @@ int cmd_vmrun(int argc, char **argv)
         die("vmrun: %s", err ? err : "vm creation failed");
     /* The VM holds its own duplicate; the relay sees end of input when the
      * VM releases it. */
-    if (spec.serial_fd >= 0)
+    if (spec.serial_fd > 0)
         close(spec.serial_fd);
 
     if (vz_vm_start(g_vm, &err) != 0)

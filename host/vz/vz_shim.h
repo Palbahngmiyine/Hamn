@@ -21,9 +21,11 @@ typedef struct {
     const char *efi_vars;        /* EFI variable store 경로 (필수, 없으면 생성) */
     const char *machine_id_file; /* VZGenericMachineIdentifier 영속 파일 (선택) */
     const char *mac_addr;        /* "52:54:00:xx:xx:xx" (선택, NULL=랜덤) */
-    /* Write end for the guest's virtio console (hvc0) output; negative =
-     * no console. vz_vm_create duplicates it (close-on-exec) for the VM, and
-     * the caller keeps and closes its own descriptor. */
+    /* Write end for the guest's virtio console (hvc0) output; 0 or
+     * negative = no console, so a zero-initialized spec has none (vmrun's
+     * pipe descriptors are above 2). vz_vm_create duplicates it
+     * (close-on-exec) for the VM, and the caller keeps and closes its own
+     * descriptor. */
     int serial_fd;
     int rosetta;                 /* Linux Intel binary translation share */
     int nested_virtualization;   /* supported Apple Silicon hosts only */
