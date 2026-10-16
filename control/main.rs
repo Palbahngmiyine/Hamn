@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::{ffi::CString, io::IsTerminal, os::unix::ffi::OsStrExt};
 mod capabilities;
+mod cluster_kinds;
 mod command_input;
 mod core;
 mod docker;
