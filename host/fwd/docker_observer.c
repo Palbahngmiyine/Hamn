@@ -345,7 +345,11 @@ static int docker_http_get(const char *socket_path, const char *target,
             continue;
         if (received < 0 || (received == 0 && length == 0) ||
             (received > 0 && (length += (size_t)received) == capacity)) {
-            int saved = received < 0 ? errno : EOVERFLOW;
+            /* Only a full buffer is a response over the limits. A connection
+             * closed before any byte, as an SSH-forwarded socket is when the
+             * forward behind it fails, is no response at all. */
+            int saved = received < 0 ? errno :
+                received == 0 ? EPROTO : EOVERFLOW;
             close(fd);
             free(response);
             errno = saved;
