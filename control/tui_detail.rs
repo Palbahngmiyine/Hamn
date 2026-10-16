@@ -102,7 +102,7 @@ fn value_style(value: &str) -> Style {
         "starting" | "stopping" | "preparing" | "Pending" | "ContainerCreating" | "Terminating"
         | "restarting" => Some(Level::Warning),
         "recoveryRequired" | "unavailable" | "Failed" | "CrashLoopBackOff" | "ImagePullBackOff"
-        | "ErrImagePull" | "OOMKilled" | "Error" | "dead" | "False" | "damaged" => {
+        | "ErrImagePull" | "OOMKilled" | "Error" | "dead" | "False" | "damaged" | "panicked" => {
             Some(Level::Error)
         }
         _ => None,
