@@ -10,7 +10,9 @@
  * Guest kernel panic: the guest console (hvc0) passes through vmrun's console
  * relay (vmrun/console.h) on its way to --serial-log. When the kernel's panic
  * banner appears there, vmrun stops the VM once the panic report has ended,
- * or PANIC_REPORT_GRACE_SEC after the banner, and exits 1. The guest image
+ * or PANIC_REPORT_GRACE_SEC after the banner, and exits 1. Before the stop
+ * it writes the panic's reason to --panic-record (core/guest_panic.h), which
+ * `vm status` reports until the next start removes it. The guest image
  * boots with `panic=0`, so the panicked kernel waits for this instead of
  * rebooting inside the VM, which Virtualization.framework would allow
  * without telling vmrun.
@@ -27,11 +29,13 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <dispatch/dispatch.h>
 
 #include "cli.h"
+#include "core/guest_panic.h"
 #include "core/log.h"
 #include "util/fs.h"
 #include "util/proc.h"
@@ -45,10 +49,15 @@
  * may never print the end, so the wait for it is bounded. */
 #define PANIC_REPORT_GRACE_SEC 2
 
+/* Every reason the console relay can report fits the panic record. */
+_Static_assert(CONSOLE_PANIC_REASON_CAP <= GUEST_PANIC_DETAIL_CAP,
+               "a console panic reason must fit the guest panic record");
+
 static vz_vm *g_vm;
 static const char *g_pidfile;
 static const char *g_identity_file;
 static const char *g_ctl_sock;
+static const char *g_panic_record;
 static char g_pid_text[32];
 static char g_identity_text[192];
 static size_t g_pid_text_len;
@@ -297,16 +306,26 @@ static void handle_stop_signal(void)
                    });
 }
 
-/* Main queue only: the first call stops the VM and ends vmrun. */
+/* Main queue only: the first call records the panic, stops the VM and ends
+ * vmrun. context is a malloc'd copy of the panic's reason, freed here. */
 static void stop_after_panic(void *context)
 {
     static int stopping;
-    (void)context;
-    if (stopping)
+    char *reason = context;
+    if (stopping) {
+        free(reason);
         return;
+    }
     stopping = 1;
-    logmsg("vmrun: stopping the VM after a guest kernel panic; the panic "
-           "report is in the serial log");
+    if (g_panic_record &&
+        guest_panic_record(g_panic_record, reason ? reason : "",
+                           (long long)time(NULL)) != 0)
+        logerr("vmrun: cannot record the guest kernel panic in %s: %s",
+               g_panic_record, strerror(errno));
+    logmsg("vmrun: stopping the VM after a guest kernel panic (%s); the "
+           "panic report is in the serial log",
+           reason && reason[0] ? reason : "no reason printed");
+    free(reason);
     char *err = NULL;
     if (vz_vm_force_stop(g_vm, &err) != 0) {
         logerr("vmrun: %s", err ? err : "force stop failed");
@@ -315,18 +334,22 @@ static void stop_after_panic(void *context)
     exit(1);
 }
 
-/* Console relay queue: schedules the stop on the main queue. */
-static void on_console_panic(enum console_panic_stage stage, void *context)
+/* Console relay queue: schedules the stop on the main queue, each time with
+ * its own copy of the reason (NULL when no memory is left: the stop happens
+ * all the same, without it). */
+static void on_console_panic(enum console_panic_stage stage,
+                             const char *reason, void *context)
 {
     (void)context;
+    char *copy = strdup(reason);
     if (stage == CONSOLE_PANIC_STARTED) {
         logmsg("vmrun: guest kernel panic on the console");
         dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,
                                        PANIC_REPORT_GRACE_SEC * NSEC_PER_SEC),
-                         dispatch_get_main_queue(), NULL, stop_after_panic);
+                         dispatch_get_main_queue(), copy, stop_after_panic);
         return;
     }
-    dispatch_async_f(dispatch_get_main_queue(), NULL, stop_after_panic);
+    dispatch_async_f(dispatch_get_main_queue(), copy, stop_after_panic);
 }
 
 /*
@@ -372,6 +395,7 @@ static int vmrun_usage(void)
             "  --seed <path>         cloud-init seed ISO (ro)\n"
             "  --serial-log <path>   serial console log file; a guest kernel\n"
             "                        panic there stops the VM\n"
+            "  --panic-record <path> where that panic's reason is recorded\n"
             "  --efi-vars <path>     EFI variable store (default: <disk>.efivars)\n"
             "  --machine-id <path>   persisted machine identifier\n"
             "  --mac <addr>          fixed MAC address\n"
@@ -427,6 +451,7 @@ int cmd_vmrun(int argc, char **argv)
         { "spawn-guard-fd", required_argument, NULL, 'F' },
         { "spawn-token", required_argument, NULL, 'T' },
         { "ctl-sock", required_argument, NULL, 'k' },
+        { "panic-record", required_argument, NULL, 'P' },
         { 0 },
     };
 
@@ -481,6 +506,9 @@ int cmd_vmrun(int argc, char **argv)
             break;
         case 'k':
             g_ctl_sock = optarg;
+            break;
+        case 'P':
+            g_panic_record = optarg;
             break;
         case 'S':
         case 'R': {

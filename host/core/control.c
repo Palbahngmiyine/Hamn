@@ -11,6 +11,7 @@
 
 #include "cjson/cJSON.h"
 #include "core/guest_filesystem.h"
+#include "core/guest_panic.h"
 #include "core/guest_status.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
@@ -144,6 +145,14 @@ static cJSON *profile_status(const struct profile *profile)
     if (!filesystem ||
         !cJSON_AddItemToObject(value, "guestFilesystem", filesystem)) {
         cJSON_Delete(filesystem);
+        cJSON_Delete(value);
+        return NULL;
+    }
+    /* Why the last run ended, when its guest kernel panicked; the next start
+     * removes the record. */
+    cJSON *panic = guest_panic_snapshot(profile);
+    if (!panic || !cJSON_AddItemToObject(value, "guestKernelPanic", panic)) {
+        cJSON_Delete(panic);
         cJSON_Delete(value);
         return NULL;
     }

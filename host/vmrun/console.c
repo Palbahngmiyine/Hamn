@@ -53,6 +53,7 @@ enum console_panic_stage console_scan_feed(struct console_scan *scan,
     assert(bytes || length == 0);
     assert(scan->start_matched < START_LENGTH);
     assert(scan->end_matched < END_LENGTH);
+    assert(scan->reason_length < CONSOLE_PANIC_REASON_CAP);
     const unsigned char *p = bytes;
     for (size_t i = 0; i < length && scan->stage != CONSOLE_PANIC_ENDED; i++) {
         if (scan->stage == CONSOLE_QUIET) {
@@ -60,8 +61,18 @@ enum console_panic_stage console_scan_feed(struct console_scan *scan,
             if (scan->start_matched == START_LENGTH) {
                 scan->start_matched = 0;
                 scan->stage = CONSOLE_PANIC_STARTED;
+                scan->reason_open = 1;
             }
         } else {
+            if (scan->reason_open) {
+                if (p[i] == '\n' || p[i] == '\r') {
+                    scan->reason_open = 0;
+                } else if (scan->reason_length < CONSOLE_PANIC_REASON_CAP - 1) {
+                    scan->reason[scan->reason_length++] =
+                        p[i] >= 0x20 && p[i] < 0x7f ? (char)p[i] : '?';
+                    scan->reason[scan->reason_length] = '\0';
+                }
+            }
             scan->end_matched = step(END_BANNER, scan->end_matched, p[i]);
             if (scan->end_matched == END_LENGTH) {
                 scan->end_matched = 0;
@@ -70,6 +81,18 @@ enum console_panic_stage console_scan_feed(struct console_scan *scan,
         }
     }
     return scan->stage;
+}
+
+const char *console_scan_reason(const struct console_scan *scan)
+{
+    assert(scan);
+    /* The kernel prints "Kernel panic - not syncing: <reason>". */
+    const char *reason = scan->reason;
+    if (*reason == ':')
+        reason++;
+    while (*reason == ' ')
+        reason++;
+    return reason;
 }
 
 struct console_relay {
@@ -115,11 +138,12 @@ static void relay_read(void *context)
             enum console_panic_stage before = relay->scan.stage;
             enum console_panic_stage after =
                 console_scan_feed(&relay->scan, buffer, (size_t)n);
+            const char *reason = console_scan_reason(&relay->scan);
             if (before < CONSOLE_PANIC_STARTED &&
                 after >= CONSOLE_PANIC_STARTED)
-                relay->on_panic(CONSOLE_PANIC_STARTED, relay->context);
+                relay->on_panic(CONSOLE_PANIC_STARTED, reason, relay->context);
             if (before < CONSOLE_PANIC_ENDED && after == CONSOLE_PANIC_ENDED)
-                relay->on_panic(CONSOLE_PANIC_ENDED, relay->context);
+                relay->on_panic(CONSOLE_PANIC_ENDED, reason, relay->context);
             continue;
         }
         if (n < 0 && errno == EINTR)

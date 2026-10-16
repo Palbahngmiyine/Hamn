@@ -25,6 +25,8 @@
 #define FAILURE_DEADLINE_SEC 10
 
 static const char START[] = "Kernel panic - not syncing";
+static const char EXCERPT_REASON[] =
+    "corrupted stack end detected inside scheduler";
 static const char END[] = "---[ end Kernel panic - not syncing";
 
 /* From the hvc0 log of a guest whose kernel stack was damaged (2026-10-15). */
@@ -81,6 +83,14 @@ static enum console_panic_stage scan_whole(const char *text, size_t length)
     return console_scan_feed(&scan, text, length);
 }
 
+static const char *reason_whole(const char *text, size_t length)
+{
+    static struct console_scan scan;
+    console_scan_init(&scan);
+    console_scan_feed(&scan, text, length);
+    return console_scan_reason(&scan);
+}
+
 static void test_every_prefix_matches_the_oracle(const char *text)
 {
     size_t length = strlen(text);
@@ -103,6 +113,11 @@ static void test_every_split_matches_the_whole(const char *text)
         require(console_scan_feed(&scan, text + split, length - split) ==
                     whole,
                 "a split stream ends in another stage than the whole");
+        char split_reason[CONSOLE_PANIC_REASON_CAP];
+        snprintf(split_reason, sizeof(split_reason), "%s",
+                 console_scan_reason(&scan));
+        require(strcmp(split_reason, reason_whole(text, length)) == 0,
+                "a split stream has another reason than the whole");
     }
     struct console_scan scan;
     console_scan_init(&scan);
@@ -111,6 +126,10 @@ static void test_every_split_matches_the_whole(const char *text)
         require(stage == oracle(text, i + 1),
                 "a byte-at-a-time stream has the wrong stage");
     }
+    char bytewise[CONSOLE_PANIC_REASON_CAP];
+    snprintf(bytewise, sizeof(bytewise), "%s", console_scan_reason(&scan));
+    require(strcmp(bytewise, reason_whole(text, length)) == 0,
+            "a byte-at-a-time stream has another reason than the whole");
 }
 
 static void test_real_panic_is_started_then_ended(void)
@@ -125,6 +144,54 @@ static void test_real_panic_is_started_then_ended(void)
             "a panic before its end line must be CONSOLE_PANIC_STARTED");
     test_every_prefix_matches_the_oracle(PANIC_EXCERPT);
     test_every_split_matches_the_whole(PANIC_EXCERPT);
+    require(strcmp(reason_whole(PANIC_EXCERPT, strlen(PANIC_EXCERPT)),
+                   EXCERPT_REASON) == 0,
+            "the reason of a real panic is the rest of its banner line");
+    require(strcmp(reason_whole(PANIC_EXCERPT,
+                                (size_t)(end_line - PANIC_EXCERPT)),
+                   EXCERPT_REASON) == 0,
+            "the reason is complete once the banner line has ended");
+    require(reason_whole(BOOT_EXCERPT, strlen(BOOT_EXCERPT))[0] == '\0',
+            "no reason before a panic");
+}
+
+static void test_reason_is_bounded_printable_ascii(void)
+{
+    static const struct {
+        const char *text;
+        const char *reason;
+    } cases[] = {
+        { "Kernel panic - not syncing: Oops: Fatal exception\n",
+          "Oops: Fatal exception" },
+        { "Kernel panic - not syncing: sysrq triggered crash\r\n",
+          "sysrq triggered crash" },
+        { "Kernel panic - not syncing:   spaced\n", "spaced" },
+        { "Kernel panic - not syncingglued\n", "glued" },
+        { "Kernel panic - not syncing: tab\there\x01\x7f\n",
+          "tab?here??" },
+        { "Kernel panic - not syncing: caf\xc3\xa9\n", "caf??" },
+        { "Kernel panic - not syncing: unterminated", "unterminated" },
+        { "Kernel panic - not syncing: one\ntwo\n", "one" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const char *reason = reason_whole(cases[i].text, strlen(cases[i].text));
+        if (strcmp(reason, cases[i].reason) != 0) {
+            fprintf(stderr, "case %zu: reason \"%s\"\n", i, reason);
+            require(0, "a reason was not cleaned as documented");
+        }
+    }
+    /* A reason longer than the cap keeps its first CAP - 1 bytes (": " is
+     * counted, then skipped). */
+    char text[CONSOLE_PANIC_REASON_CAP * 2 + 64];
+    int n = snprintf(text, sizeof(text), "Kernel panic - not syncing: ");
+    for (int i = 0; i < CONSOLE_PANIC_REASON_CAP * 2; i++)
+        text[n + i] = (char)('a' + i % 26);
+    text[n + CONSOLE_PANIC_REASON_CAP * 2] = '\n';
+    text[n + CONSOLE_PANIC_REASON_CAP * 2 + 1] = '\0';
+    const char *reason = reason_whole(text, strlen(text));
+    require(strlen(reason) == CONSOLE_PANIC_REASON_CAP - 3 &&
+                strncmp(reason, text + n, strlen(reason)) == 0,
+            "a long reason is cut at the cap");
 }
 
 static void test_boot_output_stays_quiet(void)
@@ -203,15 +270,20 @@ static void test_nul_bytes_are_plain_bytes(void)
 struct observed {
     dispatch_semaphore_t ended;
     enum console_panic_stage stages[4];
+    char reasons[4][CONSOLE_PANIC_REASON_CAP];
     atomic_int count;
 };
 
-static void on_panic(enum console_panic_stage stage, void *context)
+static void on_panic(enum console_panic_stage stage, const char *reason,
+                     void *context)
 {
     struct observed *observed = context;
     int index = atomic_load(&observed->count);
-    if (index < 4)
+    if (index < 4) {
         observed->stages[index] = stage;
+        snprintf(observed->reasons[index], sizeof(observed->reasons[index]),
+                 "%s", reason);
+    }
     atomic_fetch_add(&observed->count, 1);
     if (stage == CONSOLE_PANIC_ENDED)
         dispatch_semaphore_signal(observed->ended);
@@ -350,6 +422,13 @@ static void test_relay_copies_every_byte_and_reports_once(const char *dir)
         require(observed.stages[0] == CONSOLE_PANIC_STARTED &&
                     observed.stages[1] == CONSOLE_PANIC_ENDED,
                 "the start is reported before the end");
+        require(strcmp(observed.reasons[1], EXCERPT_REASON) == 0,
+                "the end callback carries the complete reason");
+        /* How much of the banner line one read carries depends on the
+         * pipe, not on the writes. */
+        require(strncmp(observed.reasons[0], EXCERPT_REASON,
+                        strlen(observed.reasons[0])) == 0,
+                "the start callback carries a prefix of the reason");
         size_t logged = 0;
         char *log = read_file(log_path, &logged);
         require(logged == size && memcmp(log, data, size) == 0,
@@ -410,6 +489,7 @@ int main(void)
     test_partial_matches_restart_correctly();
     test_end_banner_counts_only_after_a_start();
     test_nul_bytes_are_plain_bytes();
+    test_reason_is_bounded_printable_ascii();
 
     char directory[] = "/tmp/hamn-console-test-XXXXXX";
     if (!mkdtemp(directory))
