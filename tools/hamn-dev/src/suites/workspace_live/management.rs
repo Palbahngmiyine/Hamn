@@ -441,7 +441,7 @@ impl Review<'_> {
             terminal.until("Choose your default workspace");
             terminal.send(b"1\r", None);
         }
-        terminal.until(": command");
+        terminal.until("<:> command");
         // The unrelated pod sorts first in a namespace-wide list. Select the
         // intended starting object explicitly; the relationship queries
         // below must still prove that their selectors exclude the decoy.

@@ -2,10 +2,18 @@
 //! Only the workspace-owned `verify` profile is changed. Its original
 //! configuration and permissions are restored even after a failed assertion,
 //! before the outer harness attempts VM cleanup. No disk is removed.
-use super::{Live, PROFILE, Spec, finally, path_str, process};
+use super::{Live, PROFILE, Spec, finally, path_str, process, resolved};
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
+
+/// The writable share's host directory. `vm start` shares a writable mount
+/// only from an owned directory beneath HOME whose path is already canonical
+/// (host/cmd/cmd_start.c), and on macOS the root's `/tmp` is a symbolic link.
+fn apply_share(live: &Live) -> PathBuf {
+    resolved(&live.runtime.home).join("apply-share")
+}
 
 fn definition(cpus: u32, memory: u32, share: &str) -> String {
     // YAML quoting must also work when the temporary root contains spaces.
@@ -47,7 +55,7 @@ fn guest(live: &Live, cpus: u32, memory: u64) -> Value {
     // persistence as evidence of guest RAM changing.
     assert!(kib >= memory * 1024 * 9 / 10 && kib <= memory * 1024, "{output}");
     assert_eq!(lines[2], "host-proof");
-    assert_eq!(fs::read(live.root.join("apply-share/guest-proof")).unwrap(), b"guest-proof");
+    assert_eq!(fs::read(apply_share(live).join("guest-proof")).unwrap(), b"guest-proof");
     json!({"onlineCpus": cpus, "memTotalKiB": kib, "writableMount": true})
 }
 
@@ -57,7 +65,7 @@ pub(super) fn verify(live: &Live) {
     let config = live.profile().join("config.yaml");
     let original = fs::read(&config).unwrap();
     let permissions = fs::metadata(&config).unwrap().permissions();
-    let share = live.root.join("apply-share");
+    let share = apply_share(live);
     fs::create_dir_all(&share).unwrap();
     fs::write(share.join("host-proof"), b"host-proof\n").unwrap();
     let file = live.root.join("apply-definition.yaml");
@@ -131,4 +139,38 @@ pub(super) fn verify(live: &Live) {
     live.call(&["vm", "start"], &["--yes"]);
     live.write_json("vm-apply-results.json", &json!({"passed": true, "observations": evidence}));
     println!("PASS: live vm apply idempotency, running conflict, guest CPU/RAM/mount and explicit configuration recovery");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::mkdtemp;
+    use super::*;
+    use crate::release::runtime::Runtime;
+    use std::path::Path;
+
+    /// The rule `vm start` applies to a writable mount (host/cmd/cmd_start.c):
+    /// the location is already its own canonical path and lies beneath the
+    /// canonical HOME. prepare() puts the root under /tmp, a symbolic link
+    /// on macOS.
+    #[test]
+    fn the_writable_share_is_canonical_and_beneath_home() {
+        let root = mkdtemp(Path::new("/tmp"), "hamn-apply-share-").unwrap();
+        let home = root.join("home");
+        fs::create_dir(&home).unwrap();
+        let live =
+            Live { root: root.clone(), runtime: Runtime::new(root.join("hamn-under-test"), home.clone(), "docker") };
+        let share = apply_share(&live);
+        let created = fs::create_dir(&share);
+        let canonical = fs::canonicalize(&share);
+        let home_real = fs::canonicalize(&home).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        created.unwrap();
+        assert_eq!(canonical.unwrap(), share, "the location is not canonical");
+        assert!(
+            share.starts_with(&home_real) && share != home_real,
+            "{} is not beneath HOME {}",
+            share.display(),
+            home_real.display()
+        );
+    }
 }
