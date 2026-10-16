@@ -12,11 +12,24 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Gives the terminal back, then prints the cleanup failures of queries that
+/// the screen has not shown yet (`query_process::hold_reports`).
 struct Restore;
 impl Drop for Restore {
     fn drop(&mut self) {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         ratatui::restore();
+        for message in crate::query_process::release_reports() {
+            eprintln!("hamn: {message}");
+        }
+    }
+}
+
+/// Shows the cleanup failures that queries held for the screen while it
+/// draws, each as a failure of the view: `!` shows it whole.
+fn show_held_reports(state: &mut State) {
+    for message in crate::query_process::take_reports() {
+        state.fail(crate::model::Failure::new("queryCleanup", message));
     }
 }
 
@@ -52,20 +65,59 @@ fn mutation_progress<'a>(
     }
 }
 
+/// What the user still has to know about changes once the screen is gone,
+/// as sentences on stderr: a change that failed or was cancelled, and each
+/// change whose outcome is unknown, with its target. A completed change,
+/// and one still reported as running, add nothing. A quit that cancels a
+/// change ends it after the screen closed, so this is where its end shows.
 fn write_outcomes(mut output: impl std::io::Write, states: &[&State]) -> std::io::Result<()> {
     for state in states {
-        if !state.operation_status.is_empty() {
-            writeln!(
-                output,
-                "{}",
-                serde_json::json!({"operationStatus":state.operation_status})
-            )?;
+        let status = &state.operation_status;
+        // An unknown outcome is told below, with its target.
+        if !status.is_empty()
+            && tui_state::operation_level(status) == crate::tui_failure::Level::Error
+            && !status.starts_with("outcomeUnknown:")
+        {
+            writeln!(output, "hamn: {}", crate::tui_failure::single_line(status))?;
         }
         for outcome in &state.uncertain {
-            writeln!(output, "{outcome}")?;
+            writeln!(output, "{}", outcome_line(outcome))?;
         }
     }
     Ok(())
+}
+
+/// One line for a change whose outcome is unknown (`uncertain`): the
+/// operation, its target, why and what to do before a retry. Control
+/// characters of the error become spaces, so that they reach no terminal.
+fn outcome_line(outcome: &Value) -> String {
+    let text = |value: &Value| value.as_str().map(crate::tui_failure::single_line);
+    let mut target = Vec::new();
+    for key in ["profile", "context", "namespace", "name", "dockerConfig"] {
+        if let Some(value) = text(&outcome["target"][key]) {
+            target.push(format!("{key} {value}"));
+        }
+    }
+    for key in ["uid", "kubeconfig"] {
+        if let Some(value) = text(&outcome[key]) {
+            target.push(format!("{key} {value}"));
+        }
+    }
+    let mut line = format!(
+        "hamn: outcomeUnknown: {}",
+        text(&outcome["operation"]).unwrap_or_else(|| "change".into())
+    );
+    if !target.is_empty() {
+        line.push_str(&format!(" ({})", target.join(", ")));
+    }
+    if let Some(reason) = text(&outcome["error"]["message"]) {
+        line.push_str(&format!(": {reason}"));
+    }
+    line.push('.');
+    if let Some(advice) = text(&outcome["message"]) {
+        line.push_str(&format!(" {advice}"));
+    }
+    line
 }
 
 impl Drop for Job {
@@ -81,7 +133,7 @@ impl Drop for Job {
         }
         if let Some(request) = &self.mutation {
             ratatui::restore();
-            eprintln!("{}", uncertain(request));
+            eprintln!("{}", outcome_line(&uncertain(request)));
         }
     }
 }
@@ -110,6 +162,18 @@ impl Job {
         if self.mutation.is_some() {
             return;
         }
+        self.stop();
+        if let Some(request) = self.mutation.take() {
+            state.uncertain.push(uncertain(&request));
+        }
+        state.loading = false;
+        state.refreshing = false;
+    }
+    /// Stops the work of this job, but not a change that it runs.
+    fn stop(&mut self) {
+        if self.mutation.is_some() {
+            return;
+        }
         self.cancel.cancel();
         if let Some(task) = self.reload.take() {
             task.abort();
@@ -117,26 +181,33 @@ impl Job {
         if let Some(task) = self.task.take() {
             task.abort();
         }
-        if let Some(request) = self.mutation.take() {
-            state.uncertain.push(uncertain(&request));
-        }
         self.generation += 1;
-        state.loading = false;
-        state.refreshing = false;
     }
+    /// Runs `request`. A read establishes the view: it replaces the read
+    /// before it and is shown as loading. A change runs beside the reads of
+    /// the view, which keep refreshing it, so that the screen follows the
+    /// change (a VM that starts, then runs); its progress is the operation
+    /// status, not `State::loading`, which belongs to the reads.
     fn start(&mut self, request: Request, state: &mut State) {
         if self.mutation.is_some() {
             state.warn("A change is already running; ! shows its log");
             return;
         }
-        self.cancel(state);
-        self.mutation = request.mutates().then(|| request.clone());
+        let mutates = request.mutates();
+        if mutates {
+            self.stop();
+        } else {
+            self.cancel(state);
+        }
+        self.mutation = mutates.then(|| request.clone());
         self.cancel = CancellationToken::new();
         self.generation += 1;
         let generation = self.generation;
         let cancel = self.cancel.clone();
         let sender = self.sender.clone();
-        state.loading = true;
+        if !mutates {
+            state.loading = true;
+        }
         self.task = Some(tokio::spawn(async move {
             let (events, mut receiver) = mpsc::channel(32);
             let execution = service::execute_stream(&request, &cancel, Some(events));
@@ -292,6 +363,12 @@ fn dry_run_answer(request: &Request, result: Result<Value>) -> Result<Value> {
         })),
         result => result,
     }
+}
+
+/// The `:` commands that quit as `q` does, asking first while a change
+/// runs: `q` and `exit`, with or without surrounding spaces.
+fn is_quit_command(input: &str) -> bool {
+    matches!(input.trim(), "q" | "exit")
 }
 
 fn resource_action(
@@ -716,6 +793,8 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     );
     let mut terminal = ratatui::init();
     let _restore = Restore;
+    // A line on stderr would land in the middle of the screen from now on.
+    crate::query_process::hold_reports();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     let mut cli: Option<Session> = None;
     let mut menu: Option<Menu> = None;
@@ -767,6 +846,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         // Every change of the Kubernetes context or kubeconfig passes here
         // before the next draw or key: a lookup for the previous one stops.
         kinds.retarget(kubernetes(&mut state, &mut other));
+        show_held_reports(&mut state);
         if let Err(error) = terminal.draw(|frame| {
             if let Some(session) = &cli {
                 session.draw(frame);
@@ -891,7 +971,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                 kubernetes(&mut state, &mut other).cluster_kinds.finish(ticket, result);
             }
             _ = refresh.tick() => {
-                if state.refresh.due(std::time::Instant::now()) && cli.is_none() && menu.is_none() && !sessions_open && !choosing && !state.loading && !state.refreshing && state.pending.is_none() && state.pending_native.is_none() && state.input.is_none() && state.detail.is_none() {
+                if state.refresh.due(std::time::Instant::now()) && cli.is_none() && menu.is_none() && !sessions_open && !choosing && state.may_refresh_in_background() {
                     job.refresh_in_background(&mut state);
                 }
             }
@@ -1091,7 +1171,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                                 }
                             } else if prefix == ':' {
                                 state.remember_command(&input);
-                                if input == "q" {
+                                if is_quit_command(&input) {
                                     if mutation_job.mutation.is_none() { break; }
                                     state.quit_confirmation = true; continue;
                                 }
@@ -1428,11 +1508,15 @@ mod tests {
                 assert!(
                     output.contains("owned-original") == (code == "outcomeUnknown")
                         && output.contains(code)
-                        && output.contains("stop reconnect diagnostic")
+                        && output.contains("stop reconnect diagnostic"),
+                    "{output}"
                 );
-                assert_eq!(
-                    output.lines().count(),
-                    if code == "outcomeUnknown" { 2 } else { 1 }
+                // One sentence per failure: an unknown outcome is told once,
+                // with its target, and not again as the status.
+                assert_eq!(output.lines().count(), 1, "{output}");
+                assert!(
+                    output.starts_with("hamn: ") && !output.contains('{'),
+                    "{output}"
                 );
             }
         }
@@ -1473,20 +1557,25 @@ mod tests {
 
     #[test]
     fn final_outcomes_distinguish_success_known_failure_and_unknown() {
-        for (result, expected_code, count) in [
-            (Ok(Value::Null), "Operation completed", 0),
+        // What exit prints: nothing for a completed change, a sentence for
+        // one that failed, and the target of one whose outcome is unknown.
+        // Control characters of a message reach no terminal.
+        for (result, expected_code, count, printed) in [
+            (Ok(Value::Null), "Operation completed", 0, ""),
             (
                 Err(crate::model::Failure::new("cancelled", "before dispatch")),
                 "cancelled",
                 0,
+                "hamn: cancelled: before dispatch\n",
             ),
             (
                 Err(crate::model::Failure::new(
                     "outcomeUnknown",
-                    "request accepted\nresult lost",
+                    "request accepted\nresult \u{1b}[31mlost",
                 )),
                 "outcomeUnknown",
                 1,
+                "hamn: outcomeUnknown: k8s pods delete (context owned-cluster, name sample): request accepted result [31mlost. The operation may have changed the target. Inspect it before retrying; cancellation does not undo changes.\n",
             ),
         ] {
             let request = Request {
@@ -1513,19 +1602,71 @@ mod tests {
             assert_eq!(other.uncertain.len(), count);
             let mut output = Vec::new();
             write_outcomes(&mut output, &[&state, &other]).unwrap();
-            let lines: Vec<Value> = String::from_utf8(output)
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            assert_eq!(lines.len(), 1 + count);
-            if count > 0 {
-                assert_eq!(lines[1]["target"]["context"], "owned-cluster");
-                assert_eq!(
-                    lines[1]["error"]["message"],
-                    "request accepted\nresult lost"
-                );
-            }
+            assert_eq!(String::from_utf8(output).unwrap(), printed);
+        }
+        // A change still reported as running, or none at all, adds nothing.
+        let mut state = State::new(Default::default());
+        let other = State::new(Default::default());
+        for status in [
+            "",
+            "vm start in progress; ! shows logs",
+            "Cancelling; waiting for recovery and cleanup",
+        ] {
+            state.operation_status = status.into();
+            let mut output = Vec::new();
+            write_outcomes(&mut output, &[&state, &other]).unwrap();
+            assert!(output.is_empty(), "{status}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_change_runs_beside_the_reads_that_refresh_the_view() {
+        let (sender, _receiver) = mpsc::channel(1);
+        let mut changes = Job {
+            generation: 0,
+            cancel: CancellationToken::new(),
+            task: None,
+            reload: None,
+            sender,
+            mutation: None,
+        };
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        // A periodic read of the VM panel is running when a start is
+        // confirmed. The start is not confirmed for the core (`yes` is
+        // unset), and its task is stopped before this test lets it run.
+        state.refreshing = true;
+        let start = Request {
+            words: vec!["vm".into(), "start".into()],
+            profile: Some("default".into()),
+            ..Default::default()
+        };
+        assert!(start.mutates());
+        changes.start(start, &mut state);
+        assert!(changes.mutation.is_some());
+        // The read goes on and the view is not shown as loading; once the
+        // read has landed, the next one may start while the VM starts.
+        assert!(state.refreshing && !state.loading);
+        state.refreshing = false;
+        assert!(state.may_refresh_in_background());
+        changes.task.take().unwrap().abort();
+        changes.mutation = None;
+        // A read replaces the one before it and is shown as loading.
+        state.refreshing = true;
+        changes.start(state.request.clone(), &mut state);
+        assert!(changes.mutation.is_none());
+        assert!(state.loading && !state.refreshing);
+        assert!(!state.may_refresh_in_background());
+        changes.task.take().unwrap().abort();
+    }
+
+    #[test]
+    fn q_and_exit_quit_and_nothing_else_does() {
+        for quit in ["q", "exit", " exit ", "q "] {
+            assert!(is_quit_command(quit), "{quit:?}");
+        }
+        for other in ["", "ex", "exits", "exit now", "quit", "ps", "Q"] {
+            assert!(!is_quit_command(other), "{other:?}");
         }
     }
 

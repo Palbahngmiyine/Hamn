@@ -233,6 +233,22 @@ pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure)
     Failure::new(VM_NOT_READY, message)
 }
 
+/// A detail made of one row of the list, which each list that arrives
+/// makes again (`State::follow_row_detail`).
+#[derive(Clone)]
+struct RowDetail {
+    /// The identity of the row.
+    row: Vec<String>,
+    /// The text last made of the row. While `State::detail` holds this
+    /// text, the detail is the row's; any other text replaced it.
+    shown: String,
+}
+
+/// The first line of a row detail whose row the latest list no longer
+/// holds; what was read last follows it. Without a colon, it is shown as a
+/// sentence and not as a key (`tui_detail`).
+const ROW_GONE: &str = "No longer in the list; what follows was read last.";
+
 struct Browser {
     native: Option<crate::native::Invocation>,
     data: Value,
@@ -242,6 +258,7 @@ struct Browser {
     request: Request,
     environment_picker: bool,
     detail: Option<String>,
+    row_detail: Option<RowDetail>,
     connection_status: String,
     stale: bool,
     show_operation: bool,
@@ -281,6 +298,8 @@ pub struct State {
     /// diagnostics view (`!`): the summary never replaces the raw text.
     pub last_error: Option<Failure>,
     pub detail: Option<String>,
+    /// The row that `detail` is made of, when it is one.
+    row_detail: Option<RowDetail>,
     pub pending: Option<Request>,
     pub pending_native: Option<crate::native_actions::Action>,
     /// A read that establishes or replaces the view is running; the title
@@ -334,6 +353,7 @@ impl State {
             message_hint: None,
             last_error: None,
             detail: None,
+            row_detail: None,
             pending: None,
             pending_native: None,
             loading: false,
@@ -446,6 +466,7 @@ impl State {
             scroll: self.scroll,
             environment_picker: self.environment_picker,
             detail: self.detail.clone(),
+            row_detail: self.row_detail.clone(),
             connection_status: self.connection_status.clone(),
             stale: self.stale,
             show_operation: self.show_operation,
@@ -460,6 +481,7 @@ impl State {
         self.scroll = browser.scroll;
         self.environment_picker = browser.environment_picker;
         self.detail = browser.detail;
+        self.row_detail = browser.row_detail;
         self.connection_status = browser.connection_status;
         self.stale = browser.stale;
         self.show_operation = browser.show_operation;
@@ -852,7 +874,7 @@ impl State {
             return;
         };
         if row["configurationError"].is_string() {
-            self.detail = Some(profile_detail(&row));
+            self.show_row_detail(&row);
             return;
         }
         self.input = Some((
@@ -904,6 +926,7 @@ impl State {
                 } else {
                     identity.and_then(|key| self.find_identity(&key))
                 };
+                self.follow_row_detail();
                 self.clear_message();
             }
             Ok(value) => {
@@ -951,15 +974,75 @@ impl State {
             "vm list" => {
                 self.discard_picker();
                 self.request.profile = row["name"].as_str().map(String::from);
-                self.detail = Some(profile_detail(&row));
+                self.show_row_detail(&row);
                 Ok(None)
             }
             "docker images list" | "docker volumes list" | "docker networks list" => {
-                self.detail = Some(serde_json::to_string_pretty(&row).unwrap());
+                self.show_row_detail(&row);
                 Ok(None)
             }
             _ => self.action("inspect").map(Some),
         }
+    }
+    /// Shows the detail of `row` of the list, and keeps it current: each
+    /// list that arrives makes it again ([`Self::follow_row_detail`]). A row
+    /// without an identity cannot be found again; its detail stays as it is.
+    fn show_row_detail(&mut self, row: &Value) {
+        let text = row_detail_text(&self.request.operation(), row);
+        self.row_detail = identity(row).map(|row| RowDetail {
+            row,
+            shown: text.clone(),
+        });
+        self.detail = Some(text);
+    }
+    /// Whether the open detail is made of a row of the list, so that each
+    /// refresh of the list changes it: the periodic refresh runs under it.
+    /// Any other detail, such as an inspect or the answer of a dry run, is
+    /// a result of its own that no refresh of the list changes.
+    pub fn detail_follows_rows(&self) -> bool {
+        self.row_detail
+            .as_ref()
+            .is_some_and(|detail| self.detail.as_deref() == Some(detail.shown.as_str()))
+    }
+    /// Whether, as far as this state goes, the periodic refresh may read the
+    /// view again now: no read runs, nothing waits for the user's answer or
+    /// input, and what is shown is what such a read changes, the rows or a
+    /// detail made of one of them. A change that runs does not stop it.
+    pub fn may_refresh_in_background(&self) -> bool {
+        !self.loading
+            && !self.refreshing
+            && self.pending.is_none()
+            && self.pending_native.is_none()
+            && self.input.is_none()
+            && (self.detail.is_none() || self.detail_follows_rows())
+    }
+    /// Makes the open row detail again from the list that just arrived. It
+    /// follows the selected row, which the refresh kept by its identity,
+    /// because the keys of the detail act on that row. A row that is gone
+    /// leaves what was read last under [`ROW_GONE`], and the detail stops
+    /// following: no refresh selects a row again on its own.
+    fn follow_row_detail(&mut self) {
+        if !self.detail_follows_rows() {
+            self.row_detail = None;
+            return;
+        }
+        let detail = self.row_detail.take().expect("a detail that follows a row");
+        match self
+            .selected()
+            .filter(|row| identity(row).as_ref() == Some(&detail.row))
+        {
+            Some(row) => self.show_row_detail(&row),
+            None => self.detail = Some(format!("{ROW_GONE}\n\n{}", detail.shown)),
+        }
+    }
+}
+
+/// The detail that Enter shows of a row of the list `operation`.
+fn row_detail_text(operation: &str, row: &Value) -> String {
+    if operation == "vm list" {
+        profile_detail(row)
+    } else {
+        serde_json::to_string_pretty(row).unwrap()
     }
 }
 
@@ -1787,7 +1870,7 @@ pub fn draw(frame: &mut Frame, state: &State) {
 }
 
 /// How the status of the latest change reads: running, done, or failed.
-fn operation_level(status: &str) -> Level {
+pub(crate) fn operation_level(status: &str) -> Level {
     if status.contains("in progress") || status.starts_with("Cancelling") {
         Level::Warning
     } else if status == "Operation completed" {
@@ -3330,6 +3413,153 @@ mod tests {
         };
         assert_eq!(at("Memory:", 0).fg, crate::tui_detail::key_style().fg.unwrap());
         assert_eq!(at("VM: running", 4).fg, Color::Green);
+    }
+    #[test]
+    fn a_profile_detail_shows_what_each_refresh_of_the_list_read() {
+        let row = |vm: &str, docker: &str| {
+            serde_json::json!({"name": "default", "state": vm, "dockerStatus": docker,
+                "cpus": 4, "memoryMiB": 4096, "diskGiB": 60})
+        };
+        let detail = |vm: &str, docker: &str, memory: u32| {
+            format!(
+                "Profile: default\nVM: {vm}\nDocker: {docker}\nCPU: 4\nMemory: {memory} MiB\nDisk: 60 GiB"
+            )
+        };
+        let other = serde_json::json!({"name": "work", "state": "stopped",
+            "dockerStatus": "unavailable", "cpus": 2, "memoryMiB": 2048, "diskGiB": 40});
+        // The detail of a stopped profile is open while its VM starts.
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        state.accept(Ok(serde_json::json!([
+            row("stopped", "unavailable"),
+            other.clone()
+        ])));
+        assert!(state.enter().unwrap().is_none());
+        assert_eq!(state.detail, Some(detail("stopped", "unavailable", 4096)));
+        assert!(state.detail_follows_rows() && state.may_refresh_in_background());
+        state.scroll = 1;
+        // Each list that arrives makes the detail again from the same row,
+        // wherever the row is in the list.
+        for (vm, docker) in [
+            ("starting", "unavailable"),
+            ("running", "preparing"),
+            ("running", "ready"),
+        ] {
+            state.accept(Ok(serde_json::json!([other.clone(), row(vm, docker)])));
+            assert_eq!(state.detail, Some(detail(vm, docker, 4096)));
+            assert!(state.detail_follows_rows());
+        }
+        assert_eq!(state.scroll, 1, "a refresh keeps the place in the detail");
+        let mut resized = row("running", "ready");
+        resized["memoryMiB"] = 8192.into();
+        state.accept(Ok(serde_json::json!([resized, other.clone()])));
+        assert_eq!(state.detail, Some(detail("running", "ready", 8192)));
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        let screen = |terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>,
+                      state: &State| {
+            terminal.draw(|frame| draw(frame, state)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+        let text = screen(&mut terminal, &state);
+        assert!(
+            text.contains("Profile default")
+                && text.contains("VM: running")
+                && text.contains("Docker: ready"),
+            "{text}"
+        );
+        assert!(!text.contains("[stale]"), "{text}");
+
+        // A refresh that fails keeps the detail, whose title says it is stale.
+        state.accept(Err(Failure::new(
+            "profileUnavailable",
+            "cannot read the state file",
+        )));
+        assert_eq!(state.detail, Some(detail("running", "ready", 8192)));
+        assert!(state.detail_follows_rows() && state.may_refresh_in_background());
+        assert!(screen(&mut terminal, &state).contains("Profile default [stale]"));
+        // The next list is made again whole: the memory read before is gone.
+        state.accept(Ok(serde_json::json!([
+            row("stopping", "unavailable"),
+            other.clone()
+        ])));
+        assert_eq!(state.detail, Some(detail("stopping", "unavailable", 4096)));
+
+        // A profile that is no longer listed, such as one deleted elsewhere:
+        // the detail says so above what was read last, and stops following,
+        // because no refresh selects a row again and its keys act on none.
+        state.accept(Ok(serde_json::json!([other.clone()])));
+        let gone = format!("{ROW_GONE}\n\n{}", detail("stopping", "unavailable", 4096));
+        assert_eq!(state.detail.as_deref(), Some(gone.as_str()));
+        assert!(state.selected().is_none());
+        assert!(!state.detail_follows_rows() && !state.may_refresh_in_background());
+        state.accept(Ok(serde_json::json!([
+            row("stopped", "unavailable"),
+            other
+        ])));
+        assert_eq!(state.detail.as_deref(), Some(gone.as_str()));
+        assert!(state.selected().is_none());
+    }
+    #[test]
+    fn only_a_detail_made_of_a_row_follows_the_list() {
+        let stopped = serde_json::json!({"name": "default", "state": "stopped",
+            "dockerStatus": "unavailable", "cpus": 4, "memoryMiB": 4096, "diskGiB": 60});
+        let mut running = stopped.clone();
+        running["state"] = "running".into();
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        state.accept(Ok(serde_json::json!([stopped.clone()])));
+        assert!(state.enter().unwrap().is_none());
+        // An answer that replaces it, such as the dry run of vm apply, is a
+        // result of its own: the list leaves it as it is, and it stops the
+        // periodic refresh as every such detail does.
+        state.accept(Ok(serde_json::json!({"action": "none", "changes": []})));
+        let answer = state.detail.clone().unwrap();
+        assert!(!state.detail_follows_rows() && !state.may_refresh_in_background());
+        state.accept(Ok(serde_json::json!([running.clone()])));
+        assert_eq!(state.detail.as_deref(), Some(answer.as_str()));
+        // A log that a stream appends to it is no row detail either.
+        assert!(state.enter().unwrap().is_none());
+        state.accept(Ok(serde_json::json!({"type": "log", "text": "booting\n"})));
+        assert!(!state.detail_follows_rows());
+        // Esc closes the detail: the list that arrives opens none.
+        assert!(state.enter().unwrap().is_none());
+        assert!(state.detail_follows_rows());
+        state.detail = None;
+        assert!(!state.detail_follows_rows() && state.may_refresh_in_background());
+        state.accept(Ok(serde_json::json!([stopped])));
+        assert!(state.detail.is_none());
+        // What waits for the user stops the refresh, whatever the detail.
+        assert!(state.enter().unwrap().is_none());
+        state.input = Some(('/', String::new()));
+        assert!(!state.may_refresh_in_background());
+        state.input = None;
+        state.loading = true;
+        assert!(!state.may_refresh_in_background());
+        state.loading = false;
+
+        // The detail of an image follows its row in the same way, and so
+        // does a profile reopened from the picker that covered it.
+        let mut images = State::new(Request::default());
+        images.view("docker images list").unwrap();
+        let image = |size: u64| serde_json::json!({"ID": "sha256:a", "Repository": "web", "Tag": "1", "Size": size});
+        images.accept(Ok(serde_json::json!([image(10)])));
+        assert!(images.enter().unwrap().is_none());
+        images.accept(Ok(serde_json::json!([image(20)])));
+        assert!(images.detail.as_deref().unwrap().contains("\"Size\": 20"));
+        assert!(images.detail_follows_rows());
+        state.open_picker();
+        assert!(state.detail.is_none());
+        assert!(state.cancel_picker());
+        assert!(state.detail_follows_rows());
+        state.accept(Ok(serde_json::json!([running])));
+        assert!(state.detail.as_deref().unwrap().contains("VM: running"));
     }
     #[test]
     fn messages_break_between_words_and_keep_their_styles() {

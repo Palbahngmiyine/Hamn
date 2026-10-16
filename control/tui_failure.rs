@@ -464,7 +464,10 @@ fn strip_prefixes(line: &str) -> &str {
     line
 }
 
-fn single_line(text: &str) -> String {
+/// The words of `text` on one line: each run of whitespace and control
+/// characters between them becomes one space, so none reaches a terminal,
+/// and an escaped quote (`\"`) becomes a quote.
+pub(crate) fn single_line(text: &str) -> String {
     text.split(|c: char| c.is_whitespace() || c.is_control())
         .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
