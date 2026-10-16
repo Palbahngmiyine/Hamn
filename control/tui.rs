@@ -12,11 +12,24 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+/// Gives the terminal back, then prints the cleanup failures of queries that
+/// the screen has not shown yet (`query_process::hold_reports`).
 struct Restore;
 impl Drop for Restore {
     fn drop(&mut self) {
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableBracketedPaste);
         ratatui::restore();
+        for message in crate::query_process::release_reports() {
+            eprintln!("hamn: {message}");
+        }
+    }
+}
+
+/// Shows the cleanup failures that queries held for the screen while it
+/// draws, each as a failure of the view: `!` shows it whole.
+fn show_held_reports(state: &mut State) {
+    for message in crate::query_process::take_reports() {
+        state.fail(crate::model::Failure::new("queryCleanup", message));
     }
 }
 
@@ -780,6 +793,8 @@ pub async fn run(request: Request) -> std::io::Result<()> {
     );
     let mut terminal = ratatui::init();
     let _restore = Restore;
+    // A line on stderr would land in the middle of the screen from now on.
+    crate::query_process::hold_reports();
     crossterm::execute!(std::io::stdout(), crossterm::event::EnableBracketedPaste)?;
     let mut cli: Option<Session> = None;
     let mut menu: Option<Menu> = None;
@@ -831,6 +846,7 @@ pub async fn run(request: Request) -> std::io::Result<()> {
         // Every change of the Kubernetes context or kubeconfig passes here
         // before the next draw or key: a lookup for the previous one stops.
         kinds.retarget(kubernetes(&mut state, &mut other));
+        show_held_reports(&mut state);
         if let Err(error) = terminal.draw(|frame| {
             if let Some(session) = &cli {
                 session.draw(frame);

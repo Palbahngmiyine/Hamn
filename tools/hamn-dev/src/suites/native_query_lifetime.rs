@@ -64,8 +64,11 @@ fn exercise(mode: &str) {
     if mode == "exit" {
         harness.until("completed-query");
     }
-    assert!(!contains(&harness.output, b"cannot reap query process"));
-    assert!(!contains(&harness.output, b"cannot terminate query process group"));
+    // On the screen a cleanup failure is a message that starts with a
+    // capital; on stderr, after the screen, it does not.
+    let output = harness.output.to_ascii_lowercase();
+    assert!(!contains(&output, b"cannot reap query process"));
+    assert!(!contains(&output, b"cannot terminate query process group"));
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
