@@ -21,7 +21,10 @@ typedef struct {
     const char *efi_vars;        /* EFI variable store 경로 (필수, 없으면 생성) */
     const char *machine_id_file; /* VZGenericMachineIdentifier 영속 파일 (선택) */
     const char *mac_addr;        /* "52:54:00:xx:xx:xx" (선택, NULL=랜덤) */
-    const char *serial_log;      /* 시리얼 콘솔 출력 파일 (선택) */
+    /* Write end for the guest's virtio console (hvc0) output; negative =
+     * no console. vz_vm_create duplicates it (close-on-exec) for the VM, and
+     * the caller keeps and closes its own descriptor. */
+    int serial_fd;
     int rosetta;                 /* Linux Intel binary translation share */
     int nested_virtualization;   /* supported Apple Silicon hosts only */
     struct {

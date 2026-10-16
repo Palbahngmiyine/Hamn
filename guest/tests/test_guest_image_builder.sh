@@ -73,13 +73,14 @@ if grep -Eq '^path-exclude=.*(docker|containerd$|/runc$|dnsmasq|hamn)' "$EXCLUDE
     exit 1
 fi
 # The kernel command line keeps the cloud image's consoles, makes the
-# virtio console that the host logs /dev/console, and repairs the root
-# filesystem at boot instead of stopping at "RUN fsck MANUALLY".
+# virtio console that the host logs /dev/console, repairs the root
+# filesystem at boot instead of stopping at "RUN fsck MANUALLY", panics on an
+# oops and waits after a panic for the host to stop the VM.
 GRUB_SETTINGS=$GUEST_ROOT/image/grub-hamn.cfg
 COMMAND_LINE=$(GRUB_CMDLINE_LINUX_DEFAULT='console=tty1 console=ttyAMA0'
     . "$GRUB_SETTINGS"
     printf '%s' "$GRUB_CMDLINE_LINUX_DEFAULT")
-[ "$COMMAND_LINE" = 'console=tty1 console=ttyAMA0 console=hvc0 fsck.repair=yes' ]
+[ "$COMMAND_LINE" = 'console=tty1 console=ttyAMA0 console=hvc0 fsck.repair=yes oops=panic panic=0' ]
 grep -Fq 'for name in snapd lxd-installer ubuntu-cloud-minimal; do' "$SLIM"
 grep -Fq 'for command in cloud-init sshd sudo netplan git; do' "$SLIM"
 grep -Fq 'if installed dnsmasq; then' "$SLIM"
@@ -306,7 +307,7 @@ awk '
         getline
         if ($0 == "bash /tmp/hamn-image-provision.sh") provision = NR
         if ($0 == "update-grub") grub = NR
-        if ($0 == "grep -q '\''console=hvc0 fsck.repair=yes'\'' /boot/grub/grub.cfg") check = NR
+        if ($0 == "grep -q '\''console=hvc0 fsck.repair=yes oops=panic panic=0'\'' /boot/grub/grub.cfg") check = NR
         next
     }
     $0 == "--upload" {

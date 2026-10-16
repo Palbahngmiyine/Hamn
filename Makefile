@@ -45,6 +45,7 @@ $(VERSIONED_OBJS): CFLAGS += $(VERSION_CFLAGS)
 LIFECYCLE_LOCK_TEST := $(BUILD)/tests/test_lifecycle_lock
 VMRUN_IDENTITY_TEST := $(BUILD)/tests/test_vmrun_identity
 CTLSOCK_TEST := $(BUILD)/tests/test_ctlsock
+CONSOLE_TEST := $(BUILD)/tests/test_console
 FS_TEST := $(BUILD)/tests/test_fs
 SEED_MOUNTS_TEST := $(BUILD)/tests/test_cloudinit_mounts
 PROVISION_TEST := $(BUILD)/tests/test_provision
@@ -134,6 +135,12 @@ $(CTLSOCK_TEST): tests/host/test_ctlsock.c host/vmrun/ctlsock.c \
 	@mkdir -p $(dir $@)
 	clang -DHAMN_TEST $(filter-out -MMD -MP,$(CFLAGS)) $< \
 		host/vmrun/ctlsock.c -framework Foundation -o $@
+
+$(CONSOLE_TEST): tests/host/test_console.c host/vmrun/console.c \
+                host/vmrun/console.h host/core/log.c host/core/log.h
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< host/vmrun/console.c \
+		host/core/log.c vendor/cjson/cJSON.c -o $@
 
 $(FS_TEST): tests/host/test_fs.c host/util/fs.c host/util/fs.h
 	@mkdir -p $(dir $@)
@@ -463,7 +470,7 @@ test-qcow2: host
 	}
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test qcow2 $(HAMN_QCOW2_IMAGE)
 
-test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
+test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
 		$(GUEST_FILESYSTEM_TEST) \
@@ -474,6 +481,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
 	rm -rf $(BUILD)/tests/raw-cache-data
 	$(CTLSOCK_TEST)
+	$(CONSOLE_TEST)
 	$(FS_TEST)
 	$(SEED_MOUNTS_TEST)
 	$(PROVISION_TEST)

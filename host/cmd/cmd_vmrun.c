@@ -6,6 +6,14 @@
  * 스파이크(S2) 검증을 위해 직접 실행한다.
  *
  * SIGINT/SIGTERM: 게스트에 graceful stop 요청 후 15초 내 미종료 시 강제 종료.
+ *
+ * Guest kernel panic: the guest console (hvc0) passes through vmrun's console
+ * relay (vmrun/console.h) on its way to --serial-log. When the kernel's panic
+ * banner appears there, vmrun stops the VM once the panic report has ended,
+ * or PANIC_REPORT_GRACE_SEC after the banner, and exits 1. The guest image
+ * boots with `panic=0`, so the panicked kernel waits for this instead of
+ * rebooting inside the VM, which Virtualization.framework would allow
+ * without telling vmrun.
  */
 
 #include <errno.h>
@@ -27,10 +35,15 @@
 #include "core/log.h"
 #include "util/fs.h"
 #include "util/proc.h"
+#include "vmrun/console.h"
 #include "vmrun/ctlsock.h"
 #include "vz/vz_shim.h"
 
 #define STOP_GRACE_SEC 15
+/* After the panic banner the kernel prints its report (registers, call
+ * trace) and ends it with "---[ end Kernel panic"; a CPU wedged by the damage
+ * may never print the end, so the wait for it is bounded. */
+#define PANIC_REPORT_GRACE_SEC 2
 
 static vz_vm *g_vm;
 static const char *g_pidfile;
@@ -284,6 +297,60 @@ static void handle_stop_signal(void)
                    });
 }
 
+/* Main queue only: the first call stops the VM and ends vmrun. */
+static void stop_after_panic(void *context)
+{
+    static int stopping;
+    (void)context;
+    if (stopping)
+        return;
+    stopping = 1;
+    logmsg("vmrun: stopping the VM after a guest kernel panic; the panic "
+           "report is in the serial log");
+    char *err = NULL;
+    if (vz_vm_force_stop(g_vm, &err) != 0) {
+        logerr("vmrun: %s", err ? err : "force stop failed");
+        free(err);
+    }
+    exit(1);
+}
+
+/* Console relay queue: schedules the stop on the main queue. */
+static void on_console_panic(enum console_panic_stage stage, void *context)
+{
+    (void)context;
+    if (stage == CONSOLE_PANIC_STARTED) {
+        logmsg("vmrun: guest kernel panic on the console");
+        dispatch_after_f(dispatch_time(DISPATCH_TIME_NOW,
+                                       PANIC_REPORT_GRACE_SEC * NSEC_PER_SEC),
+                         dispatch_get_main_queue(), NULL, stop_after_panic);
+        return;
+    }
+    dispatch_async_f(dispatch_get_main_queue(), NULL, stop_after_panic);
+}
+
+/*
+ * Opens the serial log (truncating it, as before the relay existed), starts
+ * the console relay into it, and returns the write end for the VM.
+ */
+static int serial_console_open(const char *serial_log)
+{
+    int log_fd = open(serial_log, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                      0644);
+    if (log_fd < 0)
+        die("vmrun: cannot open serial log %s: %s", serial_log,
+            strerror(errno));
+    int pipe_fds[2];
+    if (pipe(pipe_fds) != 0 ||
+        fcntl(pipe_fds[0], F_SETFD, FD_CLOEXEC) != 0 ||
+        fcntl(pipe_fds[1], F_SETFD, FD_CLOEXEC) != 0)
+        die("vmrun: cannot create the guest console pipe: %s",
+            strerror(errno));
+    if (console_relay_start(pipe_fds[0], log_fd, on_console_panic, NULL) != 0)
+        die("vmrun: cannot relay the guest console to %s", serial_log);
+    return pipe_fds[1];
+}
+
 static void watch_signal(int sig)
 {
     signal(sig, SIG_IGN);
@@ -303,7 +370,8 @@ static int vmrun_usage(void)
             "usage: hamn vmrun --disk <raw> [options]\n"
             "  --disk <path>         raw disk image (required, rw)\n"
             "  --seed <path>         cloud-init seed ISO (ro)\n"
-            "  --serial-log <path>   serial console log file\n"
+            "  --serial-log <path>   serial console log file; a guest kernel\n"
+            "                        panic there stops the VM\n"
             "  --efi-vars <path>     EFI variable store (default: <disk>.efivars)\n"
             "  --machine-id <path>   persisted machine identifier\n"
             "  --mac <addr>          fixed MAC address\n"
@@ -335,7 +403,9 @@ int cmd_vmrun(int argc, char **argv)
     vz_vm_spec spec = {
         .cpus = 4,
         .mem_bytes = 4096ULL << 20,
+        .serial_fd = -1,
     };
+    const char *serial_log = NULL;
     char efi_default[1024];
 
     static const struct option opts[] = {
@@ -372,7 +442,7 @@ int cmd_vmrun(int argc, char **argv)
             spec.seed_iso = optarg;
             break;
         case 'l':
-            spec.serial_log = optarg;
+            serial_log = optarg;
             break;
         case 'e':
             spec.efi_vars = optarg;
@@ -486,9 +556,15 @@ int cmd_vmrun(int argc, char **argv)
         die("vmrun: pre-control startup test barrier failed");
 
     char *err = NULL;
+    if (serial_log)
+        spec.serial_fd = serial_console_open(serial_log);
     g_vm = vz_vm_create(&spec, on_state, NULL, &err);
     if (!g_vm)
         die("vmrun: %s", err ? err : "vm creation failed");
+    /* The VM holds its own duplicate; the relay sees end of input when the
+     * VM releases it. */
+    if (spec.serial_fd >= 0)
+        close(spec.serial_fd);
 
     if (vz_vm_start(g_vm, &err) != 0)
         die("vmrun: %s", err ? err : "vm start failed");
