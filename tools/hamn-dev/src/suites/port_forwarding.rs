@@ -62,6 +62,7 @@ const DRIVER_CASES: &[(&str, Test)] = &[
     ("sync_retries_an_unanswered_tcp_request_until_it_succeeds", sync_retries_an_unanswered_tcp_request_until_it_succeeds),
     ("sync_does_not_take_another_process_listener_for_its_own", sync_does_not_take_another_process_listener_for_its_own),
     ("sync_commits_a_pending_tcp_record_only_on_the_master_answer", sync_commits_a_pending_tcp_record_only_on_the_master_answer),
+    ("a_killed_relay_has_ended_only_as_a_zombie_or_gone", a_killed_relay_has_ended_only_as_a_zombie_or_gone),
     ("sync_restarts_a_udp_relay_that_is_gone", sync_restarts_a_udp_relay_that_is_gone),
     ("udp_relay_that_ended_under_its_live_parent_counts_as_gone", udp_relay_that_ended_under_its_live_parent_counts_as_gone),
     ("udp_record_without_a_relay_identity_is_recovered", udp_record_without_a_relay_identity_is_recovered),
@@ -180,6 +181,30 @@ impl Driver {
         let output = bounded_process::output(&mut self.command(args), TIMEOUT);
         assert!(output.status.success(), "{args:?}: {}", describe(&output));
     }
+
+    /// What sysctl reports of `pid` now, through the driver's `process-state`.
+    fn process_state(&self, pid: i32) -> ProcessState {
+        let output = bounded_process::output(&mut self.command(&["process-state", &pid.to_string()]), TIMEOUT);
+        assert!(output.status.success(), "process-state {pid}: {}", describe(&output));
+        match String::from_utf8_lossy(&output.stdout).trim() {
+            "-" => ProcessState::Absent,
+            text => match text.parse::<u32>() {
+                Ok(libc::SZOMB) => ProcessState::Zombie,
+                Ok(state) => ProcessState::Present(state),
+                Err(error) => panic!("process-state {pid}: {text:?}: {error}"),
+            },
+        }
+    }
+}
+
+/// What sysctl reports of a PID: ports.c reads it to tell a zombie from a
+/// process that runs or is still exiting, which libproc does not describe.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ProcessState {
+    Absent,
+    Zombie,
+    /// Any other `p_stat`, such as SRUN for a process that runs or exits.
+    Present(u32),
 }
 
 fn describe(output: &Output) -> String {
@@ -249,6 +274,18 @@ fn start_token(pid: i32) -> Option<(u64, u64)> {
 /// Whether the process that had `token` as `pid` still runs.
 fn running(pid: i32, token: (u64, u64)) -> bool {
     start_token(pid) == Some(token)
+}
+
+/// Whether the process that had `token` has ended as ports.c sees it, from
+/// its PID's libproc start token `visible` and, only when libproc does not
+/// describe the PID, from what sysctl reports of it. A process that exits
+/// leaves libproc before it is a zombie and still answers signals; ports.c
+/// cannot verify it then, so it has not ended yet.
+fn has_ended(token: (u64, u64), visible: Option<(u64, u64)>, state: impl FnOnce() -> ProcessState) -> bool {
+    match visible {
+        Some(actual) => actual != token,
+        None => matches!(state(), ProcessState::Absent | ProcessState::Zombie),
+    }
 }
 
 /// An unrelated live process in its own process group, killed and reaped
@@ -465,12 +502,13 @@ impl Relay {
         running(self.pid, self.token)
     }
 
-    /// Kills the relay as a crash would and waits until it is gone.
-    fn kill(&self) {
+    /// Kills the relay as a crash would and waits until it has ended: a
+    /// zombie that its parent has not reaped yet, or gone.
+    fn kill(&self, driver: &Driver) {
         pty::kill(self.pid as u32, libc::SIGKILL);
         let deadline = Instant::now() + Duration::from_secs(5);
-        while self.running() {
-            assert!(Instant::now() < deadline, "UDP forward process {} survived SIGKILL for 5 s", self.pid);
+        while !has_ended(self.token, start_token(self.pid), || driver.process_state(self.pid)) {
+            assert!(Instant::now() < deadline, "UDP forward process {} did not end within 5 s of SIGKILL", self.pid);
             std::thread::sleep(Duration::from_millis(10));
         }
     }
@@ -751,6 +789,33 @@ fn sync_commits_a_pending_tcp_record_only_on_the_master_answer(driver: &Driver) 
     }
 }
 
+fn a_killed_relay_has_ended_only_as_a_zombie_or_gone(driver: &Driver) {
+    // libproc stops describing a process as soon as it starts to exit. Until
+    // sysctl reports it as a zombie it still answers signals, and ports.c
+    // counts it as unverified, not gone: a pass then neither reaps nor
+    // replaces it. Measured after SIGKILL at a load average of about 15,
+    // that window lasted 0.1 to 0.2 ms; at a load of 44 it outlasted kill's
+    // 10 ms poll, which used to return inside it. Nothing holds the window
+    // open, so its observations are given here as ports.c would see them.
+    let token = (1, 2);
+    let exiting = ProcessState::Present(libc::SRUN);
+    assert!(!has_ended(token, None, || exiting), "a process that is still exiting counts as ended");
+    assert!(has_ended(token, None, || ProcessState::Zombie));
+    assert!(has_ended(token, None, || ProcessState::Absent));
+    assert!(has_ended(token, Some((1, 3)), || panic!("sysctl was read for a PID that names another process")));
+    assert!(!has_ended(token, Some(token), || panic!("sysctl was read for a process that runs")));
+
+    // The other states on a real child of this process, which reaps it only
+    // when it is dropped: it runs, ends as a zombie, then is gone.
+    let unrelated = Unrelated::start();
+    let child = Relay { pid: unrelated.pid(), token: unrelated.token };
+    assert!(matches!(driver.process_state(child.pid), ProcessState::Present(_)));
+    child.kill(driver);
+    assert_eq!(driver.process_state(child.pid), ProcessState::Zombie, "kill returned before the child was a zombie");
+    drop(unrelated);
+    assert!(has_ended(child.token, start_token(child.pid), || driver.process_state(child.pid)), "a reaped child has not ended");
+}
+
 fn sync_restarts_a_udp_relay_that_is_gone(driver: &Driver) {
     // A committed UDP record says that a relay was started, not that it
     // still runs. A pass that finds the recorded relay gone starts a new one
@@ -760,7 +825,7 @@ fn sync_restarts_a_udp_relay_that_is_gone(driver: &Driver) {
     let published = ["sync", "0.0.0.0:48273:53/udp"];
     profile.ok(&published);
     let first = profile.relay(48273);
-    first.kill();
+    first.kill(driver);
     profile.ok(&published);
     let second = profile.relay(48273);
     assert_ne!((second.pid, second.token), (first.pid, first.token), "the record still names the relay that is gone");
@@ -774,7 +839,7 @@ fn sync_restarts_a_udp_relay_that_is_gone(driver: &Driver) {
     // Another process takes the port of a relay that ended. No relay can
     // start: nothing stays recorded, the stale pidfile is cleared, and the
     // port is reported until a later pass can forward it.
-    second.kill();
+    second.kill(driver);
     let holder = bind_udp_after_kill("127.0.0.1:48273");
     profile.fails(&published);
     profile.assert_no_state();
@@ -851,7 +916,7 @@ fn udp_relay_that_ended_under_its_live_parent_counts_as_gone(driver: &Driver) {
         &snapshot,
         || {
             let relay = profile.relay(48278);
-            relay.kill();
+            relay.kill(driver);
             assert!(answers_signals(relay.pid), "the relay that ended is not an unreaped child");
             ended.set(Some(relay));
         },
@@ -876,7 +941,7 @@ fn udp_relay_that_ended_under_its_live_parent_counts_as_gone(driver: &Driver) {
         &snapshot,
         || {
             let relay = profile.relay(48278);
-            relay.kill();
+            relay.kill(driver);
             assert!(answers_signals(relay.pid), "the relay that ended is not an unreaped child");
             profile.ok(&["cleanup"]);
             profile.assert_no_state();

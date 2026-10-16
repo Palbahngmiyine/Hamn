@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -565,6 +566,29 @@ static int inspect_snapshot_fixture(const char *directory)
     return synchronized && state_ok && reported_ok && cleaned ? 0 : 1;
 }
 
+/* Prints what ports.c's process_is_zombie reads of the PID in `text`: the
+ * kp_proc.p_stat that sysctl reports, or "-" when it reports no such process.
+ * libproc stops describing a process as soon as it starts to exit, before it
+ * is a zombie (SZOMB); only this tells the two apart. */
+static int print_process_state(const char *text)
+{
+    char *end = NULL;
+    errno = 0;
+    long pid = strtol(text, &end, 10);
+    if (errno || !end || end == text || *end || pid <= 1 || pid > INT_MAX)
+        return 2;
+    int name[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, (int)pid };
+    struct kinfo_proc info;
+    size_t size = sizeof(info);
+    if (sysctl(name, 4, &info, &size, NULL, 0) != 0)
+        return 1;
+    if (size == 0)
+        return puts("-") >= 0 ? 0 : 1;
+    if (size != sizeof(info) || info.kp_proc.p_pid != (pid_t)pid)
+        return 1;
+    return printf("%d\n", info.kp_proc.p_stat) >= 0 ? 0 : 1;
+}
+
 static int parse_count(const char *text, unsigned *count)
 {
     char *end = NULL;
@@ -595,6 +619,8 @@ int main(int argc, char **argv)
         return ignore_sigterm();
     if (argc == 2 && strcmp(argv[1], "spawn-ignore-sigterm") == 0)
         return spawn_ignore_sigterm();
+    if (argc == 3 && strcmp(argv[1], "process-state") == 0)
+        return print_process_state(argv[2]);
     if (argc == 3 && strcmp(argv[1], "parse") == 0) {
         struct port_spec parsed;
         return load_spec(argv[2], &parsed) == 0 ? 0 : 2;
