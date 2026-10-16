@@ -76,10 +76,14 @@ fn tab_takes_a_kubectl_alias_and_keeps_the_workspace() {
     // The completion is drawn after the typed text before anything takes it.
     harness.send(b":dep", ":deployments");
     harness.write(b"\t\r");
-    // The title changes on Enter; the query of the completed alias follows.
-    harness.wait(|harness| !calls_with(harness, "kubectl", "deployments").is_empty());
+    // Enter closes the prompt and starts the query of the completed alias.
+    // The peer records the query and the TUI draws the closed prompt on two
+    // separate paths, so the recorded query can come first: wait for both.
+    harness.wait(|harness| {
+        !calls_with(harness, "kubectl", "deployments").is_empty() && !harness.text().contains(" Command ")
+    });
     let text = harness.text();
-    assert!(text.contains("[Kubernetes]") && !text.contains(" Command "), "{text}");
+    assert!(text.contains("[Kubernetes]"), "{text}");
     let queries = calls_with(&harness, "kubectl", "deployments");
     assert!(queries.iter().all(|args| args.iter().any(|arg| arg == "get")), "{queries:?}");
     assert!(calls_with(&harness, "kubectl", "dep").is_empty(), "{:?}", harness.calls());
