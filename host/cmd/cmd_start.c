@@ -19,6 +19,7 @@
 #include "core/control.h"
 #include "core/guest_deployment.h"
 #include "core/guest_filesystem.h"
+#include "core/guest_panic.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/operation.h"
@@ -644,6 +645,7 @@ static int cmd_start_execute(const struct start_options *options,
         die("cannot resolve own executable path");
 
     char disk[1024], seed[1024], serial[1024], efivars[1024], mid[1024];
+    char panic_record[1024];
     char pidf[1024], identity[1024], spawning[1024], ctl[1024], vmlog[1024];
     char cpus_s[16], mem_s[16], guard_fd_s[16];
     const char *rosetta = p.rosetta ? "true" : "false";
@@ -654,6 +656,8 @@ static int cmd_start_execute(const struct start_options *options,
     profile_path(&p, "disk.img", disk, sizeof(disk));
     profile_path(&p, "seed.iso", seed, sizeof(seed));
     profile_path(&p, "logs/serial.log", serial, sizeof(serial));
+    profile_path(&p, GUEST_PANIC_RECORD_NAME, panic_record,
+                 sizeof(panic_record));
     profile_path(&p, "efi-vars.bin", efivars, sizeof(efivars));
     profile_path(&p, "machine-id.bin", mid, sizeof(mid));
     profile_path(&p, "vmrun.pid", pidf, sizeof(pidf));
@@ -676,6 +680,13 @@ static int cmd_start_execute(const struct start_options *options,
         logerr("cannot persist starting VM state");
         goto rollback;
     }
+    /* The record describes the last run; left in place, it would describe
+     * the run this start launches as panicked. */
+    if (guest_panic_forget(&p) != 0) {
+        logerr("cannot remove the record of the last guest kernel panic "
+               "(%s): %s", GUEST_PANIC_RECORD_NAME, strerror(errno));
+        goto rollback;
+    }
 
     int spawn_guard_fd = -1;
     if (vm_spawn_guard_create(&p, &spawn_guard_fd, spawn_token) != 0) {
@@ -688,7 +699,8 @@ static int cmd_start_execute(const struct start_options *options,
     size_t vmargc = 0;
     const char *const vm_prefix[] = {
         self, "vmrun", "--disk", disk, "--seed", seed,
-        "--serial-log", serial, "--efi-vars", efivars,
+        "--serial-log", serial, "--panic-record", panic_record,
+        "--efi-vars", efivars,
         "--machine-id", mid, "--mac", mac, "--cpus", cpus_s,
         "--mem-mib", mem_s,
         "--rosetta", rosetta,

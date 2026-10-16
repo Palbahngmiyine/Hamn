@@ -148,6 +148,40 @@ pub(crate) fn guest_disk_damaged(status: &Value) -> bool {
     guest_disk_problem(status).is_some_and(|(damaged, _)| damaged)
 }
 
+/// The guest kernel panic that ended the last run of a Hamn profile's VM,
+/// from `guestKernelPanic` of `vm status` (core/guest_panic.h), or None when
+/// there is none or the status does not say. panicked is false for a record
+/// that cannot be validated; detail is then why. at is the UTC time of the
+/// panic when the record has one.
+pub(crate) struct GuestKernelPanic {
+    pub panicked: bool,
+    pub detail: String,
+    pub at: Option<String>,
+}
+
+pub(crate) fn guest_kernel_panic(status: &Value) -> Option<GuestKernelPanic> {
+    let record = status.get("guestKernelPanic").filter(|v| v.is_object())?;
+    let at = record["observedAt"]
+        .as_i64()
+        .and_then(|seconds| jiff::Timestamp::from_second(seconds).ok())
+        .map(|time| time.to_string());
+    Some(GuestKernelPanic {
+        panicked: record["state"] == "panicked",
+        detail: record["detail"].as_str().unwrap_or("").to_owned(),
+        at,
+    })
+}
+
+/// The header's sentence about a guest kernel panic, and its level.
+fn guest_kernel_panic_sentence(panic: &GuestKernelPanic) -> (String, Level) {
+    if !panic.panicked {
+        return (format!("Guest kernel panic record unreadable: {}", panic.detail), Level::Warning);
+    }
+    let at = panic.at.as_deref().map(|time| format!(" at {time}")).unwrap_or_default();
+    let reason = if panic.detail.is_empty() { "no reason printed" } else { &panic.detail };
+    (format!("Guest kernel panicked{at}: {reason}; the report is in logs/serial.log"), Level::Error)
+}
+
 /// A Hamn profile's Docker socket answers only once its VM runs and guest
 /// Docker is ready. The Docker CLI proves that it could not reach the daemon
 /// (`DOCKER_UNREACHABLE`); the VM status observed by the same refresh then
@@ -175,6 +209,13 @@ pub fn hamn_query_failure(profile: &str, status: Option<&Value>, error: Failure)
         );
     }
     let vm = status["state"].as_str().unwrap_or("unknown");
+    // vmrun stopped the VM after its kernel panicked; a start runs it again.
+    if guest_kernel_panic(status).is_some_and(|panic| panic.panicked) && !matches!(vm, "running" | "starting") {
+        return Failure::new(
+            VM_NOT_READY,
+            format!("Hamn VM {profile} stopped after a guest kernel panic. Press s to start it."),
+        );
+    }
     let message = match (vm, docker) {
         (_, "recoveryRequired") => {
             format!("Hamn VM {profile} needs recovery. Press s to repair it.")
@@ -1039,6 +1080,19 @@ fn profile_detail(row: &Value) -> String {
         )),
         None => {}
     }
+    // Why the last run ended, until the next start.
+    match guest_kernel_panic(row) {
+        Some(panic) if panic.panicked => detail.push_str(&format!(
+            "\nGuest kernel: panicked\nPanicked at: {}\nReason: {}\n\nThe panic report is in logs/serial.log (logs/serial.previous.log after the next start); s starts the VM.",
+            panic.at.as_deref().unwrap_or("unknown"),
+            if panic.detail.is_empty() { "no reason printed" } else { &panic.detail }
+        )),
+        Some(panic) => detail.push_str(&format!(
+            "\nGuest kernel: last panic record cannot be read\nEvidence: {}",
+            panic.detail
+        )),
+        None => {}
+    }
     detail
 }
 
@@ -1103,6 +1157,10 @@ fn label(value: &Value) -> String {
             value["dockerStatus"].as_str().unwrap_or("")
         ),
         _ => value["dockerStatus"].as_str().unwrap_or("").to_owned(),
+    };
+    let docker = match guest_kernel_panic(value) {
+        Some(panic) if panic.panicked => format!("{docker}  guest kernel panicked"),
+        _ => docker,
     };
     // A Hamn profile whose config.yaml cannot be read is listed with the
     // state of its VM and this reason, in the VM panel and in the picker.
@@ -1351,6 +1409,15 @@ fn info_lines(state: &State, width: u16, full_width: u16) -> (Vec<Line<'static>>
                     } else {
                         (format!("Guest disk not known to be damaged: {evidence}"), Level::Warning)
                     };
+                    reason_lines.extend(
+                        at_most_two_lines(&sentence, full_width)
+                            .into_iter()
+                            .map(|line| Line::styled(line, theme::level(level))),
+                    );
+                }
+                // A kernel panic ended the VM's last run: why it is stopped.
+                if let Some(panic) = guest_kernel_panic(&state.runtime) {
+                    let (sentence, level) = guest_kernel_panic_sentence(&panic);
                     reason_lines.extend(
                         at_most_two_lines(&sentence, full_width)
                             .into_iter()
@@ -1856,7 +1923,11 @@ fn operation_lines(state: &State) -> Vec<Line<'static>> {
 
 /// The state that a row of a Hamn profile or environment reports.
 fn label_tone(row: &Value) -> theme::Tone {
-    if row["configurationError"].is_string() || row["dockerStatus"] == "recoveryRequired" || guest_disk_damaged(row) {
+    if row["configurationError"].is_string()
+        || row["dockerStatus"] == "recoveryRequired"
+        || guest_disk_damaged(row)
+        || guest_kernel_panic(row).is_some_and(|panic| panic.panicked)
+    {
         return theme::Tone::Failed;
     }
     if row["disabled"] == true {
@@ -2481,6 +2552,111 @@ mod tests {
         panel.detail = None;
         panel.accept(Ok(serde_json::json!([row])));
         assert!(crate::tui_keys::hints(&panel).contains(&("s", "start/repair")));
+    }
+    #[test]
+    fn a_guest_kernel_panic_is_shown_with_its_reason_until_the_next_start() {
+        let header = |runtime: Value, width: u16| {
+            let mut state = State::new(Request::default());
+            state.native = Some(crate::native::parse("ps", &state).unwrap());
+            state.runtime = runtime;
+            let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|f| draw(f, &state)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..buffer.area.height)
+                .map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+                .collect::<Vec<_>>()
+        };
+        let reason = "corrupted stack end detected inside scheduler";
+        // vmrun recorded the panic at 2026-10-16T06:55:36Z and stopped the VM.
+        let panicked = serde_json::json!({"state": "stopped", "dockerStatus": "unavailable",
+            "guestFilesystem": null,
+            "guestKernelPanic": {"state": "panicked", "detail": reason, "observedAt": 1792133736}});
+        let sentence = format!("Guest kernel panicked at 2026-10-16T06:55:36Z: {reason}; the report is in logs/serial.log");
+        // The VM line stays; the sentence follows at full width, in at most
+        // two lines, and the keys still offer the start.
+        for width in [120, 80] {
+            let lines = header(panicked.clone(), width);
+            assert!(lines.iter().any(|line| line.contains("VM: stopped | Docker: Connection unavailable")), "{lines:?}");
+            let joined = lines.iter().map(|line| line.trim_end()).collect::<Vec<_>>().join(" ");
+            assert!(joined.contains(&sentence), "{width}: {lines:?}");
+            let text = lines.join("\n");
+            assert!(text.contains("<s> start VM") && !text.contains("reset disk"), "{text}");
+        }
+        // A panic that printed no reason still says when it happened.
+        let mut silent = panicked.clone();
+        silent["guestKernelPanic"]["detail"] = "".into();
+        let text = header(silent, 120).join("\n");
+        assert!(text.contains("Guest kernel panicked at 2026-10-16T06:55:36Z: no reason printed; the report is in logs/serial.log"), "{text}");
+        // A record that cannot be validated says so, and nothing more.
+        let mut unknown = panicked.clone();
+        unknown["guestKernelPanic"] = serde_json::json!({"state": "unknown",
+            "detail": "cannot validate guest-panic.json: Invalid argument", "observedAt": null});
+        let text = header(unknown.clone(), 120).join("\n");
+        assert!(text.contains("Guest kernel panic record unreadable: cannot validate guest-panic.json: Invalid argument"), "{text}");
+        assert!(!text.contains("Guest kernel panicked"), "{text}");
+        // Without a record (after the next start), the header is as it was.
+        let mut clean = panicked.clone();
+        clean["guestKernelPanic"] = Value::Null;
+        let text = header(clean.clone(), 120).join("\n");
+        assert!(!text.contains("Guest kernel"), "{text}");
+        // A status from a binary that predates the record has no key at all.
+        let mut older = clean.clone();
+        older.as_object_mut().unwrap().remove("guestKernelPanic");
+        assert!(guest_kernel_panic(&older).is_none());
+
+        // A Docker list that fails says why the VM is stopped and how to run it.
+        let failure = hamn_query_failure("work", Some(&panicked), Failure::new(crate::native::DOCKER_UNREACHABLE, "docker exited 1: Cannot connect"));
+        assert_eq!(failure.code, VM_NOT_READY);
+        assert_eq!(failure.message, "Hamn VM work stopped after a guest kernel panic. Press s to start it.");
+        assert!(failure.message.chars().count() <= 78, "{}", failure.message);
+        // While a start runs again, the record is about to go: the usual message.
+        let mut starting = panicked.clone();
+        starting["state"] = "starting".into();
+        let failure = hamn_query_failure("work", Some(&starting), Failure::new(crate::native::DOCKER_UNREACHABLE, "docker exited 1: Cannot connect"));
+        assert!(failure.message.contains("is starting"), "{}", failure.message);
+        // A record that cannot be validated is no reason to name a panic.
+        let failure = hamn_query_failure("work", Some(&unknown), Failure::new(crate::native::DOCKER_UNREACHABLE, "docker exited 1: Cannot connect"));
+        assert!(failure.message.contains("is not running (stopped)"), "{}", failure.message);
+        // Errors that a start could not fix anyway keep their message.
+        let usage = hamn_query_failure("work", Some(&panicked), Failure::new("cliError", "docker exited 125: unknown flag"));
+        assert_eq!(usage.message, "docker exited 125: unknown flag");
+
+        // The VM panel row and its detail.
+        let mut row = panicked.clone();
+        row["name"] = "work".into();
+        row["cpus"] = 2.into();
+        row["memoryMiB"] = 2048.into();
+        row["diskGiB"] = 60.into();
+        assert_eq!(label(&row), "work  stopped  unavailable  guest kernel panicked");
+        assert_eq!(label_tone(&row), theme::Tone::Failed);
+        let detail = profile_detail(&row);
+        assert!(detail.ends_with(&format!("Disk: 60 GiB\nGuest kernel: panicked\nPanicked at: 2026-10-16T06:55:36Z\nReason: {reason}\n\nThe panic report is in logs/serial.log (logs/serial.previous.log after the next start); s starts the VM.")), "{detail}");
+        let mut panel = State::new(Request::default());
+        panel.view("vm").unwrap();
+        panel.accept(Ok(serde_json::json!([row.clone()])));
+        // A start runs the VM again, as for any stopped VM.
+        assert!(crate::tui_keys::hints(&panel).contains(&("s", "start/repair")));
+        assert!(panel.enter().unwrap().is_none());
+        // The detail shows the panic as a red state.
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &panel)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content().iter().map(|cell| cell.symbol()).collect();
+        let start = text.find("Guest kernel: panicked").unwrap() + "Guest kernel: ".len();
+        let index = text[..start].chars().count();
+        let width = usize::from(buffer.area.width);
+        assert_eq!(buffer[((index % width) as u16, (index / width) as u16)].fg, Color::Red);
+        // An unreadable record is shown as such in the detail, without the red state.
+        let mut unreadable = row.clone();
+        unreadable["guestKernelPanic"] = unknown["guestKernelPanic"].clone();
+        assert_eq!(label(&unreadable), "work  stopped  unavailable");
+        assert_eq!(label_tone(&unreadable), theme::Tone::Done);
+        assert!(profile_detail(&unreadable).ends_with("Guest kernel: last panic record cannot be read\nEvidence: cannot validate guest-panic.json: Invalid argument"));
+        // Without a record, the row and its detail are as they were.
+        row["guestKernelPanic"] = Value::Null;
+        assert_eq!(label(&row), "work  stopped  unavailable");
+        assert_eq!(label_tone(&row), theme::Tone::Done);
+        assert!(profile_detail(&row).ends_with("Disk: 60 GiB"));
     }
     #[test]
     fn failed_hamn_query_keeps_errors_that_starting_the_vm_cannot_fix() {

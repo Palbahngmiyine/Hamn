@@ -154,11 +154,11 @@ VZVirtualMachineConfiguration *hamn_vz_build_config(const vz_vm_spec *spec,
     }
     cfg.networkDevices = @[ net ];
 
-    /* 시리얼 콘솔 → 로그 파일 (게스트 hvc0) */
-    if (spec->serial_log) {
-        int fd = open(spec->serial_log, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    /* Guest console (hvc0) → the caller's descriptor (vmrun's console relay) */
+    if (spec->serial_fd > 0) {
+        int fd = fcntl(spec->serial_fd, F_DUPFD_CLOEXEC, 0);
         if (fd < 0) {
-            *outErr = mk_err(@"cannot open serial log file");
+            *outErr = mk_err(@"cannot duplicate the serial console descriptor");
             return nil;
         }
         NSFileHandle *wh =

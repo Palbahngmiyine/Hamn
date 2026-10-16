@@ -1,8 +1,10 @@
 /* The Virtualization.framework configuration that vz_config.m builds for a
  * VM (host/vz/vz_config.m): its disk attachments read back through the
  * framework's own properties. The main disk is writable, host-cached and
- * fully synchronized; the seed ISO is read-only. No VM is started, so this
- * runs without the virtualization entitlement. */
+ * fully synchronized; the seed ISO is read-only. The guest console is
+ * attached only for a descriptor the spec names: a zero-initialized spec has
+ * none. No VM is started, so this runs without the virtualization
+ * entitlement. */
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
 
@@ -103,6 +105,53 @@ static void main_disk_is_cached_and_fully_synchronized(const char *dir)
     REQUIRE(seed_disk.readOnly, "seed ISO is writable");
 }
 
+/* serial_fd 0 is "no console": a zeroed spec must not attach stdin. A pipe's
+ * write end becomes the one virtio console, through a duplicate. */
+static void serial_console_is_attached_only_for_a_descriptor(const char *dir)
+{
+    char disk[PATH_MAX], efi[PATH_MAX];
+    snprintf(disk, sizeof(disk), "%s/disk.img", dir);
+    snprintf(efi, sizeof(efi), "%s/efi-vars.bin", dir);
+    make_file(disk, 64 << 20);
+
+    vz_vm_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.cpus = 1;
+    spec.mem_bytes = 512ull << 20;
+    spec.disk_img = disk;
+    spec.efi_vars = efi;
+    NSError *error = nil;
+    VZVirtualMachineConfiguration *cfg = hamn_vz_build_config(&spec, &error);
+    REQUIRE(cfg != nil, "build config: %s",
+            error.localizedDescription.UTF8String ?: "no error");
+    REQUIRE(cfg.serialPorts.count == 0,
+            "a zeroed spec attached %lu serial ports",
+            (unsigned long)cfg.serialPorts.count);
+
+    int pipe_fds[2];
+    REQUIRE(pipe(pipe_fds) == 0, "pipe: %s", strerror(errno));
+    spec.serial_fd = pipe_fds[1];
+    cfg = hamn_vz_build_config(&spec, &error);
+    REQUIRE(cfg != nil, "build config with a console: %s",
+            error.localizedDescription.UTF8String ?: "no error");
+    REQUIRE(cfg.serialPorts.count == 1, "expected one serial port, got %lu",
+            (unsigned long)cfg.serialPorts.count);
+    VZSerialPortConfiguration *port = cfg.serialPorts[0];
+    REQUIRE([port isKindOfClass:[VZVirtioConsoleDeviceSerialPortConfiguration class]],
+            "the console is not a virtio console");
+    REQUIRE([port.attachment isKindOfClass:[VZFileHandleSerialPortAttachment class]],
+            "the console is not attached to a file handle");
+    VZFileHandleSerialPortAttachment *attachment =
+        (VZFileHandleSerialPortAttachment *)port.attachment;
+    int attached = attachment.fileHandleForWriting.fileDescriptor;
+    REQUIRE(attached != pipe_fds[1] && attached > STDERR_FILENO,
+            "the console uses descriptor %d, not a duplicate of %d", attached,
+            pipe_fds[1]);
+    /* The caller keeps its own descriptor. */
+    REQUIRE(close(pipe_fds[1]) == 0 && close(pipe_fds[0]) == 0,
+            "the caller's console descriptors must stay open");
+}
+
 static char test_dir[] = "/tmp/hamn-vz-config-XXXXXX";
 
 /* Runs on every exit, failures included; a file the test never created is
@@ -126,6 +175,7 @@ int main(void)
         REQUIRE(mkdtemp(test_dir) != NULL, "mkdtemp");
         REQUIRE(atexit(remove_dir) == 0, "atexit");
         main_disk_is_cached_and_fully_synchronized(test_dir);
+        serial_console_is_attached_only_for_a_descriptor(test_dir);
     }
     puts("vz disk config: ok");
     return 0;

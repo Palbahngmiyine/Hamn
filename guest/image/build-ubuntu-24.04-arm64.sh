@@ -205,7 +205,7 @@ fi
     --upload "$ROOT/guest/image/grub-hamn.cfg:/etc/default/grub.d/90-hamn.cfg" \
     --chmod '0644:/etc/default/grub.d/90-hamn.cfg' \
     --run-command 'update-grub' \
-    --run-command "grep -q 'console=hvc0 fsck.repair=yes' /boot/grub/grub.cfg" \
+    --run-command "grep -q 'console=hvc0 fsck.repair=yes oops=panic panic=0' /boot/grub/grub.cfg" \
     --upload "$ROOT_FSTAB:/tmp/hamn-root-fstab.sh" \
     --run-command 'bash /tmp/hamn-root-fstab.sh /etc/fstab' \
     --run-command 'rm -f /tmp/hamn-root-fstab.sh' \

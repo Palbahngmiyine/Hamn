@@ -45,12 +45,14 @@ $(VERSIONED_OBJS): CFLAGS += $(VERSION_CFLAGS)
 LIFECYCLE_LOCK_TEST := $(BUILD)/tests/test_lifecycle_lock
 VMRUN_IDENTITY_TEST := $(BUILD)/tests/test_vmrun_identity
 CTLSOCK_TEST := $(BUILD)/tests/test_ctlsock
+CONSOLE_TEST := $(BUILD)/tests/test_console
 FS_TEST := $(BUILD)/tests/test_fs
 SEED_MOUNTS_TEST := $(BUILD)/tests/test_cloudinit_mounts
 PROVISION_TEST := $(BUILD)/tests/test_provision
 DEPLOYMENT_FINGERPRINT_TEST := $(BUILD)/tests/test_guest_deployment_fingerprint
 DEPLOYMENT_RECOVERY_TEST := $(BUILD)/tests/test_deployment_recovery
 GUEST_FILESYSTEM_TEST := $(BUILD)/tests/test_guest_filesystem
+GUEST_PANIC_TEST := $(BUILD)/tests/test_guest_panic
 VZ_DISK_CONFIG_TEST := $(BUILD)/tests/test_vz_disk_config
 MANAGED_GUEST_IMAGE_TEST := $(BUILD)/tests/test_managed_guest_image
 SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
@@ -136,6 +138,12 @@ $(CTLSOCK_TEST): tests/host/test_ctlsock.c host/vmrun/ctlsock.c \
 	clang -DHAMN_TEST $(filter-out -MMD -MP,$(CFLAGS)) $< \
 		host/vmrun/ctlsock.c -framework Foundation -o $@
 
+$(CONSOLE_TEST): tests/host/test_console.c host/vmrun/console.c \
+                host/vmrun/console.h host/core/log.c host/core/log.h
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< host/vmrun/console.c \
+		host/core/log.c vendor/cjson/cJSON.c -o $@
+
 $(FS_TEST): tests/host/test_fs.c host/util/fs.c host/util/fs.h
 	@mkdir -p $(dir $@)
 	clang -DHAMN_TEST $(filter-out -MMD -MP,$(CFLAGS)) $< host/util/fs.c -o $@
@@ -183,6 +191,11 @@ $(SSH_OPTIONS_TEST): tests/host/test_ssh_options.c $(HOST_TEST_OBJS)
 		$(LDFLAGS) -o $@
 
 $(GUEST_FILESYSTEM_TEST): tests/host/test_guest_filesystem.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
+		$(LDFLAGS) -o $@
+
+$(GUEST_PANIC_TEST): tests/host/test_guest_panic.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) \
 		$(LDFLAGS) -o $@
@@ -470,10 +483,10 @@ test-qcow2: host
 	}
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test qcow2 $(HAMN_QCOW2_IMAGE)
 
-test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
+test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) $(FS_TEST) \
 		$(SEED_MOUNTS_TEST) $(PROVISION_TEST) $(DEPLOYMENT_FINGERPRINT_TEST) \
 		$(MANAGED_GUEST_IMAGE_TEST) $(SSH_OPTIONS_TEST) \
-		$(GUEST_FILESYSTEM_TEST) $(VZ_DISK_CONFIG_TEST) \
+		$(GUEST_FILESYSTEM_TEST) $(GUEST_PANIC_TEST) $(VZ_DISK_CONFIG_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
 		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
 		$(PROFILE_YAML_FAULTS_TEST) $(GUEST_WAIT_DEADLINES_TEST)
@@ -481,6 +494,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
 	rm -rf $(BUILD)/tests/raw-cache-data
 	$(CTLSOCK_TEST)
+	$(CONSOLE_TEST)
 	$(FS_TEST)
 	$(SEED_MOUNTS_TEST)
 	$(PROVISION_TEST)
@@ -488,6 +502,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(FS_TEST) \
 	$(MANAGED_GUEST_IMAGE_TEST)
 	$(SSH_OPTIONS_TEST)
 	$(GUEST_FILESYSTEM_TEST)
+	$(GUEST_PANIC_TEST)
 	$(VZ_DISK_CONFIG_TEST)
 	$(START_DOCKER_CONTEXT_RETRY_TEST)
 	$(GUEST_WAIT_DEADLINES_TEST)
