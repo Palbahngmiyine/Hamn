@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 (2026-10-16)
+
+## What's Changed
+* fix: stop the VM on a guest kernel panic and report it in vm status and the TUI by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/92
+* fix: keep the TUI's VM detail live, quit quietly with :exit, and stop a false query cleanup error by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/94
+
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.3.0...v0.3.1
+
 ## 0.3.0 (2026-10-16)
 
 ## What's Changed
