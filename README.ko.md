@@ -74,8 +74,9 @@ hamn --headless vm stop --profile work --yes
 감당할 수 없으면 `admissionRefused`로 실패하고 VM, 설정, 디스크를 그대로 둡니다.
 자리를 만들려고 다른 VM을 멈추지 않습니다. 헤드리스 오류의 `details`에는 거부 사유,
 측정값, 한도, 실행 중인 프로필이 들어 있고, TUI는 같은 메시지를 보여 줍니다.
-측정값을 읽지 못해도 시작을 거부합니다. 동시에 들어온 시작은 하나씩 판정하므로 두
-요청이 같은 여유 메모리를 함께 쓰지 않습니다.
+메모리 압박, 메모리, 실행 중인 VM의 메모리나 켜진 한도가 쓰는 측정값을 읽지 못해도
+시작을 거부합니다. 동시에 들어온 시작은 하나씩 판정하므로 두 요청이 같은 여유
+메모리를 함께 쓰지 않습니다.
 
 한도는 `hamn`을 실행하는 환경 변수로 정합니다.
 
@@ -85,6 +86,8 @@ hamn --headless vm stop --profile work --yes
 | `HAMN_ADMISSION_MEMORY_PRESSURE` | macOS 메모리 압박이 이 단계 이상: `warn` 또는 `critical` | `critical` |
 | `HAMN_ADMISSION_MAX_LOAD_PER_CPU` | CPU 하나당 1분 부하가 이 값(예: `1.5`)보다 큼 | 한도 없음 |
 | `HAMN_ADMISSION_MIN_BATTERY_PERCENT` | 배터리 전원이고 잔량이 이 퍼센트보다 낮음 | `0`, 한도 없음 |
+
+기본 한도는 기준 측정으로 실제 값을 정하기 전까지 일부러 느슨하게 두었습니다.
 
 ## 선언적 설정
 

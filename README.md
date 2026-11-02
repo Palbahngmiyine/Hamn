@@ -76,9 +76,10 @@ configured for the Hamn VMs that run. If the host cannot take the new VM, the
 start fails with `admissionRefused` and leaves the VM, its configuration and its
 disk as they were. Hamn never stops another VM to make room. The headless
 error has `details` with the reasons, the measured values, the limits and the
-running profiles; the TUI shows the same message. A measurement that cannot be
-read also refuses the start. Starts that run at the same time are checked one
-after another, so two of them never count on the same free memory.
+running profiles; the TUI shows the same message. The start is also refused when
+Hamn cannot read the memory pressure, the memory, the running VMs' memory, or a
+measurement an enabled limit uses. Starts that run at the same time are checked
+one after another, so two of them never count on the same free memory.
 
 Set the limits in the environment of `hamn`:
 
@@ -88,6 +89,9 @@ Set the limits in the environment of `hamn`:
 | `HAMN_ADMISSION_MEMORY_PRESSURE` | macOS memory pressure is at this level or above: `warn` or `critical` | `critical` |
 | `HAMN_ADMISSION_MAX_LOAD_PER_CPU` | the 1-minute load average per CPU is above this number, such as `1.5` | no limit |
 | `HAMN_ADMISSION_MIN_BATTERY_PERCENT` | the Mac runs on battery below this percentage | `0`, no limit |
+
+The default limits are deliberately permissive until a measured baseline sets
+real values.
 
 ## Declarative configuration
 
