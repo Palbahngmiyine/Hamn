@@ -601,6 +601,40 @@ static void an_unreadable_profile_is_listed_beside_the_others(const char *root)
     assert(unlink(path) == 0 && rmdir(other.dir) == 0);
 }
 
+/* An earlier Hamn stored rosetta: true. The profile stays readable; a start
+ * and a configure that would keep the setting are refused with the command
+ * that clears it, before either changes anything, and --rosetta false
+ * clears it. `existing` reads with cpus 2 and no deleted marker. */
+static void rosetta_set_by_an_earlier_hamn_is_refused_until_cleared(void)
+{
+    static const char refusal[] =
+        "profile existing sets rosetta: true, but Rosetta support was "
+        "removed; vm configure --profile existing --rosetta false --yes "
+        "clears it";
+    struct profile profile;
+    assert(profile_read_existing(&profile, "existing") == 0);
+    profile.rosetta = 1;
+    assert(profile_save(&profile) == 0);
+    char deleted[1024];
+    assert(profile_path(&profile, "deleted", deleted, sizeof(deleted)));
+    assert(fs_write_file_atomic(deleted, "", 0, 0600) == 0);
+
+    /* Disk 1 stops a start that got past the refusal at the shrink check,
+     * before it looks for a guest image. */
+    assert(hamn_control_start("existing", 0, 0, 1) == 1);
+    assert(strcmp(log_last_error(), refusal) == 0);
+    assert(access(deleted, F_OK) == 0);
+    assert(hamn_control_configure("existing", 3, 0, 0, 0, -1) == 1);
+    assert(strcmp(log_last_error(), refusal) == 0);
+    assert(profile_read_existing(&profile, "existing") == 0);
+    assert(profile.rosetta == 1 && profile.cpus == 2);
+
+    assert(hamn_control_configure("existing", 3, 0, 0, 0, 0) == 0);
+    assert(profile_read_existing(&profile, "existing") == 0);
+    assert(profile.rosetta == 0 && profile.cpus == 3);
+    assert(unlink(deleted) == 0);
+}
+
 /* A query reports its own failure only. It forgets the reason an earlier
  * call recorded, so that a failure it has no sentence for is not reported
  * with the sentence of another operation. `existing` reads. */
@@ -649,19 +683,21 @@ int main(void)
     assert(hamn_control_configure("existing", 0, UINT_MAX, 0, 0, -1) == 2);
     assert(profile_read_existing(&profile, "existing") == 0);
     assert(profile.mem_mib == 2048);
-    /* Rosetta: -1 keeps the setting, 0 and 1 set it, anything else is invalid. */
+    /* Rosetta support was removed: -1 keeps the setting, 0 clears it, and 1
+     * or anything else is invalid. A refused create leaves no directory. */
     assert(profile.rosetta == 0);
-    assert(hamn_control_configure("existing", 0, 0, 0, 0, 1) == 0);
-    assert(profile_read_existing(&profile, "existing") == 0 && profile.rosetta == 1);
-    assert(hamn_control_configure("existing", 3, 0, 0, 0, -1) == 0);
-    assert(profile_read_existing(&profile, "existing") == 0);
-    assert(profile.rosetta == 1 && profile.cpus == 3);
+    assert(hamn_control_configure("existing", 0, 0, 0, 0, 1) == 2);
+    assert(strcmp(log_last_error(), "Rosetta support was removed; "
+                  "--rosetta accepts only false") == 0);
     assert(hamn_control_configure("existing", 0, 0, 0, 0, 2) == 2);
     assert(hamn_control_configure("existing", 0, 0, 0, 0, -2) == 2);
-    assert(profile_read_existing(&profile, "existing") == 0 && profile.rosetta == 1);
-    assert(hamn_control_configure("existing", 2, 0, 0, 0, 0) == 0);
-    assert(profile_read_existing(&profile, "existing") == 0);
-    assert(profile.rosetta == 0 && profile.cpus == 2);
+    assert(hamn_control_configure("translated", 0, 0, 0, 1, 1) == 2);
+    char translated[1024];
+    assert(snprintf(translated, sizeof(translated), "%s/translated", root) <
+           (int)sizeof(translated));
+    assert(access(translated, F_OK) == -1 && errno == ENOENT);
+    assert(profile_read_existing(&profile, "existing") == 0 && profile.rosetta == 0);
+    rosetta_set_by_an_earlier_hamn_is_refused_until_cleared();
     /* The managed K3s `kubernetes` key was removed: a profile that still has
      * it is rejected rather than read with the key silently dropped. */
     char path[1024];

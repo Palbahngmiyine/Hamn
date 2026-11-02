@@ -38,14 +38,17 @@ void hamn_control_free(char *result);
  * operation record says whether the outcome is known. A damage found while
  * the VM this start booted could not be stopped is such a failure. An
  * earlier operation whose outcome is unknown stays unknown in the record
- * after any failure. */
+ * after any failure. A profile that sets rosetta: true (core/profile.h) is
+ * refused with 1 before anything changes. */
 #define HAMN_CONTROL_GUEST_FILESYSTEM_DAMAGED 6
 int hamn_control_start(const char *profile, unsigned cpus,
                        unsigned memory_gib, unsigned disk_gib);
-/* A zero resource keeps the profile's value. rosetta is 1 or 0 to set Apple
- * Linux Rosetta translation, -1 to keep it; any other value is invalid.
- * Returns 0, 2 for invalid arguments, 4 when create finds that the profile
- * exists, and 1 for any other failure. */
+/* A zero resource keeps the profile's value. rosetta is -1 to keep the
+ * setting or 0 to clear the rosetta: true that an earlier Hamn stored
+ * (core/profile.h). Returns 0; 2 for invalid arguments, rosetta 1 included,
+ * since Rosetta support was removed; 4 when create finds that the profile
+ * exists; and 1 for any other failure, a stored rosetta: true that the call
+ * would keep included. */
 int hamn_control_configure(const char *profile, unsigned cpus,
                            unsigned memory_gib, unsigned disk_gib, int create,
                            int rosetta);

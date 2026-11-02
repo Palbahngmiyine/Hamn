@@ -43,7 +43,7 @@ pub struct Request {
         long,
         value_name = "BOOL",
         action = clap::ArgAction::Set,
-        help = "Apple Linux Rosetta translation for vm create and vm configure: true or false"
+        help = "Only false, for vm create and vm configure: clears the rosetta: true an earlier Hamn stored, since Rosetta support was removed"
     )]
     pub rosetta: Option<bool>,
     #[arg(long)]
@@ -196,7 +196,7 @@ impl Request {
     pub fn impact(&self) -> String {
         match self.operation().as_str() {
             "vm create" => "Create a profile and its VM configuration.".into(),
-            "vm configure" => "Change the stopped VM's CPU, memory, disk or Rosetta settings.".into(),
+            "vm configure" => "Change the stopped VM's CPU, memory or disk settings.".into(),
             "vm apply" => "Create the profile or replace its stopped VM's configuration with the definition file; settings the file omits return to their defaults. The VM is not started or stopped.".into(),
             "vm start" => "Start the VM.".into(),
             "vm stop" => "Stop the VM and interrupt its running containers.".into(),

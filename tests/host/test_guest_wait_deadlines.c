@@ -549,13 +549,12 @@ static int leftover_exists(void)
     return 0;
 }
 
-/* A cold start without a leftover: the recovery finds nothing. A boot
- * registers only qemu's x86_64 handler, so the profile's translation is
- * applied, then Docker's network-dependent settings, each once and in the
- * reconciliation's transaction; nothing else of the image is touched. */
-static void reconcile_without_a_leftover(int rosetta)
+/* A cold start without a leftover: the recovery finds nothing. Docker's
+ * network-dependent settings are applied once, in the reconciliation's
+ * transaction; nothing else of the image is touched, and the removed Rosetta
+ * configuration is never called. */
+static void reconcile_without_a_leftover_configures_docker_only(void)
 {
-    fixture.profile.rosetta = rosetta;
     struct vm_state state;
     leave_a_transaction(&state);
     assert(unsetenv(ENV_LEFTOVER) == 0 && unlink(fixture.leftover) == 0);
@@ -563,9 +562,7 @@ static void reconcile_without_a_leftover(int rosetta)
                                                      &state) == 0);
     assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
     assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
-    assert(ssh_calls(rosetta ? "configure-rosetta enable" :
-                               "configure-rosetta disable") == 1);
-    assert(ssh_calls("configure-rosetta") == 1);
+    assert(ssh_calls("configure-rosetta") == 0);
     assert(ssh_calls("configure-docker") == 1);
     assert(ssh_calls(SETTLE_RECORD) == 0);
     assert(ssh_calls(TRANSACTION_HELPER " commit") == 1);
@@ -575,41 +572,30 @@ static void reconcile_without_a_leftover(int rosetta)
     char *output = read_file(fixture.out);
     assert(!strstr(output, "deployment recovery"));
     assert(!strstr(output, "whole guest runtime"));
-    assert(strstr(output, "warm start reconciled x86_64 translation, Docker "
-                          "networking and readiness"));
+    assert(strstr(output, "warm start reconciled Docker networking and "
+                          "readiness"));
     free(output);
     ssh_clients_reaped();
 }
 
-static void reconcile_without_a_leftover_applies_qemu_translation(void)
-{
-    reconcile_without_a_leftover(0);
-}
-
-static void reconcile_without_a_leftover_applies_rosetta_translation(void)
-{
-    reconcile_without_a_leftover(1);
-}
-
-/* A translation that cannot be applied fails the reconciliation loudly: its
- * transaction is rolled back and Docker is not reconfigured. */
-static void reconcile_rolls_back_when_translation_fails(void)
+/* Docker settings that cannot be applied fail the reconciliation loudly: its
+ * transaction is rolled back and nothing is committed. */
+static void reconcile_rolls_back_when_docker_configuration_fails(void)
 {
     struct vm_state state;
     leave_a_transaction(&state);
     assert(unsetenv(ENV_LEFTOVER) == 0 && unlink(fixture.leftover) == 0);
-    setenv(ENV_FAIL, "configure-rosetta", 1);
+    setenv(ENV_FAIL, "configure-docker", 1);
     assert(guest_deployment_reconcile_runtime_locked(&fixture.profile,
                                                      &state) == -1);
     assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
-    assert(ssh_calls("configure-rosetta") == 1);
-    assert(ssh_calls("configure-docker") == 0);
+    assert(ssh_calls("configure-docker") == 1);
     assert(ssh_calls(TRANSACTION_HELPER " commit") == 0);
     assert(ssh_calls(TRANSACTION_HELPER " rollback") == 1);
     assert(!guest_deployment_cleanup_pending());
     fflush(NULL);
     char *output = read_file(fixture.out);
-    assert(strstr(output, "cannot configure qemu x86_64 translation"));
+    assert(strstr(output, "Docker daemon configuration failed"));
     assert(strstr(output, "guest runtime reconciliation failed; restoring the "
                           "runtime files and services its backup holds"));
     free(output);
@@ -621,8 +607,8 @@ static void reconcile_rolls_back_when_translation_fails(void)
  * so the start needs no repair. Because the recovery changed the guest, and
  * on an image without the durable commit the crash may also have lost the
  * last deployment's writes, the whole runtime is configured again inside the
- * reconciliation's own transaction: x86_64 translation, the image check,
- * containerd and Docker, each once. Only the refresh's cloud-init wait,
+ * reconciliation's own transaction: the image check, containerd and Docker,
+ * each once. Only the refresh's cloud-init wait,
  * which a disk past its first boot does not need, is left out. */
 static void reconcile_recovers_a_leftover_and_applies_the_whole_runtime(void)
 {
@@ -633,7 +619,7 @@ static void reconcile_recovers_a_leftover_and_applies_the_whole_runtime(void)
     assert(!leftover_exists());
     assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
     assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
-    assert(ssh_calls("configure-rosetta disable") == 1);
+    assert(ssh_calls("configure-rosetta") == 0);
     assert(ssh_calls("verify-image-contract") == 1);
     assert(ssh_calls("configure-containerd") == 1);
     assert(ssh_calls("configure-docker") == 1);
@@ -669,7 +655,7 @@ static void reapply_applies_the_whole_runtime_without_a_leftover(void)
                                                    &state) == 0);
     assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
     assert(ssh_calls(TRANSACTION_HELPER " begin") == 1);
-    assert(ssh_calls("configure-rosetta disable") == 1);
+    assert(ssh_calls("configure-rosetta") == 0);
     assert(ssh_calls("verify-image-contract") == 1);
     assert(ssh_calls("configure-containerd") == 1);
     assert(ssh_calls("configure-docker") == 1);
@@ -700,8 +686,7 @@ static void reconcile_begins_nothing_when_recovery_fails(void)
     assert(leftover_exists());
     assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
     assert(ssh_calls(TRANSACTION_HELPER " begin") == 0);
-    assert(ssh_calls("configure-rosetta") == 0 && ssh_calls("configure-docker") == 0 &&
-           ssh_calls("-O forward") == 0);
+    assert(ssh_calls("configure-docker") == 0 && ssh_calls("-O forward") == 0);
     assert(!guest_deployment_cleanup_pending() &&
            !guest_deployment_recovery_complete());
     ssh_clients_reaped();
@@ -723,7 +708,7 @@ static void cancelled_recovery_keeps_its_result_in_reconcile(void)
     assert(!leftover_exists());
     assert(ssh_calls(" " RECOVERY_ROOT " ") == 1);
     assert(ssh_calls(TRANSACTION_HELPER " begin") == 0);
-    assert(ssh_calls("configure-rosetta") == 0 && ssh_calls("configure-docker") == 0);
+    assert(ssh_calls("configure-docker") == 0);
     assert(guest_deployment_recovery_complete() &&
            !guest_deployment_cleanup_pending());
     assert(proc_cancelled());
@@ -740,7 +725,6 @@ static void hung_image_check_ends_at_its_bound(void)
     long long elapsed = now_ms() - started;
     assert(elapsed >= VERIFY_MS && elapsed < VERIFY_MS + 2000);
     assert(strstr(log_last_error(), "did not finish within"));
-    assert(ssh_calls("configure-rosetta") == 1);
     assert(ssh_calls("verify-image-contract") == 1);
     assert(ssh_calls("configure-containerd") == 0);
     ssh_clients_reaped();
@@ -1371,14 +1355,11 @@ int main(int argc, char **argv)
     run_case("hang_in_cleanup_after_cancellation_ends_at_the_budget",
              hang_in_cleanup_after_cancellation_ends_at_the_budget,
              API_ANSWERS, READY_MS + WATCHDOG_EXTRA_MS);
-    run_case("reconcile_without_a_leftover_applies_qemu_translation",
-             reconcile_without_a_leftover_applies_qemu_translation,
+    run_case("reconcile_without_a_leftover_configures_docker_only",
+             reconcile_without_a_leftover_configures_docker_only,
              API_ANSWERS, READY_MS + WATCHDOG_EXTRA_MS);
-    run_case("reconcile_without_a_leftover_applies_rosetta_translation",
-             reconcile_without_a_leftover_applies_rosetta_translation,
-             API_ANSWERS, READY_MS + WATCHDOG_EXTRA_MS);
-    run_case("reconcile_rolls_back_when_translation_fails",
-             reconcile_rolls_back_when_translation_fails, API_ANSWERS,
+    run_case("reconcile_rolls_back_when_docker_configuration_fails",
+             reconcile_rolls_back_when_docker_configuration_fails, API_ANSWERS,
              READY_MS + WATCHDOG_EXTRA_MS);
     run_case("reconcile_recovers_a_leftover_and_applies_the_whole_runtime",
              reconcile_recovers_a_leftover_and_applies_the_whole_runtime,
