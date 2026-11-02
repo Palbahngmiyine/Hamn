@@ -9,7 +9,10 @@ make -C "$ROOT" -B -n install >"$WORK/install"
 grep -q 'build/hamnd-agent' "$WORK/install"
 grep -q 'configure-containerd' "$WORK/install"
 grep -q 'configure-docker' "$WORK/install"
-grep -q 'configure-rosetta' "$WORK/install"
+if grep -q 'configure-rosetta' "$WORK/install"; then
+    echo "FAIL: guest install still ships the removed Rosetta configuration script" >&2
+    exit 1
+fi
 grep -q -- '-pthread' "$WORK/install"
 grep -q 'verify-image-contract' "$WORK/install"
 grep -q 'json/guest_json.c json/strict_json.c' "$WORK/install"

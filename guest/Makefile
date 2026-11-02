@@ -69,8 +69,6 @@ install-common: $(AGENT_BIN) $(GUEST_JSON_BIN)
 		$(DESTDIR)/usr/local/libexec/hamn/configure-containerd
 	install -m 0755 scripts/configure-docker.sh \
 		$(DESTDIR)/usr/local/libexec/hamn/configure-docker
-	install -m 0755 scripts/configure-rosetta.sh \
-		$(DESTDIR)/usr/local/libexec/hamn/configure-rosetta
 	install -m 0755 scripts/verify-image-contract.sh \
 		$(DESTDIR)/usr/local/libexec/hamn/verify-image-contract
 	install -m 0755 scripts/guest-deployment-transaction.sh \
