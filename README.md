@@ -159,6 +159,13 @@ hamn --headless vm down --workspace "$PWD" --purge --yes
   path in the VM. `--no-git-mount` shares the workspace only. `--cpu`,
   `--memory` and `--disk` set a new profile's resources and change an existing
   one as `vm start` does.
+- The git directory is shared only when it is the workspace's own: a `.git`
+  directory in the workspace, or the git directory that git made for this
+  linked worktree. A submodule, a `.git` file that names another repository
+  and a `.git` symbolic link get a warning, and the VM shares the workspace
+  only. The read-only git mount is a convenience for git in the guest, not a
+  security boundary against the guest: in a plain repository `.git` lies
+  inside the writable workspace share.
 - The answer is the profile's `vm status` with `profile`, `workspace` and
   `dockerHost`, the `unix://` value for `DOCKER_HOST`.
 - When the host cannot take the VM (`admissionRefused`) or its first start

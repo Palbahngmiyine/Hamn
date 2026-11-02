@@ -33,6 +33,7 @@ pub fn main(filters: &[String]) -> ExitCode {
         vec![
             case("a_refused_vm_up_leaves_no_profile_it_made", a_refused_vm_up_leaves_no_profile_it_made),
             case("a_new_profile_that_cannot_start_is_deleted_again", a_new_profile_that_cannot_start_is_deleted_again),
+            case("a_new_profile_unconfirmed_or_unrecorded_is_deleted_again", a_new_profile_unconfirmed_or_unrecorded_is_deleted_again),
             case("the_workspace_must_be_an_existing_directory_of_this_user", the_workspace_must_be_an_existing_directory_of_this_user),
             case("an_ephemeral_profile_is_reused_kept_stopped_and_purged", an_ephemeral_profile_is_reused_kept_stopped_and_purged),
             case("a_profile_without_this_workspaces_record_is_left_alone", a_profile_without_this_workspaces_record_is_left_alone),
@@ -287,6 +288,33 @@ fn a_new_profile_that_cannot_start_is_deleted_again() {
     }
     assert!(!home.hamn().join(&name).exists() && home.listed().is_empty());
     assert_eq!(entries(outside.path()), ["keep"]);
+}
+
+/// A new profile whose config.yaml was written but not confirmed durable, or
+/// whose workspace record cannot be written, is deleted again. The failures
+/// come from the atomic-write fault hook of host/util/fs.c, at the path the
+/// C core builds from HOME.
+fn a_new_profile_unconfirmed_or_unrecorded_is_deleted_again() {
+    let home = Home::new();
+    let tree = home.directory("tree");
+    let name = profile_of(&tree);
+    let unrecorded = format!("cannot record workspace {} in profile {name}: Input/output error", real(&tree).display());
+    for (file, stage, reason) in [
+        ("config.yaml", "fsync", format!("the settings of profile {name} were written but not confirmed durable")),
+        ("ephemeral", "open", unrecorded),
+    ] {
+        let fault = format!("{}/.hamn/{name}/{file}", home.path().display());
+        let (value, stderr) = home.up(
+            &tree,
+            &[],
+            &[("HAMN_TEST_FAIL_ATOMIC_PARENT_PATH", &fault), ("HAMN_TEST_FAIL_ATOMIC_PARENT_STAGE", stage)],
+        );
+        failure(&value, "operationFailed", &reason);
+        let message = value["error"]["message"].as_str().unwrap();
+        assert!(message.ends_with(&format!("; vm up deleted the profile {name} it had created")), "{message}");
+        assert!(stderr.contains(&format!("deleted profile {name} with its disk and Docker data")), "{stderr}");
+        assert!(!home.hamn().join(&name).exists() && home.listed().is_empty(), "{file}");
+    }
 }
 
 /// A missing path, a file, another user's directory and a relative path are

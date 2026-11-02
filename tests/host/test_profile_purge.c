@@ -1,9 +1,10 @@
 /* hamn_control_purge() moves a profile directory out of the profile
  * namespace before it removes it, so an interruption at any point leaves no
  * profile behind, and the next list or purge removes what is left. Faults
- * come from purge.c's HAMN_TEST hook and from a directory the test makes
- * unremovable. No VM is involved here; the vm-purge suite covers the
- * headless contract, its refusals and its error codes. */
+ * come from purge.c's HAMN_TEST hook, from a directory the test makes
+ * unremovable, and from a stop that leaves a VM process behind. No VM is
+ * involved here; the vm-purge suite covers the headless contract, its
+ * refusals and its error codes. */
 #include <assert.h>
 #include <dirent.h>
 #include <errno.h>
@@ -12,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -20,7 +22,12 @@
 #include "core/control.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
+#include "core/profile.h"
 #include "core/purge.h"
+
+/* cmd_delete.c is built with vm_stop renamed to fault_vm_stop (Makefile). */
+#undef vm_stop
+int vm_stop(const struct profile *p, int *was_running);
 
 static char root[64];   /* the directory of this test */
 static char home[128];  /* HOME of the current case */
@@ -31,6 +38,35 @@ static void begin(const char *name)
     snprintf(home, sizeof(home), "%s/%s", root, name);
     snprintf(hamn, sizeof(hamn), "%s/.hamn", home);
     assert(mkdir(home, 0700) == 0 && setenv("HOME", home, 1) == 0);
+}
+
+/* The real stop, then (while spawn_guard_planned) a vmrun that begins
+ * spawning after it: the stop reported success, yet vm_process_probe() finds
+ * the profile's spawn guard locked and cannot call the VM stopped. */
+static int spawn_guard_planned;
+static int spawn_guard = -1;  /* the descriptor that holds that lock */
+static int stops_reported_ok;
+
+static void spawn_guard_release(void)
+{
+    if (spawn_guard >= 0)
+        assert(close(spawn_guard) == 0);
+    spawn_guard = -1;
+}
+
+int fault_vm_stop(const struct profile *p, int *was_running)
+{
+    int result = vm_stop(p, was_running);
+    if (result != VM_STOP_OK)
+        return result;
+    stops_reported_ok++;
+    if (spawn_guard_planned) {
+        char path[PROFILE_PATH_CAP];
+        assert(profile_path(p, "vmrun.spawning", path, sizeof(path)));
+        spawn_guard = open(path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+        assert(spawn_guard >= 0 && flock(spawn_guard, LOCK_EX | LOCK_NB) == 0);
+    }
+    return result;
 }
 
 static const char *at(const char *directory, const char *name)
@@ -277,6 +313,31 @@ static void tree(const char *directory, char *text, size_t capacity)
     assert(closedir(listing) == 0);
 }
 
+/* A stop that reported success is not enough: a VM process the probe still
+ * sees keeps the profile, and it is deleted once the process is gone. */
+static void a_stop_that_leaves_a_vm_process_behind_keeps_the_profile(void)
+{
+    begin("vm-behind");
+    create("work");
+    spawn_guard_planned = 1;
+    stops_reported_ok = 0;
+    int absent;
+    assert(purge("work", &absent) == HAMN_CONTROL_STOP_UNCERTAIN && absent == 0);
+    assert(stops_reported_ok == 1 && spawn_guard >= 0);
+    assert(recorded("refusing to delete while VM or host port-forward "
+                    "ownership is uncertain"));
+    assert(exists(at(hamn, "work/disk.img")) &&
+           exists(at(hamn, "work/logs/serial.log")) &&
+           exists(at(hamn, "work/config.yaml")) && outside_kept("work"));
+    assert(leftovers(NULL) == 0 && listed("work"));
+
+    spawn_guard_planned = 0;
+    spawn_guard_release();
+    assert(unlink(at(hamn, "work/vmrun.spawning")) == 0);
+    assert(purge("work", &absent) == 0 && absent == 0);
+    assert(!exists(at(hamn, "work")) && leftovers(NULL) == 0);
+}
+
 static void an_absent_profile_is_purged_without_a_trace(void)
 {
     begin("absent");
@@ -320,6 +381,7 @@ int main(void)
         a_tree_that_cannot_be_removed_stays_hidden_until_it_can();
         the_sweep_removes_only_purged_trees();
         a_tree_whose_purge_still_runs_is_left_to_it();
+        a_stop_that_leaves_a_vm_process_behind_keeps_the_profile();
         an_absent_profile_is_purged_without_a_trace();
         invalid_arguments_change_nothing();
         _exit(0);

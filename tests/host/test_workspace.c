@@ -3,9 +3,9 @@
  * the profile vm up creates, and which paths count as gone for a reclaim.
  * Expected names come from SHA-256 values computed apart from Hamn (shasum
  * -a 256), and expected git directories from the layouts git itself
- * writes: a linked worktree's .git file, its commondir, and a plain
- * repository's .git directory. No VM is involved; the vm-up suite
- * covers the control calls. */
+ * writes: a linked worktree's .git file, its commondir and gitdir files, a
+ * submodule's .git file, and a plain repository's .git directory. No VM
+ * is involved; the vm-up suite covers the control calls. */
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -104,7 +104,11 @@ static void a_missing_file_relative_or_foreign_path_is_refused(void)
 static void git_case(const char *name, int rc, const char *expected)
 {
     char git[PATH_MAX], reason[WORKSPACE_REASON_CAP];
-    assert(workspace_git_directory(at(name), git, reason) == rc);
+    int returned = workspace_git_directory(at(name), git, reason);
+    if (returned != rc) {
+        fprintf(stderr, "%s: returned %d (%s)\n", name, returned, reason);
+        abort();
+    }
     if (rc == 0) {
         char real[PATH_MAX];
         assert(realpath(at(expected), real));
@@ -122,7 +126,8 @@ static void git_case(const char *name, int rc, const char *expected)
 }
 
 /* A main repository at main with a linked worktree whose git directory is
- * main/.git/worktrees/<name>, as `git worktree add` lays it out. */
+ * main/.git/worktrees/<name>, as `git worktree add` lays it out: its gitdir
+ * file names <name>/.git by its absolute path. */
 static void linked(const char *name, const char *gitdir_line,
                    const char *commondir)
 {
@@ -136,6 +141,11 @@ static void linked(const char *name, const char *gitdir_line,
                  root, name);
         write_file(path, commondir);
     }
+    snprintf(path, sizeof(path), "%s/main/.git/worktrees/%s/gitdir", root,
+             name);
+    char back[PATH_MAX];
+    snprintf(back, sizeof(back), "%s/%s/.git\n", root, name);
+    write_file(path, back);
     make_directory(name);
     snprintf(path, sizeof(path), "%s/%s/.git", root, name);
     write_file(path, gitdir_line);
@@ -174,15 +184,17 @@ static void the_common_git_directory_is_found_as_git_finds_it(void)
     linked("crlf", "gitdir: ../main/.git/worktrees/crlf\r\n", line);
     git_case("crlf", 0, "main/.git");
 
-    /* A submodule's git directory has no commondir: it is its own. */
-    linked("module", "gitdir: ../main/.git/worktrees/module\n", NULL);
-    make_directory("main/.git/worktrees/module/objects");
-    make_directory("main/.git/worktrees/module/refs");
-    git_case("module", 0, "main/.git/worktrees/module");
+    /* git worktree add --relative-paths links both ways by relative paths. */
+    linked("both-relative", "gitdir: ../main/.git/worktrees/both-relative\n",
+           "../..\n");
+    write_file(at("main/.git/worktrees/both-relative/gitdir"),
+               "../../../../both-relative/.git\n");
+    git_case("both-relative", 0, "main/.git");
 
+    /* Only a .git of the workspace's own is shared, not one it links to. */
     make_directory("linked-git");
     assert(symlink(at("main/.git"), at("linked-git/.git")) == 0);
-    git_case("linked-git", 0, "main/.git");
+    git_case("linked-git", -1, "/linked-git/.git is a symbolic link");
 
     make_directory("plain");
     git_case("plain", -1, "/.git: there is none");
@@ -207,6 +219,51 @@ static void the_common_git_directory_is_found_as_git_finds_it(void)
     make_directory("unborn/.git");
     write_file(at("unborn/.git/HEAD"), "ref: refs/heads/main\n");
     git_case("unborn", -1, "is not one: it lacks a HEAD file");
+    /* A worktree's git directory serves the worktree its gitdir file names. */
+    make_directory("intruder");
+    snprintf(line, sizeof(line), "gitdir: %s\n", at("main/.git/worktrees/wt"));
+    write_file(at("intruder/.git"), line);
+    git_case("intruder", -1, "/intruder/.git: the git directory belongs to "
+             "another worktree");
+    linked("unlinked", "gitdir: ../main/.git/worktrees/unlinked\n", "../..\n");
+    assert(unlink(at("main/.git/worktrees/unlinked/gitdir")) == 0);
+    git_case("unlinked", -1, "cannot read ../main/.git/worktrees/unlinked/"
+             "gitdir: No such file or directory");
+    /* The gitdir file names the workspace's .git, not another entry in it. */
+    linked("named-dir", "gitdir: ../main/.git/worktrees/named-dir\n",
+           "../..\n");
+    snprintf(line, sizeof(line), "%s\n", at("named-dir/git"));
+    write_file(at("main/.git/worktrees/named-dir/gitdir"), line);
+    git_case("named-dir", -1, "/named-dir/.git: the git directory belongs to "
+             "another worktree");
+    /* A git directory of the workspace's making links back to it, and its
+     * commondir names another repository. */
+    make_directory("forged");
+    make_directory("forged/admin");
+    write_file(at("forged/admin/HEAD"), "ref: refs/heads/main\n");
+    snprintf(line, sizeof(line), "%s\n", at("main/.git"));
+    write_file(at("forged/admin/commondir"), line);
+    snprintf(line, sizeof(line), "%s\n", at("forged/.git"));
+    write_file(at("forged/admin/gitdir"), line);
+    write_file(at("forged/.git"), "gitdir: admin\n");
+    git_case("forged", -1, "which is not the git directory of a linked "
+             "worktree");
+    make_directory("another");
+    repository("another/.git");
+    make_directory("borrower");
+    snprintf(line, sizeof(line), "gitdir: %s\n", at("another/.git"));
+    write_file(at("borrower/.git"), line);
+    git_case("borrower", -1, "which is not the git directory of a linked "
+             "worktree");
+    /* A submodule's git directory, under the superproject's, is a whole
+     * repository with no link back to its work tree: it is not shared. */
+    make_directory("main/.git/modules");
+    repository("main/.git/modules/sub");
+    make_directory("main/sub");
+    write_file(at("main/sub/.git"), "gitdir: ../.git/modules/sub\n");
+    git_case("main/sub", -1, "which is not the git directory of a linked "
+             "worktree");
+
     make_directory("fifo");
     assert(mkfifo(at("fifo/.git"), 0600) == 0);
     git_case("fifo", -1, "is neither a directory nor a file");

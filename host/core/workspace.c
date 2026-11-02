@@ -158,8 +158,63 @@ static int git_directory_path(int gitdir, int common, const char *path,
     return -1;
 }
 
-/* The common git directory of a linked worktree or a submodule, whose .git
- * is a file that names its git directory. */
+static int same_file(int a, int b)
+{
+    struct stat first, second;
+    return fstat(a, &first) == 0 && fstat(b, &second) == 0 &&
+           first.st_dev == second.st_dev && first.st_ino == second.st_ino;
+}
+
+/* Whether gitdir lies in the worktrees directory of common, where git keeps
+ * the git directory of each linked worktree. Without this, a git directory
+ * of the workspace's own making could link back to it and name any
+ * repository as its common one. */
+static int in_worktrees(int gitdir, int common)
+{
+    int worktrees = openat(common, "worktrees",
+                           O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    int parent = open_directory_at(gitdir, "..");
+    int same = worktrees >= 0 && parent >= 0 && same_file(worktrees, parent);
+    if (worktrees >= 0)
+        close(worktrees);
+    if (parent >= 0)
+        close(parent);
+    return same;
+}
+
+/* Whether the git directory gitdir, which the workspace's .git names as
+ * named, is that of the workspace: its gitdir file, which git writes for a
+ * linked worktree, names <workspace>/.git, relative to gitdir unless
+ * absolute. A .git file is input from the workspace, and can name the git
+ * directory of any other worktree. */
+static int links_back(int workspace, int gitdir, const char *named,
+                      const char *path, char reason[WORKSPACE_REASON_CAP])
+{
+    char link[PATH_MAX], directory[PATH_MAX];
+    if (read_git_pointer(gitdir, "gitdir", link, sizeof(link)) != 0) {
+        snprintf(reason, WORKSPACE_REASON_CAP, "cannot read %s/gitdir: %s",
+                 named, strerror(errno));
+        return 0;
+    }
+    const char *slash = strrchr(link, '/');
+    int linked = -1;
+    if (slash && strcmp(slash + 1, ".git") == 0) {
+        snprintf(directory, sizeof(directory), "%.*s",
+                 slash == link ? 1 : (int)(slash - link), link);
+        linked = open_directory_at(gitdir, directory);
+    }
+    int same = linked >= 0 && same_file(linked, workspace);
+    if (linked >= 0)
+        close(linked);
+    if (!same)
+        snprintf(reason, WORKSPACE_REASON_CAP, "%s/gitdir names %s, not "
+                 "%s/.git: the git directory belongs to another worktree",
+                 named, link, path);
+    return same;
+}
+
+/* The common git directory of a linked worktree, whose .git is a file that
+ * names its git directory. */
 static int linked_git_directory(int workspace, const char *path,
                                 char git[PATH_MAX],
                                 char reason[WORKSPACE_REASON_CAP])
@@ -203,6 +258,16 @@ static int linked_git_directory(int workspace, const char *path,
     }
     int rc = common < 0 ? -1 :
         git_directory_path(gitdir, common, path, git, reason);
+    if (rc == 0 && !in_worktrees(gitdir, common)) {
+        snprintf(reason, WORKSPACE_REASON_CAP, "%s/.git names %s, which is "
+                 "not the git directory of a linked worktree "
+                 "(<repository>/worktrees/<name>), as that of a submodule "
+                 "or of another repository is not", path, named);
+        rc = -1;
+    } else if (rc == 0 &&
+               !links_back(workspace, gitdir, named, path, reason)) {
+        rc = -1;
+    }
     if (common >= 0 && common != gitdir)
         close(common);
     close(gitdir);
@@ -222,9 +287,13 @@ int workspace_git_directory(const char *path, char git[PATH_MAX],
     }
     int rc = -1;
     struct stat status;
-    if (fstatat(workspace, ".git", &status, 0) != 0) {
+    if (fstatat(workspace, ".git", &status, AT_SYMLINK_NOFOLLOW) != 0) {
         snprintf(reason, WORKSPACE_REASON_CAP, "%s/.git: %s", path,
                  errno == ENOENT ? "there is none" : strerror(errno));
+    } else if (S_ISLNK(status.st_mode)) {
+        /* It can lead to any repository, which is not this workspace's. */
+        snprintf(reason, WORKSPACE_REASON_CAP, "%s/.git is a symbolic link",
+                 path);
     } else if (S_ISREG(status.st_mode)) {
         rc = linked_git_directory(workspace, path, git, reason);
     } else if (!S_ISDIR(status.st_mode)) {
