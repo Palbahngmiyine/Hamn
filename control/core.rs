@@ -32,6 +32,9 @@ unsafe extern "C" {
     ) -> i32;
     fn hamn_control_stop(profile: *const libc::c_char) -> i32;
     fn hamn_control_delete(profile: *const libc::c_char) -> i32;
+    // C borrows profile for this call and writes absent on every return: 1 when
+    // the profile did not exist. core/control.h lists the return values.
+    fn hamn_control_purge(profile: *const libc::c_char, absent: *mut i32) -> i32;
     // Stops the VM, then deletes its disk; core/control.h describes what stays.
     fn hamn_control_reset(profile: *const libc::c_char) -> i32;
     fn hamn_control_diagnostics(
@@ -172,6 +175,9 @@ fn apply_failure_code(rc: i32) -> &'static str {
 fn control_failure_code(operation: &str, rc: i32, unknown: bool) -> &'static str {
     match rc {
         6 if operation == "vm start" => "guestFilesystemDamaged",
+        // HAMN_CONTROL_STOP_UNCERTAIN of a purge: nothing was deleted, and the
+        // VM may still run, as when a soft delete refuses for that reason.
+        5 if operation == "vm delete" => "outcomeUnknown",
         _ if unknown => "outcomeUnknown",
         130 => "cancelled",
         3 => "restartRequired",
@@ -208,6 +214,7 @@ fn execute(request: &Request) -> Result<Value> {
         .map(CString::new)
         .transpose()
         .map_err(|e| Failure::new("invalidRequest", e))?;
+    let mut absent = 0;
     let mut output = std::ptr::null_mut();
     if operation == "vm list" {
         return query(None);
@@ -245,6 +252,7 @@ fn execute(request: &Request) -> Result<Value> {
                 request.rosetta.map_or(-1, i32::from),
             ),
             "vm stop" => hamn_control_stop(pointer),
+            "vm delete" if request.purge => hamn_control_purge(pointer, &mut absent),
             "vm delete" => hamn_control_delete(pointer),
             "vm reset" => hamn_control_reset(pointer),
             _ => return Err(Failure::new("unsupportedOperation", &operation)),
@@ -275,6 +283,8 @@ fn execute(request: &Request) -> Result<Value> {
     }
     if operation.starts_with("system ") {
         Ok(json!({"completed":true}))
+    } else if operation == "vm delete" && request.purge {
+        Ok(json!({"deleted":true,"purged":true,"alreadyAbsent":absent != 0}))
     } else if operation == "vm delete" {
         Ok(json!({"deleted":true}))
     } else {
@@ -618,6 +628,19 @@ mod tests {
             ("vm stop", 6, true, "outcomeUnknown"),
             ("vm create", 4, false, "conflict"),
             ("system upgrade", 6, false, "operationFailed"),
+        ] {
+            assert_eq!(control_failure_code(operation, rc, unknown), code, "{operation} {rc} {unknown}");
+        }
+    }
+
+    #[test]
+    fn a_purge_that_cannot_confirm_the_stop_leaves_the_outcome_open() {
+        for (operation, rc, unknown, code) in [
+            ("vm delete", 5, false, "outcomeUnknown"),
+            ("vm delete", 1, false, "operationFailed"),
+            ("vm delete", 1, true, "outcomeUnknown"),
+            ("vm stop", 5, false, "operationFailed"),
+            ("vm reset", 5, false, "operationFailed"),
         ] {
             assert_eq!(control_failure_code(operation, rc, unknown), code, "{operation} {rc} {unknown}");
         }
