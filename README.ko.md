@@ -67,6 +67,25 @@ hamn --headless vm stop --profile work --yes
 `--follow` 로그와 `--watch` 조회는 NDJSON을 출력합니다. stdout에는 기계용 응답만
 출력합니다.
 
+## 호스트 여유
+
+`vm start`는 VM을 띄우기 전에 호스트의 메모리 압박 단계, 메모리, 1분 부하, CPU 수,
+전원 상태를 읽고, 실행 중인 Hamn VM에 설정된 메모리를 더합니다. 호스트가 새 VM을
+감당할 수 없으면 아무것도 바꾸지 않고 `admissionRefused`로 실패합니다. 자리를
+만들려고 다른 VM을 멈추지 않습니다. 헤드리스 오류의 `details`에는 거부 사유,
+측정값, 한도, 실행 중인 프로필이 들어 있고, TUI는 같은 메시지를 보여 줍니다.
+측정값을 읽지 못해도 시작을 거부합니다. 동시에 들어온 시작은 하나씩 판정하므로 두
+요청이 같은 여유 메모리를 함께 쓰지 않습니다.
+
+한도는 `hamn`을 실행하는 환경 변수로 정합니다.
+
+| 변수 | 시작을 거부하는 경우 | 기본값 |
+|---|---|---|
+| `HAMN_ADMISSION_MEMORY_RESERVE_MIB` | 실행 중인 VM과 새 VM의 메모리가 호스트 메모리에서 이 MiB를 뺀 값보다 큼 | `0` |
+| `HAMN_ADMISSION_MEMORY_PRESSURE` | macOS 메모리 압박이 이 단계 이상: `warn` 또는 `critical` | `critical` |
+| `HAMN_ADMISSION_MAX_LOAD_PER_CPU` | CPU 하나당 1분 부하가 이 값(예: `1.5`)보다 큼 | 한도 없음 |
+| `HAMN_ADMISSION_MIN_BATTERY_PERCENT` | 배터리 전원이고 잔량이 이 퍼센트보다 낮음 | `0`, 한도 없음 |
+
 ## 선언적 설정
 
 프로필의 모든 설정을 파일 하나에 적어 두고, `vm apply`로 프로필을 그 파일과 같게
