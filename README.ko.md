@@ -178,11 +178,13 @@ T3 Code에서는 프로젝트의 `t3.json`에 스크립트 두 개를 더합니�
   `hamn --headless vm down --workspace "$T3CODE_WORKTREE_PATH" --yes`
 
 T3 Code는 스레드가 settle될 때마다 이 스크립트를 실행하고, 스레드는 그 뒤에도 이어질 수
-있습니다. `vm down`은 VM의 메모리를 비우고 디스크는 남기며, 다음 `vm up`이 VM을 다시
-시작합니다. 디스크까지 지우려면 `--purge`를 더합니다.
+있습니다. `vm down`은 VM의 메모리를 비우고 디스크는 남깁니다. T3 Code는 생성 스크립트를
+다시 실행하지 않으므로, 이어지는 스레드에서는 에이전트나 사용자가 같은 `vm up` 명령으로
+VM을 다시 시작합니다. 디스크까지 지우려면 `--purge`를 더합니다.
 
-Orca에서는 저장소의 setup과 archive 스크립트를 `orca.yaml`에 둡니다. Orca는 워크트리를
-지우기 전에 archive 스크립트를 실행합니다.
+Orca에서는 저장소의 setup과 archive 스크립트를 `orca.yaml`에 둡니다. 훅이 켜져 있으면
+(CLI는 `--run-hooks`) Orca는 워크트리를 지우기 전에 archive 스크립트를 실행합니다. 스크립트가
+실패하면 사용자가 그 실패를 받아들일 때까지 워크트리를 지우지 않습니다.
 
 ```yaml
 scripts:

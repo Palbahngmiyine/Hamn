@@ -188,11 +188,15 @@ In T3 Code, add two scripts to the project's `t3.json`:
   `hamn --headless vm down --workspace "$T3CODE_WORKTREE_PATH" --yes`
 
 T3 Code runs the settle script each time the thread settles, and the thread can
-continue afterwards. `vm down` frees the VM's memory and keeps its disk, and the
-next `vm up` starts it again. Add `--purge` to delete the disk as well.
+continue afterwards. `vm down` frees the VM's memory and keeps its disk. T3 Code
+does not run the create script again, so for a thread that continues, the agent
+or you run the same `vm up` command to start the VM again. Add `--purge` to
+delete the disk as well.
 
-In Orca, set the repository's setup and archive scripts in `orca.yaml`. Orca
-runs the archive script before it removes the worktree:
+In Orca, set the repository's setup and archive scripts in `orca.yaml`. When
+hooks are enabled (`--run-hooks` for the CLI), Orca runs the archive script
+before it removes the worktree. If the script fails, Orca keeps the worktree
+until you accept the failure:
 
 ```yaml
 scripts:
