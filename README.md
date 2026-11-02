@@ -73,12 +73,12 @@ reserved for machine-readable responses.
 Before `vm start` launches a VM, Hamn reads the host's memory pressure, memory,
 1-minute load average, CPU count and power source, and adds up the memory
 configured for the Hamn VMs that run. If the host cannot take the new VM, the
-start changes nothing and fails with `admissionRefused`. Hamn never stops another
-VM to make room. The headless error has `details` with the reasons, the measured
-values, the limits and the running profiles; the TUI shows the same message. A
-measurement that cannot be read also refuses the start. Starts that run at the
-same time are checked one after another, so two of them never count on the same
-free memory.
+start fails with `admissionRefused` and leaves the VM, its configuration and its
+disk as they were. Hamn never stops another VM to make room. The headless
+error has `details` with the reasons, the measured values, the limits and the
+running profiles; the TUI shows the same message. A measurement that cannot be
+read also refuses the start. Starts that run at the same time are checked one
+after another, so two of them never count on the same free memory.
 
 Set the limits in the environment of `hamn`:
 
