@@ -428,10 +428,23 @@ static int start_spawned, start_restored, start_unchanged, start_guest_damaged,
 static struct admission_lock start_admission = { .fd = -1 };
 static char *start_refusal;
 
+/* Removes the marker of vm delete, so that vm list shows the profile again. */
+static int start_reactivate(const struct profile *p)
+{
+    char marker[PROFILE_PATH_CAP];
+    if (!profile_path(p, "deleted", marker, sizeof(marker)) ||
+        fs_unlink_if_exists(marker) != 0) {
+        logerr("cannot reactivate profile data: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 /* Admission before a start that launches a VM changes the VM, its
  * configuration or its disk. A refusal or a failure leaves them as they
- * were: a stopped VM stays stopped, and a running VM that is not ready keeps
- * running, after the guest recovery that came before. */
+ * were: a stopped VM stays stopped, a deleted profile stays deleted, and a
+ * running VM that is not ready keeps running, after the guest recovery that
+ * came before. */
 static int start_admit(const struct profile *p)
 {
     struct admission_request request = {
@@ -440,7 +453,7 @@ static int start_admit(const struct profile *p)
     int rc = admission_admit(p->name, &request, &start_admission,
                              &start_refusal);
     if (rc == 0)
-        return 0;
+        return start_reactivate(p);
     start_refused = rc == ADMISSION_REFUSED;
     return -1;
 }
@@ -491,10 +504,6 @@ static int cmd_start_execute(const struct start_options *options,
         logerr("%s", failure);
         return 1;
     }
-    char deleted_marker[1024];
-    if (!profile_path(&p, "deleted", deleted_marker, sizeof(deleted_marker)) ||
-        fs_unlink_if_exists(deleted_marker) != 0)
-        die("cannot reactivate profile data");
     int mutation_fd = profile_mutation_lock(&p);
     if (mutation_fd < 0) {
         logerr("another %s profile mutation is running", p.name);
@@ -599,6 +608,8 @@ static int cmd_start_execute(const struct start_options *options,
                     logerr("cannot start the experimental mountInotify bridge");
                     goto out;
                 }
+                if (start_reactivate(&p) != 0)
+                    goto out;
                 start_trace_stage(&trace, "already-running");
                 logmsg("hamn is already running (profile %s)", p.name);
                 profile_mutation_unlock(mutation_fd);

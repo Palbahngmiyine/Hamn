@@ -20,6 +20,7 @@ pub fn main(filters: &[String]) -> ExitCode {
             case("start_warns_when_the_host_volume_is_nearly_full", start_warns_when_the_host_volume_is_nearly_full),
             case("refused_share_changes_nothing_and_is_a_known_failure", refused_share_changes_nothing_and_is_a_known_failure),
             case("admission_refusal_reports_why_and_changes_nothing", admission_refusal_reports_why_and_changes_nothing),
+            case("a_refused_start_keeps_a_deleted_profile_deleted", a_refused_start_keeps_a_deleted_profile_deleted),
             case("an_invalid_admission_limit_fails_before_any_change", an_invalid_admission_limit_fails_before_any_change),
             #[cfg(target_os = "macos")]
             case("a_running_vm_counts_until_its_vmrun_is_gone", a_running_vm_counts_until_its_vmrun_is_gone),
@@ -242,6 +243,34 @@ fn admission_refusal_reports_why_and_changes_nothing() {
     assert!(state["state"] == "stopped" && state["lastOperation"]["status"] == "failed", "{state}");
     assert_eq!(state["lastOperation"]["startedVm"], json!(false), "{state}");
     assert_eq!(state["lastOperation"]["error"], json!(message), "{state}");
+}
+
+/// The names `vm list` shows.
+fn listed(root: &Path) -> Vec<String> {
+    let rows = call(root, &["vm", "list"], 0)["data"].clone();
+    rows.as_array().unwrap().iter().map(|row| row["name"].as_str().unwrap().to_owned()).collect()
+}
+
+/// A refused start leaves a deleted profile deleted; only an admitted start
+/// brings it back.
+fn a_refused_start_keeps_a_deleted_profile_deleted() {
+    let temporary = MkdTemp::new("hamn-start-preflight-");
+    let root = temporary.path();
+    call(root, &["vm", "create", "--profile", "fixture", "--yes"], 0);
+    call(root, &["vm", "delete", "--profile", "fixture", "--yes"], 0);
+    let marker = root.join(".hamn/fixture/deleted");
+    assert!(marker.is_file() && listed(root).is_empty());
+
+    let result = failed_start(root, "fixture", &[], &[NO_ROOM]);
+    assert_eq!(result["error"]["code"], "admissionRefused", "{result}");
+    assert!(marker.is_file(), "the refused start removed the deleted marker");
+    assert!(listed(root).is_empty(), "the refused start listed the deleted profile again");
+
+    // Offline, an admitted start fails later, at the guest image.
+    let result = failed_start(root, "fixture", &[], &[]);
+    assert_ne!(result["error"]["code"], "admissionRefused", "{result}");
+    assert!(!marker.exists());
+    assert_eq!(listed(root), ["fixture"]);
 }
 
 fn an_invalid_admission_limit_fails_before_any_change() {
