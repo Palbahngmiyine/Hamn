@@ -261,12 +261,14 @@ $(PROFILE_APPLY_FAULTS_TEST): tests/host/test_profile_apply_faults.c host/core/a
 		$(filter-out $(BUILD)/host/core/apply.o,$(HOST_TEST_OBJS)) $(LDFLAGS) -o $@
 
 # purge.c is compiled into this test a second time, with its HAMN_TEST
-# interruption after the rename.
-$(PROFILE_PURGE_TEST): tests/host/test_profile_purge.c host/core/purge.c $(HOST_TEST_OBJS)
+# interruption after the rename. cmd_delete.c is compiled with vm_stop renamed
+# to a function of the test, which can leave a VM process behind a stop that
+# reported success.
+$(PROFILE_PURGE_TEST): tests/host/test_profile_purge.c host/core/purge.c host/cmd/cmd_delete.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
-	clang $(filter-out -MMD -MP,$(CFLAGS)) -DHAMN_TEST \
-		tests/host/test_profile_purge.c host/core/purge.c \
-		$(filter-out $(BUILD)/host/core/purge.o,$(HOST_TEST_OBJS)) $(LDFLAGS) -o $@
+	clang $(filter-out -MMD -MP,$(CFLAGS)) -DHAMN_TEST -Dvm_stop=fault_vm_stop \
+		tests/host/test_profile_purge.c host/core/purge.c host/cmd/cmd_delete.c \
+		$(filter-out $(BUILD)/host/core/purge.o $(BUILD)/host/cmd/cmd_delete.o,$(HOST_TEST_OBJS)) $(LDFLAGS) -o $@
 
 # admission.c is compiled into this test a second time, with its OS
 # measurements renamed to functions of the test that report a chosen host.
