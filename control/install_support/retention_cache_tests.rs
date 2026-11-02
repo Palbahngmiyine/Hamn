@@ -815,6 +815,90 @@ fn a_retired_and_a_live_raw_base_of_an_unused_digest_both_go() {
     assert!(report.deferred.is_empty(), "{report:?}");
 }
 
+/// Fixture for the leftover `raw-v1-<d>.retired` of digest `n`, with the
+/// digest lock `remove_raw` takes.
+fn retired_path(home: &Home, n: u8) -> PathBuf {
+    write(
+        &home.path(&format!(".raw-v1-{}.lock", digest(n))),
+        b"",
+        0o600,
+    );
+    home.path(&format!("raw-v1-{}.retired", digest(n)))
+}
+
+fn make_retired_bundle(retired: &Path) {
+    fs::create_dir(retired).unwrap();
+    write(&retired.join("disk.raw"), b"raw", 0o400);
+    write(&retired.join("verified"), b"marker", 0o400);
+    fs::set_permissions(retired, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn a_leftover_retired_raw_base_that_is_a_symbolic_link_stays_and_its_target_is_untouched() {
+    let home = Home::new();
+    home.select(1);
+    let victim = home.temp.0.join("victim");
+    fs::create_dir(&victim).unwrap();
+    write(&victim.join("disk.raw"), b"victim", 0o400);
+    write(&victim.join("verified"), b"victim", 0o400);
+    let retired = retired_path(&home, 2);
+    symlink(&victim, &retired).unwrap();
+    let report = home.run(&[home.generation("g", 1)]);
+    assert!(
+        fs::symlink_metadata(&retired)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "{report:?}"
+    );
+    assert!(
+        exists(&victim.join("disk.raw")) && exists(&victim.join("verified")),
+        "a link target was changed: {report:?}"
+    );
+    assert_eq!(report.deferred.len(), 1, "{report:?}");
+}
+
+#[test]
+fn a_leftover_retired_raw_base_with_unexpected_content_stays_whole() {
+    for extra in ["note", "nested/"] {
+        let home = Home::new();
+        home.select(1);
+        let retired = retired_path(&home, 2);
+        make_retired_bundle(&retired);
+        if let Some(directory) = extra.strip_suffix('/') {
+            fs::create_dir(retired.join(directory)).unwrap();
+        } else {
+            write(&retired.join(extra), b"user data", 0o600);
+        }
+        let report = home.run(&[home.generation("g", 1)]);
+        assert!(
+            exists(&retired.join("disk.raw")) && exists(&retired.join("verified")),
+            "{extra}: {report:?}"
+        );
+        assert_eq!(report.deferred.len(), 1, "{extra}: {report:?}");
+    }
+}
+
+#[test]
+fn a_leftover_retired_raw_base_with_an_open_file_stays_whole_until_it_is_closed() {
+    let home = Home::new();
+    home.select(1);
+    let generation = home.generation("g", 1);
+    let retired = retired_path(&home, 2);
+    make_retired_bundle(&retired);
+    let scan = || open_files(Duration::from_secs(30));
+    let holder = Holder::open(&retired.join("disk.raw"));
+    let report = collect_cache_with(&home.cache, std::slice::from_ref(&generation), scan).unwrap();
+    assert!(
+        exists(&retired.join("disk.raw")) && exists(&retired.join("verified")),
+        "{report:?}"
+    );
+    assert_eq!(report.deferred.len(), 1, "{report:?}");
+    drop(holder);
+    let report = collect_cache_with(&home.cache, &[generation], scan).unwrap();
+    assert!(!exists(&retired), "{report:?}");
+}
+
 #[test]
 fn an_image_and_its_marker_are_removed_independently() {
     let home = Home::new();
