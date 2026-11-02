@@ -163,6 +163,38 @@ hamn --headless vm down --workspace "$PWD" --purge --yes
 - 워크스페이스는 실제로 있는 본인 소유 디렉터리여야 하며, 쓰기 가능한 공유가 모두
   그렇듯 홈 디렉터리 안에 있어야 합니다.
 
+## ADE와 함께 쓰기
+
+T3 Code와 Orca는 워크트리를 만들 때와 그 워크트리로 할 일을 마쳤을 때 사용자가 정한
+명령을 실행합니다. 명령에는 각 도구가 넣어 주는 워크트리 경로를 넘깁니다. `$PWD`는 쓰지
+않습니다. 도구가 프로젝트 루트에서 명령을 실행하면 원래 체크아웃에 VM이 생깁니다.
+
+T3 Code에서는 프로젝트의 `t3.json`에 스크립트 두 개를 더합니다.
+
+- `"runOnWorktreeCreate": true`와 `"async": false`로, VM이 준비된 뒤 에이전트가
+  시작되게 합니다:
+  `hamn --headless vm up --workspace "$T3CODE_WORKTREE_PATH" --yes`
+- `"runOnSettle": true`로:
+  `hamn --headless vm down --workspace "$T3CODE_WORKTREE_PATH" --yes`
+
+T3 Code는 스레드가 settle될 때마다 이 스크립트를 실행하고, 스레드는 그 뒤에도 이어질 수
+있습니다. `vm down`은 VM의 메모리를 비우고 디스크는 남기며, 다음 `vm up`이 VM을 다시
+시작합니다. 디스크까지 지우려면 `--purge`를 더합니다.
+
+Orca에서는 저장소의 setup과 archive 스크립트를 `orca.yaml`에 둡니다. Orca는 워크트리를
+지우기 전에 archive 스크립트를 실행합니다.
+
+```yaml
+scripts:
+  setup: hamn --headless vm up --workspace "$ORCA_WORKTREE_PATH" --yes
+  archive: hamn --headless vm down --workspace "$ORCA_WORKTREE_PATH" --purge --yes
+```
+
+ADE에서 워크트리를 지우면 그 VM도 지워집니다. VM이 실행 중이면 Hamn은 `vm up`이 기록한
+워크스페이스 경로를 10초마다 확인하고, 그 경로에 아무것도 남지 않으면 VM을 멈춘 뒤 프로필을
+지웁니다. 이미 멈춰 있던 VM의 프로필은 다음 `vm list`나 `vm up`이 지웁니다. Hamn은 `vm up`이
+만든 프로필만 지우며, 워크트리와 그 브랜치는 지우지 않습니다.
+
 ## 외부 도구 연결
 
 ```sh

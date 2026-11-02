@@ -172,6 +172,40 @@ hamn --headless vm down --workspace "$PWD" --purge --yes
 - The workspace must exist, be a directory you own, and lie inside your home
   directory, as every writable share must.
 
+## Use Hamn with an ADE
+
+T3 Code and Orca run a command of yours when they create a worktree and when
+they are done with it. Pass the worktree path that each tool sets for the
+command. Do not use `$PWD`: a tool that runs the command from the project root
+would give the main checkout a VM.
+
+In T3 Code, add two scripts to the project's `t3.json`:
+
+- With `"runOnWorktreeCreate": true` and `"async": false`, so that the agent
+  starts once the VM is ready:
+  `hamn --headless vm up --workspace "$T3CODE_WORKTREE_PATH" --yes`
+- With `"runOnSettle": true`:
+  `hamn --headless vm down --workspace "$T3CODE_WORKTREE_PATH" --yes`
+
+T3 Code runs the settle script each time the thread settles, and the thread can
+continue afterwards. `vm down` frees the VM's memory and keeps its disk, and the
+next `vm up` starts it again. Add `--purge` to delete the disk as well.
+
+In Orca, set the repository's setup and archive scripts in `orca.yaml`. Orca
+runs the archive script before it removes the worktree:
+
+```yaml
+scripts:
+  setup: hamn --headless vm up --workspace "$ORCA_WORKTREE_PATH" --yes
+  archive: hamn --headless vm down --workspace "$ORCA_WORKTREE_PATH" --purge --yes
+```
+
+Deleting the worktree in the ADE also deletes its VM. While the VM runs, Hamn
+checks every 10 seconds the workspace path that `vm up` recorded. Once nothing
+is left there, Hamn stops the VM and then deletes its profile. The next
+`vm list` or `vm up` deletes the profile of a VM that was already stopped. Hamn
+deletes only profiles that `vm up` made, and never the worktree or its branch.
+
 ## External tools
 
 ```sh
