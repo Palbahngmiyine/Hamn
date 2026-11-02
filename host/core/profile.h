@@ -67,6 +67,8 @@ enum profile_setting {
 /* The largest profile definition, in bytes: the limit of config.yaml. */
 #define PROFILE_DEFINITION_CAP (64 * 1024)
 
+/* Every setting at its default, with an empty name and dir. */
+void profile_defaults(struct profile *profile);
 int profile_name_valid(const char *name);
 int profile_parse_positive(const char *text, unsigned *value);
 /* Docker daemon settings are a strict JSON object that cannot replace

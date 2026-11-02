@@ -31,7 +31,7 @@ struct yaml_text {
     int unwritable; /* a string held a character that text_quote refuses */
 };
 
-static void profile_defaults(struct profile *profile)
+void profile_defaults(struct profile *profile)
 {
     memset(profile, 0, sizeof(*profile));
     profile->cpus = 4;
