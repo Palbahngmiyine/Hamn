@@ -6,8 +6,15 @@
 //! migrated Hamn 0.1.x layout; generations of unknown ownership remain;
 //! marker-last retirement is retryable. Reports removals and deferrals to the
 //! caller, which decides where they are shown.
-use super::{Result, files, generation, locks, manifest::hexadecimal, require};
+//!
+//! After an update, `collect_cache` also removes the image-cache entries that
+//! the selected guest image and the generations `collect` kept do not use,
+//! under the HOME's updater lock; see its contract.
+use super::{
+    Result, download, files, generation, locks, manifest::hexadecimal, receipt, require, upgrade,
+};
 use std::{
+    collections::BTreeSet,
     fs,
     io::{ErrorKind, Read},
     os::unix::{fs::MetadataExt, process::CommandExt},
@@ -193,10 +200,26 @@ fn open_paths(text: &str) -> Vec<String> {
 /// What one collection did.
 #[derive(Debug, Default)]
 pub(super) struct Collection {
-    /// Names of removed generations.
+    /// Names of removed generations (`collect`) or cache entries
+    /// (`collect_cache`).
     pub(super) removed: Vec<String>,
-    /// Why collection (or one generation's collection) was deferred.
+    /// Why collection (or one generation's or entry's collection) was
+    /// deferred.
     pub(super) deferred: Vec<String>,
+    /// `collect` only: the directories of the generations it kept for the
+    /// active link, the recorded predecessor and the caller's `keep` targets
+    /// within these roots. `None` when it stopped before deciding (pending
+    /// recovery metadata), which is not the same as keeping nothing.
+    pub(super) retained: Option<Vec<PathBuf>>,
+}
+
+/// The generation directories of the `keep` targets that lie in `root`.
+fn retained_generations(keep: &[PathBuf], root: &Path) -> Result<Vec<PathBuf>> {
+    let mut retained = BTreeSet::new();
+    for target in keep.iter().filter(|p| generation_target(p, root)) {
+        retained.insert(files::parent(files::parent(target)?)?.to_owned());
+    }
+    Ok(retained.into_iter().collect())
 }
 
 /// Collects obsolete generations of `transaction`'s roots (see the module
@@ -246,6 +269,7 @@ pub(super) fn collect(transaction: &locks::Transaction, keep: &[&str]) -> Result
         Err(e) if e.kind() == ErrorKind::NotFound => (),
         Err(e) => return Err(e.into()),
     }
+    report.retained = Some(retained_generations(&keep, &root)?);
     let opened = open_files(Duration::from_secs(30))?;
     for mut path in children(&root)? {
         let leaf = path
@@ -320,6 +344,373 @@ pub(super) fn collect(transaction: &locks::Transaction, keep: &[&str]) -> Result
     Ok(report)
 }
 
+/// The digests that image-cache entries name: `downloads/<d>.artifact`,
+/// `hamn-guest-<d>.img` and its `.verified` marker, `raw-v1-<d>` and a
+/// leftover `raw-v1-<d>.retired`.
+#[derive(Default)]
+struct Inventory {
+    artifacts: BTreeSet<String>,
+    images: BTreeSet<String>,
+    bundles: BTreeSet<String>,
+    retired: BTreeSet<String>,
+}
+
+fn digest_in<'a>(name: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    name.strip_prefix(prefix)?
+        .strip_suffix(suffix)
+        .filter(|digest| hexadecimal(digest, 64))
+}
+
+fn names(directory: &Path) -> Result<Vec<String>> {
+    match fs::read_dir(directory) {
+        Ok(entries) => Ok(entries
+            .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+            .collect::<std::io::Result<_>>()?),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn defer(report: &mut Collection, text: impl std::fmt::Display) {
+    report.deferred.push(format!("image cache cleanup {text}"));
+}
+
+/// Reports that the entry `shown` stays, and why.
+fn left(report: &mut Collection, shown: &str, why: impl std::fmt::Display) {
+    defer(report, format_args!("left {shown} in place: {why}"));
+}
+
+impl Inventory {
+    /// Lists `cache`; an unsafe `downloads` directory is deferred, not read.
+    fn of(cache: &Path, report: &mut Collection) -> Result<Self> {
+        let mut found = Self::default();
+        let downloads = cache.join("downloads");
+        match unsafe_entry(&downloads, true) {
+            Ok(None) => match names(&downloads) {
+                Ok(names) => found.artifacts.extend(
+                    names
+                        .iter()
+                        .filter_map(|name| digest_in(name, "", ".artifact"))
+                        .map(str::to_owned),
+                ),
+                Err(e) => left(report, "downloads", e),
+            },
+            Ok(Some(why)) => left(report, "downloads", why),
+            Err(e) if is_absent(e.as_ref()) => (),
+            Err(e) => left(report, "downloads", e),
+        }
+        for name in names(cache)? {
+            if let Some(digest) = digest_in(&name, "hamn-guest-", ".img")
+                .or_else(|| digest_in(&name, "hamn-guest-", ".img.verified"))
+            {
+                found.images.insert(digest.to_owned());
+            } else if let Some(digest) = digest_in(&name, "raw-v1-", "") {
+                found.bundles.insert(digest.to_owned());
+            } else if let Some(digest) = digest_in(&name, "raw-v1-", ".retired") {
+                found.retired.insert(digest.to_owned());
+            }
+        }
+        Ok(found)
+    }
+}
+
+fn is_absent(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|e| e.kind() == ErrorKind::NotFound)
+}
+
+/// The digests of the selection and of every retained generation's receipt.
+/// `wanted` are the digests the caller is about to judge: when the selection
+/// alone covers them, no receipt is read. A receipt that names no image
+/// leaves the set unknown (an error), never smaller.
+fn keep_set(
+    cache: &Path,
+    retained: &[PathBuf],
+    wanted: &BTreeSet<&String>,
+) -> Result<BTreeSet<String>> {
+    let mut keep = BTreeSet::from([upgrade::selected_guest(cache)?]);
+    if wanted.iter().all(|digest| keep.contains(*digest)) {
+        return Ok(keep);
+    }
+    for generation in retained {
+        let digest = receipt::guest_sha256(generation)
+            .map_err(|e| format!("the receipt of {}: {e}", generation.display()))?;
+        keep.insert(digest);
+    }
+    Ok(keep)
+}
+
+/// Why `path` is unsafe to remove: a symbolic link, an entry the current
+/// user does not own, or (for a file) not a regular file with one link. An
+/// error means it could not be inspected.
+fn unsafe_entry(path: &Path, directory: bool) -> Result<Option<&'static str>> {
+    let info = fs::symlink_metadata(path)?;
+    Ok(if info.file_type().is_symlink() {
+        Some("it is a symbolic link")
+    } else if files::owned(path, directory, None).is_err() {
+        Some(if directory {
+            "it is not a directory owned by you"
+        } else {
+            "it is not a regular file owned by you with one link"
+        })
+    } else {
+        None
+    })
+}
+
+/// Why `path` must stay, or `None` when it may be removed: it is unsafe, a
+/// raw base (`directory`) holds anything but its two files, or a process
+/// has it (or a file in it) open.
+fn stays(path: &Path, directory: bool, opened: &[String]) -> Result<Option<&'static str>> {
+    if let Some(why) = unsafe_entry(path, directory)? {
+        return Ok(Some(why));
+    }
+    if directory {
+        for name in names(path)? {
+            if !matches!(name.as_str(), "disk.raw" | "verified") {
+                return Ok(Some("it holds files that are not part of a raw base"));
+            }
+            if let Some(why) = unsafe_entry(&path.join(&name), false)? {
+                return Ok(Some(why));
+            }
+        }
+    }
+    Ok(opened
+        .iter()
+        .any(|open| Path::new(open).starts_with(path))
+        .then_some("a process has it open"))
+}
+
+/// Records the verdict on `path`: `true` when it may be removed.
+fn removable(
+    report: &mut Collection,
+    shown: &str,
+    path: &Path,
+    directory: bool,
+    opened: &[String],
+) -> bool {
+    match stays(path, directory, opened) {
+        Ok(None) => true,
+        Ok(Some(why)) => {
+            left(report, shown, why);
+            false
+        }
+        Err(e) => {
+            left(report, shown, e);
+            false
+        }
+    }
+}
+
+fn remove_cached_file(report: &mut Collection, cache: &Path, shown: &str, opened: &[String]) {
+    let path = cache.join(shown);
+    if !removable(report, shown, &path, false, opened) {
+        return;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => report.removed.push(shown.to_owned()),
+        Err(e) if e.kind() == ErrorKind::NotFound => (),
+        Err(e) => left(report, shown, e),
+    }
+}
+
+/// Removes `downloads/<digest>.artifact` while holding the downloader's
+/// digest lock without waiting, so that it is not removed during a lookup,
+/// transfer or publication of the same digest.
+fn remove_artifact(report: &mut Collection, cache: &Path, digest: &str, opened: &[String]) {
+    let shown = format!("downloads/{digest}.artifact");
+    let _lock = match download::artifact_lock(&cache.join("downloads"), digest, false) {
+        Ok(lock) => lock,
+        Err(e) => {
+            let why = format_args!("its download lock is held or unusable: {e}");
+            left(report, &shown, why);
+            return;
+        }
+    };
+    remove_cached_file(report, cache, &shown, opened);
+}
+
+/// Removes the raw base `name` (`verified`, `disk.raw`, then the directory),
+/// reporting it as `shown` once it is gone. Returns whether it is gone.
+fn erase_bundle(report: &mut Collection, cache: &Path, name: &str, shown: &str) -> bool {
+    let path = cache.join(name);
+    let erased = ["verified", "disk.raw"]
+        .iter()
+        .try_for_each(|file| match fs::remove_file(path.join(file)) {
+            Err(e) if e.kind() != ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        })
+        .and_then(|()| fs::remove_dir(&path));
+    let gone = erased.is_ok();
+    match erased {
+        Ok(()) => report.removed.push(shown.to_owned()),
+        Err(e) => left(report, name, e),
+    }
+    gone
+}
+
+/// Removes the raw base of `digest` while holding its digest lock without
+/// waiting (`raw_cache.c` holds the same lock to create and clone it).
+/// `unused` says the live base is not kept. A live base is first renamed to
+/// `raw-v1-<d>.retired`: `raw_cache.c` trusts a live name only when its
+/// contents are complete, so an erase that stops midway must not leave a
+/// partial base under it. A leftover retired base is garbage whatever the
+/// digest. The lock file stays: a second process could otherwise lock a new
+/// file of the same name while this one holds the old.
+fn remove_raw(
+    report: &mut Collection,
+    cache: &Path,
+    digest: &str,
+    unused: bool,
+    opened: &[String],
+) {
+    let (live, retired) = (
+        format!("raw-v1-{digest}"),
+        format!("raw-v1-{digest}.retired"),
+    );
+    let _lock = match download::lock(&cache.join(format!(".raw-v1-{digest}.lock")), false) {
+        Ok(lock) => lock,
+        Err(e) => {
+            let shown = if unused { &live } else { &retired };
+            let why = format_args!("its digest lock is held or unusable: {e}");
+            left(report, shown, why);
+            return;
+        }
+    };
+    if fs::symlink_metadata(cache.join(&retired)).is_ok()
+        && (!removable(report, &retired, &cache.join(&retired), true, opened)
+            || !erase_bundle(report, cache, &retired, &retired))
+    {
+        return;
+    }
+    if unused
+        && fs::symlink_metadata(cache.join(&live)).is_ok()
+        && removable(report, &live, &cache.join(&live), true, opened)
+    {
+        match files::rename_exclusive(&cache.join(&live), &cache.join(&retired)) {
+            Ok(()) => {
+                erase_bundle(report, cache, &retired, &live);
+            }
+            Err(e) => left(report, &live, e),
+        }
+    }
+}
+
+/// Removes image-cache entries of the HOME's `cache` that the selection and
+/// the `retained` generations do not use, after a committed update:
+/// - `downloads/<d>.artifact`: a completed download is no longer needed once
+///   its host generation is installed and its guest image is staged as
+///   `hamn-guest-<d>.img`. It is removed under the downloader's digest lock,
+///   which a concurrent installer holds only while it looks the file up.
+///   Partial downloads, validators and locks stay.
+/// - `hamn-guest-<d>.img` with its `.verified` marker, and `raw-v1-<d>`,
+///   when `<d>` is neither the selected image nor the guest recorded by a
+///   retained generation's release receipt.
+/// - A leftover `raw-v1-<d>.retired`, a raw base whose removal stopped,
+///   whatever the keep set.
+///
+/// A path is removed only when the current user owns it, no symbolic link or
+/// extra hard link is involved and no process has it open (`lsof` finds the
+/// open files, bounded to 30 s; a failed scan removes nothing). A raw base
+/// also needs its digest lock (see `remove_raw`). Anything else stays and is
+/// reported in `deferred`. A missing or unusable selection or receipt defers
+/// images and live raw bases only. Pending recovery metadata in `cache`
+/// defers everything. Nothing outside `cache` changes, and profile disks are
+/// never opened.
+///
+/// `retained` must be non-empty: it is `collect`'s `retained` of this
+/// update. The caller holds the HOME's updater lock (`_updater`), so no
+/// other updater stages or selects an image meanwhile. An error means the
+/// cache could not be inspected; nothing was removed. A removal that stops
+/// midway leaves only entries the next run removes by the same rules.
+pub(super) fn collect_cache(
+    cache: &Path,
+    retained: &[PathBuf],
+    _updater: &locks::Held,
+) -> Result<Collection> {
+    collect_cache_with(cache, retained, || open_files(Duration::from_secs(30)))
+}
+
+/// The digests in `digests` that `keep` does not contain.
+fn unused(digests: &BTreeSet<String>, keep: &BTreeSet<String>) -> Vec<String> {
+    digests.difference(keep).cloned().collect()
+}
+
+/// `collect_cache` with the open-file scan supplied. It runs at most once,
+/// and only when there is something to remove.
+fn collect_cache_with(
+    cache: &Path,
+    retained: &[PathBuf],
+    scan: impl FnOnce() -> Result<Vec<String>>,
+) -> Result<Collection> {
+    require(
+        !retained.is_empty(),
+        "no retained generation to derive the image cache keep set from",
+    )?;
+    let mut report = Collection::default();
+    if pending(cache)? {
+        defer(
+            &mut report,
+            "deferred while recovery metadata exists or the cache directory is unsafe",
+        );
+        return Ok(report);
+    }
+    // lsof names files by their canonical path.
+    let cache = fs::canonicalize(cache)?;
+    let found = Inventory::of(&cache, &mut report)?;
+    let guest: BTreeSet<&String> = found.images.iter().chain(&found.bundles).collect();
+    let keep = if guest.is_empty() {
+        Some(BTreeSet::new())
+    } else {
+        match keep_set(&cache, retained, &guest) {
+            Ok(keep) => Some(keep),
+            Err(e) => {
+                defer(
+                    &mut report,
+                    format_args!("of guest images and raw bases deferred: {e}"),
+                );
+                None
+            }
+        }
+    };
+    let (images, bundles) = match &keep {
+        Some(keep) => (unused(&found.images, keep), unused(&found.bundles, keep)),
+        None => (Vec::new(), Vec::new()),
+    };
+    if found.artifacts.is_empty()
+        && images.is_empty()
+        && bundles.is_empty()
+        && found.retired.is_empty()
+    {
+        return Ok(report);
+    }
+    let opened = match scan() {
+        Ok(opened) => opened,
+        Err(e) => {
+            defer(&mut report, format_args!("deferred: {e}"));
+            return Ok(report);
+        }
+    };
+    for digest in &found.artifacts {
+        remove_artifact(&mut report, &cache, digest, &opened);
+    }
+    for digest in &images {
+        for suffix in [".img.verified", ".img"] {
+            let name = format!("hamn-guest-{digest}{suffix}");
+            if fs::symlink_metadata(cache.join(&name)).is_ok() {
+                remove_cached_file(&mut report, &cache, &name, &opened);
+            }
+        }
+    }
+    let raw: BTreeSet<&String> = bundles.iter().chain(&found.retired).collect();
+    for digest in raw {
+        let unused = bundles.contains(digest);
+        remove_raw(&mut report, &cache, digest, unused, &opened);
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -371,3 +762,7 @@ mod tests {
         assert!(!generation_name(&format!("{}é-12345", "a".repeat(63))));
     }
 }
+
+#[cfg(test)]
+#[path = "retention_cache_tests.rs"]
+mod cache_tests;

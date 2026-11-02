@@ -6,7 +6,7 @@
 //! `scripts`/`packaging` trees) never match.
 //! A failed check is advisory (normal verified install); write failures abort the
 //! transaction. The caller owns the install locks and generation lifetime.
-use super::{Result, download, files, require};
+use super::{Result, download, files, manifest::hexadecimal, require};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::MetadataExt, path::Path};
@@ -78,6 +78,24 @@ fn installed_digest(generation: &Path) -> Result<String> {
     ))
 }
 
+fn read(path: &Path) -> Result<Receipt> {
+    Ok(serde_json::from_slice(&download::read_file(
+        path, 4096, true,
+    )?)?)
+}
+
+/// The guest image digest that the receipt of `generation` (a generation
+/// directory) records. An absent, unsafe, malformed, other-schema or
+/// non-digest receipt is an error: it names no image.
+pub(super) fn guest_sha256(generation: &Path) -> Result<String> {
+    let r = read(&generation.join(".hamn-release.json"))?;
+    require(
+        r.schema_version == SCHEMA_VERSION && hexadecimal(&r.guest, 64),
+        "release receipt is not a current receipt with a guest image digest",
+    )?;
+    Ok(r.guest)
+}
+
 pub(super) fn run(
     mode: &str,
     target: &str,
@@ -88,7 +106,7 @@ pub(super) fn run(
     let generation = files::parent(files::parent(Path::new(target))?)?;
     let path = generation.join(".hamn-release.json");
     if mode == "host-check" {
-        let r: Receipt = serde_json::from_slice(&download::read_file(&path, 4096, true)?)?;
+        let r = read(&path)?;
         require(
             r.schema_version == SCHEMA_VERSION
                 && r.version == version
@@ -164,6 +182,45 @@ mod tests {
         fs::set_permissions(target, fs::Permissions::from_mode(0o644)).unwrap();
         fs::write(target, b"changed host bytes").unwrap();
         assert!(run("host-check", target, "v1.2.3", "host", "guest").is_err());
+    }
+
+    #[test]
+    fn guest_digest_comes_only_from_a_current_receipt_with_a_digest() {
+        let temp = super::super::test_support::Temp::new();
+        let generation = temp.0.join("generation");
+        fs::create_dir_all(generation.join("bin")).unwrap();
+        fs::create_dir_all(generation.join("share")).unwrap();
+        let target = generation.join("bin/hamn");
+        fs::write(&target, b"host bytes").unwrap();
+        let target = target.to_str().unwrap();
+        let path = generation.join(".hamn-release.json");
+        assert!(guest_sha256(&generation).is_err(), "no receipt");
+        let digest = "b".repeat(64);
+        run("write", target, "v1.2.3", "host", &digest).unwrap();
+        assert_eq!(guest_sha256(&generation).unwrap(), digest);
+        let current = fs::read_to_string(&path).unwrap();
+        for (label, damaged) in [
+            (
+                "older schema",
+                current.replace("\"schemaVersion\":2", "\"schemaVersion\":1"),
+            ),
+            ("not a digest", current.replace(&digest, &"B".repeat(64))),
+            ("short digest", current.replace(&digest, "bb")),
+        ] {
+            fs::remove_file(&path).unwrap();
+            fs::write(&path, damaged).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(guest_sha256(&generation).is_err(), "{label}");
+        }
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, &current).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(guest_sha256(&generation).unwrap(), digest);
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            guest_sha256(&generation).is_err(),
+            "a receipt with an unsafe mode"
+        );
     }
 
     #[test]

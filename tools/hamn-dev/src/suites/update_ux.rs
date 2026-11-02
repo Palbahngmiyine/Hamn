@@ -318,9 +318,12 @@ fn check(terminal: bool) {
         let result = upgrade_within(30);
         assert_eq!(result.returncode, 0, "{damage}: {result:?}");
         assert!(!result.stderr().contains("is up to date"), "{damage}");
-        // Both payloads are cached. Only damaged host integrity requires a
-        // generation reinstall; guest selection repair preserves it.
-        assert_eq!(fixture.transport.requests().len(), calls, "{damage}");
+        // The cleanup after the first update removed the host archive, so a
+        // host reinstall downloads it again; the guest image comes from its
+        // staged copy, and a selection repair needs no download.
+        let requests = fixture.transport.requests();
+        let expected: &[&str] = if damage == "selection changed" { &[] } else { &["/host.tar.gz"] };
+        assert_eq!(&requests[calls..], expected, "{damage}");
         assert_eq!(fixture.active() == active, damage == "selection changed", "{damage}");
         active = fixture.active();
         assert_eq!(fs::read(&selection).unwrap(), saved, "{damage}");
