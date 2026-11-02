@@ -132,6 +132,13 @@ const char *hamn_home(char *buf, size_t cap)
     return buf;
 }
 
+int hamn_home_open(char root[PROFILE_PATH_CAP])
+{
+    if (!hamn_home(root, PROFILE_PATH_CAP))
+        return -1;
+    return open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+}
+
 const char *profile_path(const struct profile *profile, const char *file,
                          char *buf, size_t cap)
 {

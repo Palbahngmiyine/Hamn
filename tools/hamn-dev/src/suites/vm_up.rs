@@ -46,6 +46,8 @@ pub fn main(filters: &[String]) -> ExitCode {
             case("vm_list_skips_a_held_profile_without_waiting", vm_list_skips_a_held_profile_without_waiting),
             case("vm_up_reclaims_gone_workspaces_before_it_starts", vm_up_reclaims_gone_workspaces_before_it_starts),
             case("the_reclaim_vmrun_starts_purges_only_the_profile_it_watched", the_reclaim_vmrun_starts_purges_only_the_profile_it_watched),
+            case("the_reclaim_vmrun_starts_keeps_a_workspace_that_came_back", the_reclaim_vmrun_starts_keeps_a_workspace_that_came_back),
+            case("a_record_in_a_profile_of_another_name_is_never_reclaimed", a_record_in_a_profile_of_another_name_is_never_reclaimed),
         ],
         filters,
     )
@@ -728,4 +730,61 @@ fn the_reclaim_vmrun_starts_purges_only_the_profile_it_watched() {
     let (status, output) = reclaim(&empty, &record);
     assert_eq!(status, Some(0), "{output}");
     assert!(!empty.hamn().exists());
+}
+
+/// A workspace moved away and back before the reclaim that vmrun started
+/// takes the lock, so that its recorded device and inode are at its path
+/// again, keeps its profile, as does a path that cannot be looked up;
+/// moved away for good, it is reclaimed.
+fn the_reclaim_vmrun_starts_keeps_a_workspace_that_came_back() {
+    let home = Home::new();
+    let tree = home.directory("tree");
+    let name = profile_of(&tree);
+    let recorded = real(&tree);
+    let profile = home.make_ephemeral(&tree, None);
+    let record = record_of(&tree);
+    let moved = home.path().join("tree-moved");
+    fs::rename(&tree, &moved).unwrap();
+    fs::rename(&moved, &tree).unwrap();
+
+    let (status, output) = reclaim(&home, &record);
+    assert_eq!(status, Some(0), "{output}");
+    assert!(output.contains(&format!("workspace {} is back; profile {name} stays", recorded.display())), "{output}");
+    assert!(profile.join("config.yaml").is_file() && profile.join("ephemeral").is_file());
+
+    fs::rename(&tree, &moved).unwrap();
+    let (status, output) = reclaim(&home, &record);
+    assert_eq!(status, Some(0), "{output}");
+    assert!(output.contains(&format!("reclaimed profile {name}")), "{output}");
+    assert!(!profile.exists() && moved.is_dir());
+
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        let sealed = home.directory("sealed");
+        let inner = sealed.join("tree");
+        fs::create_dir(&inner).unwrap();
+        let profile = home.make_ephemeral(&inner, None);
+        let record = record_of(&inner);
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        let (status, output) = reclaim(&home, &record);
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(status, Some(0), "{output}");
+        assert!(output.contains("cannot look at workspace"), "{output}");
+        assert!(profile.join("ephemeral").is_file());
+    }
+}
+
+/// A record belongs to the profile its path names: one found in a profile
+/// of another name, such as a copied profile directory, is never reclaimed.
+fn a_record_in_a_profile_of_another_name_is_never_reclaimed() {
+    let home = Home::new();
+    let tree = home.directory("tree");
+    assert_eq!(home.run(&["vm", "create", "--profile", "copy", "--yes"])["ok"], true);
+    private_file(&home.hamn().join("copy").join("ephemeral"), &record_of(&tree));
+    fs::remove_dir(&tree).unwrap();
+
+    let (value, stderr) = home.call(&["vm", "list"], &[]);
+    assert_eq!(value["ok"], true, "{value}");
+    assert!(!stderr.contains("reclaimed"), "{stderr}");
+    assert_eq!(home.listed(), ["copy"]);
 }

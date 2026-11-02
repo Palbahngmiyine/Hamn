@@ -110,16 +110,21 @@ int workspace_record_parse(const char *text, struct workspace *recorded);
  * tool deleted. A directory found at that path with another device or inode
  * never reclaims it, because attaching a volume again can change the device
  * of the same directory; vm up refuses such a profile instead. A profile
- * without a record is never reclaimed, and nothing is decided by a PID or a
- * name alone: a purge needs the VM known to be stopped (vm_process_probe).
+ * without a record is never reclaimed, nor one whose record names another
+ * profile, as a copied or renamed profile directory's does. Nothing is
+ * decided by a PID or a name alone: a purge needs the VM known to be
+ * stopped (vm_process_probe).
  *
  * Two places reclaim without being asked:
  *   - vmrun, while the VM runs, checks the path every 10 seconds. The first
  *     check that finds it absent asks the guest to stop, as SIGTERM does,
  *     and once vmrun has removed its process identity at exit it starts
  *     "hamn workspace-reclaim <record>" detached, which purges the profile
- *     (cmd_workspace_reclaim in cli.h). vmrun never deletes its own
- *     directory.
+ *     (cmd_workspace_reclaim in cli.h). That purge looks at the path again
+ *     under the profile's lifecycle lock: the recorded directory back there
+ *     with its device and inode, as after a move away and back, keeps the
+ *     profile; nothing there, or another directory, which vm up refuses,
+ *     purges it. vmrun never deletes its own directory.
  *   - workspace_sweep, from vm list and vm up, for a VM that stopped
  *     without vmrun noticing, or whose reclaim failed.
  */

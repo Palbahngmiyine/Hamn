@@ -77,6 +77,11 @@ int profile_docker_daemon_json_valid(const char *text);
 
 /* ~/.hamn path. Successful calls return buf. */
 const char *hamn_home(char *buf, size_t cap);
+/* Opens ~/.hamn, checked as hamn_home checks it, without following a
+ * symbolic link at its name: a read-only, close-on-exec directory
+ * descriptor that the caller closes, with the path in root, or -1 with
+ * errno (ENOENT when ~/.hamn does not exist). */
+int hamn_home_open(char root[PROFILE_PATH_CAP]);
 
 /* Create the profile directory (0700), then load config.yaml or defaults. */
 int profile_load(struct profile *profile, const char *name);

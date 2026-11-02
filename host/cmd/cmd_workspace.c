@@ -324,21 +324,43 @@ int hamn_control_down(const char *path, int purge, int *absent,
 }
 
 /* Holding the lifecycle lock of profile: purges it when it is the VM of a
- * workspace that is gone and its VM is known to be stopped. Gone means,
- * without watched, that its recorded path is absent; with watched, the
- * record vmrun found absent, that this record is still the profile's, so
- * that a later profile of the same name is never purged in its place.
- * Returns 1 when it purged, 0 when it left the profile alone, -1 having
- * logged why its purge failed. */
+ * workspace that is gone and its VM is known to be stopped. Its record must
+ * name this profile, which a copied or renamed profile directory's does
+ * not. Gone means, without watched, that its recorded path is absent. With
+ * watched, the record vmrun found absent, it means that this record is
+ * still the profile's, so that a later profile of the same name is never
+ * purged in its place, and that the recorded directory, by its device and
+ * inode, is not back at its path. Returns 1 when it purged, 0 when it left
+ * the profile alone, -1 having logged why its purge failed. */
 static int reclaim_locked(const struct profile *profile,
                           const struct workspace *watched)
 {
     struct workspace recorded;
-    if (workspace_record_read(profile, &recorded) != 1)
+    if (workspace_record_read(profile, &recorded) != 1 ||
+        strcmp(recorded.profile, profile->name) != 0)
         return 0;
-    if (watched ? !workspace_same(&recorded, watched) :
-        workspace_presence(recorded.path) != WORKSPACE_ABSENT)
+    if (!watched) {
+        if (workspace_presence(recorded.path) != WORKSPACE_ABSENT)
+            return 0;
+    } else if (!workspace_same(&recorded, watched)) {
         return 0;
+    } else {
+        /* A worktree moved away and back, or a volume mounted again, while
+         * vmrun stopped the VM: vm up can already be reusing the profile. */
+        struct stat status;
+        if (lstat(recorded.path, &status) == 0) {
+            if (status.st_dev == recorded.device &&
+                status.st_ino == recorded.inode) {
+                logmsg("workspace %s is back; profile %s stays",
+                       recorded.path, profile->name);
+                return 0;
+            }
+        } else if (errno != ENOENT && errno != ENOTDIR) {
+            logmsg("cannot look at workspace %s: %s; profile %s stays",
+                   recorded.path, strerror(errno), profile->name);
+            return 0;
+        }
+    }
     if (vm_process_probe(profile, NULL) != VM_PROCESS_STALE) {
         logmsg("workspace %s is gone, but the VM of profile %s is not known "
                "to be stopped; the profile stays", recorded.path,
@@ -357,11 +379,14 @@ static int reclaim_locked(const struct profile *profile,
 void workspace_sweep(void)
 {
     char home[PROFILE_PATH_CAP];
-    if (!hamn_home(home, sizeof(home)))
+    int fd = hamn_home_open(home);
+    if (fd < 0)
         return;
-    DIR *directory = opendir(home);
-    if (!directory)
+    DIR *directory = fdopendir(fd);
+    if (!directory) {
+        close(fd);
         return;
+    }
     struct dirent *entry;
     while ((entry = readdir(directory))) {
         struct profile profile;
@@ -378,6 +403,7 @@ void workspace_sweep(void)
         struct workspace recorded;
         if (profile_locate(&profile) != 0 ||
             workspace_record_read(&profile, &recorded) != 1 ||
+            strcmp(recorded.profile, profile.name) != 0 ||
             workspace_presence(recorded.path) != WORKSPACE_ABSENT)
             continue;
         struct vm_lifecycle_lock lock;
