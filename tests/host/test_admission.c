@@ -702,6 +702,19 @@ static void an_unread_item_no_enabled_limit_uses_is_reported_but_admitted(void)
     cJSON_free(text);
     cJSON_Delete(value);
     clear_limits();
+
+    /* The sentence names only what refuses; the details list both. */
+    host.pressure_fails = 1;
+    assert(admission_admit("work", &request, &lock, &refusal) ==
+           ADMISSION_REFUSED && refusal && lock.fd == -1);
+    assert(strstr(log_last_error(),
+                  "cannot measure the host's memory pressure. "));
+    value = cJSON_Parse(refusal);
+    cJSON_free(refusal);
+    text = cJSON_PrintUnformatted(cJSON_GetObjectItem(value, "unread"));
+    assert(strcmp(text, "[\"memoryPressure\",\"loadAverage1m\"]") == 0);
+    cJSON_free(text);
+    cJSON_Delete(value);
 }
 
 static int named(const struct admission_snapshot *snapshot, const char *name,
