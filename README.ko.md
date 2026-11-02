@@ -8,6 +8,8 @@ Hamn은 하나의 macOS 실행 파일로 Linux VM, VM의 Docker Engine, 외부 K
 
 - macOS 13 이상의 Apple Silicon Mac.
 - VM·Docker 기능에는 서명된 Hamn 게스트 이미지가 필요합니다.
+- 컨테이너 이미지는 `linux/arm64`용이어야 합니다. 게스트 이미지에는 amd64 에뮬레이션
+  (Rosetta, qemu)이 없으므로 `linux/amd64` 이미지는 실행되지 않습니다.
 - Kubernetes에는 kubeconfig가 필요하며 Hamn VM과 독립적으로 사용할 수 있습니다.
 
 TUI 컨테이너 탐색에는 Docker CLI, Kubernetes 탐색에는 kubectl이 필요합니다.
@@ -81,7 +83,6 @@ spec:
   cpus: 6
   memoryMiB: 8192
   diskGiB: 80
-  rosetta: true
   mounts:
     - location: "/Users/<your-user>/project"
       mountPoint: "/workspace/project"
@@ -107,8 +108,11 @@ hamn --headless vm start --profile work --yes
   VM이 정지되어 있어야 합니다. `vm stop`, `vm apply`, `vm start` 순서로 실행하세요.
 - `vm apply`는 Mac의 조건을 검사하지 않으며 다음 `vm start`가 검사합니다. 마운트의
   `location`은 실제로 있는 본인 소유 디렉터리로 바꾸고, 쓰기 가능한 마운트라면 홈
-  디렉터리 안의 디렉터리를 쓰세요. `rosetta: true`는 Rosetta를 쓸 수 있는 Mac에서만
-  두세요.
+  디렉터리 안의 디렉터리를 쓰세요.
+- Rosetta 지원은 제거되었습니다. `rosetta`에는 `false`만 쓸 수 있습니다. 이전 Hamn이
+  `rosetta: true`로 저장한 프로필은
+  `hamn --headless vm configure --profile <name> --rosetta false --yes`로 이 설정을
+  지우기 전까지 시작되지 않습니다.
 
 ## 외부 도구 연결
 
