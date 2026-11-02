@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Debug, Default, Parser, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[command(name = "hamn", version = crate::core::version(), about = "VM, Docker and Kubernetes console",
-    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. vm delete --purge permanently deletes one profile with its disk. vm reset permanently deletes one profile's VM disk. system uninstall permanently removes all Hamn data.",
+    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. vm delete --purge permanently deletes one profile with its disk. vm reset permanently deletes one profile's VM disk. system uninstall permanently removes all Hamn data.\nvm start refuses a new VM that the host's memory, load or battery cannot take; HAMN_ADMISSION_* environment variables set the limits.",
     after_help = "Operations and their arguments: hamn --headless capabilities")]
 pub struct Request {
     #[arg(long)]
@@ -98,6 +98,10 @@ pub struct Request {
 pub struct Failure {
     pub code: String,
     pub message: String,
+    /// What a caller needs to act on the failure, beyond the message. Only
+    /// `admissionRefused` carries it: the refusal object of core/admission.h.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
 }
 
 impl Failure {
@@ -105,6 +109,7 @@ impl Failure {
         Self {
             code: code.into(),
             message: message.to_string(),
+            details: None,
         }
     }
 }
@@ -434,6 +439,21 @@ pub fn envelope(request: &Request, id: &str, result: Result<Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_a_failure_with_details_has_them_in_the_envelope() {
+        let request = Request::default();
+        let plain = envelope(&request, "id", Err(Failure::new("operationFailed", "no")));
+        assert_eq!(plain["error"], json!({"code":"operationFailed","message":"no"}));
+        let mut refused = Failure::new("admissionRefused", "refused");
+        refused.details = Some(json!({"admission":"refused"}));
+        let detailed = envelope(&request, "id", Err(refused.clone()));
+        assert_eq!(detailed["error"]["details"], json!({"admission":"refused"}));
+        // The worker sends a failure to its frontend as JSON.
+        let carried: Failure = serde_json::from_value(serde_json::to_value(&refused).unwrap()).unwrap();
+        assert_eq!(carried.details, refused.details);
+        let carried: Failure = serde_json::from_value(json!({"code":"x","message":"y"})).unwrap();
+        assert!(carried.details.is_none());
+    }
     #[test]
     fn rejects_implicit_mutations_and_path_escape() {
         let mut r =

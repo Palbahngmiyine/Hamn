@@ -335,7 +335,8 @@ static int start_with_a_smaller_disk(const char *profile)
     /* A start that got past the read would be refused here, before it saves
      * the profile or prepares an image: the disk of a profile cannot shrink
      * to 1 GiB. */
-    return hamn_control_start(profile, 0, 0, 1);
+    char *refusal;
+    return hamn_control_start(profile, 0, 0, 1, &refusal);
 }
 
 /* Whether call(profile) returns 1 and records sentence. It runs in a child:
@@ -641,7 +642,9 @@ int main(void)
     a_configuration_path_that_does_not_fit_says_so(temporary);
     differing_settings_are_named();
     settings_that_would_not_read_back_are_not_saved();
-    assert(hamn_control_start("../escape", 0, 0, 0) == 2);
+    char *refusal;
+    assert(hamn_control_start("../escape", 0, 0, 0, &refusal) == 2 &&
+           !refusal);
     assert(hamn_control_configure("existing", 2, 2, 0, 0, -1) == 0);
     assert(profile_read_existing(&profile, "existing") == 0);
     assert(profile.cpus == 2 && profile.mem_mib == 2048);

@@ -11,7 +11,15 @@ unsafe extern "C" {
     fn proc_cancel_install() -> i32;
     fn hamn_control_query(profile: *const libc::c_char, result: *mut *mut libc::c_char) -> i32;
     fn hamn_control_free(result: *mut libc::c_char);
-    fn hamn_control_start(profile: *const libc::c_char, cpu: u32, memory: u32, disk: u32) -> i32;
+    // C borrows profile for this call and writes refusal on every return: owned
+    // UTF-8 JSON on 7 (release only with hamn_control_free), null otherwise.
+    fn hamn_control_start(
+        profile: *const libc::c_char,
+        cpu: u32,
+        memory: u32,
+        disk: u32,
+        refusal: *mut *mut libc::c_char,
+    ) -> i32;
     // rosetta: 1 or 0 sets the profile's setting, -1 keeps it.
     fn hamn_control_configure(
         profile: *const libc::c_char,
@@ -171,10 +179,12 @@ fn apply_failure_code(rc: i32) -> &'static str {
 /// outcome is unknown. A start that found the guest root filesystem damaged
 /// knows its own outcome (core/control.h): it changed nothing in the guest.
 /// The record can still say outcomeUnknown for an earlier operation that
-/// the damage keeps unresolved, and `vm status` shows that separately.
+/// the damage keeps unresolved, and `vm status` shows that separately. A
+/// start that admission refused changed nothing either.
 fn control_failure_code(operation: &str, rc: i32, unknown: bool) -> &'static str {
     match rc {
         6 if operation == "vm start" => "guestFilesystemDamaged",
+        7 if operation == "vm start" => "admissionRefused",
         // HAMN_CONTROL_STOP_UNCERTAIN of a purge: nothing was deleted, and the
         // VM may still run, as when a soft delete refuses for that reason.
         5 if operation == "vm delete" => "outcomeUnknown",
@@ -242,7 +252,7 @@ fn execute(request: &Request) -> Result<Value> {
                 &mut output,
             ),
             "system uninstall" => hamn_control_uninstall(i32::from(request.yes)),
-            "vm start" => hamn_control_start(pointer, cpu, memory, disk),
+            "vm start" => hamn_control_start(pointer, cpu, memory, disk, &mut output),
             "vm create" | "vm configure" => hamn_control_configure(
                 pointer,
                 cpu,
@@ -258,12 +268,15 @@ fn execute(request: &Request) -> Result<Value> {
             _ => return Err(Failure::new("unsupportedOperation", &operation)),
         }
     };
+    // A refused start's output is the refusal, the details of its failure.
+    let mut details = None;
     if !output.is_null() {
         let value = serde_json::from_slice(unsafe { CStr::from_ptr(output) }.to_bytes());
         unsafe { hamn_control_free(output) };
         if rc == 0 {
             return value.map_err(|e| Failure::new("coreProtocol", e));
         }
+        details = value.ok();
     }
     if rc != 0 {
         // The operation's reason, taken before the status query below: that
@@ -272,14 +285,18 @@ fn execute(request: &Request) -> Result<Value> {
         let unknown = operation.starts_with("vm ")
             && query(profile.as_ref())
                 .is_ok_and(|v| v["lastOperation"]["status"] == "outcomeUnknown");
-        return Err(Failure::new(
+        let mut failure = Failure::new(
             control_failure_code(&operation, rc, unknown),
             if message.is_empty() {
                 "C core operation failed"
             } else {
                 &message
             },
-        ));
+        );
+        if failure.code == "admissionRefused" {
+            failure.details = details;
+        }
+        return Err(failure);
     }
     if operation.starts_with("system ") {
         Ok(json!({"completed":true}))
@@ -624,6 +641,9 @@ mod tests {
             ("vm start", 1, false, "operationFailed"),
             ("vm start", 130, false, "cancelled"),
             ("vm start", 3, false, "restartRequired"),
+            ("vm start", 7, false, "admissionRefused"),
+            ("vm start", 7, true, "admissionRefused"),
+            ("vm stop", 7, false, "operationFailed"),
             ("vm stop", 6, false, "operationFailed"),
             ("vm stop", 6, true, "outcomeUnknown"),
             ("vm create", 4, false, "conflict"),

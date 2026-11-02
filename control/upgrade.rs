@@ -105,7 +105,7 @@ pub fn run_cli(args: &[OsString]) -> i32 {
             // stderr by the updater, together with its progress.
             0
         }
-        Err(Failure { code, message }) => {
+        Err(Failure { code, message, .. }) => {
             if json {
                 println!(
                     "{}",

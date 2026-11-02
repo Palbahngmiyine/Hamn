@@ -16,6 +16,7 @@
 #include <unistd.h>
 
 #include "cli.h"
+#include "core/admission.h"
 #include "core/control.h"
 #include "core/guest_deployment.h"
 #include "core/guest_filesystem.h"
@@ -420,7 +421,29 @@ int hamn_test_start_wait_vmrun_running(const struct profile *p,
 }
 #endif
 
-static int start_spawned, start_restored, start_unchanged, start_guest_damaged;
+static int start_spawned, start_restored, start_unchanged, start_guest_damaged,
+    start_refused;
+/* Held from the admission of a start that launches a VM until that VM is
+ * visible to other starts or the start fails. */
+static struct admission_lock start_admission = { .fd = -1 };
+static char *start_refusal;
+
+/* Admission before a start that launches a VM changes the VM, its
+ * configuration or its disk. A refusal or a failure leaves them as they
+ * were: a stopped VM stays stopped, and a running VM that is not ready keeps
+ * running, after the guest recovery that came before. */
+static int start_admit(const struct profile *p)
+{
+    struct admission_request request = {
+        .cpus = p->cpus, .memory_mib = p->mem_mib,
+    };
+    int rc = admission_admit(p->name, &request, &start_admission,
+                             &start_refusal);
+    if (rc == 0)
+        return 0;
+    start_refused = rc == ADMISSION_REFUSED;
+    return -1;
+}
 
 #define GUEST_FILESYSTEM_CHECK_MS 15000
 
@@ -584,6 +607,8 @@ static int cmd_start_execute(const struct start_options *options,
         }
         logmsg("running VM is not ready; recovering the incomplete start");
         if (proc_cancelled()) goto out;
+        if (start_admit(&p) != 0)
+            goto out;
         if (rollback_incomplete_start(&running_profile) != 0)
             goto out;
     } else {
@@ -592,6 +617,10 @@ static int cmd_start_execute(const struct start_options *options,
          * The shares are prepared again just before the spawn. */
         if (prepare_vm_shares(&p, vm_shares, vm_share_read_only,
                               &vm_share_count) != 0) {
+            start_unchanged = 1;
+            goto out;
+        }
+        if (start_admit(&p) != 0) {
             start_unchanged = 1;
             goto out;
         }
@@ -805,6 +834,9 @@ static int cmd_start_execute(const struct start_options *options,
         goto rollback;
     }
 
+    /* The VM is visible to vm_process_probe now, so the next admission
+     * counts it. */
+    admission_lock_release(&start_admission);
     if (wait_vmrun_running(&p, ctl, 20) != 0) {
         if (proc_cancelled())
             logerr("cancelled while waiting for the vm to run");
@@ -906,6 +938,7 @@ static int cmd_start_execute(const struct start_options *options,
     return 0;
 
 rollback:
+    admission_lock_release(&start_admission);
     proc_cleanup_begin();
     if (start_spawned && !guest_deployment_cleanup_pending() &&
         !remote_mutation_cleanup_pending()) {
@@ -930,13 +963,17 @@ out:
 
 static int cmd_start_locked(const struct start_options *options, const char *profile)
 {
-    start_spawned = start_restored = start_unchanged = start_guest_damaged = 0;
+    start_spawned = start_restored = start_unchanged = start_guest_damaged =
+        start_refused = 0;
     int rc = cmd_start_execute(options, profile);
+    admission_lock_release(&start_admission);
     if (rc == START_REEXEC_AFTER_SIGNED_UPDATE) return operation_restart_required();
     /* The damage is the result only while this start's own effect is known:
      * it changed nothing, or it stopped again the VM it booted. */
     if (rc != 0 && start_guest_damaged && (start_unchanged || start_restored))
         rc = HAMN_CONTROL_GUEST_FILESYSTEM_DAMAGED;
+    if (rc != 0 && start_refused)
+        rc = HAMN_CONTROL_ADMISSION_REFUSED;
     if (start_unchanged) return operation_finish_unchanged(rc);
     return operation_finish(rc, !remote_mutation_cleanup_pending() &&
         (start_restored || (!start_spawned &&
@@ -944,8 +981,10 @@ static int cmd_start_locked(const struct start_options *options, const char *pro
 }
 
 int hamn_control_start(const char *profile, unsigned cpus,
-                       unsigned memory_gib, unsigned disk_gib)
+                       unsigned memory_gib, unsigned disk_gib,
+                       char **refusal)
 {
+    *refusal = NULL;
     if (!profile_name_valid(profile) || memory_gib > UINT_MAX / 1024U) {
         logerr("invalid VM resource request");
         return 2;
@@ -960,6 +999,11 @@ int hamn_control_start(const char *profile, unsigned cpus,
     }
     int rc = cmd_start_locked(&options, profile);
     vm_lifecycle_lock_release(&lock);
+    if (rc == HAMN_CONTROL_ADMISSION_REFUSED)
+        *refusal = start_refusal;
+    else
+        hamn_control_free(start_refusal);
+    start_refusal = NULL;
     return rc;
 }
 

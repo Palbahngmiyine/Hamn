@@ -28,7 +28,7 @@ mod kubernetes;
 mod management;
 mod ports;
 mod profile_apply;
-mod processes;
+pub(crate) mod processes;
 mod terminal;
 mod transport;
 
