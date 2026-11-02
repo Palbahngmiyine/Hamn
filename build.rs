@@ -42,7 +42,7 @@ fn main() {
     assert!(status.success(), "C core build failed");
     println!("cargo:rustc-link-search=native={}", native.display());
     println!("cargo:rustc-link-lib=static=hamn_core");
-    for framework in ["Virtualization", "Foundation", "CoreServices"] {
+    for framework in ["Virtualization", "Foundation", "CoreServices", "IOKit"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-lib=z");

@@ -19,7 +19,8 @@ CFLAGS     := -std=c11 -Wall -Wextra -O2 -g \
               -mmacosx-version-min=$(MACOS_MIN) \
               -DHAVE_CONFIG_H \
               -Ihost -Ivendor -Ivendor/libyaml/include
-LDFLAGS    := -framework Virtualization -framework Foundation -framework CoreServices -lz \
+LDFLAGS    := -framework Virtualization -framework Foundation -framework CoreServices \
+              -framework IOKit -lz \
               -mmacosx-version-min=$(MACOS_MIN)
 ifneq ($(strip $(SDKROOT)),)
 CFLAGS     += -isysroot $(SDKROOT)
@@ -60,6 +61,7 @@ PROFILE_READ_TEST := $(BUILD)/tests/test_profile_read
 PROFILE_APPLY_TEST := $(BUILD)/tests/test_profile_apply
 PROFILE_APPLY_FAULTS_TEST := $(BUILD)/tests/test_profile_apply_faults
 PROFILE_PURGE_TEST := $(BUILD)/tests/test_profile_purge
+ADMISSION_TEST := $(BUILD)/tests/test_admission
 PROFILE_YAML_FAULTS_TEST := $(BUILD)/tests/test_profile_yaml_faults
 START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retry
 GUEST_WAIT_DEADLINES_TEST := $(BUILD)/tests/test_guest_wait_deadlines
@@ -265,6 +267,18 @@ $(PROFILE_PURGE_TEST): tests/host/test_profile_purge.c host/core/purge.c $(HOST_
 	clang $(filter-out -MMD -MP,$(CFLAGS)) -DHAMN_TEST \
 		tests/host/test_profile_purge.c host/core/purge.c \
 		$(filter-out $(BUILD)/host/core/purge.o,$(HOST_TEST_OBJS)) $(LDFLAGS) -o $@
+
+# admission.c is compiled into this test a second time, with its OS
+# measurements renamed to functions of the test that report a chosen host.
+ADMISSION_FAKES := sysctlbyname getloadavg IOPSCopyPowerSourcesInfo \
+	IOPSGetProvidingPowerSourceType IOPSCopyPowerSourcesList \
+	IOPSGetPowerSourceDescription
+$(ADMISSION_TEST): tests/host/test_admission.c host/core/admission.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) \
+		$(foreach name,$(ADMISSION_FAKES),-D$(name)=fake_$(name)) \
+		tests/host/test_admission.c host/core/admission.c \
+		$(filter-out $(BUILD)/host/core/admission.o,$(HOST_TEST_OBJS)) $(LDFLAGS) -o $@
 
 # libyaml's allocator is compiled into this test a second time, with malloc
 # and realloc renamed to functions of the test that fail on request.
@@ -498,7 +512,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 		$(GUEST_FILESYSTEM_TEST) $(GUEST_PANIC_TEST) $(VZ_DISK_CONFIG_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
 		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
-		$(PROFILE_PURGE_TEST) \
+		$(PROFILE_PURGE_TEST) $(ADMISSION_TEST) \
 		$(PROFILE_YAML_FAULTS_TEST) $(GUEST_WAIT_DEADLINES_TEST)
 	rm -rf $(BUILD)/tests/raw-cache-data && mkdir -p $(BUILD)/tests/raw-cache-data
 	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
@@ -521,6 +535,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 	$(PROFILE_APPLY_TEST)
 	$(PROFILE_APPLY_FAULTS_TEST)
 	$(PROFILE_PURGE_TEST)
+	$(ADMISSION_TEST)
 	$(PROFILE_YAML_FAULTS_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-apply

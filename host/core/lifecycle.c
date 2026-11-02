@@ -27,18 +27,8 @@
 #include "util/proc.h"
 #include "vmrun/ctlsock.h"
 
-int vm_lifecycle_lock_acquire(const char *profile_name,
-                              struct vm_lifecycle_lock *lock)
+int vm_lock_file_open(const char *file)
 {
-    if (!lock)
-        return -1;
-    lock->fd = -1;
-    if (!profile_name || !profile_name[0] || strchr(profile_name, '/') ||
-        strcmp(profile_name, ".") == 0 || strcmp(profile_name, "..") == 0) {
-        errno = EINVAL;
-        return -1;
-    }
-
     char root[1024], lock_dir[1100], path[1200];
     if (!hamn_home(root, sizeof(root))) {
         errno = EINVAL;
@@ -54,7 +44,7 @@ int vm_lifecycle_lock_acquire(const char *profile_name,
         errno = EPERM;
         return -1;
     }
-    n = snprintf(path, sizeof(path), "%s/%s.lock", lock_dir, profile_name);
+    n = snprintf(path, sizeof(path), "%s/%s", lock_dir, file);
     if (n < 0 || n >= (int)sizeof(path)) {
         errno = ENAMETOOLONG;
         return -1;
@@ -70,6 +60,29 @@ int vm_lifecycle_lock_acquire(const char *profile_name,
         errno = EINVAL;
         return -1;
     }
+    return fd;
+}
+
+int vm_lifecycle_lock_acquire(const char *profile_name,
+                              struct vm_lifecycle_lock *lock)
+{
+    if (!lock)
+        return -1;
+    lock->fd = -1;
+    if (!profile_name || !profile_name[0] || strchr(profile_name, '/') ||
+        strcmp(profile_name, ".") == 0 || strcmp(profile_name, "..") == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    char file[1200];
+    int n = snprintf(file, sizeof(file), "%s.lock", profile_name);
+    if (n < 0 || n >= (int)sizeof(file)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    int fd = vm_lock_file_open(file);
+    if (fd < 0)
+        return -1;
     while (flock(fd, LOCK_EX) != 0) {
         if (errno == EINTR)
             continue;
