@@ -26,8 +26,10 @@
  * ~/.hamn or a profile directory is not this user's alone, when a profile
  * directory cannot be entered, when a state file or a deletion marker is
  * not what it should be, and when memory or descriptors run out. Before it
- * lists, the call removes what interrupted purges left (purge_sweep in
- * core/purge.h); that removal never fails the list. */
+ * lists, the call purges the ephemeral profiles whose workspace is gone and
+ * whose VM is known to be stopped (workspace_sweep in core/workspace.h), then
+ * removes what interrupted purges left (purge_sweep in core/purge.h); neither
+ * ever fails the list. */
 int hamn_control_query(const char *profile, char **result);
 void hamn_control_free(char *result);
 /* Start the VM of profile, or bring a running one back to ready. A zero
@@ -171,7 +173,11 @@ int hamn_control_purge(const char *profile, int *absent);
  * directory it made. Only its lock files stay, as after a purge.
  *
  * Holds the profile's lifecycle lock, waiting for it, from before it reads
- * the profile until its start, and that deletion, end. */
+ * the profile until its start, and that deletion, end. Before it waits for
+ * that lock, and once the arguments are accepted, it purges the ephemeral
+ * profiles of other workspaces that are gone (workspace_sweep in
+ * core/workspace.h), whatever it then returns; "nothing was changed" above
+ * speaks of this workspace's profile. */
 int hamn_control_up(const char *path, unsigned cpus, unsigned memory_gib,
                     unsigned disk_gib, int git_mount, char **result);
 /* vm down: stop the VM of the workspace directory at path when purge is 0,

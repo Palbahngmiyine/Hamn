@@ -87,4 +87,55 @@ int workspace_record_read(const struct profile *profile,
  * inodes. */
 int workspace_same(const struct workspace *a, const struct workspace *b);
 
+/* The record of workspace as above, NUL-terminated, into text. Returns its
+ * length, or -1 with errno ENAMETOOLONG. */
+#define WORKSPACE_RECORD_CAP (PATH_MAX + 64)
+int workspace_record_format(const struct workspace *workspace,
+                            char text[WORKSPACE_RECORD_CAP]);
+
+/* Parses the NUL-terminated text as a record, newline included, into
+ * *recorded with the profile name derived from its path. Returns 0, or -1
+ * for text not in the form above. Logs nothing. */
+int workspace_record_parse(const char *text, struct workspace *recorded);
+
+/*
+ * Reclaim. A workspace's VM is reclaimed, stopped and purged, once nothing
+ * is at the workspace's recorded path any longer: a git worktree that its
+ * tool deleted. A directory found at that path with another device or inode
+ * never reclaims it, because attaching a volume again can change the device
+ * of the same directory; vm up refuses such a profile instead. A profile
+ * without a record is never reclaimed, and nothing is decided by a PID or a
+ * name alone: a purge needs the VM known to be stopped (vm_process_probe).
+ *
+ * Two places reclaim without being asked:
+ *   - vmrun, while the VM runs, checks the path every 10 seconds. The first
+ *     check that finds it absent asks the guest to stop, as SIGTERM does,
+ *     and once vmrun has removed its process identity at exit it starts
+ *     "hamn workspace-reclaim <record>" detached, which purges the profile
+ *     (cmd_workspace_reclaim in cli.h). vmrun never deletes its own
+ *     directory.
+ *   - workspace_sweep, from vm list and vm up, for a VM that stopped
+ *     without vmrun noticing, or whose reclaim failed.
+ */
+
+/* What lstat says about path: PRESENT when something is there, also a file
+ * or a symbolic link; ABSENT when it fails with ENOENT or ENOTDIR; UNKNOWN
+ * for any other failure, such as EACCES, which never reclaims. */
+enum workspace_presence {
+    WORKSPACE_PRESENT,
+    WORKSPACE_ABSENT,
+    WORKSPACE_UNKNOWN,
+};
+enum workspace_presence workspace_presence(const char *path);
+
+/* Purges every profile of ~/.hamn whose record names a path that is
+ * absent, while its VM is known to be stopped. A profile whose lifecycle
+ * lock another process holds is skipped, never waited for, and no lock file
+ * is made for a profile that is not such a candidate. Never fails its
+ * caller and leaves no recorded reason (log_last_error() is empty after
+ * it); what it purges and what it cannot purge it prints. Call it holding
+ * no profile lock. Implemented with the control calls, in
+ * cmd/cmd_workspace.c. */
+void workspace_sweep(void);
+
 #endif

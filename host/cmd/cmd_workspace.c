@@ -6,13 +6,17 @@
  * the start alone; the lock order of core/admission.h holds because no
  * profile lock is taken while the start holds the admission lock. */
 
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "cjson/cJSON.h"
+#include "cli.h"
 #include "core/control.h"
 #include "core/control_locked.h"
 #include "core/lifecycle.h"
@@ -211,6 +215,7 @@ int hamn_control_up(const char *path, unsigned cpus, unsigned memory_gib,
                "directory" : "");
         return 2;
     }
+    workspace_sweep();
     struct vm_lifecycle_lock lock;
     if (vm_lifecycle_lock_acquire(desired.name, &lock) != 0) {
         logerr("cannot lock the %s profile lifecycle", desired.name);
@@ -316,4 +321,105 @@ int hamn_control_down(const char *path, int purge, int *absent,
     int rc = down_locked(&workspace, &profile, purge, absent);
     vm_lifecycle_lock_release(&lock);
     return rc;
+}
+
+/* Holding the lifecycle lock of profile: purges it when it is the VM of a
+ * workspace that is gone and its VM is known to be stopped. Gone means,
+ * without watched, that its recorded path is absent; with watched, the
+ * record vmrun found absent, that this record is still the profile's, so
+ * that a later profile of the same name is never purged in its place.
+ * Returns 1 when it purged, 0 when it left the profile alone, -1 having
+ * logged why its purge failed. */
+static int reclaim_locked(const struct profile *profile,
+                          const struct workspace *watched)
+{
+    struct workspace recorded;
+    if (workspace_record_read(profile, &recorded) != 1)
+        return 0;
+    if (watched ? !workspace_same(&recorded, watched) :
+        workspace_presence(recorded.path) != WORKSPACE_ABSENT)
+        return 0;
+    if (vm_process_probe(profile, NULL) != VM_PROCESS_STALE) {
+        logmsg("workspace %s is gone, but the VM of profile %s is not known "
+               "to be stopped; the profile stays", recorded.path,
+               profile->name);
+        return 0;
+    }
+    int absent = 0;
+    if (control_purge_locked(profile->name, &absent) != 0)
+        return -1;
+    if (!absent)
+        logmsg("reclaimed profile %s: its workspace %s no longer exists",
+               profile->name, recorded.path);
+    return 1;
+}
+
+void workspace_sweep(void)
+{
+    char home[PROFILE_PATH_CAP];
+    if (!hamn_home(home, sizeof(home)))
+        return;
+    DIR *directory = opendir(home);
+    if (!directory)
+        return;
+    struct dirent *entry;
+    while ((entry = readdir(directory))) {
+        struct profile profile;
+        memset(&profile, 0, sizeof(profile));
+        struct stat status;
+        if (!profile_name_valid(entry->d_name) ||
+            fstatat(dirfd(directory), entry->d_name, &status,
+                    AT_SYMLINK_NOFOLLOW) != 0 ||
+            !S_ISDIR(status.st_mode) || status.st_uid != geteuid())
+            continue;
+        snprintf(profile.name, sizeof(profile.name), "%s", entry->d_name);
+        /* A first look without the lock, so that only a candidate gets a
+         * lock file; reclaim_locked looks again under it. */
+        struct workspace recorded;
+        if (profile_locate(&profile) != 0 ||
+            workspace_record_read(&profile, &recorded) != 1 ||
+            workspace_presence(recorded.path) != WORKSPACE_ABSENT)
+            continue;
+        struct vm_lifecycle_lock lock;
+        if (vm_lifecycle_lock_try(profile.name, &lock) != 0)
+            continue;
+        if (reclaim_locked(&profile, NULL) < 0)
+            logmsg("profile %s stays; the next vm list or vm up tries again",
+                   profile.name);
+        vm_lifecycle_lock_release(&lock);
+    }
+    closedir(directory);
+    log_clear_error();
+}
+
+int cmd_workspace_reclaim(int argc, char **argv)
+{
+    struct workspace watched;
+    if (argc != 2 || workspace_record_parse(argv[1], &watched) != 0) {
+        logerr("usage: hamn workspace-reclaim <workspace record>");
+        return 2;
+    }
+    struct profile profile;
+    memset(&profile, 0, sizeof(profile));
+    snprintf(profile.name, sizeof(profile.name), "%s", watched.profile);
+    if (profile_locate(&profile) != 0) {
+        logerr("cannot locate profile %s: %s", profile.name, strerror(errno));
+        return 1;
+    }
+    struct stat status;
+    if (lstat(profile.dir, &status) != 0) {
+        if (errno == ENOENT)
+            return 0;
+        logerr("cannot look for profile %s: %s", profile.name,
+               strerror(errno));
+        return 1;
+    }
+    struct vm_lifecycle_lock lock;
+    if (vm_lifecycle_lock_acquire(profile.name, &lock) != 0) {
+        logerr("cannot lock the %s profile lifecycle", profile.name);
+        return 1;
+    }
+    int rc = reclaim_locked(&profile, &watched);
+    vm_lifecycle_lock_release(&lock);
+    return rc < 0 ? 1 : 0;
 }

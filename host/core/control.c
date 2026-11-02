@@ -21,6 +21,7 @@
 #include "core/profile.h"
 #include "core/purge.h"
 #include "core/state.h"
+#include "core/workspace.h"
 #include "fwd/ports.h"
 #include "util/fs.h"
 
@@ -306,9 +307,11 @@ int hamn_control_query(const char *profile, char **result)
         return -1;
     }
     *result = NULL;
-    log_clear_error();
-    if (!profile)
+    if (!profile) {
+        workspace_sweep();
         purge_sweep();
+    }
+    log_clear_error();
     cJSON *value = profile ? profile_snapshot(profile) : profiles_snapshot();
     if (!value)
         return -1;

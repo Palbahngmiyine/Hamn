@@ -1,10 +1,11 @@
 /* core/workspace.c: which directory a workspace path names, the profile name
  * and record that follow from it, the common git directory a VM shares, and
- * the profile vm up creates. Expected names come from SHA-256 values
- * computed apart from Hamn (shasum -a 256), and expected git directories
- * from the layouts git itself writes: a linked worktree's .git file, its
- * commondir, and a plain repository's .git directory. No VM is involved;
- * the vm-up suite covers the control calls. */
+ * the profile vm up creates, and which paths count as gone for a reclaim.
+ * Expected names come from SHA-256 values computed apart from Hamn (shasum
+ * -a 256), and expected git directories from the layouts git itself
+ * writes: a linked worktree's .git file, its commondir, and a plain
+ * repository's .git directory. No VM is involved; the vm-up suite
+ * covers the control calls. */
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -333,6 +334,49 @@ static void a_directory_made_again_at_the_same_path_is_another(void)
            strcmp(before.profile, after.profile) == 0);
     assert(!workspace_same(&before, &after));
 }
+/* vmrun hands the record it watched to its reclaim as one argument. */
+static void a_formatted_record_parses_back_to_the_same_workspace(void)
+{
+    make_directory("handed");
+    struct workspace workspace, parsed;
+    assert(workspace_identify(at("handed"), &workspace) == 0);
+    char text[WORKSPACE_RECORD_CAP], expected[WORKSPACE_RECORD_CAP];
+    snprintf(expected, sizeof(expected), "%llu %llu %s\n",
+             (unsigned long long)workspace.device,
+             (unsigned long long)workspace.inode, workspace.path);
+    assert(workspace_record_format(&workspace, text) ==
+           (int)strlen(expected));
+    assert(strcmp(text, expected) == 0);
+    assert(workspace_record_parse(text, &parsed) == 0);
+    assert(workspace_same(&parsed, &workspace) &&
+           strcmp(parsed.profile, workspace.profile) == 0);
+    assert(workspace_record_parse("1 2 /p", &parsed) == -1 &&
+           parsed.path[0] == '\0');
+}
+
+/* Only "nothing is there" reclaims: ENOENT, or ENOTDIR for a path below a
+ * file. Anything at the path, a dangling symbolic link included, and any
+ * other failure, such as a parent that cannot be searched, does not. */
+static void only_a_path_with_nothing_there_is_absent(void)
+{
+    make_directory("present");
+    write_file(at("present/file"), "file\n");
+    assert(symlink(at("nowhere"), at("present/dangling")) == 0);
+    assert(workspace_presence(at("present")) == WORKSPACE_PRESENT);
+    assert(workspace_presence(at("present/file")) == WORKSPACE_PRESENT);
+    assert(workspace_presence(at("present/dangling")) == WORKSPACE_PRESENT);
+    assert(workspace_presence(at("missing")) == WORKSPACE_ABSENT);
+    assert(workspace_presence(at("present/file/below")) == WORKSPACE_ABSENT);
+    make_directory("locked");
+    make_directory("locked/tree");
+    assert(chmod(at("locked"), 0) == 0);
+    if (geteuid() != 0)
+        assert(workspace_presence(at("locked/tree")) == WORKSPACE_UNKNOWN);
+    assert(chmod(at("locked"), 0700) == 0);
+    assert(rmdir(at("locked/tree")) == 0);
+    assert(workspace_presence(at("locked/tree")) == WORKSPACE_ABSENT);
+}
+
 
 int main(void)
 {
@@ -348,6 +392,8 @@ int main(void)
         a_new_profile_shares_the_workspace_and_its_git_directory();
         the_record_names_the_directory_and_nothing_else();
         a_directory_made_again_at_the_same_path_is_another();
+        a_formatted_record_parses_back_to_the_same_workspace();
+        only_a_path_with_nothing_there_is_absent();
         _exit(0);
     }
     int status = 0;

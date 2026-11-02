@@ -265,16 +265,28 @@ void workspace_profile(const struct workspace *workspace, const char *git,
         add_mount(profile, git, 0);
 }
 
-int workspace_record_write(const struct profile *profile,
-                           const struct workspace *workspace)
+int workspace_record_format(const struct workspace *workspace,
+                            char text[WORKSPACE_RECORD_CAP])
 {
-    char path[PROFILE_PATH_CAP], text[PATH_MAX + 64];
-    int length = snprintf(text, sizeof(text), "%llu %llu %s\n",
+    int length = snprintf(text, WORKSPACE_RECORD_CAP, "%llu %llu %s\n",
                           (unsigned long long)workspace->device,
                           (unsigned long long)workspace->inode,
                           workspace->path);
-    if (!profile_path(profile, WORKSPACE_RECORD_FILE, path, sizeof(path)) ||
-        length < 0 || (size_t)length >= sizeof(text)) {
+    if (length < 0 || length >= WORKSPACE_RECORD_CAP) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return length;
+}
+
+int workspace_record_write(const struct profile *profile,
+                           const struct workspace *workspace)
+{
+    char path[PROFILE_PATH_CAP], text[WORKSPACE_RECORD_CAP];
+    int length = workspace_record_format(workspace, text);
+    if (length < 0)
+        return -1;
+    if (!profile_path(profile, WORKSPACE_RECORD_FILE, path, sizeof(path))) {
         errno = ENAMETOOLONG;
         return -1;
     }
@@ -295,11 +307,38 @@ static int read_decimal(const char **cursor, unsigned long long *value)
     return 0;
 }
 
+int workspace_record_parse(const char *text, struct workspace *recorded)
+{
+    memset(recorded, 0, sizeof(*recorded));
+    const char *cursor = text;
+    unsigned long long device = 0, inode = 0;
+    size_t path_length = 0;
+    if (read_decimal(&cursor, &device) == 0 &&
+        read_decimal(&cursor, &inode) == 0) {
+        path_length = strlen(cursor);
+        recorded->device = (dev_t)device;
+        recorded->inode = (ino_t)inode;
+    }
+    /* The path, absolute and of one line, ends the record with a newline. */
+    if (path_length < 2 || path_length > PATH_MAX || cursor[0] != '/' ||
+        memchr(cursor, '\n', path_length - 1) ||
+        cursor[path_length - 1] != '\n' ||
+        (unsigned long long)recorded->device != device ||
+        (unsigned long long)recorded->inode != inode) {
+        memset(recorded, 0, sizeof(*recorded));
+        return -1;
+    }
+    memcpy(recorded->path, cursor, path_length - 1);
+    recorded->path[path_length - 1] = '\0';
+    workspace_profile_name(recorded->path, recorded->profile);
+    return 0;
+}
+
 int workspace_record_read(const struct profile *profile,
                           struct workspace *recorded)
 {
     memset(recorded, 0, sizeof(*recorded));
-    char text[PATH_MAX + 64];
+    char text[WORKSPACE_RECORD_CAP];
     ssize_t length = -1;
     int dir = open_directory_at(AT_FDCWD, profile->dir);
     if (dir >= 0) {
@@ -316,29 +355,13 @@ int workspace_record_read(const struct profile *profile,
                WORKSPACE_RECORD_FILE, strerror(errno));
         return -1;
     }
-    const char *cursor = text;
-    unsigned long long device = 0, inode = 0;
-    size_t path_length = 0;
-    if (read_decimal(&cursor, &device) == 0 &&
-        read_decimal(&cursor, &inode) == 0) {
-        path_length = (size_t)(text + length - cursor);
-        recorded->device = (dev_t)device;
-        recorded->inode = (ino_t)inode;
-    }
-    /* The path, absolute and of one line, ends the record with a newline. */
-    if (path_length < 2 || path_length > PATH_MAX || cursor[0] != '/' ||
-        memchr(cursor, '\n', path_length - 1) ||
-        cursor[path_length - 1] != '\n' ||
-        (unsigned long long)recorded->device != device ||
-        (unsigned long long)recorded->inode != inode) {
+    /* read_small_file refuses a NUL byte, so text ends where the file
+     * does. */
+    if (workspace_record_parse(text, recorded) != 0) {
         logerr("the workspace record %s/%s is not \"<device> <inode> "
                "<path>\" on one line", profile->dir, WORKSPACE_RECORD_FILE);
-        memset(recorded, 0, sizeof(*recorded));
         return -1;
     }
-    memcpy(recorded->path, cursor, path_length - 1);
-    recorded->path[path_length - 1] = '\0';
-    workspace_profile_name(recorded->path, recorded->profile);
     return 1;
 }
 
@@ -346,4 +369,13 @@ int workspace_same(const struct workspace *a, const struct workspace *b)
 {
     return strcmp(a->path, b->path) == 0 && a->device == b->device &&
            a->inode == b->inode;
+}
+
+enum workspace_presence workspace_presence(const char *path)
+{
+    struct stat status;
+    if (lstat(path, &status) == 0)
+        return WORKSPACE_PRESENT;
+    return errno == ENOENT || errno == ENOTDIR ? WORKSPACE_ABSENT :
+        WORKSPACE_UNKNOWN;
 }

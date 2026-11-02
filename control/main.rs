@@ -49,7 +49,7 @@ fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
     if matches!(
         mode.as_str(),
-        "vmrun" | "port-observer" | "udp-forward" | "mount-inotify-watch" | "qcow2-extract"
+        "vmrun" | "port-observer" | "udp-forward" | "mount-inotify-watch" | "qcow2-extract" | "workspace-reclaim"
     ) {
         std::process::exit(internal());
     }

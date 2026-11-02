@@ -50,6 +50,10 @@ int vm_lock_file_open(const char *file);
 int vm_lifecycle_lock_acquire(const char *profile_name,
                               struct vm_lifecycle_lock *lock);
 void vm_lifecycle_lock_release(struct vm_lifecycle_lock *lock);
+/* As vm_lifecycle_lock_acquire without waiting: -1 with errno EWOULDBLOCK
+ * when another process holds the lock. */
+int vm_lifecycle_lock_try(const char *profile_name,
+                          struct vm_lifecycle_lock *lock);
 
 /*
  * spawn 전에 durable marker를 잠그고, vmrun이 identity를 기록할 때까지

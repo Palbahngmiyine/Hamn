@@ -2,9 +2,11 @@
 //! with an isolated HOME: every spelling of a workspace names one profile;
 //! a vm up that admission refuses, or whose start fails, leaves no profile
 //! it made; an ephemeral profile is reused and kept, then stopped or purged
-//! by vm down; a profile without the workspace's record is left alone; and
-//! a vm up waits for another operation on its profile, and gives up when
-//! cancelled meanwhile. Never starts a VM: each start is refused by
+//! by vm down; a profile without the workspace's record is left alone; a
+//! vm up waits for another operation on its profile, and gives up when
+//! cancelled meanwhile; and only a profile whose recorded workspace path
+//! has nothing there is reclaimed, by vm list, by vm up and by the reclaim
+//! that vmrun starts. Never starts a VM: each start is refused by
 //! admission or before it; an unreachable proxy keeps a start that got
 //! further offline. Expected names and records follow from the contract in
 //! host/core/workspace.h, and git directories from git itself;
@@ -37,6 +39,12 @@ pub fn main(filters: &[String]) -> ExitCode {
             case("vm_up_waits_while_another_operation_holds_the_profile", vm_up_waits_while_another_operation_holds_the_profile),
             case("a_vm_up_cancelled_while_it_waits_creates_nothing", a_vm_up_cancelled_while_it_waits_creates_nothing),
             case("a_new_profile_is_created_with_the_requested_resources", a_new_profile_is_created_with_the_requested_resources),
+            case("vm_list_reclaims_a_profile_whose_workspace_is_gone", vm_list_reclaims_a_profile_whose_workspace_is_gone),
+            case("only_a_recorded_path_with_nothing_there_is_reclaimed", only_a_recorded_path_with_nothing_there_is_reclaimed),
+            case("a_gone_workspace_whose_vm_is_not_known_to_be_stopped_stays", a_gone_workspace_whose_vm_is_not_known_to_be_stopped_stays),
+            case("vm_list_skips_a_held_profile_without_waiting", vm_list_skips_a_held_profile_without_waiting),
+            case("vm_up_reclaims_gone_workspaces_before_it_starts", vm_up_reclaims_gone_workspaces_before_it_starts),
+            case("the_reclaim_vmrun_starts_purges_only_the_profile_it_watched", the_reclaim_vmrun_starts_purges_only_the_profile_it_watched),
         ],
         filters,
     )
@@ -381,12 +389,14 @@ fn a_profile_without_this_workspaces_record_is_left_alone() {
     let record = home.hamn().join(&name).join("ephemeral");
     let metadata = fs::metadata(&tree).unwrap();
     let workspace = real(&tree);
+    // A directory that exists: a record of a gone one would be reclaimed.
+    let elsewhere = real(&home.directory("elsewhere"));
     for (text, code, message) in [
         (None, "conflict", format!("profile {name} exists and is not the VM of a workspace: it has no ephemeral record")),
         (
-            Some("1 2 /elsewhere\n".to_owned()),
+            Some(format!("1 2 {}\n", elsewhere.display())),
             "conflict",
-            format!("profile {name} belongs to workspace /elsewhere, not to {}", workspace.display()),
+            format!("profile {name} belongs to workspace {}, not to {}", elsewhere.display(), workspace.display()),
         ),
         (
             Some(format!("{} {} {}\n", metadata.dev(), metadata.ino() + 1, workspace.display())),
@@ -519,4 +529,175 @@ fn a_new_profile_is_created_with_the_requested_resources() {
     failure(&value, "admissionRefused", &format!("refused to start the VM of profile {name}: "));
     assert_eq!(value["error"]["details"]["request"], json!({"cpus": 2, "memoryMiB": 2048}), "{value}");
     assert!(!home.hamn().join(&name).exists() && home.listed().is_empty());
+}
+
+/// The `hamn workspace-reclaim RECORD` that vmrun starts once it stopped a
+/// VM whose workspace is gone: its exit status and output.
+fn reclaim(home: &Home, record: &str) -> (Option<i32>, String) {
+    let mut command = Command::new(hamn());
+    command.arg("workspace-reclaim").arg(record).env("HOME", home.path()).current_dir(home.path());
+    let result = api_fixtures::run(&mut command, None, Duration::from_secs(60));
+    (result.status.code(), format!("{}{}", result.stdout, result.stderr))
+}
+
+fn sorted(mut names: Vec<String>) -> Vec<String> {
+    names.sort();
+    names
+}
+
+/// A worktree deleted while its VM is stopped: the next vm list purges its
+/// profile and says so. The repository, the profile of a workspace that is
+/// there, a profile of another kind and the lock files stay.
+fn vm_list_reclaims_a_profile_whose_workspace_is_gone() {
+    let home = Home::new();
+    let (tree, common) = home.git_worktree("tree");
+    let name = profile_of(&tree);
+    home.make_ephemeral(&tree, Some(&common));
+    let kept = home.directory("kept");
+    home.make_ephemeral(&kept, None);
+    assert_eq!(home.run(&["vm", "create", "--profile", "work", "--yes"])["ok"], true);
+    let recorded = real(&tree);
+    fs::remove_dir_all(&tree).unwrap();
+
+    let (value, stderr) = home.call(&["vm", "list"], &[]);
+    assert_eq!(value["ok"], true, "{value}");
+    let reclaimed = format!("reclaimed profile {name}: its workspace {} no longer exists", recorded.display());
+    assert!(stderr.contains(&reclaimed), "{stderr}");
+    assert!(!home.hamn().join(&name).exists());
+    assert_eq!(sorted(home.listed()), sorted(vec![profile_of(&kept), "work".to_owned()]));
+    assert!(home.hamn().join(".locks").join(format!("{name}.lock")).is_file());
+    assert!(common.join("HEAD").is_file() && home.path().join("main/.git").is_dir());
+}
+
+/// Only a recorded path with nothing there reclaims, and only a profile
+/// with a record: a directory made again at that path (another inode), a
+/// path that cannot be looked up, a record that cannot be read and a
+/// `ws-` profile without a record all stay through vm list.
+fn only_a_recorded_path_with_nothing_there_is_reclaimed() {
+    let home = Home::new();
+    let again = home.directory("again");
+    home.make_ephemeral(&again, None);
+    // The old directory stays alive, so that its inode cannot be reused.
+    fs::rename(&again, home.path().join("again-old")).unwrap();
+    fs::create_dir(&again).unwrap();
+    let broken = home.directory("broken");
+    let profile = home.make_ephemeral(&broken, None);
+    private_file(&profile.join("ephemeral"), "not a record\n");
+    fs::remove_dir(&broken).unwrap();
+    assert_eq!(home.run(&["vm", "create", "--profile", "ws-0123456789ab", "--yes"])["ok"], true);
+    // SAFETY: geteuid has no preconditions.
+    let sealed = (unsafe { libc::geteuid() } != 0).then(|| {
+        let sealed = home.directory("sealed");
+        let inner = sealed.join("tree");
+        fs::create_dir(&inner).unwrap();
+        home.make_ephemeral(&inner, None);
+        fs::set_permissions(&sealed, fs::Permissions::from_mode(0o000)).unwrap();
+        sealed
+    });
+    let before = home.listed();
+    assert_eq!(before.len(), if sealed.is_some() { 4 } else { 3 }, "{before:?}");
+
+    let (value, stderr) = home.call(&["vm", "list"], &[]);
+    if let Some(sealed) = &sealed {
+        fs::set_permissions(sealed, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    assert_eq!(value["ok"], true, "{value}");
+    assert!(!stderr.contains("reclaimed"), "{stderr}");
+    assert_eq!(home.listed(), before);
+}
+
+/// A gone workspace whose VM is not known to be stopped keeps its profile
+/// until the VM is: vm list never decides by a PID or a name alone.
+fn a_gone_workspace_whose_vm_is_not_known_to_be_stopped_stays() {
+    let home = Home::new();
+    let tree = home.directory("tree");
+    let name = profile_of(&tree);
+    let profile = home.make_ephemeral(&tree, None);
+    private_file(&profile.join("vmrun.identity"), "not an identity\n");
+    fs::remove_dir(&tree).unwrap();
+    let (value, stderr) = home.call(&["vm", "list"], &[]);
+    assert_eq!(value["ok"], true, "{value}");
+    assert!(stderr.contains(&format!("the VM of profile {name} is not known to be stopped; the profile stays")), "{stderr}");
+    assert!(profile.join("config.yaml").is_file() && profile.join("ephemeral").is_file());
+
+    fs::remove_file(profile.join("vmrun.identity")).unwrap();
+    assert_eq!(home.run(&["vm", "list"])["ok"], true);
+    assert!(!profile.exists());
+}
+
+/// vm list skips a profile that another operation holds, without waiting
+/// for it, and reclaims it once the operation has ended.
+fn vm_list_skips_a_held_profile_without_waiting() {
+    let home = Home::new();
+    let tree = home.directory("tree");
+    let name = profile_of(&tree);
+    let profile = home.make_ephemeral(&tree, None);
+    fs::remove_dir(&tree).unwrap();
+    let lock = hold_lifecycle_lock(&home, &name);
+    let started = Instant::now();
+    assert_eq!(home.run(&["vm", "list"])["ok"], true);
+    assert!(started.elapsed() < Duration::from_secs(20), "vm list waited for the lock");
+    assert!(profile.join("ephemeral").is_file());
+    drop(lock);
+    assert_eq!(home.run(&["vm", "list"])["ok"], true);
+    assert!(!profile.exists());
+}
+
+/// vm up reclaims gone workspaces before its own start, also when that
+/// start is refused.
+fn vm_up_reclaims_gone_workspaces_before_it_starts() {
+    let home = Home::new();
+    let gone = home.directory("gone");
+    let profile = home.make_ephemeral(&gone, None);
+    fs::remove_dir(&gone).unwrap();
+    let other = home.directory("other");
+    let (value, stderr) = home.up(&other, &[], &[NO_ROOM]);
+    failure(&value, "admissionRefused", &format!("refused to start the VM of profile {}: ", profile_of(&other)));
+    assert!(stderr.contains("reclaimed profile"), "{stderr}");
+    assert!(!profile.exists() && home.listed().is_empty());
+}
+
+/// vmrun's reclaim purges the profile only while it still holds the record
+/// vmrun watched, also when a directory was made again at its path, and
+/// only once its VM is known to be stopped. A later profile of the same
+/// name, a profile already gone and an argument that is no record change
+/// nothing.
+fn the_reclaim_vmrun_starts_purges_only_the_profile_it_watched() {
+    let home = Home::new();
+    let tree = home.directory("tree");
+    let name = profile_of(&tree);
+    let profile = home.make_ephemeral(&tree, None);
+    let record = record_of(&tree);
+    fs::rename(&tree, home.path().join("tree-old")).unwrap();
+    fs::create_dir(&tree).unwrap();
+
+    private_file(&profile.join("vmrun.identity"), "not an identity\n");
+    let (status, output) = reclaim(&home, &record);
+    assert_eq!(status, Some(0), "{output}");
+    assert!(output.contains("is not known to be stopped"), "{output}");
+    assert!(profile.join("ephemeral").is_file());
+
+    fs::remove_file(profile.join("vmrun.identity")).unwrap();
+    let (status, output) = reclaim(&home, &record);
+    assert_eq!(status, Some(0), "{output}");
+    assert!(output.contains(&format!("reclaimed profile {name}")), "{output}");
+    assert!(!profile.exists());
+    let (status, output) = reclaim(&home, &record);
+    assert_eq!(status, Some(0), "{output}");
+
+    home.make_ephemeral(&tree, None);
+    let before = home.tree();
+    let (status, output) = reclaim(&home, &record);
+    assert_eq!(status, Some(0), "{output}");
+    assert_eq!(home.tree(), before);
+    assert_eq!(home.listed(), [name]);
+
+    let (status, output) = reclaim(&home, "not a record\n");
+    assert_eq!(status, Some(2), "{output}");
+    assert_eq!(home.tree(), before);
+
+    let empty = Home::new();
+    let (status, output) = reclaim(&empty, &record);
+    assert_eq!(status, Some(0), "{output}");
+    assert!(!empty.hamn().exists());
 }

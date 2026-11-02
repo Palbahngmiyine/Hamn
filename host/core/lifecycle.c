@@ -63,8 +63,8 @@ int vm_lock_file_open(const char *file)
     return fd;
 }
 
-int vm_lifecycle_lock_acquire(const char *profile_name,
-                              struct vm_lifecycle_lock *lock)
+static int lifecycle_lock(const char *profile_name,
+                          struct vm_lifecycle_lock *lock, int wait)
 {
     if (!lock)
         return -1;
@@ -83,14 +83,28 @@ int vm_lifecycle_lock_acquire(const char *profile_name,
     int fd = vm_lock_file_open(file);
     if (fd < 0)
         return -1;
-    while (flock(fd, LOCK_EX) != 0) {
+    while (flock(fd, LOCK_EX | (wait ? 0 : LOCK_NB)) != 0) {
         if (errno == EINTR)
             continue;
+        int saved = errno;
         close(fd);
+        errno = saved;
         return -1;
     }
     lock->fd = fd;
     return 0;
+}
+
+int vm_lifecycle_lock_acquire(const char *profile_name,
+                              struct vm_lifecycle_lock *lock)
+{
+    return lifecycle_lock(profile_name, lock, 1);
+}
+
+int vm_lifecycle_lock_try(const char *profile_name,
+                          struct vm_lifecycle_lock *lock)
+{
+    return lifecycle_lock(profile_name, lock, 0);
 }
 
 void vm_lifecycle_lock_release(struct vm_lifecycle_lock *lock)

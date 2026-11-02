@@ -24,6 +24,8 @@ int hamn_core_main(int argc, char **argv)
         return cmd_mount_inotify_watch(argc - 1, argv + 1);
     if (strcmp(cmd, "udp-forward") == 0)
         return cmd_udp_forward(argc - 1, argv + 1);
+    if (strcmp(cmd, "workspace-reclaim") == 0)
+        return cmd_workspace_reclaim(argc - 1, argv + 1);
     logerr("unknown internal process mode");
     return 2;
 }

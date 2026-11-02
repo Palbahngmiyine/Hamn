@@ -11,8 +11,8 @@ void log_set_error(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* Forget the recorded reason: log_last_error() is empty until the next
  * logerr, log_set_error or die. For a call that follows another one in the
  * same process and reports its own failure through log_last_error():
- * hamn_control_query starts with this, so that it never reports the reason
- * of the operation before it. The other control calls are the first call of
+ * hamn_control_query calls this before it reads anything, so that it never
+ * reports the reason of the operation, or of the sweeps, before it. The other control calls are the first call of
  * their worker (core/control.h) and do not. */
 void log_clear_error(void);
 void die(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
