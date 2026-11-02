@@ -22,12 +22,16 @@ fn set_flags(path: &Path, flags: libc::c_uint) {
     assert_eq!(unsafe { libc::chflags(c.as_ptr(), flags) }, 0, "{path:?}");
 }
 
-fn receipt(guest: &str) -> String {
+fn receipt_of(host: &str, guest: &str) -> String {
     format!(
-        r#"{{"schemaVersion":2,"version":"v1.2.3","hostSHA256":"{}","guestSHA256":"{guest}","installedSHA256":"{}"}}"#,
-        digest(200),
+        r#"{{"schemaVersion":2,"version":"v1.2.3","hostSHA256":"{host}","guestSHA256":"{guest}","installedSHA256":"{}"}}"#,
         digest(201)
     )
+}
+
+/// A receipt whose host archive is one that no test plants in `downloads`.
+fn receipt(guest: &str) -> String {
+    receipt_of(&digest(200), guest)
 }
 
 /// A HOME's image cache and the generations around it, in a canonical
@@ -117,16 +121,22 @@ impl Home {
         );
     }
 
-    /// A retained generation directory whose receipt names guest `n`.
-    fn generation(&self, name: &str, n: u8) -> PathBuf {
+    /// A retained generation directory whose receipt names host archive
+    /// `host` and guest image `guest`.
+    fn release(&self, name: &str, host: u8, guest: u8) -> PathBuf {
         let path = self.temp.0.join("generations").join(name);
         fs::create_dir_all(&path).unwrap();
         write(
             &path.join(".hamn-release.json"),
-            receipt(&digest(n)).as_bytes(),
+            receipt_of(&digest(host), &digest(guest)).as_bytes(),
             0o600,
         );
         path
+    }
+
+    /// A retained generation directory whose receipt names guest `n`.
+    fn generation(&self, name: &str, n: u8) -> PathBuf {
+        self.release(name, 200, n)
     }
 
     /// Everything a populated cache holds for each digest in `digests`.
@@ -206,9 +216,9 @@ fn only_entries_outside_the_keep_set_are_removed() {
 }
 
 #[test]
-fn an_unusable_receipt_of_a_retained_generation_defers_images_and_raw_bases() {
+fn an_unusable_receipt_of_a_retained_generation_defers_images_raw_bases_and_unknown_downloads() {
     let valid = receipt(&digest(1));
-    let variants: [(&str, Option<String>); 6] = [
+    let variants: [(&str, Option<String>); 8] = [
         ("missing", None),
         ("malformed", Some("{".into())),
         (
@@ -220,6 +230,14 @@ fn an_unusable_receipt_of_a_retained_generation_defers_images_and_raw_bases() {
             Some(valid.replace(&digest(1), &"A".repeat(64))),
         ),
         ("short digest", Some(valid.replace(&digest(1), "abc"))),
+        (
+            "uppercase host digest",
+            Some(valid.replace(&digest(200), &"A".repeat(64))),
+        ),
+        (
+            "short host digest",
+            Some(valid.replace(&digest(200), "abc")),
+        ),
         ("unknown field", Some(valid.replace('}', ",\"extra\":1}"))),
     ];
     for (label, text) in variants {
@@ -234,22 +252,86 @@ fn an_unusable_receipt_of_a_retained_generation_defers_images_and_raw_bases() {
         }
         let report = home.run(&[good, bad.clone()]);
         for n in [1, 2] {
-            let [image, marker, raw, artifact] = home.entries(n);
+            let [image, marker, raw, _] = home.entries(n);
             assert!(
                 exists(&image) && exists(&marker) && exists(&raw),
                 "{label}: {n}"
             );
+        }
+        assert!(
+            !exists(&home.entries(1)[3]),
+            "{label}: the selected image's download is no host archive"
+        );
+        assert!(
+            exists(&home.entries(2)[3]),
+            "{label}: the unreadable receipt may name this download as its host archive"
+        );
+        assert_eq!(report.deferred.len(), 2, "{label}: {report:?}");
+        for message in &report.deferred {
             assert!(
-                !exists(&artifact),
-                "{label}: artifacts do not depend on receipts"
+                message.contains(bad.to_str().unwrap()),
+                "{label}: {report:?}"
             );
         }
-        assert_eq!(report.deferred.len(), 1, "{label}: {report:?}");
-        assert!(
-            report.deferred[0].contains(bad.to_str().unwrap()),
-            "{label}: {report:?}"
-        );
+        let downloads = report.deferred.iter().filter(|m| m.contains("downloads"));
+        assert_eq!(downloads.count(), 1, "{label}: {report:?}");
     }
+}
+
+#[test]
+fn the_host_archive_of_a_retained_generation_stays() {
+    let home = Home::new();
+    home.select(1);
+    // 10 and 11: host archives of the retained generations; 12: one of an
+    // earlier release; 1, 2 and 3: guest images' downloads.
+    for n in [10, 11, 12, 1, 2, 3] {
+        home.artifact(n);
+    }
+    let retained = [
+        home.release("active", 10, 1),
+        home.release("previous", 11, 2),
+    ];
+    let report = home.run(&retained);
+    for kept in [10, 11] {
+        assert!(exists(&home.entries(kept)[3]), "{kept}: {report:?}");
+    }
+    for gone in [12, 1, 2, 3] {
+        assert!(!exists(&home.entries(gone)[3]), "{gone}: {report:?}");
+    }
+    assert_eq!(report.removed.len(), 4, "{report:?}");
+    assert!(report.deferred.is_empty(), "{report:?}");
+    let again = collect_cache_with(&home.cache, &retained, || {
+        panic!("only retained host archives are left")
+    })
+    .unwrap();
+    assert!(
+        again.removed.is_empty() && again.deferred.is_empty(),
+        "{again:?}"
+    );
+}
+
+#[test]
+fn an_unusable_receipt_leaves_only_downloads_that_could_be_its_host_archive() {
+    let home = Home::new();
+    home.select(1);
+    // 10: host archive named by the readable receipt; 1: selected image;
+    // 2: that receipt's guest image; 5: of unknown kind.
+    for n in [10, 1, 2, 5] {
+        home.artifact(n);
+    }
+    let good = home.release("good", 10, 2);
+    let bad = home.generation("bad", 3);
+    fs::remove_file(bad.join(".hamn-release.json")).unwrap();
+    let report = home.run(&[good, bad.clone()]);
+    assert!(exists(&home.entries(10)[3]) && exists(&home.entries(5)[3]));
+    assert!(!exists(&home.entries(1)[3]) && !exists(&home.entries(2)[3]));
+    assert_eq!(report.removed.len(), 2, "{report:?}");
+    assert_eq!(report.deferred.len(), 1, "{report:?}");
+    assert!(
+        report.deferred[0].contains("downloads")
+            && report.deferred[0].contains(bad.to_str().unwrap()),
+        "{report:?}"
+    );
 }
 
 #[test]
@@ -266,7 +348,8 @@ fn an_unsafe_receipt_file_is_not_trusted() {
         .unwrap();
         let report = home.run(&[generation]);
         assert!(exists(&home.entries(2)[0]), "{mode:o}");
-        assert_eq!(report.deferred.len(), 1, "{mode:o}: {report:?}");
+        assert!(exists(&home.entries(2)[3]), "{mode:o}");
+        assert_eq!(report.deferred.len(), 2, "{mode:o}: {report:?}");
     }
     let home = Home::new();
     home.populate(&[1, 2]);
@@ -277,10 +360,10 @@ fn an_unsafe_receipt_file_is_not_trusted() {
     symlink(&elsewhere, generation.join(".hamn-release.json")).unwrap();
     let report = home.run(&[generation]);
     assert!(
-        exists(&home.entries(2)[0]),
+        exists(&home.entries(2)[0]) && exists(&home.entries(2)[3]),
         "a symlinked receipt named no image"
     );
-    assert_eq!(report.deferred.len(), 1, "{report:?}");
+    assert_eq!(report.deferred.len(), 2, "{report:?}");
 }
 
 #[test]
