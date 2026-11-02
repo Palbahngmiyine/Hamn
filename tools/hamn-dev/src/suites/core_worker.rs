@@ -157,10 +157,15 @@ fn core_worker_isolation_and_protocol() {
     // for disk 1, so a start that got past the refusal stops at the shrink
     // check before it looks for a guest image.
     let configured = |worker: &mut Worker, arguments: Value| worker.call("vm configure", arguments);
-    let refused = configured(&mut worker, json!({"profile": "test", "yes": true, "rosetta": true}));
-    assert_eq!(refused["Err"]["message"], json!("Rosetta support was removed; --rosetta accepts only false"), "{refused}");
-    let refused = worker.call("vm create", json!({"profile": "translated", "yes": true, "rosetta": true}));
-    assert!(has(&refused, "Err") && !home.join(".hamn/translated").exists(), "{refused}");
+    for operation in ["vm configure", "vm create"] {
+        let refused = worker.call(operation, json!({"profile": "translated", "yes": true, "rosetta": true}));
+        assert_eq!(
+            refused["Err"],
+            json!({"code": "invalidRequest", "message": "Rosetta support was removed; --rosetta accepts only false"}),
+            "{operation}: {refused}"
+        );
+        assert!(!home.join(".hamn/translated").exists(), "{operation}");
+    }
     let stored = fs::read_to_string(&shared_config).unwrap();
     assert!(stored.contains("rosetta: false"), "{stored}");
     fs::write(&shared_config, stored.replace("rosetta: false", "rosetta: true")).unwrap();

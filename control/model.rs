@@ -299,6 +299,11 @@ impl Request {
                 "--rosetta is only supported for vm create and vm configure",
             ));
         }
+        if self.rosetta == Some(true) {
+            return Err(invalid(
+                "Rosetta support was removed; --rosetta accepts only false",
+            ));
+        }
         let apply = self.operation() == "vm apply";
         if !apply && (self.file.is_some() || self.dry_run) {
             return Err(invalid(
@@ -516,7 +521,7 @@ mod tests {
         }
     }
     #[test]
-    fn rosetta_takes_a_boolean_and_only_configures_a_profile() {
+    fn rosetta_takes_only_false_and_only_configures_a_profile() {
         let parse = |operation: &str, value: &str| {
             Request::try_parse_from([
                 "hamn",
@@ -531,7 +536,12 @@ mod tests {
             ])
         };
         for operation in ["create", "configure"] {
-            assert_eq!(parse(operation, "true").unwrap().rosetta, Some(true));
+            let on = parse(operation, "true").unwrap();
+            assert_eq!(on.rosetta, Some(true));
+            assert_eq!(
+                on.validate().unwrap_err().message,
+                "Rosetta support was removed; --rosetta accepts only false"
+            );
             let off = parse(operation, "false").unwrap();
             assert!(off.rosetta == Some(false) && off.validate().is_ok());
             assert!(parse(operation, "maybe").is_err());
