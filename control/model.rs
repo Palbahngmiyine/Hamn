@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Debug, Default, Parser, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[command(name = "hamn", version = crate::core::version(), about = "VM, Docker and Kubernetes console",
-    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data; vm delete --purge permanently deletes one profile with its disk. vm reset permanently deletes one profile's VM disk. system uninstall permanently removes all Hamn data.",
+    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. vm delete --purge permanently deletes one profile with its disk. vm reset permanently deletes one profile's VM disk. system uninstall permanently removes all Hamn data.",
     after_help = "Operations and their arguments: hamn --headless capabilities")]
 pub struct Request {
     #[arg(long)]
