@@ -67,6 +67,9 @@ hamn --headless vm stop --profile work --yes
 Mutations require `--yes` and explicit resource targets. One-shot commands emit
 one JSON response; `--follow` logs and `--watch` queries emit NDJSON. stdout is
 reserved for machine-readable responses.
+`vm list` needs no `--yes`, yet it can delete: it removes each profile that
+`vm up` made whose workspace path no longer exists and whose VM is stopped, with
+its disk and Docker data (see Use Hamn with an ADE).
 
 ## Host capacity
 
@@ -216,6 +219,14 @@ checks every 10 seconds the workspace path that `vm up` recorded. Once nothing
 is left there, Hamn stops the VM and then deletes its profile. The next
 `vm list` or `vm up` deletes the profile of a VM that was already stopped. Hamn
 deletes only profiles that `vm up` made, and never the worktree or its branch.
+
+Hamn cannot tell a moved or unmounted workspace from a deleted one. Moving the
+worktree (`git worktree move`, `mv`) or unmounting its volume while its VM runs
+makes Hamn stop that VM and delete its profile, with every container, image and
+volume inside it. For a stopped VM, the next `vm list` or `vm up` does the same.
+If the same directory is back at its path before Hamn deletes the profile, the
+profile stays. `vm up` at a new path makes a new VM, because the profile name
+comes from the path.
 
 ## External tools
 

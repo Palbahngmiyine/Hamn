@@ -235,7 +235,8 @@ impl Request {
             "vm up" => format!("Start the workspace's VM, creating its profile first when it has none. A new profile shares the workspace writable at its own path{}, and not the home directory; one that cannot start is removed again.", if self.no_git_mount { "" } else { " and its git directory read-only" }),
             "vm down" if self.purge => "Stop the workspace's VM and permanently delete its profile: its settings, logs and disk with every container, image, volume and file inside the VM. The workspace and its git directory are kept.".into(),
             "vm down" => "Stop the workspace's VM and interrupt its running containers. Its disk and Docker data are preserved.".into(),
-            "vm diagnostics" => "Write a redacted diagnostic archive to the selected path.".into(),
+            "vm list" => "List the profiles. Each profile that vm up made whose workspace path no longer exists and whose VM is stopped is permanently deleted first, with its disk and Docker data; no other profile changes.".into(),
+            "vm diagnostics" =>"Write a redacted diagnostic archive to the selected path.".into(),
             "system upgrade" => "Download and publish a verified Hamn release and managed guest image.".into(),
             "system uninstall" => "Permanently remove ALL Hamn profiles, VM disks, Docker data and the managed installation.".into(),
             "docker containers delete" => "Delete the selected container. Its named and anonymous volumes are preserved.".into(),
@@ -797,6 +798,10 @@ mod tests {
         assert!(down.validate().is_ok() && down.impact().contains("preserved"));
         let purge = parse(&["down", "--workspace", "/work/tree", "--purge", "--yes"]);
         assert!(purge.validate().is_ok() && purge.impact().contains("permanently delete"));
+        // vm list reclaims gone workspaces without --yes, and says so.
+        let list = parse(&["list"]);
+        assert!(list.validate().is_ok() && !list.mutates());
+        assert!(list.impact().contains("whose workspace path no longer exists and whose VM is stopped is permanently deleted"), "{}", list.impact());
         assert_eq!(
             purge.target(),
             json!({"profile":null, "workspace":"/work/tree", "context":null,
