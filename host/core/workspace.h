@@ -45,22 +45,28 @@ struct workspace {
 int workspace_identify(const char *path, struct workspace *workspace);
 
 /* The common git directory of the workspace directory at path, found the
- * way git finds it from the workspace's .git, without running git:
+ * way git finds it from the workspace's .git, without running git, when
+ * that directory is the workspace's own:
  *   - .git is a directory: that directory;
- *   - .git is a file "gitdir: <dir>" (a linked worktree or a submodule):
- *     <dir>, relative to the workspace unless absolute; then the directory
- *     named by <dir>/commondir, relative to <dir> unless absolute, when that
- *     file exists, and <dir> itself when it does not.
- * Trailing line breaks of either file are ignored, as git ignores them, and
- * symbolic links are followed. As git, it accepts the pair only when the
- * git directory holds a HEAD file and the common one objects and refs
- * directories, so that a .git file naming any other directory, such as the
- * home directory, shares nothing. Returns 0 with git holding the common
- * directory's path as F_GETPATH gives it, or -1 with git empty and reason
- * saying why there is none: no .git, a .git of another kind, a file in
- * another form, a file larger than PATH_MAX bytes, a directory that cannot
- * be opened, or one that is not laid out as a repository. Reads only, and
- * logs nothing. */
+ *   - .git is a file "gitdir: <dir>" (a linked worktree): <dir>, relative to
+ *     the workspace unless absolute; then the directory named by
+ *     <dir>/commondir, relative to <dir> unless absolute, when that file
+ *     exists, and <dir> itself when it does not.
+ * Trailing line breaks of these files are ignored, as git ignores them, and
+ * symbolic links below .git are followed. As git, it accepts the pair only
+ * when the git directory holds a HEAD file and the common one objects and
+ * refs directories, so that a .git file naming any other directory, such as
+ * the home directory, shares nothing. A .git file is input from the
+ * workspace, so its git directory must also be one that git made for this
+ * workspace: <common>/worktrees/<name>, whose gitdir file names the
+ * workspace's .git (relative to <dir> unless absolute). A submodule's git
+ * directory, another repository's, and a symbolic link .git share nothing.
+ * Returns 0 with git holding the common directory's path as F_GETPATH gives
+ * it, or -1 with git empty and reason saying why there is none: no .git, a
+ * symbolic link or a .git of another kind, a file in another form, a file
+ * larger than PATH_MAX bytes, a directory that cannot be opened, one that
+ * is not laid out as a repository, or a git directory of another worktree,
+ * of a submodule or of another repository. Reads only, and logs nothing. */
 int workspace_git_directory(const char *path, char git[PATH_MAX],
                             char reason[WORKSPACE_REASON_CAP]);
 
