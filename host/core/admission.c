@@ -33,6 +33,7 @@ static const struct {
     { ADMISSION_ITEM_LOAD, "loadAverage1m", "load average" },
     { ADMISSION_ITEM_CPUS, "logicalCpus", "CPU count" },
     { ADMISSION_ITEM_POWER, "powerSource", "power source" },
+    { ADMISSION_ITEM_BATTERY, "batteryPercent", "battery charge" },
 };
 
 static const struct {
@@ -48,12 +49,29 @@ static const struct {
 
 #define COUNT(array) (sizeof(array) / sizeof((array)[0]))
 
+/* The items the enabled limits use, as admission_decide describes. */
+static unsigned needed_items(const struct admission_snapshot *snapshot,
+                             const struct admission_limits *limits)
+{
+    unsigned needed = ADMISSION_ITEM_PRESSURE | ADMISSION_ITEM_TOTAL_MEMORY |
+                      ADMISSION_ITEM_RUNNING_MEMORY;
+    if (isfinite(limits->max_load_per_cpu))
+        needed |= ADMISSION_ITEM_LOAD | ADMISSION_ITEM_CPUS;
+    if (limits->min_battery_percent > 0) {
+        needed |= ADMISSION_ITEM_POWER;
+        if (!(snapshot->unread & ADMISSION_ITEM_POWER) &&
+            snapshot->power == ADMISSION_POWER_BATTERY)
+            needed |= ADMISSION_ITEM_BATTERY;
+    }
+    return needed;
+}
+
 unsigned admission_decide(const struct admission_snapshot *snapshot,
                           const struct admission_request *request,
                           const struct admission_limits *limits)
 {
     unsigned unread = snapshot->unread, refused = 0;
-    if (unread)
+    if (unread & needed_items(snapshot, limits))
         refused |= ADMISSION_REFUSED_UNREAD;
     if (!(unread & ADMISSION_ITEM_PRESSURE) &&
         snapshot->pressure >= limits->refused_pressure)
@@ -69,7 +87,7 @@ unsigned admission_decide(const struct admission_snapshot *snapshot,
     if (!(unread & (ADMISSION_ITEM_LOAD | ADMISSION_ITEM_CPUS)) &&
         snapshot->load_1m / snapshot->logical_cpus > limits->max_load_per_cpu)
         refused |= ADMISSION_REFUSED_LOAD;
-    if (!(unread & ADMISSION_ITEM_POWER) &&
+    if (!(unread & (ADMISSION_ITEM_POWER | ADMISSION_ITEM_BATTERY)) &&
         snapshot->power == ADMISSION_POWER_BATTERY &&
         snapshot->battery_percent < (int)limits->min_battery_percent)
         refused |= ADMISSION_REFUSED_BATTERY;
@@ -208,7 +226,7 @@ static void measure_power(struct admission_snapshot *snapshot)
 {
     CFTypeRef info = IOPSCopyPowerSourcesInfo();
     if (!info) {
-        snapshot->unread |= ADMISSION_ITEM_POWER;
+        snapshot->unread |= ADMISSION_ITEM_POWER | ADMISSION_ITEM_BATTERY;
         return;
     }
     CFStringRef source = IOPSGetProvidingPowerSourceType(info);
@@ -221,10 +239,12 @@ static void measure_power(struct admission_snapshot *snapshot)
         snapshot->power = ADMISSION_POWER_UPS;
     else
         known = 0;
-    if (!known || measure_battery(info, snapshot) != 0 ||
-        (snapshot->power == ADMISSION_POWER_BATTERY &&
-         snapshot->battery_percent < 0))
+    if (!known)
         snapshot->unread |= ADMISSION_ITEM_POWER;
+    if (measure_battery(info, snapshot) != 0 ||
+        (known && snapshot->power == ADMISSION_POWER_BATTERY &&
+         snapshot->battery_percent < 0))
+        snapshot->unread |= ADMISSION_ITEM_BATTERY;
     CFRelease(info);
 }
 
@@ -487,7 +507,7 @@ static char *refusal_json(const char *profile,
         snapshot->unread & ADMISSION_ITEM_POWER ? cJSON_CreateNull() :
         cJSON_CreateString(power_name(snapshot->power)));
     add(measured, "batteryPercent",
-        snapshot->unread & ADMISSION_ITEM_POWER ||
+        snapshot->unread & ADMISSION_ITEM_BATTERY ||
         snapshot->battery_percent < 0 ? cJSON_CreateNull() :
         cJSON_CreateNumber(snapshot->battery_percent));
     add(root, "measured", measured);
@@ -557,9 +577,10 @@ static void refusal_message(struct text *text, const char *profile,
     const char *separator = "";
     if (refused & ADMISSION_REFUSED_UNREAD) {
         append(text, "cannot measure the host's ");
+        unsigned unread = snapshot->unread & needed_items(snapshot, limits);
         const char *comma = "";
         for (size_t index = 0; index < COUNT(items); index++) {
-            if (snapshot->unread & items[index].item) {
+            if (unread & items[index].item) {
                 append(text, "%s%s", comma, items[index].words);
                 comma = ", ";
             }
@@ -638,15 +659,29 @@ int admission_admit(const char *profile, const struct admission_request *request
     log_clear_error();
     unsigned refused = admission_decide(&snapshot, request, &limits);
     if (!refused) {
-        logmsg("admitted: running VMs use %llu MiB and this VM %u MiB of "
-               "%llu MiB host memory (reserve %llu MiB); memory pressure %s; "
-               "load %.2f on %u CPUs; power %s",
+        struct text message = { .length = 0 };
+        append(&message, "admitted: running VMs use %llu MiB and this VM %u "
+               "MiB of %llu MiB host memory (reserve %llu MiB); memory "
+               "pressure %s",
                (unsigned long long)snapshot.running_memory_mib,
                request->memory_mib,
                (unsigned long long)snapshot.total_memory_mib,
                (unsigned long long)limits.memory_reserve_mib,
-               pressure_name(snapshot.pressure), snapshot.load_1m,
-               snapshot.logical_cpus, power_name(snapshot.power));
+               pressure_name(snapshot.pressure));
+        if (!(snapshot.unread & (ADMISSION_ITEM_LOAD | ADMISSION_ITEM_CPUS)))
+            append(&message, "; load %.2f on %u CPUs", snapshot.load_1m,
+                   snapshot.logical_cpus);
+        if (!(snapshot.unread & ADMISSION_ITEM_POWER))
+            append(&message, "; power %s", power_name(snapshot.power));
+        /* Admitted only because no enabled limit uses these. */
+        const char *comma = "; not measured: ";
+        for (size_t index = 0; index < COUNT(items); index++) {
+            if (snapshot.unread & items[index].item) {
+                append(&message, "%s%s", comma, items[index].words);
+                comma = ", ";
+            }
+        }
+        logmsg("%s", message.buffer);
         admission_snapshot_release(&snapshot);
         return 0;
     }

@@ -423,6 +423,85 @@ static void decisions_follow_each_limit_at_its_boundary(void)
             ADMISSION_REFUSED_UNREAD | ADMISSION_REFUSED_MEMORY);
 }
 
+/* Memory pressure, total memory and running memory are always needed. The
+ * load average and CPU count are needed only under a load limit; the power
+ * source only under a battery minimum. */
+static void only_an_item_an_enabled_limit_uses_refuses_when_unread(void)
+{
+    const unsigned always = ADMISSION_ITEM_PRESSURE |
+                            ADMISSION_ITEM_TOTAL_MEMORY |
+                            ADMISSION_ITEM_RUNNING_MEMORY;
+    struct {
+        const char *name;
+        unsigned unread;
+        double max_load_per_cpu;
+        unsigned min_battery_percent;
+        unsigned expected;
+    } cases[] = {
+        { "pressure, no optional limit", ADMISSION_ITEM_PRESSURE, INFINITY,
+          0, ADMISSION_REFUSED_UNREAD },
+        { "total memory, no optional limit", ADMISSION_ITEM_TOTAL_MEMORY,
+          INFINITY, 0, ADMISSION_REFUSED_UNREAD },
+        { "running memory, no optional limit",
+          ADMISSION_ITEM_RUNNING_MEMORY, INFINITY, 0,
+          ADMISSION_REFUSED_UNREAD },
+        { "load under a load limit", ADMISSION_ITEM_LOAD, 0.75, 0,
+          ADMISSION_REFUSED_UNREAD },
+        { "load without a load limit", ADMISSION_ITEM_LOAD, INFINITY, 30, 0 },
+        { "CPU count under a load limit", ADMISSION_ITEM_CPUS, 0.75, 0,
+          ADMISSION_REFUSED_UNREAD },
+        { "CPU count without a load limit", ADMISSION_ITEM_CPUS, INFINITY, 30,
+          0 },
+        { "power under a battery minimum", ADMISSION_ITEM_POWER, INFINITY, 30,
+          ADMISSION_REFUSED_UNREAD },
+        { "power without a battery minimum", ADMISSION_ITEM_POWER, 0.75, 0,
+          0 },
+        { "load, CPUs and power, no optional limit",
+          ADMISSION_ITEM_LOAD | ADMISSION_ITEM_CPUS | ADMISSION_ITEM_POWER,
+          INFINITY, 0, 0 },
+        { "load, CPUs and power, every limit",
+          ADMISSION_ITEM_LOAD | ADMISSION_ITEM_CPUS | ADMISSION_ITEM_POWER,
+          0.75, 30, ADMISSION_REFUSED_UNREAD },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct decision d = roomy();
+        d.snapshot.unread = cases[i].unread;
+        d.limits.max_load_per_cpu = cases[i].max_load_per_cpu;
+        d.limits.min_battery_percent = cases[i].min_battery_percent;
+        decides(cases[i].name, &d, cases[i].expected);
+        if (cases[i].unread & always)
+            continue;
+        d.snapshot.running_memory_mib = 9000;
+        decides(cases[i].name, &d,
+                cases[i].expected | ADMISSION_REFUSED_MEMORY);
+    }
+
+    /* The battery charge is needed only under a battery minimum while the
+     * Mac runs on battery. */
+    struct decision d = roomy();
+    d.snapshot.unread = ADMISSION_ITEM_BATTERY;
+    decides("an unread charge on AC power", &d, 0);
+    d.snapshot.running_memory_mib = 9000;
+    decides("an unread charge on AC power beside too little memory", &d,
+            ADMISSION_REFUSED_MEMORY);
+    d = roomy();
+    d.snapshot.unread = ADMISSION_ITEM_BATTERY;
+    d.snapshot.power = ADMISSION_POWER_UPS;
+    decides("an unread charge on UPS power", &d, 0);
+    d.snapshot.power = ADMISSION_POWER_BATTERY;
+    decides("an unread charge on battery power", &d,
+            ADMISSION_REFUSED_UNREAD);
+    d.limits.min_battery_percent = 0;
+    decides("an unread charge on battery power without a minimum", &d, 0);
+    d = roomy();
+    d.snapshot.unread = ADMISSION_ITEM_POWER | ADMISSION_ITEM_BATTERY;
+    d.snapshot.power = ADMISSION_POWER_AC;
+    decides("no power sources under a battery minimum", &d,
+            ADMISSION_REFUSED_UNREAD);
+    d.limits.min_battery_percent = 0;
+    decides("no power sources without a battery minimum", &d, 0);
+}
+
 static struct admission_snapshot measured(const char *starting)
 {
     struct admission_snapshot snapshot;
@@ -430,7 +509,8 @@ static struct admission_snapshot measured(const char *starting)
     return snapshot;
 }
 
-/* Which item a host change leaves unread. */
+/* Which items a host change leaves unread. Under the default limits only
+ * an always needed item refuses; under every limit, any item does. */
 static void unread_after(const char *name, void (*change)(void),
                          unsigned item)
 {
@@ -445,8 +525,24 @@ static void unread_after(const char *name, void (*change)(void),
     struct admission_request request = { .cpus = 1, .memory_mib = 1024 };
     struct admission_limits limits;
     assert(admission_limits_read(&limits) == 0);
-    assert(admission_decide(&snapshot, &request, &limits) ==
-           ADMISSION_REFUSED_UNREAD);
+    unsigned always = ADMISSION_ITEM_PRESSURE | ADMISSION_ITEM_TOTAL_MEMORY |
+                      ADMISSION_ITEM_RUNNING_MEMORY;
+    if (admission_decide(&snapshot, &request, &limits) !=
+        (item & always ? ADMISSION_REFUSED_UNREAD : 0u)) {
+        fprintf(stderr, "%s: wrong decision under the default limits\n",
+                name);
+        abort();
+    }
+    limits.max_load_per_cpu = 1000;
+    limits.min_battery_percent = 1;
+    /* A battery charge matters only while the Mac runs on battery. */
+    unsigned expected = item == ADMISSION_ITEM_BATTERY &&
+                        snapshot.power != ADMISSION_POWER_BATTERY ?
+                        0u : ADMISSION_REFUSED_UNREAD;
+    if (admission_decide(&snapshot, &request, &limits) != expected) {
+        fprintf(stderr, "%s: wrong decision under every limit\n", name);
+        abort();
+    }
     admission_snapshot_release(&snapshot);
 }
 
@@ -472,6 +568,11 @@ static void battery_charge_missing(void)
     host.battery = 1;
     host.capacity = -1;
     host.max_capacity = 100;
+}
+static void battery_charge_missing_on_battery(void)
+{
+    battery_charge_missing();
+    host.source = CFSTR(kIOPMBatteryPowerKey);
 }
 static void battery_capacity_zero(void)
 {
@@ -501,17 +602,20 @@ static void each_measurement_that_cannot_be_read_refuses(void)
     unread_after("getloadavg fails", load_fails, ADMISSION_ITEM_LOAD);
     unread_after("load NaN", load_nan, ADMISSION_ITEM_LOAD);
     unread_after("negative load", load_negative, ADMISSION_ITEM_LOAD);
-    unread_after("no power sources", power_info_fails, ADMISSION_ITEM_POWER);
+    unread_after("no power sources", power_info_fails,
+                 ADMISSION_ITEM_POWER | ADMISSION_ITEM_BATTERY);
     unread_after("no providing source", no_source, ADMISSION_ITEM_POWER);
     unread_after("an unknown source", unknown_source, ADMISSION_ITEM_POWER);
     unread_after("battery power without a battery",
-                 battery_power_without_battery, ADMISSION_ITEM_POWER);
+                 battery_power_without_battery, ADMISSION_ITEM_BATTERY);
     unread_after("a battery without its charge", battery_charge_missing,
-                 ADMISSION_ITEM_POWER);
+                 ADMISSION_ITEM_BATTERY);
     unread_after("a battery of no capacity", battery_capacity_zero,
-                 ADMISSION_ITEM_POWER);
+                 ADMISSION_ITEM_BATTERY);
     unread_after("a battery over its capacity", battery_over_capacity,
-                 ADMISSION_ITEM_POWER);
+                 ADMISSION_ITEM_BATTERY);
+    unread_after("a battery without its charge on battery power",
+                 battery_charge_missing_on_battery, ADMISSION_ITEM_BATTERY);
 
     host_reset();
     struct admission_snapshot snapshot = measured("work");
@@ -553,6 +657,51 @@ static void each_measurement_that_cannot_be_read_refuses(void)
     assert(cJSON_IsNull(cJSON_GetObjectItem(
         cJSON_GetObjectItem(value, "measured"), "memoryPressure")));
     cJSON_Delete(value);
+}
+
+/* Through admission_admit: an unread load average is no reason without a
+ * load limit, yet a refusal for another reason still reports it unread. */
+static void an_unread_item_no_enabled_limit_uses_is_reported_but_admitted(void)
+{
+    begin("unneeded");
+    create("work", 1);
+    host.load_fails = 1;
+    struct admission_request request = { .cpus = 1, .memory_mib = 1024 };
+    struct admission_lock lock;
+    char *refusal = NULL;
+    assert(admission_admit("work", &request, &lock, &refusal) == 0 &&
+           !refusal && lock.fd >= 0);
+    admission_lock_release(&lock);
+
+    assert(setenv("HAMN_ADMISSION_MEMORY_RESERVE_MIB", "4294967295", 1) == 0);
+    assert(admission_admit("work", &request, &lock, &refusal) ==
+           ADMISSION_REFUSED && refusal && lock.fd == -1);
+    assert(!strstr(log_last_error(), "cannot measure"));
+    cJSON *value = cJSON_Parse(refusal);
+    cJSON_free(refusal);
+    char *text = cJSON_PrintUnformatted(cJSON_GetObjectItem(value, "reasons"));
+    assert(strcmp(text, "[\"memory\"]") == 0);
+    cJSON_free(text);
+    text = cJSON_PrintUnformatted(cJSON_GetObjectItem(value, "unread"));
+    assert(strcmp(text, "[\"loadAverage1m\"]") == 0);
+    cJSON_free(text);
+    assert(cJSON_IsNull(cJSON_GetObjectItem(
+        cJSON_GetObjectItem(value, "measured"), "loadAverage1m")));
+    cJSON_Delete(value);
+
+    clear_limits();
+    assert(setenv("HAMN_ADMISSION_MAX_LOAD_PER_CPU", "1", 1) == 0);
+    assert(admission_admit("work", &request, &lock, &refusal) ==
+           ADMISSION_REFUSED && refusal && lock.fd == -1);
+    assert(strstr(log_last_error(),
+                  "cannot measure the host's load average. "));
+    value = cJSON_Parse(refusal);
+    cJSON_free(refusal);
+    text = cJSON_PrintUnformatted(cJSON_GetObjectItem(value, "reasons"));
+    assert(strcmp(text, "[\"measurementFailed\"]") == 0);
+    cJSON_free(text);
+    cJSON_Delete(value);
+    clear_limits();
 }
 
 static int named(const struct admission_snapshot *snapshot, const char *name,
@@ -914,7 +1063,9 @@ int main(void)
     snprintf(root, sizeof(root), "/tmp/hamn-admission-XXXXXX");
     assert(mkdtemp(root));
     decisions_follow_each_limit_at_its_boundary();
+    only_an_item_an_enabled_limit_uses_refuses_when_unread();
     each_measurement_that_cannot_be_read_refuses();
+    an_unread_item_no_enabled_limit_uses_is_reported_but_admitted();
     running_vms_count_until_their_vmrun_is_gone();
     a_vm_that_cannot_be_verified_counts_as_running();
     a_running_profile_whose_configuration_cannot_be_read_refuses();

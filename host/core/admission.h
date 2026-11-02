@@ -49,7 +49,8 @@ enum admission_item {
     ADMISSION_ITEM_RUNNING_MEMORY = 1u << 2,
     ADMISSION_ITEM_LOAD = 1u << 3,
     ADMISSION_ITEM_CPUS = 1u << 4,
-    ADMISSION_ITEM_POWER = 1u << 5,
+    ADMISSION_ITEM_POWER = 1u << 5,   /* the providing source */
+    ADMISSION_ITEM_BATTERY = 1u << 6, /* the internal battery's charge */
 };
 
 /* A profile whose VM runs, or may run: vm_process_probe could not verify
@@ -102,8 +103,12 @@ enum admission_reason {
 };
 
 /* 0 to admit, or every reason that refuses. Reads only its arguments.
- *   UNREAD    a measurement is unread; a check that needs only read items
- *             still adds its own reason;
+ *   UNREAD    an item an enabled limit uses is unread. PRESSURE,
+ *             TOTAL_MEMORY and RUNNING_MEMORY are always used; LOAD and
+ *             CPUS when max_load_per_cpu is finite; POWER when
+ *             min_battery_percent > 0, and BATTERY too when POWER reads
+ *             BATTERY. Any other unread item refuses nothing. A check that
+ *             needs only read items still adds its own reason;
  *   PRESSURE  pressure >= refused_pressure;
  *   MEMORY    running_memory_mib + memory_mib > total_memory_mib -
  *             memory_reserve_mib (0 when the reserve is not smaller);
@@ -130,7 +135,8 @@ int admission_limits_read(struct admission_limits *limits);
  * vm_process_probe of every profile under ~/.hamn except starting, adding
  * the memoryMiB of each one whose VM is verified or cannot be verified. A
  * value that cannot be read or is out of range marks its item unread; so
- * does a running profile whose config.yaml cannot be read. Writes nothing
+ * does a running profile whose config.yaml cannot be read, and battery
+ * power without an internal battery marks BATTERY. Writes nothing
  * of its own; the probe can record a verified vmrun's identity in that
  * profile, as vm list does. Does not lock profiles. Release with
  * admission_snapshot_release. */
@@ -171,7 +177,8 @@ void admission_lock_release(struct admission_lock *lock);
  * "memoryPressure","maxLoadPerCpu","minBatteryPercent"},"runningProfiles":
  * [{"name","memoryMiB","verified"}]}. reasons holds "measurementFailed",
  * "memoryPressure", "memory", "load" and "battery" in that order; unread
- * holds the measured keys that could not be read, whose values are null.
+ * holds every measured key that could not be read, whether or not a limit
+ * uses it, and those values are null.
  * A pressure is "normal", "warn" or "critical", a power source "ac",
  * "battery" or "ups". batteryPercent is null without a battery, a memoryMiB
  * null when unreadable, and maxLoadPerCpu null without a load limit. */
