@@ -68,6 +68,17 @@ pub struct Request {
     )]
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub purge: bool,
+    // vm up and vm down select their VM by this directory, not by --profile.
+    // Left out of the worker request unless set, as the vm apply arguments.
+    #[arg(
+        long,
+        help = "Workspace directory for vm up and vm down: an absolute path, such as a git worktree"
+    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
+    #[arg(long, help = "Share only the workspace with vm up, not its git directory")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_git_mount: bool,
     #[arg(
         long,
         help = "Release manifest URL for system upgrade (defaults to latest stable)"
@@ -127,6 +138,8 @@ pub const OPERATIONS: &[(&str, bool)] = &[
     ("vm stop", true),
     ("vm delete", true),
     ("vm reset", true),
+    ("vm up", true),
+    ("vm down", true),
     ("vm diagnostics", true),
     ("vm env", false),
     ("system upgrade", true),
@@ -189,6 +202,10 @@ impl Request {
     pub fn operation(&self) -> String {
         self.words.join(" ")
     }
+    /// `vm up` and `vm down` select their VM by `--workspace`, not `--profile`.
+    pub fn selects_workspace(&self) -> bool {
+        matches!(self.operation().as_str(), "vm up" | "vm down")
+    }
     pub fn mutates(&self) -> bool {
         if self.check
             && matches!(
@@ -215,6 +232,9 @@ impl Request {
             "vm delete" if self.purge => "Stop the VM and permanently delete the profile: its settings, logs and disk with every container, image, volume and file inside the VM. Shared host directories are kept.".into(),
             "vm delete" => "Stop and remove the profile from active listings. Its disk and Docker data are preserved.".into(),
             "vm reset" => "Stop the VM and permanently delete its disk: every container, image, volume and file inside the VM. The next start creates a new disk from the signed guest image; the profile settings and shared host directories are kept.".into(),
+            "vm up" => format!("Start the workspace's VM, creating its profile first when it has none. A new profile shares the workspace writable at its own path{}, and not the home directory; one that cannot start is removed again.", if self.no_git_mount { "" } else { " and its git directory read-only" }),
+            "vm down" if self.purge => "Stop the workspace's VM and permanently delete its profile: its settings, logs and disk with every container, image, volume and file inside the VM. The workspace and its git directory are kept.".into(),
+            "vm down" => "Stop the workspace's VM and interrupt its running containers. Its disk and Docker data are preserved.".into(),
             "vm diagnostics" => "Write a redacted diagnostic archive to the selected path.".into(),
             "system upgrade" => "Download and publish a verified Hamn release and managed guest image.".into(),
             "system uninstall" => "Permanently remove ALL Hamn profiles, VM disks, Docker data and the managed installation.".into(),
@@ -240,6 +260,8 @@ impl Request {
                     .any(|(op, _)| *op == self.words[..2].join(" "));
             return Err(invalid(if positional_profile && self.words[1] == "apply" {
                 "unknown operation; pass the profile definition with --file <path> and the profile with --profile <name>, not a positional word"
+            } else if positional_profile && matches!(self.words[1].as_str(), "up" | "down") {
+                "unknown operation; pass the workspace with --workspace <absolute path>, not a positional word"
             } else if positional_profile {
                 "unknown operation; select the VM profile with --profile <name>, not a positional word"
             } else {
@@ -252,8 +274,34 @@ impl Request {
         if self.mutates() && !self.yes {
             return Err(invalid("mutation requires --yes"));
         }
+        if self.selects_workspace() {
+            if self.profile.is_some() {
+                return Err(invalid(
+                    "vm up and vm down select the VM with --workspace, not --profile",
+                ));
+            }
+            match self.workspace.as_deref() {
+                None => {
+                    return Err(invalid(
+                        "vm up and vm down require --workspace <absolute path>",
+                    ));
+                }
+                Some(path) if !path.starts_with('/') || path.contains('\0') => {
+                    return Err(invalid("--workspace must be an absolute path"));
+                }
+                Some(_) => {}
+            }
+        } else if self.workspace.is_some() {
+            return Err(invalid(
+                "--workspace is only supported for vm up and vm down",
+            ));
+        }
+        if self.no_git_mount && self.operation() != "vm up" {
+            return Err(invalid("--no-git-mount is only supported for vm up"));
+        }
         if self.words.first().is_some_and(|word| word == "vm")
             && self.operation() != "vm list"
+            && !self.selects_workspace()
             && self.profile.is_none()
         {
             return Err(invalid(
@@ -312,8 +360,8 @@ impl Request {
                 "--rosetta is only supported for vm create and vm configure",
             ));
         }
-        if self.purge && self.operation() != "vm delete" {
-            return Err(invalid("--purge is only supported for vm delete"));
+        if self.purge && !matches!(self.operation().as_str(), "vm delete" | "vm down") {
+            return Err(invalid("--purge is only supported for vm delete and vm down"));
         }
         let apply = self.operation() == "vm apply";
         if !apply && (self.file.is_some() || self.dry_run) {
@@ -422,7 +470,7 @@ impl Request {
         Ok(())
     }
     pub fn target(&self) -> Value {
-        json!({"profile":self.profile,"context":self.context,
+        json!({"profile":self.profile,"workspace":self.workspace,"context":self.context,
             "namespace":self.namespace,"name":self.name,"dockerConfig":self.docker_config})
     }
 }
@@ -719,7 +767,7 @@ mod tests {
         ] {
             assert_eq!(
                 rejection(arguments),
-                "--purge is only supported for vm delete",
+                "--purge is only supported for vm delete and vm down",
                 "{arguments:?}"
             );
         }
@@ -729,6 +777,64 @@ mod tests {
         assert_eq!(purge["purge"], true, "{purge}");
         let read: Request = serde_json::from_value(purge).unwrap();
         assert!(read.purge && read.validate().is_ok());
+    }
+    #[test]
+    fn vm_up_and_down_select_the_vm_by_an_absolute_workspace() {
+        let parse = |arguments: &[&str]| {
+            let mut request = Request::try_parse_from(
+                [&["hamn", "--headless", "vm"][..], arguments].concat(),
+            )
+            .unwrap();
+            request.normalize().unwrap();
+            request
+        };
+        let up = parse(&["up", "--workspace", "/work/tree", "--yes", "--memory", "2"]);
+        assert!(up.validate().is_ok() && up.mutates() && up.selects_workspace());
+        assert!(up.impact().contains("its git directory read-only"), "{}", up.impact());
+        let up = parse(&["up", "--workspace", "/work/tree", "--yes", "--no-git-mount"]);
+        assert!(up.validate().is_ok() && !up.impact().contains("git"), "{}", up.impact());
+        let down = parse(&["down", "--workspace", "/work/tree", "--yes"]);
+        assert!(down.validate().is_ok() && down.impact().contains("preserved"));
+        let purge = parse(&["down", "--workspace", "/work/tree", "--purge", "--yes"]);
+        assert!(purge.validate().is_ok() && purge.impact().contains("permanently delete"));
+        assert_eq!(
+            purge.target(),
+            json!({"profile":null, "workspace":"/work/tree", "context":null,
+                "namespace":null, "name":null, "dockerConfig":null})
+        );
+        for (arguments, message) in [
+            (&["up", "--workspace", "/work/tree"][..], "mutation requires --yes"),
+            (&["up", "--yes"], "vm up and vm down require --workspace <absolute path>"),
+            (&["down", "--purge", "--yes"], "vm up and vm down require --workspace <absolute path>"),
+            (&["up", "--workspace", "work/tree", "--yes"], "--workspace must be an absolute path"),
+            (&["down", "--workspace", "", "--yes"], "--workspace must be an absolute path"),
+            (&["up", "--workspace", "/w\0x", "--yes"], "--workspace must be an absolute path"),
+            (
+                &["up", "--workspace", "/work/tree", "--profile", "work", "--yes"],
+                "vm up and vm down select the VM with --workspace, not --profile",
+            ),
+            (
+                &["start", "--workspace", "/work/tree", "--profile", "work", "--yes"],
+                "--workspace is only supported for vm up and vm down",
+            ),
+            (
+                &["down", "--workspace", "/work/tree", "--no-git-mount", "--yes"],
+                "--no-git-mount is only supported for vm up",
+            ),
+            (
+                &["up", "/work/tree", "--yes"],
+                "unknown operation; pass the workspace with --workspace <absolute path>, not a positional word",
+            ),
+        ] {
+            assert_eq!(parse(arguments).validate().unwrap_err().message, message, "{arguments:?}");
+        }
+        // Both arguments reach the worker only when set.
+        let start = serde_json::to_value(parse(&["start", "--profile", "work", "--yes"])).unwrap();
+        assert!(start.get("workspace").is_none() && start.get("no_git_mount").is_none(), "{start}");
+        let sent = serde_json::to_value(parse(&["up", "--workspace", "/w", "--no-git-mount", "--yes"])).unwrap();
+        assert!(sent["workspace"] == "/w" && sent["no_git_mount"] == true, "{sent}");
+        let read: Request = serde_json::from_value(sent).unwrap();
+        assert!(read.no_git_mount && read.validate().is_ok());
     }
     #[test]
     fn failures_never_publish_success_data() {

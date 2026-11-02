@@ -21,4 +21,11 @@ int control_stop_locked(const char *profile);
  * left (purge_sweep). *absent is written on every return. */
 int control_purge_locked(const char *profile, int *absent);
 
+struct profile;
+/* The creation of hamn_control_apply for the settings of desired, whose
+ * dir profile_locate has set and which profile_storable accepts: 0 when it
+ * created the profile, and the return values of hamn_control_apply
+ * otherwise, with 4 also when the profile exists. */
+int control_create_locked(const struct profile *desired);
+
 #endif

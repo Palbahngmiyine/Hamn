@@ -136,6 +136,58 @@ int hamn_control_delete(const char *profile);
  * way, so no order of removal is safe. */
 #define HAMN_CONTROL_STOP_UNCERTAIN 5
 int hamn_control_purge(const char *profile, int *absent);
+/* vm up: start the VM of the workspace directory at path, creating its
+ * ephemeral profile first when it has none (core/workspace.h names the
+ * profile and describes its record). path is a borrowed NUL-terminated
+ * absolute path; a zero resource keeps the profile's value, as for
+ * hamn_control_start; git_mount is 1 to share the workspace's common git
+ * directory and 0 not to.
+ *
+ * A new profile has the default settings and the requested resources,
+ * except that the home directory is not shared: the workspace is shared
+ * writable at its own path, then its common git directory, when git_mount
+ * is set and it can be found, read-only at its own path. One that cannot
+ * be found is a warning, not a failure. A profile that has the record of
+ * this workspace is started as hamn_control_start starts it, with the
+ * mounts it was created with.
+ *
+ * Returns the values of hamn_control_start, and
+ *   2  path is not an absolute path to a directory of this user, or a
+ *      profile cannot store its path: nothing under ~/.hamn was created;
+ *   4  the profile exists without the record of this workspace, it has the
+ *      record of another directory (also one that was at the same path
+ *      before), or git_mount is 0 and it shares a git directory: nothing
+ *      was changed;
+ *   130  also when the call was cancelled while it waited for the lifecycle
+ *      lock: it gave up before any change once it held the lock.
+ * On HAMN_CONTROL_ADMISSION_REFUSED *result owns the refusal, as for
+ * hamn_control_start. After every other return that found the workspace
+ * *result owns {"profile","workspace"}: the profile's name and the
+ * workspace's path. Release it with hamn_control_free; it is NULL
+ * otherwise. When this call created the profile and its start does not
+ * return 0, or its configuration write was not confirmed (1), the call
+ * deletes the profile again (hamn_control_purge) and log_last_error() says
+ * so after the reason: a refused or failed vm up leaves no profile
+ * directory it made. Only its lock files stay, as after a purge.
+ *
+ * Holds the profile's lifecycle lock, waiting for it, from before it reads
+ * the profile until its start, and that deletion, end. */
+int hamn_control_up(const char *path, unsigned cpus, unsigned memory_gib,
+                    unsigned disk_gib, int git_mount, char **result);
+/* vm down: stop the VM of the workspace directory at path when purge is 0,
+ * as hamn_control_stop; purge it when purge is 1, as hamn_control_purge,
+ * including the removal of what interrupted purges left. Only a profile with
+ * the record of this workspace is stopped or purged. path is as for
+ * hamn_control_up; absent and result are written on every return.
+ *
+ * Returns the values of hamn_control_stop or hamn_control_purge, and 2 and
+ * 4 as hamn_control_up, after which nothing was changed. When the
+ * workspace has no profile, a purge returns 0 with *absent 1 and creates,
+ * locks and changes nothing, and a stop returns 1. *result owns
+ * {"profile","workspace"} as for hamn_control_up once the workspace was
+ * found, and is NULL otherwise. */
+int hamn_control_down(const char *path, int purge, int *absent,
+                      char **result);
 /* Replace the VM disk of an existing profile: stop its VM, then delete
  * disk.img and what belongs to that disk (its EFI variables, the marker of
  * the guest deployment it received and the record of its damage). The next

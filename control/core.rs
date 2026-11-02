@@ -43,6 +43,24 @@ unsafe extern "C" {
     // C borrows profile for this call and writes absent on every return: 1 when
     // the profile did not exist. core/control.h lists the return values.
     fn hamn_control_purge(profile: *const libc::c_char, absent: *mut i32) -> i32;
+    // C borrows workspace for the call. result is written on every return:
+    // owned UTF-8 JSON (release only with hamn_control_free) or null;
+    // core/control.h says which JSON on which return.
+    fn hamn_control_up(
+        workspace: *const libc::c_char,
+        cpu: u32,
+        memory: u32,
+        disk: u32,
+        git_mount: i32,
+        result: *mut *mut libc::c_char,
+    ) -> i32;
+    // As hamn_control_up; absent is written on every return.
+    fn hamn_control_down(
+        workspace: *const libc::c_char,
+        purge: i32,
+        absent: *mut i32,
+        result: *mut *mut libc::c_char,
+    ) -> i32;
     // Stops the VM, then deletes its disk; core/control.h describes what stays.
     fn hamn_control_reset(profile: *const libc::c_char) -> i32;
     fn hamn_control_diagnostics(
@@ -162,6 +180,86 @@ fn apply(request: &Request, profile: *const libc::c_char) -> Result<Value> {
     ))
 }
 
+/// `vm up` and `vm down`: the C core finds the workspace's profile and
+/// creates, starts, stops or purges it in one call. Its JSON names the
+/// profile once the workspace is found, also after a failure, so that the
+/// outcome check reads that profile's operation record; after an admission
+/// refusal it is the refusal. A successful up or stop answers with the
+/// profile's status and the workspace, as `vm start` and `vm stop` answer
+/// with the status; a purge answers as `vm delete --purge`.
+fn workspace(request: &Request) -> Result<Value> {
+    let operation = request.operation();
+    let workspace = CString::new(request.workspace.as_deref().unwrap_or_default())
+        .map_err(|e| Failure::new("invalidRequest", e))?;
+    let mut output = std::ptr::null_mut();
+    let mut absent = 0;
+    // SAFETY: workspace is NUL-terminated and outlives the call; absent and
+    // output are valid places for what C writes.
+    let rc = unsafe {
+        if operation == "vm up" {
+            hamn_control_up(
+                workspace.as_ptr(),
+                request.cpu.unwrap_or(0),
+                request.memory.unwrap_or(0),
+                request.disk.unwrap_or(0),
+                i32::from(!request.no_git_mount),
+                &mut output,
+            )
+        } else {
+            hamn_control_down(workspace.as_ptr(), i32::from(request.purge), &mut absent, &mut output)
+        }
+    };
+    let found = if output.is_null() {
+        None
+    } else {
+        // SAFETY: a non-null result is NUL-terminated JSON owned by this
+        // call until hamn_control_free.
+        let value = serde_json::from_slice::<Value>(unsafe { CStr::from_ptr(output) }.to_bytes());
+        unsafe { hamn_control_free(output) };
+        Some(value.map_err(|e| Failure::new("coreProtocol", e))?)
+    };
+    let profile = found
+        .as_ref()
+        .and_then(|value| value["profile"].as_str())
+        .map(CString::new)
+        .transpose()
+        .map_err(|e| Failure::new("coreProtocol", e))?;
+    if rc != 0 {
+        // The operation's reason, taken before the status query below.
+        let message = recorded_error();
+        let unknown = profile.as_ref().is_some_and(|profile| {
+            query(Some(profile)).is_ok_and(|v| v["lastOperation"]["status"] == "outcomeUnknown")
+        });
+        let mut failure = Failure::new(
+            control_failure_code(&operation, rc, unknown),
+            if message.is_empty() {
+                "C core operation failed"
+            } else {
+                &message
+            },
+        );
+        if failure.code == "admissionRefused" {
+            failure.details = found;
+        }
+        return Err(failure);
+    }
+    let found = found.ok_or_else(|| Failure::new("coreProtocol", "missing C result"))?;
+    if request.purge {
+        return Ok(json!({"profile":found["profile"], "workspace":found["workspace"],
+            "deleted":true, "purged":true, "alreadyAbsent":absent != 0}));
+    }
+    let mut status = query(profile.as_ref())?;
+    status["profile"] = found["profile"].clone();
+    status["workspace"] = found["workspace"].clone();
+    if operation == "vm up" {
+        status["dockerHost"] = json!(format!(
+            "unix://{}",
+            status["dockerSocket"].as_str().unwrap_or_default()
+        ));
+    }
+    Ok(status)
+}
+
 /// The error code of a failed hamn_control_apply, by its return value.
 fn apply_failure_code(rc: i32) -> &'static str {
     match rc {
@@ -180,14 +278,17 @@ fn apply_failure_code(rc: i32) -> &'static str {
 /// knows its own outcome (core/control.h): it changed nothing in the guest.
 /// The record can still say outcomeUnknown for an earlier operation that
 /// the damage keeps unresolved, and `vm status` shows that separately. A
-/// start that admission refused changed nothing either.
+/// start that admission refused changed nothing either. `vm up` fails as
+/// the start it runs, and `vm down` as the stop or purge.
 fn control_failure_code(operation: &str, rc: i32, unknown: bool) -> &'static str {
     match rc {
-        6 if operation == "vm start" => "guestFilesystemDamaged",
-        7 if operation == "vm start" => "admissionRefused",
+        // vm up and vm down refused the workspace before any change.
+        2 if matches!(operation, "vm up" | "vm down") => "invalidRequest",
+        6 if matches!(operation, "vm start" | "vm up") => "guestFilesystemDamaged",
+        7 if matches!(operation, "vm start" | "vm up") => "admissionRefused",
         // HAMN_CONTROL_STOP_UNCERTAIN of a purge: nothing was deleted, and the
         // VM may still run, as when a soft delete refuses for that reason.
-        5 if operation == "vm delete" => "outcomeUnknown",
+        5 if matches!(operation, "vm delete" | "vm down") => "outcomeUnknown",
         _ if unknown => "outcomeUnknown",
         130 => "cancelled",
         3 => "restartRequired",
@@ -207,6 +308,9 @@ fn execute(request: &Request) -> Result<Value> {
     let pointer = profile.as_ref().map_or(std::ptr::null(), |p| p.as_ptr());
     if request.operation() == "vm apply" {
         return apply(request, pointer);
+    }
+    if request.selects_workspace() {
+        return workspace(request);
     }
     let cpu = request.cpu.unwrap_or(0);
     let memory = request.memory.unwrap_or(0);
@@ -402,7 +506,7 @@ async fn capture(
 pub async fn call(request: &Request) -> Result<Value> {
     let executable = std::env::current_exe().map_err(|e| Failure::new("coreUnavailable", e))?;
     let result = call_executable(request, executable.as_os_str(), None, None).await;
-    if request.operation() == "vm start"
+    if matches!(request.operation().as_str(), "vm start" | "vm up")
         && result.as_ref().is_err_and(|e| e.code == "restartRequired")
     {
         let invocation = std::env::args_os().next().unwrap_or_default();
@@ -424,7 +528,7 @@ pub async fn call_control(
     }
     let executable = std::env::current_exe().map_err(|e| Failure::new("coreUnavailable", e))?;
     let result = call_executable(request, executable.as_os_str(), Some(cancel), events).await;
-    if request.operation() == "vm start"
+    if matches!(request.operation().as_str(), "vm start" | "vm up")
         && result.as_ref().is_err_and(|e| e.code == "restartRequired")
         && !cancel.is_cancelled()
     {
@@ -661,6 +765,30 @@ mod tests {
             ("vm delete", 1, true, "outcomeUnknown"),
             ("vm stop", 5, false, "operationFailed"),
             ("vm reset", 5, false, "operationFailed"),
+        ] {
+            assert_eq!(control_failure_code(operation, rc, unknown), code, "{operation} {rc} {unknown}");
+        }
+    }
+
+    #[test]
+    fn vm_up_fails_as_a_start_and_vm_down_as_a_purge() {
+        for (operation, rc, unknown, code) in [
+            ("vm up", 2, false, "invalidRequest"),
+            ("vm down", 2, false, "invalidRequest"),
+            ("vm up", 4, false, "conflict"),
+            // As for every control call, an earlier unknown outcome of the
+            // profile stays visible over a refusal that changed nothing.
+            ("vm up", 4, true, "outcomeUnknown"),
+            ("vm up", 130, false, "cancelled"),
+            ("vm down", 4, false, "conflict"),
+            ("vm up", 7, false, "admissionRefused"),
+            ("vm up", 6, true, "guestFilesystemDamaged"),
+            ("vm up", 3, false, "restartRequired"),
+            ("vm up", 1, true, "outcomeUnknown"),
+            ("vm up", 1, false, "operationFailed"),
+            ("vm down", 5, false, "outcomeUnknown"),
+            ("vm down", 7, false, "operationFailed"),
+            ("vm start", 2, false, "operationFailed"),
         ] {
             assert_eq!(control_failure_code(operation, rc, unknown), code, "{operation} {rc} {unknown}");
         }

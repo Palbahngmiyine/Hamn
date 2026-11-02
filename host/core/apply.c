@@ -1,4 +1,5 @@
 #include "core/control.h"
+#include "core/control_locked.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -492,6 +493,29 @@ static int apply_configure(const struct profile *desired,
                "not changed", desired->name);
         return APPLY_FAILED;
     }
+}
+
+int control_create_locked(const struct profile *desired)
+{
+    struct profile current;
+    struct apply_plan plan;
+    int rc = apply_evaluate(desired, &current, &plan, 1);
+    if (rc != APPLY_OK)
+        return rc;
+    if (plan.action != ACTION_CREATE) {
+        logerr("profile %s already exists", desired->name);
+        return APPLY_CONFLICT;
+    }
+    int mutation = profile_mutation_lock(desired);
+    if (mutation < 0) {
+        logerr("another %s profile mutation is running", desired->name);
+        return APPLY_FAILED;
+    }
+    rc = apply_create(desired);
+    profile_mutation_unlock(mutation);
+    if (rc == APPLY_OK)
+        logmsg("profile %s: created", desired->name);
+    return rc;
 }
 
 int hamn_control_apply(const char *profile_name, const char *path, int dry_run,

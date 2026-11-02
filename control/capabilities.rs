@@ -16,6 +16,7 @@ fn operation(name: &str, mutation: bool) -> Value {
     let resource = words.get(1).copied().unwrap_or("");
     let upgrade = matches!(name, "system upgrade");
     let apply = name == "vm apply";
+    let workspace = matches!(name, "vm up" | "vm down");
     let namespaced = domain == "k8s" && !matches!(resource, "contexts" | "namespaces" | "nodes");
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
@@ -37,7 +38,7 @@ fn operation(name: &str, mutation: bool) -> Value {
             !upgrade && !apply,
         );
     }
-    if matches!(domain, "vm" | "docker") && name != "vm list" {
+    if matches!(domain, "vm" | "docker") && name != "vm list" && !workspace {
         add(
             "profile",
             json!({"type":"string", "minLength":1, "maxLength":63, "pattern":"^[A-Za-z0-9_-]+$", "not":{"const":"cache"}}),
@@ -94,7 +95,7 @@ fn operation(name: &str, mutation: bool) -> Value {
             );
         }
     }
-    if domain == "vm" && matches!(action, "create" | "configure" | "start") {
+    if domain == "vm" && matches!(action, "create" | "configure" | "start" | "up") {
         for (flag, unit) in [
             ("cpu", "virtual CPUs"),
             ("memory", "GiB of memory"),
@@ -123,6 +124,27 @@ fn operation(name: &str, mutation: bool) -> Value {
         add(
             "dry-run",
             json!({"type":"boolean", "default":false, "description":"Report the action and the changes without writing; no --yes required; the VM is not looked at"}),
+            false,
+        );
+    }
+    if workspace {
+        add(
+            "workspace",
+            json!({"type":"string", "minLength":1, "pattern":"^/", "description":"Absolute path of a directory of this user, such as a git worktree; its real path names the VM's profile: ws- and 12 hexadecimal digits"}),
+            true,
+        );
+    }
+    if name == "vm up" {
+        add(
+            "no-git-mount",
+            json!({"type":"boolean", "default":false, "description":"Share only the workspace with a new profile, not its common git directory; refused for a profile that shares it"}),
+            false,
+        );
+    }
+    if name == "vm down" {
+        add(
+            "purge",
+            json!({"type":"boolean", "default":false, "description":"Permanently delete the workspace's profile with its disk, settings and Docker data instead of stopping its VM; a workspace without a profile is reported as alreadyAbsent"}),
             false,
         );
     }
@@ -271,8 +293,26 @@ mod tests {
             }
             assert_eq!(
                 op["arguments"]["properties"]["purge"]["type"] == "boolean",
-                op["name"] == "vm delete",
+                op["name"] == "vm delete" || op["name"] == "vm down",
                 "purge on {}",
+                op["name"]
+            );
+            // A workspace operation names its VM by the workspace alone.
+            let workspace = op["name"] == "vm up" || op["name"] == "vm down";
+            assert_eq!(
+                !op["arguments"]["properties"]["workspace"].is_null(),
+                workspace,
+                "workspace on {}",
+                op["name"]
+            );
+            if workspace {
+                assert_eq!(required, &[json!("yes"), json!("workspace")], "{op}");
+                assert!(op["arguments"]["properties"]["profile"].is_null(), "{op}");
+            }
+            assert_eq!(
+                !op["arguments"]["properties"]["no-git-mount"].is_null(),
+                op["name"] == "vm up",
+                "no-git-mount on {}",
                 op["name"]
             );
             for flag in required {

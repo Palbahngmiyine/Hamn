@@ -547,6 +547,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-apply
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-reset
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-purge
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-up
 	bash guest/tests/test_guest_deployment_transaction.sh
 
 test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)
