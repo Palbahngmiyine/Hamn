@@ -1,13 +1,14 @@
 #include <stdio.h>
 
 #include "core/control.h"
+#include "core/control_locked.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/operation.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
 
-static int cmd_stop_locked(const char *profile_name)
+int control_stop_locked(const char *profile_name)
 {
     struct profile profile;
     char failure[PROFILE_FAILURE_CAP];
@@ -45,7 +46,7 @@ int hamn_control_stop(const char *profile_name)
         logerr("cannot lock the %s profile lifecycle", profile_name);
         return 1;
     }
-    int rc = cmd_stop_locked(profile_name);
+    int rc = control_stop_locked(profile_name);
     vm_lifecycle_lock_release(&lock);
     return rc;
 }

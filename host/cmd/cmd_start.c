@@ -18,6 +18,7 @@
 #include "cli.h"
 #include "core/admission.h"
 #include "core/control.h"
+#include "core/control_locked.h"
 #include "core/guest_deployment.h"
 #include "core/guest_filesystem.h"
 #include "core/guest_panic.h"
@@ -972,12 +973,8 @@ out:
     return 1;
 }
 
-static int cmd_start_locked(const struct start_options *options, const char *profile)
+static int start_finish(int rc)
 {
-    start_spawned = start_restored = start_unchanged = start_guest_damaged =
-        start_refused = 0;
-    int rc = cmd_start_execute(options, profile);
-    admission_lock_release(&start_admission);
     if (rc == START_REEXEC_AFTER_SIGNED_UPDATE) return operation_restart_required();
     /* The damage is the result only while this start's own effect is known:
      * it changed nothing, or it stopped again the VM it booted. */
@@ -991,6 +988,27 @@ static int cmd_start_locked(const struct start_options *options, const char *pro
          guest_deployment_recovery_complete())));
 }
 
+int control_start_locked(const char *profile, unsigned cpus,
+                         unsigned memory_gib, unsigned disk_gib,
+                         char **refusal)
+{
+    *refusal = NULL;
+    struct start_options options = {
+        .cpus = cpus, .memory_gib = memory_gib, .disk_gib = disk_gib,
+    };
+    start_spawned = start_restored = start_unchanged = start_guest_damaged =
+        start_refused = 0;
+    int rc = cmd_start_execute(&options, profile);
+    admission_lock_release(&start_admission);
+    rc = start_finish(rc);
+    if (rc == HAMN_CONTROL_ADMISSION_REFUSED)
+        *refusal = start_refusal;
+    else
+        hamn_control_free(start_refusal);
+    start_refusal = NULL;
+    return rc;
+}
+
 int hamn_control_start(const char *profile, unsigned cpus,
                        unsigned memory_gib, unsigned disk_gib,
                        char **refusal)
@@ -1000,21 +1018,14 @@ int hamn_control_start(const char *profile, unsigned cpus,
         logerr("invalid VM resource request");
         return 2;
     }
-    struct start_options options = {
-        .cpus = cpus, .memory_gib = memory_gib, .disk_gib = disk_gib,
-    };
     struct vm_lifecycle_lock lock;
     if (vm_lifecycle_lock_acquire(profile, &lock) != 0) {
         logerr("cannot lock the %s profile lifecycle", profile);
         return 1;
     }
-    int rc = cmd_start_locked(&options, profile);
+    int rc = control_start_locked(profile, cpus, memory_gib, disk_gib,
+                                  refusal);
     vm_lifecycle_lock_release(&lock);
-    if (rc == HAMN_CONTROL_ADMISSION_REFUSED)
-        *refusal = start_refusal;
-    else
-        hamn_control_free(start_refusal);
-    start_refusal = NULL;
     return rc;
 }
 
