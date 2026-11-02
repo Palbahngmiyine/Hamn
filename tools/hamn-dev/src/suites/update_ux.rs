@@ -456,11 +456,14 @@ fn check(terminal: bool) {
     let saved = fs::read(&selection).unwrap();
     let selected: Value = serde_json::from_slice(&saved).unwrap();
     assert_eq!(selected["sha256"], upgrade::file_digest(&fixture.guest));
-    // The update removed its own completed downloads and kept the staged image.
+    // The update removed its guest image download and kept the staged image
+    // and the host archive of the generation it installed.
     let cache = fixture.home.join(".hamn/cache");
-    assert_eq!(text.matches("hamn: removed unused cache entry downloads/").count(), 2, "{text}");
-    let downloads: Vec<_> = fs::read_dir(cache.join("downloads")).unwrap().map(|entry| entry.unwrap().file_name()).collect();
-    assert!(downloads.iter().all(|name| !name.to_string_lossy().ends_with(".artifact")), "{downloads:?}");
+    let guest_download = format!("downloads/{}.artifact", upgrade::file_digest(&fixture.guest));
+    assert_eq!(text.matches("hamn: removed unused cache entry downloads/").count(), 1, "{text}");
+    assert!(text.contains(&format!("hamn: removed unused cache entry {guest_download}")), "{text}");
+    assert!(!cache.join(&guest_download).exists());
+    assert!(cache.join(format!("downloads/{}.artifact", upgrade::file_digest(&fixture.archive))).is_file());
     assert!(cache.join(selected["file"].as_str().unwrap()).is_file());
     let upgrade_within = |seconds| fixture.upgrade(Duration::from_secs(seconds));
 
@@ -492,12 +495,10 @@ fn check(terminal: bool) {
         let result = upgrade_within(30);
         assert_eq!(result.returncode, 0, "{damage}: {result:?}");
         assert!(!result.stderr().contains("is up to date"), "{damage}");
-        // The cleanup after the first update removed the host archive, so a
-        // host reinstall downloads it again; the guest image comes from its
-        // staged copy, and a selection repair needs no download.
-        let requests = fixture.transport.requests();
-        let expected: &[&str] = if damage == "selection changed" { &[] } else { &["/host.tar.gz"] };
-        assert_eq!(&requests[calls..], expected, "{damage}");
+        // The host archive and the staged guest image are cached. Only damaged
+        // host integrity requires a generation reinstall; guest selection
+        // repair preserves it.
+        assert_eq!(fixture.transport.requests().len(), calls, "{damage}");
         assert_eq!(fixture.active() == active, damage == "selection changed", "{damage}");
         active = fixture.active();
         assert_eq!(fs::read(&selection).unwrap(), saved, "{damage}");
