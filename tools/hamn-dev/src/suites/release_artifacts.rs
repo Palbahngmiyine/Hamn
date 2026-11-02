@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
@@ -333,6 +334,10 @@ fn local_candidate_bootstraps_exact_bytes_and_refuses_unsafe_installs() {
         fs::read_to_string(cache.join("guest-image.json")).unwrap().contains(&format!("\"sha256\":\"{guest_hash}\""))
     );
     assert!(cache.join(format!("hamn-guest-{guest_hash}.img")).is_file());
+    assert!(
+        fs::symlink_metadata(cache.join(format!("downloads/{host_hash}.artifact"))).is_err(),
+        "the installed host archive was kept"
+    );
     // The installed generation is the archive's payload: the executable
     // and the release's manifest pointer, with no scripts or sources.
     let target = fs::read_link(&command).unwrap();
@@ -438,7 +443,12 @@ fn local_candidate_bootstraps_exact_bytes_and_refuses_unsafe_installs() {
     assert!(!fs::symlink_metadata(legacy_home.join(".local/bin/hamn")).unwrap().file_type().is_symlink());
     assert!(!legacy_home.join(".hamn").exists());
 
-    // A verified digest cache is independent of later origin damage.
+    // A verified digest cache, as an interrupted install leaves it (the
+    // refused attempts above fetched it again), is independent of later origin
+    // damage.
+    let cached_artifact = cache.join(format!("downloads/{host_hash}.artifact"));
+    fs::copy(&host_artifact, &cached_artifact).unwrap();
+    fs::set_permissions(&cached_artifact, fs::Permissions::from_mode(0o600)).unwrap();
     let mut bytes = fs::read(&host_artifact).unwrap();
     bytes.extend_from_slice(b"tampered\n");
     fs::write(&host_artifact, bytes).unwrap();
@@ -446,10 +456,9 @@ fn local_candidate_bootstraps_exact_bytes_and_refuses_unsafe_installs() {
     assert_eq!(cached.returncode, 0, "{}", cached.stderr());
     assert!(cached.stderr().lines().any(|line| line == "Hamn 0.0.1 is already installed."), "{}", cached.stderr());
     assert_eq!(fs::read_link(&command).unwrap(), target);
+    assert!(fs::symlink_metadata(&cached_artifact).is_err(), "the used cache copy was kept");
     // Without those verified bytes, the corrupted origin is rejected
     // before any cutover.
-    let cached_artifact = cache.join(format!("downloads/{host_hash}.artifact"));
-    fs::remove_file(&cached_artifact).unwrap();
     let tampered = bootstrap(&installer, &home, &tmp, system, &[], &local);
     assert_ne!(tampered.returncode, 0, "bootstrap accepted a modified host artifact");
     let stderr = tampered.stderr();
