@@ -27,7 +27,8 @@
  * directory cannot be entered, when a state file or a deletion marker is
  * not what it should be, and when memory or descriptors run out.
  *
- * The status of one profile changes nothing. The list is not a pure read:
+ * The status of one profile runs neither sweep below. The list is not a
+ * pure read:
  * before it lists, the call permanently deletes, with its disk and Docker
  * data, each profile that vm up made (one with a workspace record) whose
  * recorded workspace path no longer exists and whose VM is known to be
