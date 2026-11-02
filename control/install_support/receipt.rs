@@ -84,16 +84,25 @@ fn read(path: &Path) -> Result<Receipt> {
     )?)?)
 }
 
-/// The guest image digest that the receipt of `generation` (a generation
-/// directory) records. An absent, unsafe, malformed, other-schema or
-/// non-digest receipt is an error: it names no image.
-pub(super) fn guest_sha256(generation: &Path) -> Result<String> {
+/// The release artifacts that a receipt names, as SHA-256 digests.
+pub(super) struct Digests {
+    pub(super) host: String,
+    pub(super) guest: String,
+}
+
+/// The digests that the receipt of `generation` (a generation directory)
+/// records. An absent, unsafe, malformed, other-schema or non-digest receipt
+/// is an error: it names no host archive or guest image.
+pub(super) fn digests(generation: &Path) -> Result<Digests> {
     let r = read(&generation.join(".hamn-release.json"))?;
     require(
-        r.schema_version == SCHEMA_VERSION && hexadecimal(&r.guest, 64),
-        "release receipt is not a current receipt with a guest image digest",
+        r.schema_version == SCHEMA_VERSION && hexadecimal(&r.host, 64) && hexadecimal(&r.guest, 64),
+        "release receipt is not a current receipt with host archive and guest image digests",
     )?;
-    Ok(r.guest)
+    Ok(Digests {
+        host: r.host,
+        guest: r.guest,
+    })
 }
 
 pub(super) fn run(
@@ -185,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn guest_digest_comes_only_from_a_current_receipt_with_a_digest() {
+    fn digests_come_only_from_a_current_receipt_with_both_digests() {
         let temp = super::super::test_support::Temp::new();
         let generation = temp.0.join("generation");
         fs::create_dir_all(generation.join("bin")).unwrap();
@@ -194,31 +203,37 @@ mod tests {
         fs::write(&target, b"host bytes").unwrap();
         let target = target.to_str().unwrap();
         let path = generation.join(".hamn-release.json");
-        assert!(guest_sha256(&generation).is_err(), "no receipt");
-        let digest = "b".repeat(64);
-        run("write", target, "v1.2.3", "host", &digest).unwrap();
-        assert_eq!(guest_sha256(&generation).unwrap(), digest);
+        assert!(digests(&generation).is_err(), "no receipt");
+        let (host, guest) = ("a".repeat(64), "b".repeat(64));
+        run("write", target, "v1.2.3", &host, &guest).unwrap();
+        let read = digests(&generation).unwrap();
+        assert_eq!((read.host.as_str(), read.guest.as_str()), (&*host, &*guest));
         let current = fs::read_to_string(&path).unwrap();
         for (label, damaged) in [
             (
                 "older schema",
                 current.replace("\"schemaVersion\":2", "\"schemaVersion\":1"),
             ),
-            ("not a digest", current.replace(&digest, &"B".repeat(64))),
-            ("short digest", current.replace(&digest, "bb")),
+            (
+                "guest not a digest",
+                current.replace(&guest, &"B".repeat(64)),
+            ),
+            ("guest short", current.replace(&guest, "bb")),
+            ("host not a digest", current.replace(&host, &"A".repeat(64))),
+            ("host short", current.replace(&host, "aa")),
         ] {
             fs::remove_file(&path).unwrap();
             fs::write(&path, damaged).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-            assert!(guest_sha256(&generation).is_err(), "{label}");
+            assert!(digests(&generation).is_err(), "{label}");
         }
         fs::remove_file(&path).unwrap();
         fs::write(&path, &current).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(guest_sha256(&generation).unwrap(), digest);
+        assert_eq!(digests(&generation).unwrap().host, host);
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(
-            guest_sha256(&generation).is_err(),
+            digests(&generation).is_err(),
             "a receipt with an unsafe mode"
         );
     }

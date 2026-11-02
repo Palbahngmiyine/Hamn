@@ -420,25 +420,34 @@ fn is_absent(error: &(dyn std::error::Error + 'static)) -> bool {
         .is_some_and(|e| e.kind() == ErrorKind::NotFound)
 }
 
-/// The digests of the selection and of every retained generation's receipt.
-/// `wanted` are the digests the caller is about to judge: when the selection
-/// alone covers them, no receipt is read. A receipt that names no image
-/// leaves the set unknown (an error), never smaller.
-fn keep_set(
-    cache: &Path,
-    retained: &[PathBuf],
-    wanted: &BTreeSet<&String>,
-) -> Result<BTreeSet<String>> {
-    let mut keep = BTreeSet::from([upgrade::selected_guest(cache)?]);
-    if wanted.iter().all(|digest| keep.contains(*digest)) {
-        return Ok(keep);
+/// The digests that the receipts of the retained generations record. A
+/// receipt that names nothing is not skipped silently: `unusable` says why,
+/// and then the sets may lack digests, so they can only prove that an entry
+/// is used, never that it is not.
+#[derive(Default)]
+struct Recorded {
+    hosts: BTreeSet<String>,
+    guests: BTreeSet<String>,
+    unusable: Option<String>,
+}
+
+impl Recorded {
+    fn of(retained: &[PathBuf]) -> Self {
+        let mut recorded = Self::default();
+        for generation in retained {
+            match receipt::digests(generation) {
+                Ok(digests) => {
+                    recorded.hosts.insert(digests.host);
+                    recorded.guests.insert(digests.guest);
+                }
+                Err(e) => {
+                    let why = format!("the receipt of {}: {e}", generation.display());
+                    recorded.unusable.get_or_insert(why);
+                }
+            }
+        }
+        recorded
     }
-    for generation in retained {
-        let digest = receipt::guest_sha256(generation)
-            .map_err(|e| format!("the receipt of {}: {e}", generation.display()))?;
-        keep.insert(digest);
-    }
-    Ok(keep)
 }
 
 /// Why `path` is unsafe to remove: a symbolic link, an entry the current
@@ -599,11 +608,15 @@ fn remove_raw(
 
 /// Removes image-cache entries of the HOME's `cache` that the selection and
 /// the `retained` generations do not use, after a committed update:
-/// - `downloads/<d>.artifact`: a completed download is no longer needed once
-///   its host generation is installed and its guest image is staged as
-///   `hamn-guest-<d>.img`. It is removed under the downloader's digest lock,
-///   which a concurrent installer holds only while it looks the file up.
-///   Partial downloads, validators and locks stay.
+/// - `downloads/<d>.artifact`, unless `<d>` is the host archive recorded by
+///   a retained generation's release receipt: that archive stays, so that
+///   repairing or forcing a reinstall of a kept generation needs no network.
+///   Any other completed download is redundant: a guest image's is replaced
+///   by its staged `hamn-guest-<d>.img` (which acquisition reuses), and an
+///   earlier release's host archive is no longer installed. It is removed
+///   under the downloader's digest lock, which a concurrent installer holds
+///   only while it looks the file up. Partial downloads, validators and
+///   locks stay.
 /// - `hamn-guest-<d>.img` with its `.verified` marker, and `raw-v1-<d>`,
 ///   when `<d>` is neither the selected image nor the guest recorded by a
 ///   retained generation's release receipt.
@@ -615,9 +628,11 @@ fn remove_raw(
 /// open files, bounded to 30 s; a failed scan removes nothing). A raw base
 /// also needs its digest lock (see `remove_raw`). Anything else stays and is
 /// reported in `deferred`. A missing or unusable selection or receipt defers
-/// images and live raw bases only. Pending recovery metadata in `cache`
-/// defers everything. Nothing outside `cache` changes, and profile disks are
-/// never opened.
+/// images and live raw bases. An unusable receipt may also name any download
+/// as its host archive, so it defers every download except one that a usable
+/// receipt or the selection shows to be a guest image's. Pending recovery
+/// metadata in `cache` defers everything. Nothing outside `cache` changes,
+/// and profile disks are never opened.
 ///
 /// `retained` must be non-empty: it is `collect`'s `retained` of this
 /// update. The caller holds the HOME's updater lock (`_updater`), so no
@@ -659,30 +674,37 @@ fn collect_cache_with(
     // lsof names files by their canonical path.
     let cache = fs::canonicalize(cache)?;
     let found = Inventory::of(&cache, &mut report)?;
-    let guest: BTreeSet<&String> = found.images.iter().chain(&found.bundles).collect();
-    let keep = if guest.is_empty() {
-        Some(BTreeSet::new())
-    } else {
-        match keep_set(&cache, retained, &guest) {
-            Ok(keep) => Some(keep),
-            Err(e) => {
-                defer(
-                    &mut report,
-                    format_args!("of guest images and raw bases deferred: {e}"),
-                );
-                None
-            }
+    let recorded = Recorded::of(retained);
+    let selected = upgrade::selected_guest(&cache);
+    let mut guests = recorded.guests.clone();
+    guests.extend(selected.as_ref().ok().cloned());
+    let (mut images, mut bundles) = (
+        unused(&found.images, &guests),
+        unused(&found.bundles, &guests),
+    );
+    if !(images.is_empty() && bundles.is_empty()) {
+        let unknown = selected
+            .as_ref()
+            .err()
+            .map(ToString::to_string)
+            .or_else(|| recorded.unusable.clone());
+        if let Some(why) = unknown {
+            defer(
+                &mut report,
+                format_args!("of guest images and raw bases deferred: {why}"),
+            );
+            (images, bundles) = (Vec::new(), Vec::new());
         }
-    };
-    let (images, bundles) = match &keep {
-        Some(keep) => (unused(&found.images, keep), unused(&found.bundles, keep)),
-        None => (Vec::new(), Vec::new()),
-    };
-    if found.artifacts.is_empty()
-        && images.is_empty()
-        && bundles.is_empty()
-        && found.retired.is_empty()
-    {
+    }
+    let mut artifacts = unused(&found.artifacts, &recorded.hosts);
+    if let Some(why) = &recorded.unusable {
+        let candidates = artifacts.len();
+        artifacts.retain(|digest| guests.contains(digest));
+        if artifacts.len() < candidates {
+            defer(&mut report, format_args!("of downloads deferred: {why}"));
+        }
+    }
+    if artifacts.is_empty() && images.is_empty() && bundles.is_empty() && found.retired.is_empty() {
         return Ok(report);
     }
     let opened = match scan() {
@@ -692,7 +714,7 @@ fn collect_cache_with(
             return Ok(report);
         }
     };
-    for digest in &found.artifacts {
+    for digest in &artifacts {
         remove_artifact(&mut report, &cache, digest, &opened);
     }
     for digest in &images {
