@@ -162,7 +162,7 @@ fn strict_profiles_advanced_settings_preservation_and_soft_deletion() {
     let advanced = profiles.write(
         "advanced",
         &format!(
-            "cpus: 2\nmountHome: false\nmountInotify: true\nrosetta: true\nnestedVirtualization: true\nsshAgent: true\n\
+            "cpus: 2\nmountHome: false\nmountInotify: true\nrosetta: false\nnestedVirtualization: true\nsshAgent: true\n\
              docker:\n  daemonJson: '{{\"features\":{{\"buildkit\":true}}}}'\n\
              mounts:\n  - location: \"{}\"\n    mountPoint: /workspace\n    writable: true\n\
              provision:\n  - command: echo ready\n    stage: system\n    timeoutSeconds: 30\n    mode: fail\n",
@@ -173,7 +173,7 @@ fn strict_profiles_advanced_settings_preservation_and_soft_deletion() {
     let share_text = share.display().to_string();
     for required in [
         "mountInotify: true",
-        "rosetta: true",
+        "rosetta: false",
         "nestedVirtualization: true",
         "sshAgent: true",
         "echo ready",

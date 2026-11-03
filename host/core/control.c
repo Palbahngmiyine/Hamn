@@ -341,6 +341,10 @@ int hamn_control_configure(const char *name, unsigned cpus,
     if (!profile_name_valid(name) || memory_gib > UINT_MAX / 1024U ||
         rosetta < -1 || rosetta > 1)
         return 2;
+    if (rosetta == 1) {
+        logerr("Rosetta support was removed; --rosetta accepts only false");
+        return 2;
+    }
     struct vm_lifecycle_lock lifecycle;
     if (vm_lifecycle_lock_acquire(name, &lifecycle) != 0)
         return 1;
@@ -363,6 +367,10 @@ int hamn_control_configure(const char *name, unsigned cpus,
     if ((create ? profile_load_explained(&profile, name, failure) :
          profile_read_existing_explained(&profile, name, failure)) != 0) {
         logerr("%s", failure);
+        goto out;
+    }
+    if (profile.rosetta && rosetta != 0) {
+        logerr(PROFILE_ROSETTA_REMOVED_FORMAT, name, name);
         goto out;
     }
     mutation = profile_mutation_lock(&profile);

@@ -254,6 +254,22 @@ struct Selection {
     file: String,
     sha256: String,
 }
+/// The digest of the guest image that `guest-image.json` selects. A missing,
+/// unsafe or malformed record, or one that names another file, is an error.
+pub(super) fn selected_guest(cache: &Path) -> Result<String> {
+    let selection: Selection = serde_json::from_slice(&download::read_file(
+        &cache.join("guest-image.json"),
+        4096,
+        false,
+    )?)?;
+    require(
+        selection.schema_version == 1
+            && manifest::hexadecimal(&selection.sha256, 64)
+            && selection.file == format!("hamn-guest-{}.img", selection.sha256),
+        "guest image selection is malformed",
+    )?;
+    Ok(selection.sha256)
+}
 fn guest_healthy(cache: &Path, artifact: &manifest::Artifact) -> bool {
     (|| -> Result<bool> {
         let name = format!("hamn-guest-{}.img", artifact.sha256);
@@ -849,6 +865,29 @@ mod tests {
             good.replace('{', "{\"unknown\":true,"),
         ] {
             assert!(serde_json::from_str::<Selection>(&bad).is_err());
+        }
+    }
+    #[test]
+    fn selected_guest_names_the_image_only_for_a_matching_current_record() {
+        let t = Temp::new();
+        let selection = t.0.join("guest-image.json");
+        assert!(selected_guest(&t.0).is_err(), "no record");
+        let digest = "a".repeat(64);
+        let record = |schema: u32, file: &str, sha256: &str| {
+            format!("{{\"schemaVersion\":{schema},\"file\":\"{file}\",\"sha256\":\"{sha256}\"}}")
+        };
+        let name = format!("hamn-guest-{digest}.img");
+        fs::write(&selection, record(1, &name, &digest)).unwrap();
+        assert_eq!(selected_guest(&t.0).unwrap(), digest);
+        for bad in [
+            record(2, &name, &digest),
+            record(1, "hamn-guest-other.img", &digest),
+            record(1, &name.to_uppercase(), &digest.to_uppercase()),
+            record(1, "hamn-guest-abc.img", "abc"),
+            "{".to_owned(),
+        ] {
+            fs::write(&selection, &bad).unwrap();
+            assert!(selected_guest(&t.0).is_err(), "{bad}");
         }
     }
     #[test]

@@ -13,6 +13,7 @@ use crate::support::upgrade::{self, Artifact, Group, Output, release_payload, wr
 use serde_json::{Value, json};
 use std::fs;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
@@ -23,7 +24,11 @@ pub fn main(filters: &[String]) -> ExitCode {
     runner::run(
         "update-ux",
         "progress before completion, JSON, version summary, schema rejection, no-op identity and state preservation",
-        vec![case("redirected", || check(false)), case("pty", || check(true))],
+        vec![
+            case("redirected", || check(false)),
+            case("pty", || check(true)),
+            case("redirected_retained_guest_images", retained_guest_images),
+        ],
         filters,
     )
 }
@@ -236,7 +241,117 @@ fn contains(haystack: &[u8], needle: &str) -> bool {
     haystack.windows(needle.len()).any(|window| window == needle.as_bytes())
 }
 
-fn check(terminal: bool) {
+fn write_with_mode(path: PathBuf, bytes: &[u8], mode: u32) {
+    fs::write(&path, bytes).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// A raw base and its digest lock, as `raw_cache.c` leaves them.
+fn plant_raw_base(cache: &Path, digest: &str) {
+    let raw = cache.join(format!("raw-v1-{digest}"));
+    fs::create_dir(&raw).unwrap();
+    fs::set_permissions(&raw, fs::Permissions::from_mode(0o700)).unwrap();
+    write_with_mode(raw.join("disk.raw"), b"raw", 0o400);
+    write_with_mode(raw.join("verified"), b"marker", 0o400);
+    write_with_mode(cache.join(format!(".raw-v1-{digest}.lock")), b"", 0o600);
+}
+
+/// Cache entries of a digest that no generation or selection uses, planted
+/// the way the downloader and `raw_cache.c` leave them.
+fn plant_unused_cache_entries(cache: &Path, digest: &str) {
+    plant_raw_base(cache, digest);
+    write_with_mode(cache.join(format!("hamn-guest-{digest}.img")), b"image", 0o644);
+    write_with_mode(cache.join(format!("hamn-guest-{digest}.img.verified")), digest.as_bytes(), 0o644);
+    write_with_mode(cache.join(format!("downloads/{digest}.artifact")), b"artifact", 0o600);
+    write_with_mode(cache.join(format!("downloads/.{digest}.partial")), b"partial", 0o600);
+}
+
+/// Restores a directory's mode when dropped, even after a failed assertion.
+struct Restore(PathBuf);
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// After a committed update (or a no-op check) the cache entries that no
+/// kept generation or selection uses are removed and reported on stderr,
+/// resumable downloads and digest locks stay, and the committed state and
+/// the JSON result are untouched. A removal that fails only defers.
+fn cache_cleanup(fixture: &Fixture, version: &str, active: &Path, saved: &[u8]) {
+    let cache = fixture.home.join(".hamn/cache");
+    let digest = "ab".repeat(32);
+    let removed = |what: &str| format!("hamn: removed unused cache entry {what}\n");
+    let noop = format!("Checking for updates...\nHamn {version} is up to date.\n");
+    plant_unused_cache_entries(&cache, &digest);
+    let calls = fixture.transport.requests().len();
+    let cleaned = fixture.upgrade(Duration::from_secs(30));
+    assert_eq!(cleaned.returncode, 0, "{cleaned:?}");
+    let result: Value = serde_json::from_slice(&cleaned.stdout).unwrap();
+    assert!(result["data"]["completed"] == true && result["data"]["status"] == "up-to-date", "{result}");
+    assert_eq!(
+        cleaned.stderr(),
+        format!(
+            "{noop}{}{}{}{}",
+            removed(&format!("downloads/{digest}.artifact")),
+            removed(&format!("hamn-guest-{digest}.img.verified")),
+            removed(&format!("hamn-guest-{digest}.img")),
+            removed(&format!("raw-v1-{digest}")),
+        )
+    );
+    for gone in [
+        format!("downloads/{digest}.artifact"),
+        format!("hamn-guest-{digest}.img"),
+        format!("hamn-guest-{digest}.img.verified"),
+        format!("raw-v1-{digest}"),
+    ] {
+        assert!(!cache.join(&gone).exists(), "{gone}");
+    }
+    for stays in [format!("downloads/.{digest}.partial"), format!(".raw-v1-{digest}.lock")] {
+        assert!(cache.join(&stays).exists(), "{stays}");
+    }
+    let selected: Value = serde_json::from_slice(saved).unwrap();
+    assert!(cache.join(selected["file"].as_str().unwrap()).is_file(), "the selected image was removed");
+    assert_eq!(fixture.transport.requests().len(), calls);
+    fixture.assert_unchanged(active, saved, "cache cleanup");
+
+    // A directory that cannot be changed defers its entries: the command
+    // still succeeds with the same committed state, and a later run finishes.
+    plant_unused_cache_entries(&cache, &digest);
+    let downloads = cache.join("downloads");
+    let restore = Restore(downloads.clone());
+    fs::set_permissions(&downloads, fs::Permissions::from_mode(0o500)).unwrap();
+    let deferred = fixture.upgrade(Duration::from_secs(30));
+    drop(restore);
+    assert_eq!(deferred.returncode, 0, "{deferred:?}");
+    let result: Value = serde_json::from_slice(&deferred.stdout).unwrap();
+    assert!(result["data"]["completed"] == true && result["data"]["status"] == "up-to-date", "{result}");
+    let stderr = deferred.stderr();
+    assert!(stderr.starts_with(&noop), "{stderr}");
+    assert!(
+        stderr.contains(&format!("hamn: image cache cleanup left downloads/{digest}.artifact in place: ")),
+        "{stderr}"
+    );
+    assert!(cache.join(format!("downloads/{digest}.artifact")).exists());
+    assert!(!cache.join(format!("raw-v1-{digest}")).exists(), "entries outside downloads are independent");
+    fixture.assert_unchanged(active, saved, "deferred cache cleanup");
+    let finished = fixture.upgrade(Duration::from_secs(30));
+    assert_eq!(finished.stderr(), format!("{noop}{}", removed(&format!("downloads/{digest}.artifact"))));
+    fixture.assert_unchanged(active, saved, "finished cache cleanup");
+}
+
+/// A managed install of the frozen build, its release inputs and a manifest
+/// naming them. The directory is removed when this is dropped.
+struct Installed {
+    _directory: TempDir,
+    fixture: Fixture,
+    version: String,
+    original: PathBuf,
+    manifest: Value,
+}
+
+fn install() -> Installed {
     let directory = TempDir::new("hamn-update-ux-");
     let work = fs::canonicalize(directory.path()).unwrap();
     let hamn = fs::canonicalize(crate::support::hamn()).unwrap();
@@ -268,6 +383,59 @@ fn check(terminal: bool) {
         &fixture.transport.artifact(&fixture.guest),
     );
     write_json(&fixture.manifest_path, &manifest);
+    Installed { _directory: directory, fixture, version, original, manifest }
+}
+
+/// The guest image of the predecessor generation is kept for one more
+/// update, and removed once no kept generation uses it.
+fn retained_guest_images() {
+    let Installed { _directory, fixture, manifest, .. } = install();
+    fixture.transport.gate.release();
+    let cache = fixture.home.join(".hamn/cache");
+    let upgrade_ok = |what: &str| {
+        let result = fixture.upgrade(Duration::from_secs(60));
+        assert_eq!(result.returncode, 0, "{what}: {result:?}");
+        result.stderr()
+    };
+    upgrade_ok("first guest image");
+    let first: Value = serde_json::from_slice(&fs::read(fixture.selection()).unwrap()).unwrap();
+    let first = first["sha256"].as_str().unwrap().to_owned();
+    plant_raw_base(&cache, &first);
+    let entries = [
+        format!("hamn-guest-{first}.img"),
+        format!("hamn-guest-{first}.img.verified"),
+        format!("raw-v1-{first}"),
+    ];
+
+    // A second guest image: the generation installed for it records the new
+    // digest, and its predecessor still records the first.
+    fs::write(&fixture.guest, "second guest fixture\n").unwrap();
+    let guest = fixture.transport.artifact(&fixture.guest);
+    let mut second = manifest;
+    second["artifacts"]["guestImage"]["sha256"] = guest.sha256.clone().into();
+    second["artifacts"]["guestImage"]["size"] = guest.size.into();
+    write_json(&fixture.manifest_path, &second);
+    let stderr = upgrade_ok("second guest image");
+    let selected: Value = serde_json::from_slice(&fs::read(fixture.selection()).unwrap()).unwrap();
+    assert_eq!(selected["sha256"], guest.sha256);
+    for entry in &entries {
+        assert!(cache.join(entry).exists(), "{entry} is used by the predecessor generation");
+        assert!(!stderr.contains(entry.as_str()), "{stderr}");
+    }
+
+    // Another generation makes the predecessor's digest unused.
+    fs::write(fixture.artifact.join("share/hamn/same-version-change.txt"), "third candidate").unwrap();
+    write_json(&fixture.manifest_path, &fixture.repack(&second));
+    let stderr = upgrade_ok("third release");
+    for entry in &entries {
+        assert!(!cache.join(entry).exists(), "{entry} was kept without a user");
+        assert!(stderr.contains(&format!("hamn: removed unused cache entry {entry}\n")), "{stderr}");
+    }
+    assert!(cache.join(selected["file"].as_str().unwrap()).is_file(), "the selected image was removed");
+}
+
+fn check(terminal: bool) {
+    let Installed { _directory, fixture, version, original, manifest } = install();
 
     let (received, first) = first_upgrade(&fixture, terminal);
     assert_eq!(first.returncode, 0, "{}\n{first:?}", String::from_utf8_lossy(&received));
@@ -288,6 +456,15 @@ fn check(terminal: bool) {
     let saved = fs::read(&selection).unwrap();
     let selected: Value = serde_json::from_slice(&saved).unwrap();
     assert_eq!(selected["sha256"], upgrade::file_digest(&fixture.guest));
+    // The update removed its guest image download and kept the staged image
+    // and the host archive of the generation it installed.
+    let cache = fixture.home.join(".hamn/cache");
+    let guest_download = format!("downloads/{}.artifact", upgrade::file_digest(&fixture.guest));
+    assert_eq!(text.matches("hamn: removed unused cache entry downloads/").count(), 1, "{text}");
+    assert!(text.contains(&format!("hamn: removed unused cache entry {guest_download}")), "{text}");
+    assert!(!cache.join(&guest_download).exists());
+    assert!(cache.join(format!("downloads/{}.artifact", upgrade::file_digest(&fixture.archive))).is_file());
+    assert!(cache.join(selected["file"].as_str().unwrap()).is_file());
     let upgrade_within = |seconds| fixture.upgrade(Duration::from_secs(seconds));
 
     // The identical release must not fetch either payload or rewrite state.
@@ -318,8 +495,9 @@ fn check(terminal: bool) {
         let result = upgrade_within(30);
         assert_eq!(result.returncode, 0, "{damage}: {result:?}");
         assert!(!result.stderr().contains("is up to date"), "{damage}");
-        // Both payloads are cached. Only damaged host integrity requires a
-        // generation reinstall; guest selection repair preserves it.
+        // The host archive and the staged guest image are cached. Only damaged
+        // host integrity requires a generation reinstall; guest selection
+        // repair preserves it.
         assert_eq!(fixture.transport.requests().len(), calls, "{damage}");
         assert_eq!(fixture.active() == active, damage == "selection changed", "{damage}");
         active = fixture.active();
@@ -345,6 +523,10 @@ fn check(terminal: bool) {
     assert!(result.returncode == 0 && result.stderr().contains("Reinstalled Hamn "), "{result:?}");
     assert_ne!(fixture.active(), active);
     active = fixture.active();
+    // Both retained generations now carry a release receipt.
+    if !terminal {
+        cache_cleanup(&fixture, &version, &active, &saved);
+    }
 
     // Strict metadata rejection: retired schema v2 fields and versions,
     // and unknown fields, whatever their values.

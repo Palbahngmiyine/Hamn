@@ -12,13 +12,6 @@ GETENT=${HAMN_GETENT:-getent}
 SYSTEMCTL=${HAMN_SYSTEMCTL:-systemctl}
 GUEST_JSON=${HAMN_GUEST_JSON:-/usr/local/libexec/hamn/guest-json}
 FSTAB=${HAMN_FSTAB:-/etc/fstab}
-BINFMT_MODE=${HAMN_BINFMT_MODE:-qemu}
-case "$BINFMT_MODE" in
-    qemu) DEFAULT_BINFMT_ENTRY=/proc/sys/fs/binfmt_misc/qemu-x86_64 ;;
-    rosetta) DEFAULT_BINFMT_ENTRY=/proc/sys/fs/binfmt_misc/hamn-rosetta ;;
-    *) echo "hamn: guest image contract: invalid binfmt mode: $BINFMT_MODE" >&2; exit 1 ;;
-esac
-BINFMT_ENTRY=${HAMN_BINFMT_ENTRY:-$DEFAULT_BINFMT_ENTRY}
 ARCH=${HAMN_GUEST_ARCH:-$(uname -m)}
 
 fail() {
@@ -42,7 +35,7 @@ safe_regular "$IMAGE_MANIFEST" || fail "guest image manifest is unavailable"
 # Docker's default Buildx driver uses BuildKit server components embedded in
 # dockerd. The contract intentionally attests that guest capability without
 # requiring a host CLI plugin, standalone buildkitd, or public BuildKit socket.
-for command in dockerd docker containerd ctr runc dnsmasq qemu-x86_64-static; do
+for command in dockerd docker containerd ctr runc dnsmasq; do
     command -v "$command" >/dev/null 2>&1 ||
         fail "required image component is unavailable: $command"
 done
@@ -72,7 +65,5 @@ DISCARD_MOUNTS=$(awk '
     fail "guest fstab mounts with online discard: $DISCARD_MOUNTS"
 "$SYSTEMCTL" is-enabled --quiet fstrim.timer >/dev/null 2>&1 ||
     fail "fstrim.timer is not enabled in the guest image"
-[ -f "$BINFMT_ENTRY" ] && grep -Fxq enabled "$BINFMT_ENTRY" ||
-    fail "amd64 binfmt registration is unavailable"
 
 echo "hamn: verified Ubuntu 24.04 arm64 guest image contract"

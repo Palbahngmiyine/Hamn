@@ -239,7 +239,6 @@ test-portable: hamn-dev
 	$(HAMN_DEV) test repository
 	bash guest/tests/test_configure_containerd.sh
 	bash guest/tests/test_configure_docker.sh
-	bash guest/tests/test_configure_rosetta.sh
 	bash guest/tests/test_make_install_targets.sh
 	bash guest/tests/test_guest_deployment_transaction.sh
 	bash guest/tests/test_verify_image_contract.sh
@@ -575,7 +574,6 @@ test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)
 	$(DEPLOYMENT_RECOVERY_TEST)
 	bash guest/tests/test_make_install_targets.sh
 	bash guest/tests/test_configure_docker.sh
-	bash guest/tests/test_configure_rosetta.sh
 	bash guest/tests/test_verify_image_contract.sh
 	bash guest/tests/test_guest_image_builder.sh
 	$(MAKE) -C guest test-strict-json test-image-tools

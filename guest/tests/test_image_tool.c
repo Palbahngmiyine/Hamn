@@ -534,7 +534,7 @@ static void test_size_report_layout_and_budget_flow(void)
         "    \"duplicate files as hard links\",\n    \"filesystem journal\",\n"
         "    \"free filesystem blocks\"\n  ],\n"
         "  \"runtimeValidation\": \"required: physical boot, Docker, Compose, "
-        "Buildx, binfmt, Rosetta, reboot\",\n  \"reviewOnly\": true\n}\n",
+        "Buildx, reboot\",\n  \"reviewOnly\": true\n}\n",
         BASE_SHA, REVISION, BASELINE_BYTES, CANDIDATE_BYTES, ZERO_BASELINE_SHA,
         ZERO_CANDIDATE_SHA, BASELINE_BYTES - CANDIDATE_BYTES, 64 * MIB);
     size_t report_length = 0;

@@ -11,6 +11,14 @@
  * the same hash-verified descriptor, without reopening the source pathname.
  * A successful target inherits mode 0400; the caller makes its private copy
  * writable before growing it. The caller owns and cleans up that target.
+ *
+ * Layout beside the image: `raw-v1-<sha256>` (the bundle: `disk.raw` and
+ * `verified`) and its digest lock `.raw-v1-<sha256>.lock`, which is never
+ * removed. After an update, `control/install_support/retention.rs` removes
+ * a bundle that no kept image uses: under that lock, without waiting, it
+ * renames the bundle to `raw-v1-<sha256>.retired` and erases that, so a
+ * live name is always complete. The creation stage `raw-v1-<sha256>.stage`
+ * is only ever touched by this module.
  */
 int raw_cache_clone(const char *image, const char *target);
 

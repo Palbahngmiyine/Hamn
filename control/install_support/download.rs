@@ -271,6 +271,12 @@ pub(super) fn lock(path: &Path, blocking: bool) -> Result<DownloadLock> {
     Ok(guard)
 }
 
+/// The lock that covers lookup, transfer and publication of `<key>.artifact`
+/// in `downloads`; see `lock` for the contention rules.
+pub(super) fn artifact_lock(downloads: &Path, key: &str, blocking: bool) -> Result<DownloadLock> {
+    lock(&downloads.join(format!(".{key}.lock")), blocking)
+}
+
 pub(super) fn digest(path: &Path) -> Result<String> {
     let mut file = open_owned(path, false, None)?;
     let mut hash = Sha256::new();
@@ -909,7 +915,7 @@ fn acquire_observed<W: Write>(
     let final_path = downloads.join(format!("{key}.artifact"));
     let partial = downloads.join(format!(".{key}.partial"));
     let metadata = downloads.join(format!(".{key}.validator"));
-    let _lock = lock(&downloads.join(format!(".{key}.lock")), true)?;
+    let _lock = artifact_lock(&downloads, key, true)?;
     let reused = |path: PathBuf, source: &str| -> Result<(PathBuf, Counts)> {
         let size = safe_file(&path, false, Some(limit))?.len();
         Ok((

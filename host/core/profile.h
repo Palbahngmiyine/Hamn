@@ -35,6 +35,11 @@ struct profile {
     int home_read_only;
     int mount_inotify;
     char docker_daemon_json[4096];
+    /* Rosetta support was removed. config.yaml still reads and writes the
+     * setting, so a profile that an earlier Hamn stored with rosetta: true
+     * stays readable: it can be listed, stopped, reset, deleted and
+     * corrected. vm start, vm create, vm configure and vm apply refuse a
+     * profile that would keep it true (PROFILE_ROSETTA_REMOVED_FORMAT). */
     int rosetta;
     int nested_virtualization;
     int ssh_agent;
@@ -60,6 +65,12 @@ enum profile_setting {
     PROFILE_SETTING_PROVISION,
     PROFILE_SETTING_COUNT
 };
+
+/* How a stored rosetta: true is refused: a printf format that takes the
+ * profile name twice. */
+#define PROFILE_ROSETTA_REMOVED_FORMAT \
+    "profile %s sets rosetta: true, but Rosetta support was removed; " \
+    "vm configure --profile %s --rosetta false --yes clears it"
 
 /* Capacity, with the terminating NUL, of the reason for a refused profile. */
 #define PROFILE_REASON_CAP 256
