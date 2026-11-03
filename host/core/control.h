@@ -41,10 +41,20 @@ void hamn_control_free(char *result);
  * the VM this start booted could not be stopped is such a failure. An
  * earlier operation whose outcome is unknown stays unknown in the record
  * after any failure. A profile that sets rosetta: true (core/profile.h) is
- * refused with 1 before anything changes. */
+ * refused with 1 before anything changes.
+ *
+ * A start that would launch a VM first asks admission (core/admission.h)
+ * whether the host can take it, before it changes the VM, its configuration
+ * or its disk. HAMN_CONTROL_ADMISSION_REFUSED: the host could not, nothing
+ * was started, *refusal owns the refusal JSON that admission_admit
+ * describes (release it with hamn_control_free), and log_last_error() says
+ * the same in a sentence. refusal must not be NULL; *refusal is NULL after
+ * every other return. */
 #define HAMN_CONTROL_GUEST_FILESYSTEM_DAMAGED 6
+#define HAMN_CONTROL_ADMISSION_REFUSED 7
 int hamn_control_start(const char *profile, unsigned cpus,
-                       unsigned memory_gib, unsigned disk_gib);
+                       unsigned memory_gib, unsigned disk_gib,
+                       char **refusal);
 /* A zero resource keeps the profile's value. rosetta is -1 to keep the
  * setting or 0 to clear the rosetta: true that an earlier Hamn stored
  * (core/profile.h). Returns 0; 2 for invalid arguments, rosetta 1 included,

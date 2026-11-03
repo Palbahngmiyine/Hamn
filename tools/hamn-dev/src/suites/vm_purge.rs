@@ -255,10 +255,11 @@ fn a_soft_delete_keeps_the_disk_for_a_start_to_restore() {
     }
     assert!(home.listed().is_empty());
 
-    // A start rejected before any VM work still brings the profile back.
+    // Only an admitted start brings the profile back (start-preflight covers
+    // that); a start rejected before any VM work leaves it deleted.
     let rejected = home.run(&["vm", "start", "--profile", "work", "--disk", "1", "--yes"]);
     assert_eq!(rejected["ok"], false, "{rejected}");
-    assert_eq!(home.listed(), ["work"]);
+    assert!(home.listed().is_empty() && home.hamn().join("work/deleted").is_file());
     assert_eq!(fs::read_to_string(home.hamn().join("work/disk.img")).unwrap(), "disk\n");
 
     // A purge deletes a soft-deleted profile as well.

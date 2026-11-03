@@ -38,6 +38,14 @@ enum vm_spawn_process_result {
     VM_SPAWN_PROCESS_EXITED = 1,
 };
 
+/* Opens ~/.hamn/.locks/<file>, creating that directory (0700) and the file
+ * (0600) when missing. The directory must be this user's and writable by no
+ * one else, and the file a regular file of this user with one link that no
+ * one else can write; a symbolic link is refused. Returns a close-on-exec
+ * descriptor that holds no lock yet, or -1 with errno (EPERM for the
+ * directory, EINVAL for the file). */
+int vm_lock_file_open(const char *file);
+
 /* start/stop/delete와 fork된 supervisor 수명을 직렬화하는 inherited lock. */
 int vm_lifecycle_lock_acquire(const char *profile_name,
                               struct vm_lifecycle_lock *lock);

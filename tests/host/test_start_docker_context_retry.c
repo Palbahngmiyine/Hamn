@@ -240,7 +240,8 @@ int main(void)
         goto out;
     }
     if (reexec_pid == 0) {
-        _exit(hamn_control_start("reexec", 0, 0, 0));
+        char *refusal;
+        _exit(hamn_control_start("reexec", 0, 0, 0, &refusal));
     }
     int reexec_status;
     if (waitpid(reexec_pid, &reexec_status, 0) != reexec_pid ||
