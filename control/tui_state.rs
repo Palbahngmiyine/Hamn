@@ -764,7 +764,9 @@ impl State {
                     request.docker_config.or_else(|| self.docker_config.clone());
             }
         } else {
-            request.profile = request.profile.or_else(|| self.request.profile.clone());
+            if !request.selects_workspace() {
+                request.profile = request.profile.or_else(|| self.request.profile.clone());
+            }
             request.context = request.context.or_else(|| self.request.context.clone());
         }
         if !context_changed {
@@ -1192,6 +1194,7 @@ fn confirmation(request: &Request, width: u16) -> Vec<String> {
     let mut text = format!("Confirm {}\n", request.operation());
     for (key, value) in [
         ("Profile", &request.profile),
+        ("Workspace", &request.workspace),
         ("Context", &request.context),
         ("Namespace", &request.namespace),
         ("Name", &request.name),
@@ -3413,6 +3416,27 @@ mod tests {
         // No terminal input is a definition file.
         let refused = state.view("vm apply --file -").unwrap_err();
         assert_eq!(refused.code, "invalidRequest");
+    }
+    #[test]
+    fn a_typed_vm_up_or_down_targets_its_workspace_and_not_the_selected_profile() {
+        let mut state = State::new(Request::default());
+        assert!(state.request.profile.is_some());
+        let up = state.view("vm up --workspace /work/tree").unwrap();
+        assert!(up.mutates() && up.yes && up.profile.is_none());
+        assert_eq!(up.workspace.as_deref(), Some("/work/tree"));
+        let text = confirmation(&up, 400).join("\n");
+        for line in ["Confirm vm up", "Workspace: \"/work/tree\"", "its git directory read-only"] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        assert!(!text.contains("Profile:"), "{text}");
+        let purge = state.view("vm down --workspace /work/tree --purge").unwrap();
+        assert!(purge.purge && purge.profile.is_none());
+        assert!(confirmation(&purge, 400).join("\n").contains("permanently delete its profile"));
+        // The confirmation frame is red for an impact that names a deletion.
+        assert!(purge.impact().to_lowercase().contains("delete"));
+        assert!(!up.impact().to_lowercase().contains("delete"), "{}", up.impact());
+        let refused = state.view("vm up --workspace work/tree").unwrap_err();
+        assert_eq!(refused.message, "--workspace must be an absolute path");
     }
     #[test]
     fn a_profile_detail_reads_as_fields_with_the_keys_that_act_on_it() {

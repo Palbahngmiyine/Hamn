@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 
 #include "core/control.h"
+#include "core/control_locked.h"
 #include "core/lifecycle.h"
 #include "core/log.h"
 #include "core/mutation_lock.h"
@@ -75,14 +76,13 @@ static int profile_present(const char *profile_name)
     return -1;
 }
 
-static int purge_locked(const char *profile_name, int *absent)
+int control_purge_locked(const char *profile_name, int *absent)
 {
     /* Another purge can have finished while this one waited for the lock. */
     int present = profile_present(profile_name);
-    if (present <= 0) {
-        *absent = present == 0;
+    *absent = present == 0;
+    if (present <= 0)
         return present == 0 ? 0 : 1;
-    }
     struct profile profile;
     char failure[PROFILE_FAILURE_CAP];
     if (profile_load_explained(&profile, profile_name, failure) != 0) {
@@ -129,7 +129,7 @@ int hamn_control_purge(const char *profile_name, int *absent)
             logerr("cannot lock the %s profile lifecycle", profile_name);
             return 1;
         }
-        rc = purge_locked(profile_name, absent);
+        rc = control_purge_locked(profile_name, absent);
         vm_lifecycle_lock_release(&lock);
     }
     if (rc == 0 && *absent)

@@ -62,6 +62,7 @@ PROFILE_APPLY_TEST := $(BUILD)/tests/test_profile_apply
 PROFILE_APPLY_FAULTS_TEST := $(BUILD)/tests/test_profile_apply_faults
 PROFILE_PURGE_TEST := $(BUILD)/tests/test_profile_purge
 ADMISSION_TEST := $(BUILD)/tests/test_admission
+WORKSPACE_TEST := $(BUILD)/tests/test_workspace
 PROFILE_YAML_FAULTS_TEST := $(BUILD)/tests/test_profile_yaml_faults
 START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retry
 GUEST_WAIT_DEADLINES_TEST := $(BUILD)/tests/test_guest_wait_deadlines
@@ -243,6 +244,10 @@ test-portable: hamn-dev
 	bash guest/tests/test_guest_image_builder.sh
 
 $(PROFILE_READ_TEST): tests/host/test_profile_read.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) $(LDFLAGS) -o $@
+
+$(WORKSPACE_TEST): tests/host/test_workspace.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) $(LDFLAGS) -o $@
 
@@ -513,7 +518,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 		$(GUEST_FILESYSTEM_TEST) $(GUEST_PANIC_TEST) $(VZ_DISK_CONFIG_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
 		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
-		$(PROFILE_PURGE_TEST) $(ADMISSION_TEST) \
+		$(PROFILE_PURGE_TEST) $(ADMISSION_TEST) $(WORKSPACE_TEST) \
 		$(PROFILE_YAML_FAULTS_TEST) $(GUEST_WAIT_DEADLINES_TEST)
 	rm -rf $(BUILD)/tests/raw-cache-data && mkdir -p $(BUILD)/tests/raw-cache-data
 	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
@@ -537,11 +542,13 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 	$(PROFILE_APPLY_FAULTS_TEST)
 	$(PROFILE_PURGE_TEST)
 	$(ADMISSION_TEST)
+	$(WORKSPACE_TEST)
 	$(PROFILE_YAML_FAULTS_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-apply
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-reset
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-purge
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-up
 	bash guest/tests/test_guest_deployment_transaction.sh
 
 test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)

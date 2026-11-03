@@ -141,6 +141,48 @@ again at any time, also while the VM runs.
   `hamn --headless vm configure --profile <name> --rosetta false --yes` clears
   it.
 
+## One VM per workspace
+
+`vm up` gives a directory, such as a git worktree, a VM of its own; `vm down`
+stops it or deletes it. Name the directory by its absolute path, not by a
+profile:
+
+```sh
+hamn --headless vm up --workspace "$PWD" --yes
+hamn --headless vm down --workspace "$PWD" --yes
+hamn --headless vm down --workspace "$PWD" --purge --yes
+```
+
+- The profile is named `ws-` and 12 hexadecimal digits taken from the
+  directory's real path, so every spelling of one directory, such as
+  `.../Project` and `.../project` on a case-insensitive disk, names the same
+  VM. Another `vm up` of the same directory starts that profile again and
+  answers with the same profile and Docker socket.
+- A new profile does not share your home directory. It shares the workspace
+  writable and the worktree's common git directory read-only, each at its own
+  path in the VM. `--no-git-mount` shares the workspace only. `--cpu`,
+  `--memory` and `--disk` set a new profile's resources and change an existing
+  one as `vm start` does.
+- The git directory is shared only when it is the workspace's own: a `.git`
+  directory in the workspace, or the git directory that git made for this
+  linked worktree. A submodule, a `.git` file that names another repository
+  and a `.git` symbolic link get a warning, and the VM shares the workspace
+  only. The read-only git mount is a convenience for git in the guest, not a
+  security boundary against the guest: in a plain repository `.git` lies
+  inside the writable workspace share.
+- The answer is the profile's `vm status` with `profile`, `workspace` and
+  `dockerHost`, the `unix://` value for `DOCKER_HOST`.
+- When the host cannot take the VM (`admissionRefused`) or its first start
+  fails, `vm up` deletes the profile it made. A profile that existed before
+  stays as it was.
+- `vm down` stops the VM and keeps its disk; `--purge` deletes the profile as
+  `vm delete --purge` does. Neither touches the workspace or its repository.
+- Both act only on the profile that `vm up` made for this directory. A
+  profile of the same name without that record, or one made for an earlier
+  directory at the same path, is refused with `conflict`.
+- The workspace must exist, be a directory you own, and lie inside your home
+  directory, as every writable share must.
+
 ## External tools
 
 ```sh

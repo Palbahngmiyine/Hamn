@@ -93,7 +93,7 @@ fn write_outcomes(mut output: impl std::io::Write, states: &[&State]) -> std::io
 fn outcome_line(outcome: &Value) -> String {
     let text = |value: &Value| value.as_str().map(crate::tui_failure::single_line);
     let mut target = Vec::new();
-    for key in ["profile", "context", "namespace", "name", "dockerConfig"] {
+    for key in ["profile", "workspace", "context", "namespace", "name", "dockerConfig"] {
         if let Some(value) = text(&outcome["target"][key]) {
             target.push(format!("{key} {value}"));
         }

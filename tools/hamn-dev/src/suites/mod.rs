@@ -85,6 +85,7 @@ mod upgrade_recovery_ownership;
 mod vm_apply;
 mod vm_purge;
 mod vm_reset;
+mod vm_up;
 #[cfg(target_os = "macos")]
 mod workspace_live;
 
@@ -117,6 +118,7 @@ const SUITES: &[Suite] = &[
     ("vm-apply", vm_apply::main),
     ("vm-purge", vm_purge::main),
     ("vm-reset", vm_reset::main),
+    ("vm-up", vm_up::main),
     ("start-preflight", start_preflight::main),
     ("tui-native-regressions", tui_native_regressions::main),
     ("tui-command-completion", tui_command_completion::main),
