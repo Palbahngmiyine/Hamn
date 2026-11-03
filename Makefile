@@ -59,6 +59,7 @@ SSH_OPTIONS_TEST := $(BUILD)/tests/test_ssh_options
 PROFILE_READ_TEST := $(BUILD)/tests/test_profile_read
 PROFILE_APPLY_TEST := $(BUILD)/tests/test_profile_apply
 PROFILE_APPLY_FAULTS_TEST := $(BUILD)/tests/test_profile_apply_faults
+PROFILE_PURGE_TEST := $(BUILD)/tests/test_profile_purge
 PROFILE_YAML_FAULTS_TEST := $(BUILD)/tests/test_profile_yaml_faults
 START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retry
 GUEST_WAIT_DEADLINES_TEST := $(BUILD)/tests/test_guest_wait_deadlines
@@ -256,6 +257,16 @@ $(PROFILE_APPLY_FAULTS_TEST): tests/host/test_profile_apply_faults.c host/core/a
 		-Dprofile_read_existing_reason=fault_profile_read_existing_reason \
 		tests/host/test_profile_apply_faults.c host/core/apply.c \
 		$(filter-out $(BUILD)/host/core/apply.o,$(HOST_TEST_OBJS)) $(LDFLAGS) -o $@
+
+# purge.c is compiled into this test a second time, with its HAMN_TEST
+# interruption after the rename. cmd_delete.c is compiled with vm_stop renamed
+# to a function of the test, which can leave a VM process behind a stop that
+# reported success.
+$(PROFILE_PURGE_TEST): tests/host/test_profile_purge.c host/core/purge.c host/cmd/cmd_delete.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) -DHAMN_TEST -Dvm_stop=fault_vm_stop \
+		tests/host/test_profile_purge.c host/core/purge.c host/cmd/cmd_delete.c \
+		$(filter-out $(BUILD)/host/core/purge.o $(BUILD)/host/cmd/cmd_delete.o,$(HOST_TEST_OBJS)) $(LDFLAGS) -o $@
 
 # libyaml's allocator is compiled into this test a second time, with malloc
 # and realloc renamed to functions of the test that fail on request.
@@ -489,6 +500,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 		$(GUEST_FILESYSTEM_TEST) $(GUEST_PANIC_TEST) $(VZ_DISK_CONFIG_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
 		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
+		$(PROFILE_PURGE_TEST) \
 		$(PROFILE_YAML_FAULTS_TEST) $(GUEST_WAIT_DEADLINES_TEST)
 	rm -rf $(BUILD)/tests/raw-cache-data && mkdir -p $(BUILD)/tests/raw-cache-data
 	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
@@ -510,10 +522,12 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 	$(VMRUN_IDENTITY_TEST)
 	$(PROFILE_APPLY_TEST)
 	$(PROFILE_APPLY_FAULTS_TEST)
+	$(PROFILE_PURGE_TEST)
 	$(PROFILE_YAML_FAULTS_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-apply
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-reset
+	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-purge
 	bash guest/tests/test_guest_deployment_transaction.sh
 
 test-guest-deployment: host $(DEPLOYMENT_RECOVERY_TEST)

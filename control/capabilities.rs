@@ -126,6 +126,13 @@ fn operation(name: &str, mutation: bool) -> Value {
             false,
         );
     }
+    if name == "vm delete" {
+        add(
+            "purge",
+            json!({"type":"boolean", "default":false, "description":"Permanently delete the profile with its disk, settings and Docker data instead of hiding it; a profile that does not exist is reported as alreadyAbsent"}),
+            false,
+        );
+    }
     if name == "vm diagnostics" {
         add(
             "path",
@@ -262,6 +269,12 @@ mod tests {
                     op["name"]
                 );
             }
+            assert_eq!(
+                op["arguments"]["properties"]["purge"]["type"] == "boolean",
+                op["name"] == "vm delete",
+                "purge on {}",
+                op["name"]
+            );
             for flag in required {
                 assert!(!op["arguments"]["properties"][flag.as_str().unwrap()].is_null());
             }
