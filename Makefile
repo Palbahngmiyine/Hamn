@@ -63,6 +63,7 @@ PROFILE_APPLY_FAULTS_TEST := $(BUILD)/tests/test_profile_apply_faults
 PROFILE_PURGE_TEST := $(BUILD)/tests/test_profile_purge
 ADMISSION_TEST := $(BUILD)/tests/test_admission
 WORKSPACE_TEST := $(BUILD)/tests/test_workspace
+VMRUN_WORKSPACE_TEST := $(BUILD)/tests/test_vmrun_workspace
 PROFILE_YAML_FAULTS_TEST := $(BUILD)/tests/test_profile_yaml_faults
 START_DOCKER_CONTEXT_RETRY_TEST := $(BUILD)/tests/test_start_docker_context_retry
 GUEST_WAIT_DEADLINES_TEST := $(BUILD)/tests/test_guest_wait_deadlines
@@ -250,6 +251,20 @@ $(PROFILE_READ_TEST): tests/host/test_profile_read.c $(HOST_TEST_OBJS)
 $(WORKSPACE_TEST): tests/host/test_workspace.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
 	clang $(filter-out -MMD -MP,$(CFLAGS)) $< $(HOST_TEST_OBJS) $(LDFLAGS) -o $@
+
+# cmd_vmrun.c is compiled for this test a second time, checking its workspace
+# every 50 ms, with the VM, the detached spawn and workspace_presence renamed
+# to functions of the test.
+VMRUN_WORKSPACE_FAKES := vz_vm_create vz_vm_start vz_vm_request_stop \
+	vz_vm_force_stop vz_runloop proc_spawn_daemon workspace_presence
+$(VMRUN_WORKSPACE_TEST): tests/host/test_vmrun_workspace.c host/cmd/cmd_vmrun.c $(HOST_TEST_OBJS)
+	@mkdir -p $(dir $@)
+	clang $(filter-out -MMD -MP,$(CFLAGS)) -DWORKSPACE_CHECK_MS=50 \
+		$(foreach name,$(VMRUN_WORKSPACE_FAKES),-D$(name)=fake_$(name)) \
+		-c host/cmd/cmd_vmrun.c -o $@.vmrun.o
+	clang $(filter-out -MMD -MP,$(CFLAGS)) tests/host/test_vmrun_workspace.c \
+		$@.vmrun.o $(filter-out $(BUILD)/host/cmd/cmd_vmrun.o,$(HOST_TEST_OBJS)) \
+		$(LDFLAGS) -o $@
 
 $(PROFILE_APPLY_TEST): tests/host/test_profile_apply.c $(HOST_TEST_OBJS)
 	@mkdir -p $(dir $@)
@@ -518,7 +533,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 		$(GUEST_FILESYSTEM_TEST) $(GUEST_PANIC_TEST) $(VZ_DISK_CONFIG_TEST) \
 		$(START_DOCKER_CONTEXT_RETRY_TEST) $(RAW_CACHE_TEST) $(VMRUN_IDENTITY_TEST) \
 		$(PROFILE_APPLY_TEST) $(PROFILE_APPLY_FAULTS_TEST) \
-		$(PROFILE_PURGE_TEST) $(ADMISSION_TEST) $(WORKSPACE_TEST) \
+		$(PROFILE_PURGE_TEST) $(ADMISSION_TEST) $(WORKSPACE_TEST) $(VMRUN_WORKSPACE_TEST) \
 		$(PROFILE_YAML_FAULTS_TEST) $(GUEST_WAIT_DEADLINES_TEST)
 	rm -rf $(BUILD)/tests/raw-cache-data && mkdir -p $(BUILD)/tests/raw-cache-data
 	$(RAW_CACHE_TEST) $(BUILD)/tests/raw-cache-data
@@ -543,6 +558,7 @@ test-profile-state: host $(LIFECYCLE_LOCK_TEST) $(CTLSOCK_TEST) $(CONSOLE_TEST) 
 	$(PROFILE_PURGE_TEST)
 	$(ADMISSION_TEST)
 	$(WORKSPACE_TEST)
+	$(VMRUN_WORKSPACE_TEST)
 	$(PROFILE_YAML_FAULTS_TEST)
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test profile-yaml
 	HAMN=$(HOST_BIN) $(HAMN_DEV) test vm-apply

@@ -16,6 +16,13 @@
  * boots with `panic=0`, so the panicked kernel waits for this instead of
  * rebooting inside the VM, which Virtualization.framework would allow
  * without telling vmrun.
+ *
+ * Workspace: with --profile naming an ephemeral profile (core/workspace.h),
+ * vmrun checks every WORKSPACE_CHECK_MS that the profile's workspace path is
+ * still there. The first check that finds it absent stops the VM as SIGTERM
+ * does, and at exit, once its identity files and control socket are gone,
+ * vmrun starts "hamn workspace-reclaim <record>" detached to purge the
+ * profile. A profile without a record is not watched.
  */
 
 #include <errno.h>
@@ -37,6 +44,8 @@
 #include "cli.h"
 #include "core/guest_panic.h"
 #include "core/log.h"
+#include "core/profile.h"
+#include "core/workspace.h"
 #include "util/fs.h"
 #include "util/proc.h"
 #include "vmrun/console.h"
@@ -48,6 +57,10 @@
  * trace) and ends it with "---[ end Kernel panic"; a CPU wedged by the damage
  * may never print the end, so the wait for it is bounded. */
 #define PANIC_REPORT_GRACE_SEC 2
+/* A test build sets a shorter interval. */
+#ifndef WORKSPACE_CHECK_MS
+#define WORKSPACE_CHECK_MS 10000
+#endif
 
 /* Every reason the console relay can report fits the panic record. */
 _Static_assert(CONSOLE_PANIC_REASON_CAP <= GUEST_PANIC_DETAIL_CAP,
@@ -73,6 +86,11 @@ static int g_spawn_guard_fd = -1;
 static dev_t g_spawn_guard_dev;
 static ino_t g_spawn_guard_ino;
 static int g_spawn_guard_owned;
+static int g_stop_requested;
+static struct workspace g_watched; /* its path is empty when not watched */
+static dispatch_source_t g_watch_timer;
+static int g_reclaiming;
+static char g_reclaim_log[PROFILE_PATH_CAP];
 
 static int path_is_inode(const char *path, dev_t dev, ino_t ino,
                          mode_t type)
@@ -277,15 +295,14 @@ static void on_state(void *ud, enum vz_state st)
 
 static void handle_stop_signal(void)
 {
-    static int requested;
     char *err = NULL;
 
-    if (requested) {
+    if (g_stop_requested) {
         logmsg("vmrun: force stopping");
         vz_vm_force_stop(g_vm, &err);
         exit(0);
     }
-    requested = 1;
+    g_stop_requested = 1;
 
     logmsg("vmrun: requesting guest stop");
     if (vz_vm_request_stop(g_vm, &err) != 0) {
@@ -304,6 +321,81 @@ static void handle_stop_signal(void)
                        vz_vm_force_stop(g_vm, &e);
                        exit(0);
                    });
+}
+
+/* Main queue only, like handle_stop_signal: the first check that finds the
+ * workspace absent stops the VM, unless a stop was already asked for, which
+ * ends vmrun all the same. */
+static void check_workspace(void)
+{
+    if (workspace_presence(g_watched.path) != WORKSPACE_ABSENT)
+        return;
+    dispatch_source_cancel(g_watch_timer);
+    g_reclaiming = 1;
+    logmsg("vmrun: workspace %s no longer exists; stopping the VM to delete "
+           "profile %s", g_watched.path, g_watched.profile);
+    if (!g_stop_requested)
+        handle_stop_signal();
+}
+
+static void watch_workspace(void)
+{
+    g_watch_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0,
+                                           dispatch_get_main_queue());
+    if (!g_watch_timer)
+        die("vmrun: cannot create the workspace timer");
+    dispatch_source_set_timer(
+        g_watch_timer,
+        dispatch_time(DISPATCH_TIME_NOW, WORKSPACE_CHECK_MS * NSEC_PER_MSEC),
+        WORKSPACE_CHECK_MS * NSEC_PER_MSEC,
+        WORKSPACE_CHECK_MS * NSEC_PER_MSEC / 10);
+    dispatch_source_set_event_handler(g_watch_timer, ^{
+        check_workspace();
+    });
+    dispatch_resume(g_watch_timer);
+}
+
+/* At exit, after cleanup_files: with the identity files and the control
+ * socket gone, the purge finds the VM known to be stopped. When this fails,
+ * the next vm list or vm up purges the profile. */
+static void reclaim_after_exit(void)
+{
+    if (!g_reclaiming)
+        return;
+    char self[PATH_MAX], record[WORKSPACE_RECORD_CAP];
+    if (!proc_self_path(self, sizeof(self)) ||
+        workspace_record_format(&g_watched, record) < 0) {
+        logerr("vmrun: cannot start the deletion of profile %s; vm list or "
+               "vm up deletes it", g_watched.profile);
+        return;
+    }
+    const char *argv[] = { self, "workspace-reclaim", record, NULL };
+    pid_t pid = proc_spawn_daemon(argv, g_reclaim_log);
+    if (pid < 0)
+        logerr("vmrun: cannot start the deletion of profile %s: %s; vm list "
+               "or vm up deletes it", g_watched.profile, strerror(errno));
+    else
+        logmsg("vmrun: deleting profile %s in process %d", g_watched.profile,
+               (int)pid);
+}
+
+/* Reads the record of profile to watch its workspace; a profile without one
+ * is not watched. */
+static void workspace_watch_open(const char *name)
+{
+    struct profile profile;
+    memset(&profile, 0, sizeof(profile));
+    snprintf(profile.name, sizeof(profile.name), "%s", name);
+    if (!profile_name_valid(name) || profile_locate(&profile) != 0)
+        die("vmrun: invalid --profile %s", name);
+    int found = workspace_record_read(&profile, &g_watched);
+    if (found < 0)
+        die("vmrun: cannot read the workspace record of profile %s", name);
+    if (!found)
+        return;
+    if (!profile_path(&profile, "logs/vmrun.log", g_reclaim_log,
+                      sizeof(g_reclaim_log)))
+        die("vmrun: the log path of profile %s is too long", name);
 }
 
 /* Main queue only: the first call records the panic, stops the VM and ends
@@ -400,6 +492,8 @@ static int vmrun_usage(void)
             "  --serial-log <path>   serial console log file; a guest kernel\n"
             "                        panic there stops the VM\n"
             "  --panic-record <path> where that panic's reason is recorded\n"
+            "  --profile <name>      the profile; an ephemeral one's VM stops\n"
+            "                        and is deleted once its workspace is gone\n"
             "  --efi-vars <path>     EFI variable store (default: <disk>.efivars)\n"
             "  --machine-id <path>   persisted machine identifier\n"
             "  --mac <addr>          fixed MAC address\n"
@@ -433,6 +527,7 @@ int cmd_vmrun(int argc, char **argv)
         .serial_fd = -1,
     };
     const char *serial_log = NULL;
+    const char *profile_name = NULL;
     char efi_default[1024];
 
     static const struct option opts[] = {
@@ -454,6 +549,7 @@ int cmd_vmrun(int argc, char **argv)
         { "spawn-token", required_argument, NULL, 'T' },
         { "ctl-sock", required_argument, NULL, 'k' },
         { "panic-record", required_argument, NULL, 'P' },
+        { "profile", required_argument, NULL, 'W' },
         { 0 },
     };
 
@@ -512,6 +608,9 @@ int cmd_vmrun(int argc, char **argv)
         case 'P':
             g_panic_record = optarg;
             break;
+        case 'W':
+            profile_name = optarg;
+            break;
         case 'S':
         case 'R': {
             if (spec.nshares >= VZ_MAX_SHARES)
@@ -556,9 +655,13 @@ int cmd_vmrun(int argc, char **argv)
         spec.efi_vars = efi_default;
     }
 
+    /* Exit handlers run in reverse: the reclaim starts after the cleanup. */
+    atexit(reclaim_after_exit);
     atexit(cleanup_files);
     if (guard_args && spawn_guard_validate() != 0)
         die("vmrun: cannot validate inherited spawn guard");
+    if (profile_name)
+        workspace_watch_open(profile_name);
     const char *test_exit =
         getenv("HAMN_TEST_VMRUN_EXIT_BEFORE_IDENTITY");
     if (test_exit && strcmp(test_exit, "1") == 0)
@@ -608,5 +711,7 @@ int cmd_vmrun(int argc, char **argv)
 
     watch_signal(SIGINT);
     watch_signal(SIGTERM);
+    if (g_watched.path[0])
+        watch_workspace();
     vz_runloop();
 }

@@ -81,17 +81,10 @@ static int remove_tree(int home, const char *name)
     return -1;
 }
 
-static int open_home(char root[PROFILE_PATH_CAP])
-{
-    if (!hamn_home(root, PROFILE_PATH_CAP))
-        return -1;
-    return open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-}
-
 enum purge_result purge_retire(const struct profile *profile)
 {
     char root[PROFILE_PATH_CAP];
-    int home = open_home(root);
+    int home = hamn_home_open(root);
     if (home < 0) {
         logerr("cannot open ~/.hamn to delete profile %s: %s; nothing was "
                "deleted", profile->name, strerror(errno));
@@ -131,7 +124,7 @@ enum purge_result purge_retire(const struct profile *profile)
 void purge_sweep(void)
 {
     char root[PROFILE_PATH_CAP];
-    int home = open_home(root);
+    int home = hamn_home_open(root);
     if (home < 0)
         return;
     DIR *directory = fdopendir(home);

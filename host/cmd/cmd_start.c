@@ -767,7 +767,8 @@ static int cmd_start_execute(const struct start_options *options,
     const char *const vm_suffix[] = {
         "--pidfile", pidf, "--identity-file", identity,
         "--spawn-guard", spawning, "--spawn-guard-fd", guard_fd_s,
-        "--spawn-token", spawn_token, "--ctl-sock", ctl, NULL,
+        "--spawn-token", spawn_token, "--ctl-sock", ctl, "--profile", p.name,
+        NULL,
     };
     for (size_t index = 0; vm_suffix[index]; index++) {
         if (append_vm_argument(vmargv, &vmargc,
