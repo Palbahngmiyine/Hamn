@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 (2026-11-03)
+
+## What's Changed
+* feat: add vm delete --purge to remove a profile and its disk by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/95
+* feat: remove guest image cache entries that no retained generation uses after an upgrade by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/96
+* feat: remove amd64 emulation (Rosetta and qemu-x86_64 binfmt) by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/98
+* feat: refuse new VM starts when host memory, load, or power is short by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/97
+* feat: add vm up and vm down to run one VM per git worktree by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/99
+* feat: reclaim a worktree VM when its workspace is deleted by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/100
+
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.3.1...v0.4.0
+
 ## 0.3.1 (2026-10-16)
 
 ## What's Changed
