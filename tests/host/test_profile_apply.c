@@ -177,6 +177,9 @@ static void refused_definitions_create_nothing(void)
           "YAML anchors and tags are not supported" },
         { DEFINITION("work", "\n  homeReadOnly: true\n  mountHome: false\n"),
           "homeReadOnly requires mountHome" },
+        { DEFINITION("work", "\n  rosetta: true\n"),
+          "invalid profile definition: Rosetta support was removed; set "
+          "rosetta: false" },
         { DEFINITION("work", " {}\n") "---\n" DEFINITION("work", " {}\n"),
           "expected exactly one YAML configuration document" },
         /* A value that config.yaml could not hold: the file written from it
@@ -248,7 +251,7 @@ static void refused_definitions_create_nothing(void)
 static void apply_creates_configures_or_does_nothing(void)
 {
     const char *first = DEFINITION("work",
-        "\n  cpus: 6\n  memoryMiB: 6000\n  diskGiB: 80\n  rosetta: true\n"
+        "\n  cpus: 6\n  memoryMiB: 6000\n  diskGiB: 80\n  nestedVirtualization: true\n"
         "  docker:\n    daemonJson: '{\"debug\":true}'\n"
         "  mounts:\n    - location: /Volumes/data\n"
         "      mountPoint: /data\n"
@@ -264,7 +267,7 @@ static void apply_creates_configures_or_does_nothing(void)
     struct profile stored;
     assert(profile_read_existing(&stored, "work") == 0);
     assert(stored.cpus == 6 && stored.mem_mib == 6000 &&
-           stored.disk_gib == 80 && stored.rosetta == 1 &&
+           stored.disk_gib == 80 && stored.nested_virtualization == 1 &&
            stored.mount_home == 1 && stored.mount_count == 1 &&
            stored.hook_count == 1 && stored.hooks[0].timeout_seconds == 60);
     assert(strcmp(stored.docker_daemon_json, "{\"debug\":true}") == 0);
@@ -297,7 +300,7 @@ static void apply_creates_configures_or_does_nothing(void)
     const char *expected =
         "[{\"key\":\"cpus\",\"from\":6,\"to\":8},"
         "{\"key\":\"docker.daemonJson\"},"
-        "{\"key\":\"rosetta\",\"from\":true,\"to\":false},"
+        "{\"key\":\"nestedVirtualization\",\"from\":true,\"to\":false},"
         "{\"key\":\"sshAgent\",\"from\":false,\"to\":true},"
         "{\"key\":\"mounts\"},{\"key\":\"provision\"}]";
     assert(strcmp(applied("work", second, 1, "configure"), expected) == 0);
@@ -307,7 +310,8 @@ static void apply_creates_configures_or_does_nothing(void)
            status.st_mtime == 1000000000);
     assert(strcmp(applied("work", second, 0, "configure"), expected) == 0);
     assert(profile_read_existing(&stored, "work") == 0);
-    assert(stored.cpus == 8 && stored.rosetta == 0 && stored.ssh_agent == 1 &&
+    assert(stored.cpus == 8 && stored.nested_virtualization == 0 &&
+           stored.ssh_agent == 1 &&
            stored.docker_daemon_json[0] == '\0' && stored.hook_count == 0 &&
            stored.mounts[0].writable == 1 && stored.disk_gib == 80);
     assert(stat(in_profile("work", "config.yaml"), &status) == 0 &&
@@ -325,7 +329,30 @@ static void apply_creates_configures_or_does_nothing(void)
     assert(strcmp(after, by_hand) == 0);
 }
 
+/* A profile that an earlier Hamn stored with rosetta: true. A definition that
+ * keeps it is refused even though the settings are equal, and one without it
+ * clears it like any other change. */
+static void rosetta_set_by_an_earlier_hamn_is_cleared_but_never_applied(void)
+{
+    const char *stored_text = "rosetta: true\n";
+    char after[8192];
+    assert(mkdir(in_profile("translated", NULL), 0700) == 0);
+    write_file(in_profile("translated", "config.yaml"), stored_text,
+               strlen(stored_text));
+    for (int dry_run = 0; dry_run < 2; dry_run++)
+        refused("translated", DEFINITION("translated", "\n  rosetta: true\n"),
+                dry_run, 2, "Rosetta support was removed; set rosetta: false");
+    read_file(in_profile("translated", "config.yaml"), after, sizeof(after));
+    assert(strcmp(after, stored_text) == 0);
+    assert(strcmp(applied("translated", DEFINITION("translated", " {}\n"), 0,
+                          "configure"),
+                  "[{\"key\":\"rosetta\",\"from\":true,\"to\":false}]") == 0);
+    struct profile stored;
+    assert(profile_read_existing(&stored, "translated") == 0 && !stored.rosetta);
+}
+
 /* States of a profile that forbid the change. Each leaves every byte. */
+
 static void conflicting_states_are_refused_unchanged(void)
 {
     char before[8192], after[8192];
@@ -609,7 +636,7 @@ static void concurrent_applies_leave_one_definition(void)
 {
     char paths[2][128];
     const char *texts[2] = {
-        DEFINITION("raced", "\n  cpus: 5\n  rosetta: true\n"),
+        DEFINITION("raced", "\n  cpus: 5\n  nestedVirtualization: true\n"),
         DEFINITION("raced", "\n  cpus: 7\n  sshAgent: true\n"),
     };
     assert(strcmp(applied("raced", DEFINITION("raced", " {}\n"), 0, "create"),
@@ -644,8 +671,8 @@ static void concurrent_applies_leave_one_definition(void)
     }
     struct profile stored;
     assert(profile_read_existing(&stored, "raced") == 0);
-    assert((stored.cpus == 5 && stored.rosetta && !stored.ssh_agent) ||
-           (stored.cpus == 7 && !stored.rosetta && stored.ssh_agent));
+    assert((stored.cpus == 5 && stored.nested_virtualization && !stored.ssh_agent) ||
+           (stored.cpus == 7 && !stored.nested_virtualization && stored.ssh_agent));
 }
 
 int main(void)
@@ -667,6 +694,7 @@ int main(void)
         alarm(60);
         refused_definitions_create_nothing();
         apply_creates_configures_or_does_nothing();
+        rosetta_set_by_an_earlier_hamn_is_cleared_but_never_applied();
         conflicting_states_are_refused_unchanged();
         a_change_waits_for_the_lifecycle_lock();
         concurrent_applies_leave_one_definition();

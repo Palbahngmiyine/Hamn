@@ -518,6 +518,11 @@ int hamn_control_apply(const char *profile_name, const char *path, int dry_run,
                desired.name, profile_name);
         return APPLY_INVALID;
     }
+    if (desired.rosetta) {
+        logerr("invalid profile definition: Rosetta support was removed; "
+               "set rosetta: false");
+        return APPLY_INVALID;
+    }
     if (!profile_storable(&desired)) {
         logerr("invalid profile definition: %s", errno == EOVERFLOW ?
                "its settings do not fit in config.yaml, which holds 65536 "

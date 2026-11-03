@@ -20,7 +20,7 @@ unsafe extern "C" {
         disk: u32,
         refusal: *mut *mut libc::c_char,
     ) -> i32;
-    // rosetta: 1 or 0 sets the profile's setting, -1 keeps it.
+    // rosetta: 0 clears the stored setting, -1 keeps it; the core refuses 1.
     fn hamn_control_configure(
         profile: *const libc::c_char,
         cpu: u32,

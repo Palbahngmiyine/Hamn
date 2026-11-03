@@ -130,7 +130,7 @@ fn a_definition_creates_a_profile_and_a_repeat_changes_nothing() {
     let home = Home::new();
     let text = definition(
         "work",
-        "cpus: 6\nmemoryMiB: 6000\ndiskGiB: 80\nrosetta: true\nmounts:\n  - location: /Volumes/data\n    mountPoint: /data\nprovision:\n  - command: echo ready",
+        "cpus: 6\nmemoryMiB: 6000\ndiskGiB: 80\nnestedVirtualization: true\nmounts:\n  - location: /Volumes/data\n    mountPoint: /data\nprovision:\n  - command: echo ready",
     );
     let created = home.applied("work", &text, &["--yes"]);
     assert_eq!(created, json!({"profile": "work", "action": "create", "changes": [], "dryRun": false}));
@@ -138,7 +138,8 @@ fn a_definition_creates_a_profile_and_a_repeat_changes_nothing() {
     assert_eq!(fs::metadata(&config).unwrap().permissions().mode() & 0o7777, 0o600);
     assert_eq!(fs::metadata(home.profile("work")).unwrap().permissions().mode() & 0o7777, 0o700);
     let status = home.status("work");
-    assert!(status["cpus"] == 6 && status["memoryMiB"] == 6000 && status["diskGiB"] == 80 && status["rosetta"] == true, "{status}");
+    assert!(status["cpus"] == 6 && status["memoryMiB"] == 6000 && status["diskGiB"] == 80, "{status}");
+    assert!(fs::read_to_string(&config).unwrap().contains("nestedVirtualization: true\n"));
     assert_eq!(status["state"], "stopped", "{status}");
     assert_eq!(status["lastOperation"], Value::Null, "{status}");
     assert_eq!(status["sharedDirectories"][1], json!({"hostPath": "/Volumes/data", "guestPath": "/data", "writable": false}), "{status}");
@@ -171,7 +172,7 @@ fn omitted_settings_return_to_defaults_and_every_change_is_listed() {
     let home = Home::new();
     home.applied(
         "work",
-        &definition("work", "cpus: 6\nrosetta: true\ndocker:\n  daemonJson: '{\"debug\":true}'\nprovision:\n  - command: echo ready"),
+        &definition("work", "cpus: 6\nnestedVirtualization: true\ndocker:\n  daemonJson: '{\"debug\":true}'\nprovision:\n  - command: echo ready"),
         &["--yes"],
     );
     // The definition is the whole configuration: the keys this one leaves
@@ -182,7 +183,7 @@ fn omitted_settings_return_to_defaults_and_every_change_is_listed() {
     let changes = json!([
         {"key": "cpus", "from": 6, "to": 8},
         {"key": "docker.daemonJson"},
-        {"key": "rosetta", "from": true, "to": false},
+        {"key": "nestedVirtualization", "from": true, "to": false},
         {"key": "sshAgent", "from": false, "to": true},
         {"key": "mounts"},
         {"key": "provision"},
@@ -192,7 +193,7 @@ fn omitted_settings_return_to_defaults_and_every_change_is_listed() {
     assert_eq!(fs::read(home.config("work")).unwrap(), before);
     assert_eq!(home.applied("work", &second, &["--yes"]), json!({"profile": "work", "action": "configure", "changes": changes, "dryRun": false}));
     let text = fs::read_to_string(home.config("work")).unwrap();
-    for line in ["cpus: 8\n", "rosetta: false\n", "sshAgent: true\n", "daemonJson: \"\"\n", "provision: []\n", "    writable: true\n"] {
+    for line in ["cpus: 8\n", "nestedVirtualization: false\n", "sshAgent: true\n", "daemonJson: \"\"\n", "provision: []\n", "    writable: true\n"] {
         assert!(text.contains(line), "{line:?} in {text}");
     }
     assert_eq!(fs::metadata(home.config("work")).unwrap().permissions().mode() & 0o7777, 0o600);
@@ -239,6 +240,7 @@ const SPECS: &[(&str, &str)] = &[
     ("mountHome: false\nmountInotify: true", "mountInotify requires a writable share"),
     ("docker:\n  daemonJson: \"[\"", "docker.daemonJson must be one JSON object"),
     ("docker:\n  daemonJson: \"{\\\"containerd\\\":\\\"/other.sock\\\"}\"", "docker.daemonJson must be one JSON object"),
+    ("rosetta: true", "Rosetta support was removed; set rosetta: false"),
     // What config.yaml cannot store is refused before it is written.
     ("provision:\n  - command: \"echo \\x7F\"", "a setting holds a character that config.yaml cannot store"),
     ("provision:\n  - command: \"echo \\a\"", "a setting holds a character that config.yaml cannot store"),

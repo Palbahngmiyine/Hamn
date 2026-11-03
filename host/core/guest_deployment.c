@@ -162,8 +162,6 @@ static int deployment_fingerprint(const struct profile *profile,
      * runtime settings are hashed; no host source is copied into the VM. */
     fingerprint_field(&context, "docker-daemon-json");
     fingerprint_field(&context, profile->docker_daemon_json);
-    fingerprint_field(&context, "rosetta");
-    fingerprint_field(&context, profile->rosetta ? "true" : "false");
 
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256_Final(digest, &context);
@@ -296,35 +294,11 @@ static int guest_deployment_configure_docker(const struct profile *profile,
     return 0;
 }
 
-static int guest_deployment_configure_rosetta(const struct profile *profile,
-                                              const char *ip)
-{
-    const char *action = profile->rosetta ? "enable" : "disable";
-    const char *configure_rosetta[] = {
-        "sudo", "/usr/local/libexec/hamn/configure-rosetta", action, NULL
-    };
-    if (deployment_exec_locked(profile, ip, configure_rosetta) != 0) {
-        logerr("cannot configure %s x86_64 translation",
-               profile->rosetta ? "Rosetta" : "qemu");
-        return -1;
-    }
-    return 0;
-}
-
 static int guest_deployment_verify_image(const struct profile *profile,
                                          const char *ip)
 {
-    const char *mode = profile->rosetta ? "rosetta" : "qemu";
-    char mode_env[32];
-    int written = snprintf(mode_env, sizeof(mode_env),
-                           "HAMN_BINFMT_MODE=%s", mode);
-    if (written < 0 || written >= (int)sizeof(mode_env)) {
-        logerr("cannot construct guest binfmt verification mode");
-        return -1;
-    }
     const char *verify_image[] = {
-        "sudo", "env", mode_env,
-        "/usr/local/libexec/hamn/verify-image-contract", NULL
+        "sudo", "/usr/local/libexec/hamn/verify-image-contract", NULL
     };
     /* Its report stays on the operation's output. */
     int rc = ssh_exec_bounded_shown(profile, ip, verify_image,
@@ -344,8 +318,7 @@ static int guest_deployment_verify_image(const struct profile *profile,
 int guest_deployment_configure_runtime(const struct profile *profile,
                                        const char *ip)
 {
-    if (guest_deployment_configure_rosetta(profile, ip) != 0 ||
-        guest_deployment_verify_image(profile, ip) != 0)
+    if (guest_deployment_verify_image(profile, ip) != 0)
         return -1;
     const char *configure_containerd[] = {
         "sudo", "/usr/local/libexec/hamn/configure-containerd", NULL
@@ -692,24 +665,13 @@ static int deployment_reconcile_locked(const struct profile *profile,
         return -1;
     }
 
-    /* Every boot registers only qemu's x86_64 handler: systemd-binfmt and
-     * binfmt-support load qemu, and nothing loads the Rosetta handler from
-     * its own database. Like Docker's network settings, the profile's x86_64
-     * translation is applied on every cold start; configure-rosetta checks
-     * the handler it leaves enabled. */
-    /* The translation lives outside the backup (binfmt databases and kernel
-     * registrations, the Rosetta mount), so a rollback below leaves it as
-     * configure-rosetta set it: the profile's mode, which the marker records,
-     * and not the qemu-only state a boot leaves. A refresh's rollback does
-     * the same. */
     int configured;
     if (whole_runtime) {
         logmsg("deployment recovery changed the guest runtime; applying the "
                "whole guest runtime configuration again");
         configured = guest_deployment_configure_runtime(profile, state->ip);
     } else {
-        configured = guest_deployment_configure_rosetta(profile, state->ip) == 0 &&
-            guest_deployment_configure_docker(profile, state->ip) == 0 ? 0 : -1;
+        configured = guest_deployment_configure_docker(profile, state->ip);
     }
     if (configured == 0 &&
         guest_deployment_forward_sockets(profile, state->ip) == 0 &&
@@ -721,8 +683,7 @@ static int deployment_reconcile_locked(const struct profile *profile,
             logmsg(whole_runtime ?
                    "applied the whole guest runtime again and confirmed its "
                    "readiness" :
-                   "warm start reconciled x86_64 translation, Docker "
-                   "networking and readiness");
+                   "warm start reconciled Docker networking and readiness");
             return 0;
         }
         logerr("guest runtime reconciliation succeeded but backup commit failed "
@@ -734,8 +695,7 @@ static int deployment_reconcile_locked(const struct profile *profile,
     proc_cleanup_begin();
     (void)operation_phase("recovering");
     logerr("guest runtime reconciliation failed; restoring the runtime files "
-           "and services its backup holds (x86_64 translation stays as the "
-           "profile sets it)");
+           "and services its backup holds");
     if (deployment_transaction(profile, state->ip, "rollback", token) != 0) {
         logerr("guest runtime reconciliation rollback failed for operation %s; "
                "the guest backup was retained for manual recovery", token);

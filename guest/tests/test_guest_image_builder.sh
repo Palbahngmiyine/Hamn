@@ -19,8 +19,14 @@ if "$BUILDER" >"$WORK/missing.out" 2>"$WORK/missing.err"; then
 fi
 grep -Fq 'HAMN_GUEST_BASE_IMAGE' "$WORK/missing.err"
 grep -Fq 'docker.io,containerd,runc,containernetworking-plugins' "$BUILDER"
-grep -Fq 'qemu-user-static,binfmt-support,dnsmasq-base,nftables' "$BUILDER"
-grep -Fq '"components":["docker","buildkit","containerd","runc","cni","binfmt","dnsmasq","hamnd"]' "$BUILDER"
+grep -Fq "PACKAGES='curl,docker.io,containerd,runc,containernetworking-plugins,dnsmasq-base,nftables'" "$BUILDER"
+grep -Fq '"components":["docker","buildkit","containerd","runc","cni","dnsmasq","hamnd"]' "$BUILDER"
+# The image runs arm64 only: the builder installs no amd64 emulation package,
+# registers no binfmt handler and lists no binfmt component.
+if grep -Eq 'qemu-user|qemu-x86_64|binfmt' "$BUILDER"; then
+    echo "FAIL: guest image builder still provisions amd64 emulation" >&2
+    exit 1
+fi
 if grep -Eiq 'k3s|HAMN_RELEASE_PUBLIC_KEY' "$BUILDER" "$GUEST_ROOT/Makefile"; then
     echo "FAIL: new guest image still includes managed K3s inputs" >&2
     exit 1
@@ -28,15 +34,6 @@ fi
 grep -Fq 'make -C /opt/hamn/guest install' "$BUILDER"
 grep -Fq 'groupadd --system hamn' "$BUILDER"
 grep -Fq 'systemctl enable hamnd.service' "$BUILDER"
-grep -Fq 'QEMU_BINFMT_INTERPRETER=/usr/bin/qemu-x86_64-static' \
-    "$BUILDER"
-grep -Fq '\x00\x00\x02\x00\x3e\x00' "$BUILDER"
-grep -Fq 'update-binfmts --import qemu-x86_64' "$BUILDER"
-grep -Fq 'systemctl enable binfmt-support.service' "$BUILDER"
-if grep -Eq 'x86_64-binfmt-P|update-binfmts --enable qemu-x86_64' "$BUILDER"; then
-    echo "FAIL: hosted image builder depends on a symlink or the build kernel binfmt state" >&2
-    exit 1
-fi
 if grep -Eq 'shared|\.\./shared' "$BUILDER" "$GUEST_ROOT/Makefile"; then
     echo "FAIL: guest image source inputs retain the removed shared tree" >&2
     exit 1
@@ -54,14 +51,10 @@ if grep -Eiq 'python|\.py([^[:alnum:]_]|$)' "$BUILDER" "$SLIM"; then
     exit 1
 fi
 grep -Fq '/usr/local/libexec/hamn/guest-json' "$SLIM"
-# Only linux/amd64 emulation and the six CNI plugins Hamn links stay; the
-# image checks the filters took effect after installation.
+# Only the six CNI plugins Hamn links stay; the image checks the filters took
+# effect after installation.
 EXCLUDES=$GUEST_ROOT/image/dpkg-excludes
 for rule in \
-    'path-exclude=/usr/bin/qemu-*-static' \
-    'path-include=/usr/bin/qemu-x86_64-static' \
-    'path-include=/usr/lib/binfmt.d/qemu-x86_64.conf' \
-    'path-include=/usr/libexec/qemu-binfmt/x86_64-binfmt-P' \
     'path-exclude=/usr/lib/cni/*' \
     'path-include=/usr/lib/cni/bridge' 'path-include=/usr/lib/cni/host-local' \
     'path-include=/usr/lib/cni/loopback' 'path-include=/usr/lib/cni/portmap' \
@@ -70,6 +63,10 @@ for rule in \
 done
 if grep -Eq '^path-exclude=.*(docker|containerd$|/runc$|dnsmasq|hamn)' "$EXCLUDES"; then
     echo "FAIL: dpkg path filters exclude a required runtime component" >&2
+    exit 1
+fi
+if grep -Eq 'qemu|binfmt' "$EXCLUDES"; then
+    echo "FAIL: dpkg path filters still keep amd64 emulation files" >&2
     exit 1
 fi
 # The kernel command line keeps the cloud image's consoles, makes the
@@ -84,6 +81,52 @@ COMMAND_LINE=$(GRUB_CMDLINE_LINUX_DEFAULT='console=tty1 console=ttyAMA0'
 grep -Fq 'for name in snapd lxd-installer ubuntu-cloud-minimal; do' "$SLIM"
 grep -Fq 'for command in cloud-init sshd sudo netplan git; do' "$SLIM"
 grep -Fq 'if installed dnsmasq; then' "$SLIM"
+if grep -Eq 'qemu-x86_64-static|binfmt-support\.service' "$SLIM"; then
+    echo "FAIL: offline image check still requires amd64 emulation" >&2
+    exit 1
+fi
+
+# slim-guest.sh runs only on the Linux image builder. Its amd64 absence checks
+# run here with their /usr paths moved into a fixture root and `installed`
+# answered from a list of package names.
+SLIM_ROOT=$WORK/slim-root
+SLIM_PACKAGES=$WORK/slim-packages
+SLIM_ABSENCE=$WORK/slim-amd64-absence.sh
+mkdir -p "$SLIM_ROOT/usr/bin" "$SLIM_ROOT/usr/lib/binfmt.d"
+: >"$SLIM_PACKAGES"
+{
+    echo 'set -euo pipefail'
+    echo "installed() { grep -Fxq -- \"\$1\" '$SLIM_PACKAGES'; }"
+    sed -n '/^for name in qemu-user-static binfmt-support; do$/,/^test /{/^test /!p;}' \
+        "$SLIM" | sed "s|/usr/|$SLIM_ROOT/usr/|g"
+} >"$SLIM_ABSENCE"
+grep -Fq 'compgen -G' "$SLIM_ABSENCE"
+bash "$SLIM_ABSENCE"
+reject_slim() {
+    local reason=$1
+    if bash "$SLIM_ABSENCE" 2>"$WORK/slim-absence.err"; then
+        echo "FAIL: slim-guest accepted amd64 emulation: $reason" >&2
+        exit 1
+    fi
+    grep -Fq "slim-guest: $reason" "$WORK/slim-absence.err"
+}
+for package in qemu-user-static binfmt-support; do
+    echo "$package" >"$SLIM_PACKAGES"
+    reject_slim "the amd64 emulation package $package is installed"
+done
+: >"$SLIM_PACKAGES"
+reject_leftover() {
+    : >"$SLIM_ROOT/$1"
+    reject_slim "amd64 emulation files remain: $SLIM_ROOT/$2"
+    rm "$SLIM_ROOT/$1"
+}
+reject_leftover usr/bin/qemu-x86_64-static 'usr/bin/qemu-*'
+reject_leftover usr/bin/qemu-x86_64 'usr/bin/qemu-*'
+reject_leftover usr/lib/binfmt.d/qemu-x86_64.conf 'usr/lib/binfmt.d/qemu-*'
+ln -s "$WORK/no-such-interpreter" "$SLIM_ROOT/usr/lib/binfmt.d/qemu-x86_64.conf"
+reject_slim "amd64 emulation files remain: $SLIM_ROOT/usr/lib/binfmt.d/qemu-*"
+rm "$SLIM_ROOT/usr/lib/binfmt.d/qemu-x86_64.conf"
+bash "$SLIM_ABSENCE"
 
 # Exercise the archive path in an isolated Git checkout. The injected
 # untracked shared/ file must not become an immutable image input.

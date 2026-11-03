@@ -43,7 +43,7 @@ pub struct Request {
         long,
         value_name = "BOOL",
         action = clap::ArgAction::Set,
-        help = "Apple Linux Rosetta translation for vm create and vm configure: true or false"
+        help = "Only false, for vm create and vm configure: clears the rosetta: true an earlier Hamn stored, since Rosetta support was removed"
     )]
     pub rosetta: Option<bool>,
     #[arg(long)]
@@ -208,7 +208,7 @@ impl Request {
     pub fn impact(&self) -> String {
         match self.operation().as_str() {
             "vm create" => "Create a profile and its VM configuration.".into(),
-            "vm configure" => "Change the stopped VM's CPU, memory, disk or Rosetta settings.".into(),
+            "vm configure" => "Change the stopped VM's CPU, memory or disk settings.".into(),
             "vm apply" => "Create the profile or replace its stopped VM's configuration with the definition file; settings the file omits return to their defaults. The VM is not started or stopped.".into(),
             "vm start" => "Start the VM.".into(),
             "vm stop" => "Stop the VM and interrupt its running containers.".into(),
@@ -310,6 +310,11 @@ impl Request {
         {
             return Err(invalid(
                 "--rosetta is only supported for vm create and vm configure",
+            ));
+        }
+        if self.rosetta == Some(true) {
+            return Err(invalid(
+                "Rosetta support was removed; --rosetta accepts only false",
             ));
         }
         if self.purge && self.operation() != "vm delete" {
@@ -547,7 +552,7 @@ mod tests {
         }
     }
     #[test]
-    fn rosetta_takes_a_boolean_and_only_configures_a_profile() {
+    fn rosetta_takes_only_false_and_only_configures_a_profile() {
         let parse = |operation: &str, value: &str| {
             Request::try_parse_from([
                 "hamn",
@@ -562,7 +567,12 @@ mod tests {
             ])
         };
         for operation in ["create", "configure"] {
-            assert_eq!(parse(operation, "true").unwrap().rosetta, Some(true));
+            let on = parse(operation, "true").unwrap();
+            assert_eq!(on.rosetta, Some(true));
+            assert_eq!(
+                on.validate().unwrap_err().message,
+                "Rosetta support was removed; --rosetta accepts only false"
+            );
             let off = parse(operation, "false").unwrap();
             assert!(off.rosetta == Some(false) && off.validate().is_ok());
             assert!(parse(operation, "maybe").is_err());

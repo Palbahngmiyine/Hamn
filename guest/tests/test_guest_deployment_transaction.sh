@@ -52,9 +52,9 @@ run_watched() {
 }
 
 # Commit and rollback retire a backup in four barriers: the protected items,
-# then the whole root filesystem (systemd enablement links and binfmt
-# databases are outside the backup), both while the backup is still ready;
-# then the removed phase alone; then everything else.
+# then the whole root filesystem (systemd enablement links are outside the
+# backup), both while the backup is still ready; then the removed phase alone;
+# then everything else.
 assert_retired_in_order() {
     local transaction="$TRANSACTION_ROOT/$1" path
     [ "$(wc -l <"$SYNC_LOG")" -eq 4 ] || fail "unexpected retirement barriers"

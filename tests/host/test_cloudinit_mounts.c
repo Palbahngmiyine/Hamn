@@ -101,8 +101,9 @@ int main(void)
         require_absent(user_data, "\"/opt/hamn\"") != 0) {
         goto out;
     }
-    if (require_contains(user_data,
-                         "[ \"rosetta\", \"/mnt/hamn-rosetta\", virtiofs, \"ro,nofail\", \"0\", \"0\" ]") != 0 ||
+    /* A profile that an earlier Hamn stored with rosetta: true gets no Rosetta
+     * share; vm start refuses it before the seed is written. */
+    if (require_absent(user_data, "rosetta") != 0 ||
         require_absent(user_data, "package_update:") != 0 ||
         require_absent(user_data, "packages:") != 0 ||
         require_absent(user_data, "qemu-user-static") != 0 ||
@@ -152,7 +153,6 @@ int main(void)
      * join it as its primary group. Omit mounts when there are no entries:
      * cloud-init's schema rejects both null and an empty list. */
     profile.mount_home = 0;
-    profile.rosetta = 0;
     profile.mount_count = 0;
     if (cloudinit_seed_ensure(&profile, 1) != 0 ||
         extract_user_data(iso, user_data, sizeof(user_data)) != 0 ||

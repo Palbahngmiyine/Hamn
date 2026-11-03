@@ -405,7 +405,6 @@ static int vmrun_usage(void)
             "  --mac <addr>          fixed MAC address\n"
             "  --cpus <n>            vCPU count (default 4)\n"
             "  --mem-mib <n>         memory in MiB (default 4096)\n"
-            "  --rosetta BOOL        expose Linux Intel translation (opt-in)\n"
             "  --nested-virtualization BOOL enable supported nested VZ\n"
             "  --share <tag>=<path>  writable virtiofs share (repeatable)\n"
             "  --share-ro <tag>=<path> read-only virtiofs share (repeatable, max %d)\n",
@@ -447,7 +446,6 @@ int cmd_vmrun(int argc, char **argv)
         { "mem-mib", required_argument, NULL, 'M' },
         { "share", required_argument, NULL, 'S' },
         { "share-ro", required_argument, NULL, 'R' },
-        { "rosetta", required_argument, NULL, 'r' },
         { "nested-virtualization", required_argument, NULL, 'v' },
         { "pidfile", required_argument, NULL, 'p' },
         { "identity-file", required_argument, NULL, 'I' },
@@ -528,10 +526,6 @@ int cmd_vmrun(int argc, char **argv)
             spec.nshares++;
             break;
         }
-        case 'r':
-            if (parse_bool_option(optarg, &spec.rosetta) != 0)
-                die("vmrun: --rosetta must be true or false");
-            break;
         case 'v':
             if (parse_bool_option(optarg, &spec.nested_virtualization) != 0)
                 die("vmrun: --nested-virtualization must be true or false");

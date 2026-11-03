@@ -17,7 +17,7 @@ installed() {
 # Hamn's guest tools are C and shell and need no interpreter; packages that
 # the base image's own cloud-init depends on stay installed through apt.
 apt-mark manual curl docker.io containerd runc \
-    containernetworking-plugins qemu-user-static binfmt-support dnsmasq-base nftables
+    containernetworking-plugins dnsmasq-base nftables
 apt-get -y purge gcc make binutils
 # Ubuntu Minimal's ubuntu-cloud-minimal holds the base system (cloud-init,
 # sshd, sudo, ...) and depends on snapd. Pin everything it holds before it goes
@@ -55,8 +55,21 @@ done
 # the base image's own kernel already installed.
 rm -rf /lib/firmware/*/device-tree
 test -f /etc/dpkg/dpkg.cfg.d/hamn-excludes
-test "$(echo /usr/bin/qemu-*-static)" = /usr/bin/qemu-x86_64-static
-test "$(echo /usr/lib/binfmt.d/qemu-*.conf)" = /usr/lib/binfmt.d/qemu-x86_64.conf
+# The image runs arm64 only: no amd64 emulation package, emulator or binfmt.d
+# registration. `compgen -G` succeeds only for an existing match, dangling
+# links included, where a bare glob without a match expands to its own text.
+for name in qemu-user-static binfmt-support; do
+    if installed "$name"; then
+        echo "slim-guest: the amd64 emulation package $name is installed" >&2
+        exit 1
+    fi
+done
+for pattern in '/usr/bin/qemu-*' '/usr/lib/binfmt.d/qemu-*'; do
+    if compgen -G "$pattern" >/dev/null; then
+        echo "slim-guest: amd64 emulation files remain: $pattern" >&2
+        exit 1
+    fi
+done
 test "$(echo /usr/lib/cni/*)" = \
     '/usr/lib/cni/bridge /usr/lib/cni/firewall /usr/lib/cni/host-local /usr/lib/cni/loopback /usr/lib/cni/portmap /usr/lib/cni/tuning'
 test ! -e /usr/bin/containerd-stress
@@ -68,7 +81,7 @@ if installed dnsmasq; then
     exit 1
 fi
 for command in curl docker dockerd containerd ctr runc \
-    qemu-x86_64-static dnsmasq nft /usr/local/bin/hamnd \
+    dnsmasq nft /usr/local/bin/hamnd \
     /usr/local/libexec/hamn/guest-json; do
     command -v "$command" >/dev/null
 done
@@ -76,9 +89,8 @@ for plugin in bridge host-local loopback portmap firewall tuning; do
     test -x "/usr/lib/cni/$plugin"
 done
 systemctl is-enabled --quiet hamnd.service
-systemctl is-enabled --quiet binfmt-support.service
-# This offline check cannot establish binfmt registration, Rosetta, networking,
-# Docker/Compose/Buildx operation or reboot persistence; physical gates own those.
+# This offline check cannot establish networking, Docker/Compose/Buildx
+# operation or reboot persistence; physical gates own those.
 cloud-init clean --logs --machine-id
 rm -f /etc/ssh/ssh_host_*
 rm -f /var/lib/systemd/random-seed
