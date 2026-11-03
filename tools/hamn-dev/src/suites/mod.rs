@@ -83,6 +83,7 @@ mod upgrade_native;
 mod upgrade_properties;
 mod upgrade_recovery_ownership;
 mod vm_apply;
+mod vm_purge;
 mod vm_reset;
 #[cfg(target_os = "macos")]
 mod workspace_live;
@@ -114,6 +115,7 @@ const SUITES: &[Suite] = &[
     ("kubernetes-api", kubernetes_api::main),
     ("profile-yaml", profile_yaml::main),
     ("vm-apply", vm_apply::main),
+    ("vm-purge", vm_purge::main),
     ("vm-reset", vm_reset::main),
     ("start-preflight", start_preflight::main),
     ("tui-native-regressions", tui_native_regressions::main),

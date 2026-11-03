@@ -1250,6 +1250,9 @@ pub async fn run(request: Request) -> std::io::Result<()> {
                     KeyCode::Char('x') if state.vm_panel() => {
                         let request = state.action("reset"); job.dispatch(request, &mut state);
                     },
+                    KeyCode::Char('X') if state.vm_panel() => {
+                        let request = state.purge(); job.dispatch(request, &mut state);
+                    },
                     KeyCode::Char('v') if !state.environment_picker && state.hamn_environment() => {
                         state.save_browser(); state.native = None; state.environment_picker = false;
                         let request = state.view("vm"); job.dispatch(request, &mut state);
