@@ -31,8 +31,7 @@ static const char *const managed_daemon_keys[] = {
 };
 
 static const char *const manifest_components[] = {
-    "docker", "buildkit", "containerd", "runc", "cni", "binfmt", "dnsmasq",
-    "hamnd",
+    "docker", "buildkit", "containerd", "runc", "cni", "dnsmasq", "hamnd",
 };
 
 static int usage(void)

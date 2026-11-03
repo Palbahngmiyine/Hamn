@@ -90,7 +90,7 @@ COMPACT=$STAGE_DIR/compressed.img
 GUEST_MANIFEST=$WORK/guest-image.json
 printf '%s\n' \
     '{"schemaVersion":1,"distribution":"ubuntu-24.04","architecture":"arm64",' \
-    '"components":["docker","buildkit","containerd","runc","cni","binfmt","dnsmasq","hamnd"]}' \
+    '"components":["docker","buildkit","containerd","runc","cni","dnsmasq","hamnd"]}' \
     >"$GUEST_MANIFEST"
 SOURCE_ARCHIVE=$WORK/hamn-guest-sources.tar.gz
 git -C "$ROOT" rev-parse --is-inside-work-tree | grep -qx true ||
@@ -108,7 +108,7 @@ git -C "$ROOT" archive --format=tar HEAD -- guest vendor |
 # Buildx remains a host Docker CLI plugin; its docker-container driver runs a
 # dedicated BuildKit container in this guest through the Docker API.
 BUILD_PACKAGES='gcc,make'
-PACKAGES='curl,docker.io,containerd,runc,containernetworking-plugins,qemu-user-static,binfmt-support,dnsmasq-base,nftables'
+PACKAGES='curl,docker.io,containerd,runc,containernetworking-plugins,dnsmasq-base,nftables'
 PROVISION=$WORK/provision.sh
 cat >"$PROVISION" <<'EOF'
 #!/bin/bash
@@ -121,20 +121,6 @@ make -C /opt/hamn/guest install
 systemctl enable hamnd.service
 rm -rf /opt/hamn/guest /opt/hamn/vendor \
     /tmp/hamn-guest-sources.tar.gz
-QEMU_BINFMT_INTERPRETER=/usr/bin/qemu-x86_64-static
-test -x "$QEMU_BINFMT_INTERPRETER" && test ! -L "$QEMU_BINFMT_INTERPRETER"
-printf '%s\n' \
-    'package qemu-user-static' \
-    "interpreter $QEMU_BINFMT_INTERPRETER" \
-    'magic \x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00' \
-    'mask \xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff' \
-    'credentials no' \
-    'preserve yes' \
-    'fix_binary yes' \
-    > /usr/share/binfmts/qemu-x86_64
-chmod 0644 /usr/share/binfmts/qemu-x86_64
-update-binfmts --import qemu-x86_64
-systemctl enable binfmt-support.service
 EOF
 chmod 0755 "$PROVISION"
 # Ubuntu's cloud image mounts the root ext4 with online discard. After an ext4

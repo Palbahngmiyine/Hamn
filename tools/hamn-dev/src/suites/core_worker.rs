@@ -151,17 +151,35 @@ fn core_worker_isolation_and_protocol() {
     assert!(status["Ok"]["state"] == "stopped" && status["Ok"]["portForwardFailures"] == json!([]), "{status}");
     fs::remove_file(home.join(".hamn/test/port-forward-failures.json")).unwrap();
     assert_eq!(worker.call("vm create", json!({"profile": "test", "yes": true, "cpu": 10}))["Err"]["code"], json!("conflict"));
-    // Rosetta is set on a stopped profile, kept when not named, and never by a start.
+    // Rosetta support was removed. create and configure refuse rosetta: true;
+    // a profile that an earlier Hamn stored with it stays readable, and start
+    // and configure refuse it until --rosetta false clears it. Each start asks
+    // for disk 1, so a start that got past the refusal stops at the shrink
+    // check before it looks for a guest image.
     let configured = |worker: &mut Worker, arguments: Value| worker.call("vm configure", arguments);
-    assert_eq!(configured(&mut worker, json!({"profile": "test", "yes": true, "rosetta": true}))["Ok"]["rosetta"], json!(true));
-    assert!(fs::read_to_string(home.join(".hamn/test/config.yaml")).unwrap().contains("rosetta: true"));
-    let kept = configured(&mut worker, json!({"profile": "test", "yes": true, "cpu": 2}));
-    assert!(kept["Ok"]["rosetta"] == json!(true) && kept["Ok"]["cpus"] == json!(2), "{kept}");
-    assert_eq!(configured(&mut worker, json!({"profile": "test", "yes": true, "rosetta": false}))["Ok"]["rosetta"], json!(false));
-    assert!(fs::read_to_string(home.join(".hamn/test/config.yaml")).unwrap().contains("rosetta: false"));
+    for operation in ["vm configure", "vm create"] {
+        let refused = worker.call(operation, json!({"profile": "translated", "yes": true, "rosetta": true}));
+        assert_eq!(
+            refused["Err"],
+            json!({"code": "invalidRequest", "message": "Rosetta support was removed; --rosetta accepts only false"}),
+            "{operation}: {refused}"
+        );
+        assert!(!home.join(".hamn/translated").exists(), "{operation}");
+    }
+    let stored = fs::read_to_string(&shared_config).unwrap();
+    assert!(stored.contains("rosetta: false"), "{stored}");
+    fs::write(&shared_config, stored.replace("rosetta: false", "rosetta: true")).unwrap();
+    assert_eq!(worker.call("vm status", json!({"profile": "test"}))["Ok"]["rosetta"], json!(true));
+    let removed = "profile test sets rosetta: true, but Rosetta support was removed; vm configure --profile test --rosetta false --yes clears it";
+    let refused = worker.call("vm start", json!({"profile": "test", "yes": true, "disk": 1}));
+    assert_eq!(refused["Err"]["message"], json!(removed), "{refused}");
+    let refused = configured(&mut worker, json!({"profile": "test", "yes": true, "cpu": 3}));
+    assert_eq!(refused["Err"]["message"], json!(removed), "{refused}");
+    let cleared = configured(&mut worker, json!({"profile": "test", "yes": true, "rosetta": false}));
+    assert!(cleared["Ok"]["rosetta"] == json!(false) && cleared["Ok"]["cpus"] == json!(2), "{cleared}");
+    assert!(fs::read_to_string(&shared_config).unwrap().contains("rosetta: false"));
     let refused = worker.call("vm start", json!({"profile": "test", "yes": true, "rosetta": true}));
     assert_eq!(refused["Err"]["code"], json!("invalidRequest"), "{refused}");
-    assert_eq!(worker.call("vm status", json!({"profile": "test"}))["Ok"]["rosetta"], json!(false));
     assert_eq!(worker.call("vm status", json!({"profile": "test"}))["Ok"]["cpus"], json!(2));
 
     let disk = home.join(".hamn/test/disk.img");

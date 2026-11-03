@@ -30,7 +30,7 @@ static const char NETWORK_CONFIG[] =
 
 /*
  * user-data: hamn 사용자와 virtiofs mount만 준비한다. Docker, system
- * containerd, runc, CNI, binfmt와 hamnd는 signed Ubuntu guest image에 이미
+ * containerd, runc, CNI와 hamnd는 signed Ubuntu guest image에 이미
  * 들어 있어야 한다. cloud-init network package install은 release runtime의
  * 구성요소나 trust boundary를 바꾸지 않는다.
  */
@@ -123,19 +123,12 @@ static int build_user_data(const struct profile *profile, const char *pubkey,
         append_text(output, USER_DATA_CAP, &length, "\n") != 0)
         return -1;
     /* cloud-init requires a nonempty list when mounts is present. */
-    if ((profile->mount_home || profile->rosetta || profile->mount_count) &&
+    if ((profile->mount_home || profile->mount_count) &&
         append_text(output, USER_DATA_CAP, &length, "mounts:\n") != 0)
         return -1;
     if (profile->mount_home &&
         append_mount(output, USER_DATA_CAP, &length, "home", home,
                      profile->home_read_only) != 0)
-        return -1;
-    /* The host supplies the read-only translation directory only after the
-     * user opted in. Guest registration remains explicit and is documented,
-     * matching Apple's Linux Rosetta activation boundary. */
-    if (profile->rosetta &&
-        append_mount(output, USER_DATA_CAP, &length, "rosetta",
-                     "/mnt/hamn-rosetta", 1) != 0)
         return -1;
     for (size_t index = 0; index < profile->mount_count; index++) {
         char tag[32];

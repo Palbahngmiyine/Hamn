@@ -186,20 +186,6 @@ VZVirtualMachineConfiguration *hamn_vz_build_config(const vz_vm_spec *spec,
         fsd.share = [[VZSingleDirectoryShare alloc] initWithDirectory:dir];
         [sharing addObject:fsd];
     }
-    if (spec->rosetta) {
-        NSError *rosetta_error = nil;
-        VZLinuxRosettaDirectoryShare *rosetta =
-            [[VZLinuxRosettaDirectoryShare alloc] initWithError:&rosetta_error];
-        if (!rosetta) {
-            *outErr = rosetta_error ?: mk_err(@"Linux Intel binary translation is unavailable");
-            return nil;
-        }
-        VZVirtioFileSystemDeviceConfiguration *fsd =
-            [[VZVirtioFileSystemDeviceConfiguration alloc]
-                initWithTag:@"rosetta"];
-        fsd.share = rosetta;
-        [sharing addObject:fsd];
-    }
     cfg.directorySharingDevices = sharing;
 
     cfg.entropyDevices =
