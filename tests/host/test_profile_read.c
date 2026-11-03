@@ -622,7 +622,9 @@ static void rosetta_set_by_an_earlier_hamn_is_refused_until_cleared(void)
 
     /* Disk 1 stops a start that got past the refusal at the shrink check,
      * before it looks for a guest image. */
-    assert(hamn_control_start("existing", 0, 0, 1) == 1);
+    char *admission_refusal;
+    assert(hamn_control_start("existing", 0, 0, 1, &admission_refusal) == 1 &&
+           admission_refusal == NULL);
     assert(strcmp(log_last_error(), refusal) == 0);
     assert(access(deleted, F_OK) == 0);
     assert(hamn_control_configure("existing", 3, 0, 0, 0, -1) == 1);
