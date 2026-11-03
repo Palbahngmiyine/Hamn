@@ -27,7 +27,6 @@ typedef struct {
      * (close-on-exec) for the VM, and the caller keeps and closes its own
      * descriptor. */
     int serial_fd;
-    int rosetta;                 /* Linux Intel binary translation share */
     int nested_virtualization;   /* supported Apple Silicon hosts only */
     struct {
         const char *tag;         /* virtiofs 태그 */

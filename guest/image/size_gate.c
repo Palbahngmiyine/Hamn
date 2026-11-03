@@ -336,7 +336,7 @@ int size_gate_run(const struct size_gate_options *options,
                    string_array(cleanup, sizeof(cleanup) / sizeof(cleanup[0]))) == 0 &&
         add_member(report, "runtimeValidation",
                    json_new_cstring("required: physical boot, Docker, Compose, "
-                                    "Buildx, binfmt, Rosetta, reboot")) == 0 &&
+                                    "Buildx, reboot")) == 0 &&
         add_member(report, "reviewOnly",
                    json_new_literal(options->review_only ? JSON_TRUE :
                                                            JSON_FALSE)) == 0;

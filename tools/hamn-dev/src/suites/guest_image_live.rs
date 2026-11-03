@@ -3,10 +3,10 @@
 //!
 //! Each image gets an isolated HOME and a single 2-CPU/2-GiB VM. The
 //! private cache marker is local test authorization by exact digest, not a
-//! release signature or attestation. No user profile, home sharing, source
-//! provisioning or Rosetta installation is used. A failed cleanup stops the
-//! sequence and keeps the evidence; a failed image stops it too, since a
-//! common runtime defect needs diagnosis rather than repetition.
+//! release signature or attestation. No user profile, home sharing or source
+//! provisioning is used. A failed cleanup stops the sequence and keeps the
+//! evidence; a failed image stops it too, since a common runtime defect needs
+//! diagnosis rather than repetition.
 use super::workspace_live::{
     Flags, Live, PROFILE, catch_interrupts, cli_extensions, interrupted, is_lower_hex, mkdtemp, panic_text, prepare,
     random_hex, repository, write_json,
@@ -445,13 +445,12 @@ fn run_image(
     *created = true;
     let config = live.profile().join("config.yaml");
     config_bool(&config, "mountHome", false);
-    config_bool(&config, "rosetta", false);
     *stage = "initial-boot";
     let started = Instant::now();
     let boot = live.call(&["vm", "start"], &["--yes"]);
     let status = live.call(&["vm", "status"], &[]);
     assert!(
-        boot["dockerStatus"] == "ready" && status["mountHome"] == false && status["rosetta"] == false,
+        boot["dockerStatus"] == "ready" && status["mountHome"] == false,
         "{boot} {status}"
     );
     evidence.mark("boot", json!({"elapsedSeconds": started.elapsed().as_secs_f64(), "status": status}));
@@ -460,18 +459,24 @@ fn run_image(
     let versions =
         live.ssh("systemctl is-active containerd docker\ncontainerd --version\nrunc --version\nctr namespaces list -q");
     assert!(versions.contains("moby"), "{versions}");
-    let qemu = live.ssh("cat /proc/sys/fs/binfmt_misc/qemu-x86_64\ntest ! -e /proc/sys/fs/binfmt_misc/hamn-rosetta");
-    assert!(qemu.starts_with("enabled\n") && qemu.contains("qemu"), "{qemu}");
+    // The image runs arm64 only: no x86_64 handler is registered, so an
+    // amd64 image is pulled but cannot run.
+    let handlers = live.ssh("ls /proc/sys/fs/binfmt_misc");
+    assert!(!handlers.contains("x86_64") && !handlers.contains("rosetta"), "{handlers}");
     live.docker(&["pull", "--platform=linux/arm64", "busybox:1.37"]);
     let arm = live.docker(&["image", "inspect", "--format", "{{.Id}}", "busybox:1.37"]).trim().to_owned();
     assert_eq!(live.docker(&["run", "--rm", "--platform=linux/arm64", &arm, "uname", "-m"]).trim(), "aarch64");
     live.docker(&["pull", "--platform=linux/amd64", "busybox:1.37"]);
     let amd = live.docker(&["image", "inspect", "--format", "{{.Id}}", "busybox:1.37"]).trim().to_owned();
-    assert_eq!(live.docker(&["run", "--rm", "--platform=linux/amd64", &amd, "uname", "-m"]).trim(), "x86_64");
+    let amd_run = live
+        .runtime
+        .engine(&["run", "--rm", "--platform=linux/amd64", &amd, "uname", "-m"], PROFILE)
+        .expect_err("an amd64 image ran in the arm64-only guest");
+    assert!(amd_run.contains("exec format error"), "{amd_run}");
     live.docker(&["tag", &arm, "busybox:1.37"]);
     evidence.mark(
-        "arm64-and-qemu-amd64",
-        json!({"armImageId": arm, "amdImageId": amd, "qemuRegistration": qemu, "runtimeVersions": versions}),
+        "arm64-only",
+        json!({"armImageId": arm, "amdImageId": amd, "binfmtHandlers": handlers, "amd64Run": amd_run, "runtimeVersions": versions}),
     );
     let label = format!("io.hamn.test={token}");
     live.docker(&["volume", "create", "--label", &label, volume]);
@@ -529,19 +534,19 @@ fn run_image(
     assert!(failed.trim().is_empty(), "failed systemd units after restart:\n{failed}");
     evidence.mark("no-failed-units-after-restart", json!({"failedUnits": failed}));
 
-    *stage = "rosetta";
+    *stage = "rosetta-refused";
     live.call(&["vm", "stop"], &["--yes"]);
     config_bool(&config, "rosetta", true);
-    if let Err(error) = live.runtime.call(&["vm", "start"], PROFILE, &["--yes"]) {
-        evidence.value["checks"]["rosetta"] =
-            json!({"passed": false, "error": error, "systemInstallationAttempted": false});
-        panic!("{error}");
-    }
-    let rosetta = live.ssh("cat /proc/sys/fs/binfmt_misc/hamn-rosetta\ntest ! -e /proc/sys/fs/binfmt_misc/qemu-x86_64");
-    assert!(rosetta.starts_with("enabled\n") && rosetta.contains("/mnt/hamn-rosetta/rosetta"), "{rosetta}");
-    assert_eq!(live.docker(&["run", "--rm", "--platform=linux/amd64", &amd, "uname", "-m"]).trim(), "x86_64");
-    assert_eq!(state(), before, "Rosetta start changed Docker state");
-    evidence.mark("rosetta", json!({"passed": true, "registration": rosetta, "systemInstallationAttempted": false}));
+    let refused = live
+        .runtime
+        .call(&["vm", "start"], PROFILE, &["--yes"])
+        .expect_err("a profile with rosetta: true started");
+    assert!(refused.contains("Rosetta support was removed"), "{refused}");
+    assert_eq!(live.state(), "stopped");
+    config_bool(&config, "rosetta", false);
+    live.call(&["vm", "start"], &["--yes"]);
+    assert_eq!(state(), before, "the refused Rosetta start changed Docker state");
+    evidence.mark("rosetta-refused", json!({"refusal": refused}));
     let tools = live.ssh(
         "for tool in gcc make; do if command -v \"$tool\"; then \"$tool\" --version | head -n 1; else printf \"%s absent\\n\" \"$tool\"; fi; done",
     );

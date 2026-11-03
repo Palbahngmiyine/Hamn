@@ -468,6 +468,10 @@ static int cmd_start_execute(const struct start_options *options,
         logerr("%s", failure);
         return 1;
     }
+    if (p.rosetta) {
+        logerr(PROFILE_ROSETTA_REMOVED_FORMAT, p.name, p.name);
+        return 1;
+    }
     char deleted_marker[1024];
     if (!profile_path(&p, "deleted", deleted_marker, sizeof(deleted_marker)) ||
         fs_unlink_if_exists(deleted_marker) != 0)
@@ -648,7 +652,6 @@ static int cmd_start_execute(const struct start_options *options,
     char panic_record[1024];
     char pidf[1024], identity[1024], spawning[1024], ctl[1024], vmlog[1024];
     char cpus_s[16], mem_s[16], guard_fd_s[16];
-    const char *rosetta = p.rosetta ? "true" : "false";
     const char *nested_virtualization = p.nested_virtualization ? "true" :
         "false";
     char spawn_token[VM_SPAWN_TOKEN_HEX_SIZE];
@@ -703,7 +706,6 @@ static int cmd_start_execute(const struct start_options *options,
         "--efi-vars", efivars,
         "--machine-id", mid, "--mac", mac, "--cpus", cpus_s,
         "--mem-mib", mem_s,
-        "--rosetta", rosetta,
         "--nested-virtualization", nested_virtualization, NULL,
     };
     for (size_t index = 0; vm_prefix[index]; index++) {

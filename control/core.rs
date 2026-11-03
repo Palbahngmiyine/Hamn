@@ -12,7 +12,7 @@ unsafe extern "C" {
     fn hamn_control_query(profile: *const libc::c_char, result: *mut *mut libc::c_char) -> i32;
     fn hamn_control_free(result: *mut libc::c_char);
     fn hamn_control_start(profile: *const libc::c_char, cpu: u32, memory: u32, disk: u32) -> i32;
-    // rosetta: 1 or 0 sets the profile's setting, -1 keeps it.
+    // rosetta: 0 clears the stored setting, -1 keeps it; the core refuses 1.
     fn hamn_control_configure(
         profile: *const libc::c_char,
         cpu: u32,

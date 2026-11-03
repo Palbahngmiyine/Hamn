@@ -110,7 +110,7 @@ fn operation(name: &str, mutation: bool) -> Value {
     if matches!(name, "vm create" | "vm configure") {
         add(
             "rosetta",
-            json!({"type":"boolean", "description":"Apple Linux Rosetta translation for linux/amd64; omitted keeps the profile's setting (false for a new profile)"}),
+            json!({"type":"boolean", "const":false, "description":"Rosetta support was removed: false clears the rosetta: true an earlier Hamn stored, and true is refused; omitted keeps the profile's setting"}),
             false,
         );
     }
@@ -299,7 +299,7 @@ mod tests {
             vm["arguments"]["properties"]["memory"]["description"],
             "GiB of memory"
         );
-        // Rosetta is a setting of a stopped profile: create and configure only.
+        // Only create and configure take rosetta, and only as false.
         for op in operations {
             let name = op["name"].as_str().unwrap();
             assert_eq!(
@@ -307,6 +307,9 @@ mod tests {
                 matches!(name, "vm create" | "vm configure"),
                 "{name}"
             );
+            if matches!(name, "vm create" | "vm configure") {
+                assert_eq!(op["arguments"]["properties"]["rosetta"]["const"], false, "{name}");
+            }
         }
     }
 }

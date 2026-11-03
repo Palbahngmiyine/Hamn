@@ -23,7 +23,24 @@ int main(void)
 
     struct profile profile;
     if (profile_load(&profile, "default") != 0 ||
-        guest_deployment_mark_current(&profile) != 0 ||
+        !profile_path(&profile, "guest-deployment.version", marker,
+                      sizeof(marker)))
+        return fail("cannot load the default profile");
+
+    /* The marker that an earlier Hamn wrote for these default settings, whose
+     * fingerprint also hashed "rosetta" and "false". It describes a deployment
+     * that ran configure-rosetta, so the next start refreshes it. */
+    FILE *released = fopen(marker, "w");
+    if (!released ||
+        fputs("schemaVersion=6\nfingerprint=sha256:"
+              "73d25d2686d730b37d08f4563db55f695ffac4f5e486094dc5164a97fb2073cb\n",
+              released) < 0 ||
+        fclose(released) != 0)
+        return fail("cannot write the marker of an earlier Hamn");
+    if (guest_deployment_is_current(&profile) != 0)
+        return fail("the marker of an earlier Hamn's deployment is current");
+
+    if (guest_deployment_mark_current(&profile) != 0 ||
         guest_deployment_is_current(&profile) != 1)
         return fail("initial deployment fingerprint is not current");
 
@@ -35,16 +52,7 @@ int main(void)
         guest_deployment_is_current(&profile) != 1)
         return fail("updated Docker daemon JSON cannot mark deployment current");
 
-    profile.rosetta = 1;
-    if (guest_deployment_is_current(&profile) != 0)
-        return fail("Rosetta selection did not invalidate deployment marker");
-    if (guest_deployment_mark_current(&profile) != 0 ||
-        guest_deployment_is_current(&profile) != 1)
-        return fail("updated Rosetta selection cannot mark deployment current");
-
-    if (!profile_path(&profile, "guest-deployment.version", marker,
-                      sizeof(marker)) || unlink(marker) != 0 ||
-        rmdir(profile.dir) != 0) {
+    if (unlink(marker) != 0 || rmdir(profile.dir) != 0) {
         perror("cleanup profile");
         return 1;
     }

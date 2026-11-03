@@ -558,10 +558,10 @@ static void apply_changes_the_settings_of_a_stopped_vm_only(const char *root)
     assert(vm_process_probe(&p, NULL) == VM_PROCESS_VERIFIED);
     assert(apply(root, " {}\n", 0, &action) == 0 &&
            strcmp(action, "none") == 0);
-    assert(apply(root, "\n  cpus: 8\n  rosetta: true\n", 0, &action) == 4);
+    assert(apply(root, "\n  cpus: 8\n  sshAgent: true\n", 0, &action) == 4);
     assert(strcmp(log_last_error(), "VM must be stopped before changing "
-                  "settings: cpus, rosetta") == 0);
-    assert(apply(root, "\n  cpus: 8\n  rosetta: true\n", 1, &action) == 0 &&
+                  "settings: cpus, sshAgent") == 0);
+    assert(apply(root, "\n  cpus: 8\n  sshAgent: true\n", 1, &action) == 0 &&
            strcmp(action, "configure") == 0);
     read_text(&p, "config.yaml", after, sizeof(after));
     assert(strcmp(before, after) == 0);

@@ -296,8 +296,8 @@ sync_protected_items() {
 # a crash that loses part of the removal leaves an entry that recovery
 # discards, never a ready backup with missing or zero-filled data. The
 # runtime also includes what the backup does not hold, such as systemd's
-# enablement links under /etc/systemd/system and the binfmt databases under
-# /var/lib, so the root filesystem as a whole (syncfs) follows the items.
+# enablement links under /etc/systemd/system and state under /var/lib, so the
+# root filesystem as a whole (syncfs) follows the items.
 retire_transaction() {
     local runtime=$1
     sync_protected_items && sync -f -- "$(rooted /)" ||

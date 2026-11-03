@@ -8,6 +8,8 @@ use `hamn --headless` for headless automation.
 
 - Apple Silicon Mac with macOS 13 or later.
 - A signed Hamn guest image for VM and Docker operations.
+- Container images built for `linux/arm64`. The guest image has no amd64
+  emulation (Rosetta or qemu), so a `linux/amd64` image does not run.
 - A kubeconfig for Kubernetes operations. These work independently of the VM.
 
 TUI container browsing requires Docker CLI; Kubernetes browsing requires kubectl.
@@ -82,7 +84,6 @@ spec:
   cpus: 6
   memoryMiB: 8192
   diskGiB: 80
-  rosetta: true
   mounts:
     - location: "/Users/<your-user>/project"
       mountPoint: "/workspace/project"
@@ -109,8 +110,11 @@ again at any time, also while the VM runs.
   and a change needs a stopped VM: `vm stop`, `vm apply`, then `vm start`.
 - `vm apply` does not check the Mac; the next `vm start` does. Replace the
   mount `location` with a directory that exists and that you own, inside your
-  home directory for a writable mount, and keep `rosetta: true` only where
-  Rosetta is available.
+  home directory for a writable mount.
+- Rosetta support was removed: `rosetta` accepts only `false`. A profile that
+  an earlier Hamn stored with `rosetta: true` does not start until
+  `hamn --headless vm configure --profile <name> --rosetta false --yes` clears
+  it.
 
 ## External tools
 

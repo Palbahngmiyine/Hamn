@@ -77,8 +77,8 @@ static int fixture_current, transactions, recovery_calls;
 static int leftover, first_recovery;
 /* recovered: what guest_deployment_recovered_backup reports after a recovery
  * that succeeded, that is, whether it found a leftover. The counters tell
- * x86_64 translation and Docker's settings from the whole runtime. */
-static int recovered, runtime_configs, rosetta_configs, docker_configs;
+ * Docker's settings from the whole runtime. */
+static int recovered, runtime_configs, docker_configs;
 /* settles: removals of the guest's reapply record after a whole runtime. */
 static int settles;
 static const char *fault;
@@ -91,7 +91,6 @@ static const char *fault;
 #define operation_phase(...) 0
 #define remote_mutation_cleanup_pending() 0
 #define guest_deployment_configure_runtime(...) (runtime_configs++, 0)
-#define guest_deployment_configure_rosetta(...) (rosetta_configs++, 0)
 #define guest_deployment_configure_docker(...) (docker_configs++, 0)
 #define guest_deployment_recovered_backup() recovered
 #define deployment_settle_reapply(...) ((void)settles++)
@@ -136,7 +135,7 @@ int main(void) {
  for (int failure=0; failure<3; failure++) {
   fault=phases[phase]; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=rosetta_configs=docker_configs=settles=0;
+  runtime_configs=docker_configs=settles=0;
   fail_barrier=failure==1; fail_recovery=failure==2; leftover=first_recovery=0;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==-1 && cancelled && depth==0 && barriers==1);
@@ -147,24 +146,23 @@ int main(void) {
   assert(transactions==(phase ? 2 : 1));
   assert(runtime_configs==(phase && !reconcile));
   assert(settles==0);
-  assert(rosetta_configs==(phase && reconcile) && docker_configs==(phase && reconcile));
+  assert(docker_configs==(phase && reconcile));
  }
  /* A leftover transaction would make begin refuse; the recovery before begin
   * removes it, so neither path fails on it. A refresh always configures the
   * whole runtime; a reconcile does so only after recovering a leftover, and
-  * otherwise applies the x86_64 translation a boot resets and Docker's
-  * settings. */
+  * otherwise applies Docker's settings, which a boot resets. */
  for (int reconcile=0; reconcile<2; reconcile++)
  for (int left=0; left<2; left++) {
   fault="none"; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=rosetta_configs=docker_configs=settles=0;
+  runtime_configs=docker_configs=settles=0;
   fail_barrier=fail_recovery=first_recovery=0; leftover=left;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==0 && !leftover && recovery_calls==1 && transactions==2);
   assert(!cancelled && depth==0 && barriers==0 && !cleanup_pending && !recovery_complete);
   assert(runtime_configs==(!reconcile || left));
-  assert(rosetta_configs==(reconcile && !left) && docker_configs==(reconcile && !left));
+  assert(docker_configs==(reconcile && !left));
   /* Only a whole runtime after a recovered backup settles its record. */
   assert(settles==left);
  }
@@ -174,11 +172,11 @@ int main(void) {
  for (int outcome=1; outcome<=3; outcome++) {
   fault="none"; fixture_current=reconcile; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=rosetta_configs=docker_configs=settles=0;
+  runtime_configs=docker_configs=settles=0;
   fail_barrier=fail_recovery=0; leftover=1; first_recovery=outcome;
   int rc=reconcile ? guest_deployment_reconcile_runtime_locked(&p,&state) : deployment_refresh_locked(&p,&state,1);
   assert(rc==-1 && recovery_calls==1 && transactions==0 && barriers==0 && depth==0);
-  assert(runtime_configs==0 && rosetta_configs==0 && docker_configs==0);
+  assert(runtime_configs==0 && docker_configs==0);
   assert(settles==0);
   assert(cleanup_pending==(outcome==3) && recovery_complete==(outcome==2));
  }
@@ -188,11 +186,11 @@ int main(void) {
  for (int left=0; left<2; left++) {
   fault="none"; fixture_current=1; cancelled=remote_active=depth=barriers=0;
   recovery_complete=cleanup_pending=recovery_calls=transactions=0;
-  runtime_configs=rosetta_configs=docker_configs=settles=0;
+  runtime_configs=docker_configs=settles=0;
   fail_barrier=fail_recovery=first_recovery=0; leftover=left;
   assert(guest_deployment_reapply_runtime_locked(&p,&state)==0);
   assert(!leftover && recovery_calls==1 && transactions==2 && barriers==0 && depth==0);
-  assert(runtime_configs==1 && rosetta_configs==0 && docker_configs==0);
+  assert(runtime_configs==1 && docker_configs==0);
   assert(settles==1);
  }
  fixture_current=0;
