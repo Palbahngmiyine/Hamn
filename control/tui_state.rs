@@ -866,6 +866,13 @@ impl State {
         request.validate()?;
         Ok(request)
     }
+    /// `X` in the VM panel: `vm delete --purge` of the selected profile.
+    pub fn purge(&self) -> Result<Request> {
+        let mut request = self.action("delete")?;
+        request.purge = true;
+        request.validate()?;
+        Ok(request)
+    }
     /// `c` in the VM panel: a `vm configure` command with the settings of
     /// the selected profile, to edit and run. A profile whose configuration
     /// cannot be read has no settings to offer; its detail says why instead.
@@ -2448,6 +2455,27 @@ mod tests {
         let impact = request.impact();
         assert!(impact.contains("permanently delete its disk") && impact.contains("every container, image, volume and file"), "{impact}");
         assert!(impact.contains("profile settings and shared host directories are kept"), "{impact}");
+    }
+    #[test]
+    fn capital_x_in_the_vm_panel_asks_to_purge_the_selected_profile() {
+        let mut state = State::new(Request::default());
+        state.view("vm").unwrap();
+        state.accept(Ok(serde_json::json!([
+            {"name": "other", "state": "stopped", "dockerStatus": "unavailable"},
+            {"name": "work", "state": "stopped", "dockerStatus": "unavailable"}
+        ])));
+        state.selected = Some(1);
+        assert!(crate::tui_keys::hints(&state).contains(&("X", "purge")));
+        let request = state.purge().unwrap();
+        assert_eq!(request.operation(), "vm delete");
+        assert_eq!(request.profile.as_deref(), Some("work"));
+        assert!(request.purge && request.mutates() && request.yes);
+        let impact = request.impact();
+        assert!(impact.contains("permanently delete the profile") && impact.contains("Shared host directories are kept"), "{impact}");
+        let soft = state.action("delete").unwrap();
+        assert!(!soft.purge && soft.impact().contains("preserved"), "{}", soft.impact());
+        let typed = state.view("vm delete --profile work --purge").unwrap();
+        assert!(typed.purge && typed.mutates() && typed.impact() == impact);
     }
     #[test]
     fn a_damaged_guest_disk_is_shown_instead_of_the_repair_offer() {

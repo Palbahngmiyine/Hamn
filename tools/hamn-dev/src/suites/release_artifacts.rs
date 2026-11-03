@@ -333,6 +333,10 @@ fn local_candidate_bootstraps_exact_bytes_and_refuses_unsafe_installs() {
         fs::read_to_string(cache.join("guest-image.json")).unwrap().contains(&format!("\"sha256\":\"{guest_hash}\""))
     );
     assert!(cache.join(format!("hamn-guest-{guest_hash}.img")).is_file());
+    assert!(
+        cache.join(format!("downloads/{host_hash}.artifact")).is_file(),
+        "the installed generation's host archive was removed"
+    );
     // The installed generation is the archive's payload: the executable
     // and the release's manifest pointer, with no scripts or sources.
     let target = fs::read_link(&command).unwrap();

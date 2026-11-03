@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 #[derive(Clone, Debug, Default, Parser, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 #[command(name = "hamn", version = crate::core::version(), about = "VM, Docker and Kubernetes console",
-    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. vm reset permanently deletes one profile's VM disk. system uninstall permanently removes all Hamn data.",
+    long_about = "VM, Docker and Kubernetes console. Run without arguments for TUI, or use --headless <operation> for JSON.\nvm delete preserves the VM disk and Docker data. vm delete --purge permanently deletes one profile with its disk. vm reset permanently deletes one profile's VM disk. system uninstall permanently removes all Hamn data.",
     after_help = "Operations and their arguments: hamn --headless capabilities")]
 pub struct Request {
     #[arg(long)]
@@ -61,6 +61,13 @@ pub struct Request {
     )]
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub dry_run: bool,
+    // Left out of the worker request unless set, as the vm apply arguments.
+    #[arg(
+        long,
+        help = "Permanently delete the profile with vm delete: its disk, settings and Docker data"
+    )]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub purge: bool,
     #[arg(
         long,
         help = "Release manifest URL for system upgrade (defaults to latest stable)"
@@ -200,6 +207,7 @@ impl Request {
             "vm apply" => "Create the profile or replace its stopped VM's configuration with the definition file; settings the file omits return to their defaults. The VM is not started or stopped.".into(),
             "vm start" => "Start the VM.".into(),
             "vm stop" => "Stop the VM and interrupt its running containers.".into(),
+            "vm delete" if self.purge => "Stop the VM and permanently delete the profile: its settings, logs and disk with every container, image, volume and file inside the VM. Shared host directories are kept.".into(),
             "vm delete" => "Stop and remove the profile from active listings. Its disk and Docker data are preserved.".into(),
             "vm reset" => "Stop the VM and permanently delete its disk: every container, image, volume and file inside the VM. The next start creates a new disk from the signed guest image; the profile settings and shared host directories are kept.".into(),
             "vm diagnostics" => "Write a redacted diagnostic archive to the selected path.".into(),
@@ -303,6 +311,9 @@ impl Request {
             return Err(invalid(
                 "Rosetta support was removed; --rosetta accepts only false",
             ));
+        }
+        if self.purge && self.operation() != "vm delete" {
+            return Err(invalid("--purge is only supported for vm delete"));
         }
         let apply = self.operation() == "vm apply";
         if !apply && (self.file.is_some() || self.dry_run) {
@@ -667,6 +678,47 @@ mod tests {
         let read: Request = serde_json::from_value(apply).unwrap();
         assert!(read.dry_run && read.file.as_deref() == Some("work.yaml"));
         assert!(read.validate().is_ok());
+    }
+    #[test]
+    fn purge_belongs_to_vm_delete_and_names_the_permanent_loss() {
+        let parse = |arguments: &[&str]| Request::try_parse_from(arguments).unwrap();
+        let purge = parse(&["hamn", "--headless", "vm", "delete", "--profile", "work", "--purge", "--yes"]);
+        assert!(purge.purge && purge.mutates() && purge.validate().is_ok());
+        assert!(purge.impact().contains("permanently delete the profile"), "{}", purge.impact());
+        let soft = parse(&["hamn", "--headless", "vm", "delete", "--profile", "work", "--yes"]);
+        assert_eq!(
+            soft.impact(),
+            "Stop and remove the profile from active listings. Its disk and Docker data are preserved."
+        );
+        assert_eq!(
+            rejection(&["hamn", "--headless", "vm", "delete", "--profile", "work", "--purge"]),
+            "mutation requires --yes"
+        );
+        assert!(
+            rejection(&["hamn", "--headless", "vm", "delete", "--purge", "--yes"])
+                .starts_with("an explicit --profile is required")
+        );
+        for arguments in [
+            &["hamn", "--headless", "vm", "reset", "--profile", "work", "--purge", "--yes"][..],
+            &["hamn", "--headless", "vm", "stop", "--profile", "work", "--purge", "--yes"],
+            &["hamn", "--headless", "vm", "list", "--purge"],
+            &[
+                "hamn", "--headless", "docker", "containers", "delete", "--profile", "work",
+                "--name", "web", "--purge", "--yes",
+            ],
+        ] {
+            assert_eq!(
+                rejection(arguments),
+                "--purge is only supported for vm delete",
+                "{arguments:?}"
+            );
+        }
+        let soft = serde_json::to_value(&soft).unwrap();
+        assert!(soft.get("purge").is_none(), "{soft}");
+        let purge = serde_json::to_value(&purge).unwrap();
+        assert_eq!(purge["purge"], true, "{purge}");
+        let read: Request = serde_json::from_value(purge).unwrap();
+        assert!(read.purge && read.validate().is_ok());
     }
     #[test]
     fn failures_never_publish_success_data() {

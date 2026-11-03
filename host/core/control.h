@@ -25,7 +25,9 @@
  * "configurationError", the reason. The list still fails as a whole when
  * ~/.hamn or a profile directory is not this user's alone, when a profile
  * directory cannot be entered, when a state file or a deletion marker is
- * not what it should be, and when memory or descriptors run out. */
+ * not what it should be, and when memory or descriptors run out. Before it
+ * lists, the call removes what interrupted purges left (purge_sweep in
+ * core/purge.h); that removal never fails the list. */
 int hamn_control_query(const char *profile, char **result);
 void hamn_control_free(char *result);
 /* Start the VM of profile, or bring a running one back to ready. A zero
@@ -93,6 +95,40 @@ int hamn_control_apply(const char *profile, const char *path, int dry_run,
                        char **result);
 int hamn_control_stop(const char *profile);
 int hamn_control_delete(const char *profile);
+/* Delete profile permanently: stop its VM, then remove ~/.hamn/<profile>
+ * with its disk, configuration, keys, logs and Docker data, as
+ * core/purge.h describes. Shared host directories are not touched. A
+ * soft-deleted profile is purged all the same, and a directory without
+ * config.yaml is purged as a profile with the default settings. Every call
+ * first removes what interrupted purges left (purge_sweep). profile is a
+ * borrowed NUL-terminated string; absent is written on every return.
+ *
+ * Returns 0 once the directory is gone, with *absent 1 when there was no
+ * ~/.hamn/<profile> to begin with: such a call creates, locks and changes
+ * nothing, so a repeated purge has no effect. Otherwise *absent is 0,
+ * log_last_error() says why, and the value is:
+ *   2  profile is not a profile name, or absent is NULL;
+ *   HAMN_CONTROL_STOP_UNCERTAIN  the VM or its host port forwards are not
+ *      known to be stopped: nothing was deleted and the state of the VM is
+ *      unknown, as when vm delete refuses for the same reason;
+ *   1  any other failure. The configuration cannot be read (the sentences
+ *      of the note above), another mutation holds the profile, or its
+ *      directory could not be moved aside: nothing was deleted. Or the
+ *      directory was moved aside and not entirely removed: the profile no
+ *      longer exists, and the next vm list or purge removes what is left.
+ *
+ * Takes the lifecycle lock, waiting for it, then the mutation lock, which
+ * it does not wait for. Both lock files stay, empty and reused by a later
+ * profile of the same name: ~/.hamn/.locks/<profile>.lock and
+ * ~/.hamn/.<profile>-mutation.lock. A process locks the file it opened, and
+ * neither lock checks afterwards that the path still names that file. If a
+ * purge removed a lock file while another process waited on it, that
+ * process would get the removed file while a third created and locked a
+ * new one at the same path, and both would own the profile. Released Hamn
+ * binaries, which an open TUI can keep running after an upgrade, lock this
+ * way, so no order of removal is safe. */
+#define HAMN_CONTROL_STOP_UNCERTAIN 5
+int hamn_control_purge(const char *profile, int *absent);
 /* Replace the VM disk of an existing profile: stop its VM, then delete
  * disk.img and what belongs to that disk (its EFI variables, the marker of
  * the guest deployment it received and the record of its damage). The next

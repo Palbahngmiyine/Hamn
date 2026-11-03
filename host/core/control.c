@@ -19,6 +19,7 @@
 #include "core/guest_deployment.h"
 #include "core/mutation_lock.h"
 #include "core/profile.h"
+#include "core/purge.h"
 #include "core/state.h"
 #include "fwd/ports.h"
 #include "util/fs.h"
@@ -306,6 +307,8 @@ int hamn_control_query(const char *profile, char **result)
     }
     *result = NULL;
     log_clear_error();
+    if (!profile)
+        purge_sweep();
     cJSON *value = profile ? profile_snapshot(profile) : profiles_snapshot();
     if (!value)
         return -1;

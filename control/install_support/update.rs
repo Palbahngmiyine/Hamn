@@ -26,10 +26,12 @@
 //! version; stage the guest image; publish the journal; install the host
 //! generation (unless only the guest image needs repair); verify it and write
 //! its receipt; commit the guest image selection; retire the journal; then
-//! collect obsolete generations. Every failure after the journal exists
-//! rolls back through it; a SIGKILL leaves it for the next run, and VM start
-//! refuses to run while it is pending. Existing profiles and VMs are never
-//! touched. HTTPS acquisition is bounded by `download`.
+//! collect obsolete generations and the image-cache entries that no kept
+//! generation or selection uses (also after a no-op check). Every failure
+//! after the journal exists rolls back through it; a SIGKILL leaves it for
+//! the next run, and VM start refuses to run while it is pending. Existing
+//! profiles and VMs are never touched. HTTPS acquisition is bounded by
+//! `download`.
 use super::{
     Result, archive, files,
     generation::{self, POINTER, Payload},
@@ -520,19 +522,43 @@ fn stage_guest(cache: &Path, download: &Path, hash: &str) -> Step<Vec<u8>> {
     Ok(format!("{{\"schemaVersion\":1,\"file\":\"{name}\",\"sha256\":\"{hash}\"}}\n").into_bytes())
 }
 
-/// Collects obsolete generations; failure only defers cleanup.
-fn prune(transaction: &locks::Transaction, keep: &[Option<&str>], report: &Report) {
+/// Collects obsolete generations, then the image-cache entries they and the
+/// selection no longer use; `updater` is the HOME's update lock. Failure only
+/// defers cleanup.
+fn prune(
+    transaction: &locks::Transaction,
+    keep: &[Option<&str>],
+    cache: &Path,
+    updater: &locks::Held,
+    report: &Report,
+) {
     let keep: Vec<&str> = keep.iter().flatten().copied().collect();
-    match retention::collect(transaction, &keep) {
-        Ok(collection) => {
-            for deferred in collection.deferred {
-                line(&format!("hamn: {deferred}"));
-            }
-        }
+    let collection = match retention::collect(transaction, &keep) {
+        Ok(collection) => collection,
         Err(error) => {
             line(&format!("hamn: {error}"));
             report.note("obsolete generation cleanup deferred");
+            line("hamn: image cache cleanup deferred");
+            return;
         }
+    };
+    for deferred in &collection.deferred {
+        line(&format!("hamn: {deferred}"));
+    }
+    let Some(retained) = &collection.retained else {
+        line("hamn: image cache cleanup deferred while generation cleanup is deferred");
+        return;
+    };
+    match retention::collect_cache(cache, retained, updater) {
+        Ok(cleaned) => {
+            for name in cleaned.removed {
+                line(&format!("hamn: removed unused cache entry {name}"));
+            }
+            for deferred in cleaned.deferred {
+                line(&format!("hamn: {deferred}"));
+            }
+        }
+        Err(error) => line(&format!("hamn: image cache cleanup deferred: {error}")),
     }
 }
 
@@ -577,7 +603,7 @@ fn transaction(options: &Options, report: &mut Report) -> Step<()> {
         return fail("unsafe Hamn image cache");
     }
     // One HOME has one journal path, shared by every install root.
-    let _cache_lock = locks::cache(&cache.join(".hamn-upgrade.lock"), &transaction)
+    let cache_lock = locks::cache(&cache.join(".hamn-upgrade.lock"), &transaction)
         .or_else(|error| fail(format!("cannot lock the update cache: {error}")))?;
     let paths = journal::Paths::new(&cache, &roots.bindir, &roots.datadir);
     let link = paths.link.clone();
@@ -754,7 +780,7 @@ fn transaction(options: &Options, report: &mut Report) -> Step<()> {
                     .or_else(|error| fail(error.to_string()))?,
             );
             finish("up-to-date", &counts)?;
-            prune(&transaction, &keep, report);
+            prune(&transaction, &keep, &cache, &cache_lock, report);
             return Ok(());
         }
     }
@@ -981,7 +1007,7 @@ fn transaction(options: &Options, report: &mut Report) -> Step<()> {
     if journal::cleanup_deferred(&paths).is_err() {
         report.note("completed transaction cleanup remains deferred; the committed binary and guest image selection are active");
     }
-    prune(&transaction, &keep, report);
+    prune(&transaction, &keep, &cache, &cache_lock, report);
     line(&match &previous_version {
         None => format!("Installed Hamn {release}."),
         Some(_) if !host_mutation => {

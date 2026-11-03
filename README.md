@@ -132,6 +132,10 @@ authentication runs according to the installed CLI in the embedded terminal.
 ## Data
 
 `vm delete` stops and hides a profile while preserving its disk and Docker data.
+`vm delete --profile <name> --purge --yes` stops the VM and permanently deletes the
+profile: its settings, logs and disk with every container, image, volume and file inside
+it. Shared host directories stay. Purging a profile that does not exist succeeds and
+changes nothing.
 `vm reset --profile <name> --yes` stops the VM and permanently deletes its disk with
 every container, image, volume and file inside it; the next start creates a new disk
 from the signed guest image. The profile settings and shared host directories stay.

@@ -365,6 +365,10 @@ fn binary_runs_and_help_describes_data_semantics() {
         "help does not describe profile deletion semantics"
     );
     assert!(
+        help.contains("vm delete --purge permanently deletes one profile with its disk."),
+        "help does not describe profile purge data deletion"
+    );
+    assert!(
         help.contains("vm reset permanently deletes one profile's VM disk."),
         "help does not describe disk reset data deletion"
     );
