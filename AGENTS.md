@@ -1,5 +1,14 @@
 # Instructions
 
+## Read First
+
+- Before adding, modifying, or deleting code, read this file and follow it.
+- Read the relevant source before writing tests or changing behavior.
+- Treat the code as the source of truth. Do not assume behavior from names, docs, or prior memory alone.
+- Check the current checkout, Git status, applicable directory instructions, and affected callers before editing. Preserve user-owned changes.
+- Keep this file aligned with source and build targets. Describe proposed architecture as a proposal until implemented.
+- Keep shared rules here and put specialized instructions near the code only when needed. Read applicable directory guidance before editing there; do not load unrelated subtrees.
+
 ## Three Principles
 
 ### 1. Clarity is the highest value
