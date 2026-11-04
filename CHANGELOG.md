@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.1 (2026-11-04)
+
+## What's Changed
+* docs: keep only the essentials in the README [skip release] by @Palbahngmiyine in https://github.com/Palbahngmiyine/Hamn/pull/102
+* chore(deps): bump rustls from 0.23.43 to 0.23.46 by @dependabot[bot] in https://github.com/Palbahngmiyine/Hamn/pull/103
+
+## New Contributors
+* @dependabot[bot] made their first contribution in https://github.com/Palbahngmiyine/Hamn/pull/103
+
+**Full Changelog**: https://github.com/Palbahngmiyine/Hamn/compare/v0.4.0...v0.4.1
+
 ## 0.4.0 (2026-11-03)
 
 ## What's Changed
