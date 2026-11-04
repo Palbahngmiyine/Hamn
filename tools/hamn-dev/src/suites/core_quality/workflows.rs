@@ -345,12 +345,20 @@ pub fn workflows_leave_sdk_selection_to_the_flake() {
 }
 
 pub fn release_please_workflow_is_complete() {
+    // A release starts only when a maintainer runs this workflow: a push or
+    // a finished Release run must not open or update a release PR.
+    let workflow: Value =
+        serde_yaml::from_str(&read(RELEASE_PLEASE)).unwrap_or_else(|error| panic!("{RELEASE_PLEASE}: {error}"));
+    let on = workflow.get("on").or_else(|| workflow.get(Value::Bool(true))).expect("Release Please workflow has no on");
+    let triggers: Option<Vec<Option<&str>>> = on.as_mapping().map(|on| on.keys().map(Value::as_str).collect());
+    assert_eq!(
+        triggers,
+        Some(vec![Some("workflow_dispatch")]),
+        "Release Please must run only on a manual workflow_dispatch"
+    );
     assert_lines(
         &read(RELEASE_PLEASE),
         &[
-            "    workflows: [Release]",
-            "    types: [completed]",
-            "    if: (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[skip release]'))",
             "          ref: main",
             "        run: cargo run --locked -p hamn-dev -- release pr-ready",
             "        if: steps.publication.outputs.ready == 'true'",
