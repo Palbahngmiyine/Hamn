@@ -51,8 +51,6 @@ docker compose up -d
 
 Building Hamn from source needs Apple Silicon macOS 13+, Apple command-line
 developer tools, and the Rust toolchain in `rust-toolchain.toml`.
-[AGENTS.md](AGENTS.md) describes the repository layout, build commands, and
-test gates.
 
 ## Security
 
