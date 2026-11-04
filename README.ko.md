@@ -50,8 +50,7 @@ docker compose up -d
 ## 개발
 
 소스에서 빌드하려면 macOS 13 이상의 Apple Silicon Mac, Apple 명령줄 개발자 도구,
-`rust-toolchain.toml`의 Rust 툴체인이 필요합니다. 저장소 구조, 빌드 명령, 테스트
-게이트는 [AGENTS.md](AGENTS.md)에 있습니다.
+`rust-toolchain.toml`의 Rust 툴체인이 필요합니다.
 
 ## 보안
 
