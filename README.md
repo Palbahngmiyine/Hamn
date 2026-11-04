@@ -1,21 +1,28 @@
 # Hamn
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/branding/hamn-icon.svg">
+  <img src="assets/branding/hamn-icon-on-light.svg" alt="Hamn" width="100">
+</picture>
+
+[한국어](README.ko.md)
+
+----
+
 Hamn manages a Linux VM, its Docker Engine, and external Kubernetes clusters
 from one macOS executable. Run `hamn` for the terminal interface or
 use `hamn --headless` for headless automation.
 
+----
+
 ## Requirements
 
 - Apple Silicon Mac with macOS 13 or later.
-- A signed Hamn guest image for VM and Docker operations.
 - Container images built for `linux/arm64`. The guest image has no amd64
   emulation (Rosetta or qemu), so a `linux/amd64` image does not run.
-- A kubeconfig for Kubernetes operations. These work independently of the VM.
 
 TUI container browsing requires Docker CLI; Kubernetes browsing requires kubectl.
-Headless profile Docker and Kubernetes SDK operations do not require these CLIs;
-external Docker `--context` operations require Docker CLI. Compose, buildx, and plugins
-remain external installations. Docker Desktop is not required.
+Docker Desktop is not required.
 
 ## Install
 
@@ -26,273 +33,31 @@ curl -fsSL --proto '=https' --tlsv1.2 \
 ```
 
 It downloads Hamn and its Linux guest image, verifies both, and installs the
-`hamn` command in `~/.local/bin`. Example output:
+`hamn` command in `~/.local/bin`. Update later with `hamn upgrade`.
 
-```text
-Installing Hamn 0.1.2 for Apple Silicon macOS...
-Downloading Hamn 0.1.2 (4.4 MiB)...
-Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
-Installing...
-Installed Hamn 0.1.2.
-Run hamn to get started. Update later with hamn upgrade.
-```
-
-If `~/.local/bin` is not on your PATH, the installer prints the one line to add
-for your shell. It needs only macOS system tools; Python, Homebrew, Rust, and
-Xcode Command Line Tools are not required for installation or updates.
-Hamn 0.1.2 and earlier cannot update themselves to this release: run the
-installer above once, which migrates the existing installation in place.
-
-## Terminal interface
-
-Choose Containers or Kubernetes on first launch. Tab switches workspace; `,`
-changes the saved default. Enter `:ps`, `:docker ps -a`, `:images`, `:get pods -A`,
-or `:kubectl get deployments -n dev`. Ordinary lists become selectable tables;
-other commands run in the embedded terminal with their original CLI semantics.
-`e` selects the environment/context; `v` opens VM controls only for Hamn profiles.
-
-## Headless interface
+## Getting started
 
 ```sh
-hamn --headless capabilities
+hamn
 hamn --headless vm create --profile work --cpu 4 --memory 4 --yes
 hamn --headless vm start --profile work --yes
-hamn --headless docker containers list --profile work
-hamn --headless docker containers list --context remote
-hamn --headless docker containers logs api --profile work --follow
-hamn --headless k8s contexts list
-hamn --headless k8s pods list --context dev --namespace default
-hamn --headless k8s deployments scale api --replicas 3 --context dev --namespace default --yes
-hamn --headless vm stop --profile work --yes
-```
-
-Mutations require `--yes` and explicit resource targets. One-shot commands emit
-one JSON response; `--follow` logs and `--watch` queries emit NDJSON. stdout is
-reserved for machine-readable responses.
-`vm list` needs no `--yes`, yet it can delete: it removes each profile that
-`vm up` made whose workspace path no longer exists and whose VM is stopped, with
-its disk and Docker data (see Use Hamn with an ADE).
-
-## Host capacity
-
-Before `vm start` launches a VM, Hamn reads the host's memory pressure, memory,
-1-minute load average, CPU count and power source, and adds up the memory
-configured for the Hamn VMs that run. If the host cannot take the new VM, the
-start fails with `admissionRefused` and leaves the VM, its configuration and its
-disk as they were. Hamn never stops another VM to make room. The headless
-error has `details` with the reasons, the measured values, the limits and the
-running profiles; the TUI shows the same message. The start is also refused when
-Hamn cannot read the memory pressure, the memory, the running VMs' memory, or a
-measurement an enabled limit uses. Starts that run at the same time are checked
-one after another, so two of them never count on the same free memory.
-
-Set the limits in the environment of `hamn`:
-
-| Variable | A start is refused when | Default |
-|---|---|---|
-| `HAMN_ADMISSION_MEMORY_RESERVE_MIB` | the running VMs and the new VM need more than the host's memory less this many MiB | `0` |
-| `HAMN_ADMISSION_MEMORY_PRESSURE` | macOS memory pressure is at this level or above: `warn` or `critical` | `critical` |
-| `HAMN_ADMISSION_MAX_LOAD_PER_CPU` | the 1-minute load average per CPU is above this number, such as `1.5` | no limit |
-| `HAMN_ADMISSION_MIN_BATTERY_PERCENT` | the Mac runs on battery below this percentage | `0`, no limit |
-
-The default limits are deliberately permissive until a measured baseline sets
-real values.
-
-## Declarative configuration
-
-Keep every setting of a profile in one file, and let `vm apply` make the
-profile match it. A file `work.yaml`:
-
-```yaml
-apiVersion: hamn/v1
-kind: Profile
-metadata:
-  name: work
-spec:
-  cpus: 6
-  memoryMiB: 8192
-  diskGiB: 80
-  mounts:
-    - location: "/Users/<your-user>/project"
-      mountPoint: "/workspace/project"
-      writable: true
-```
-
-```sh
-hamn --headless vm apply --profile work --file work.yaml --dry-run
-hamn --headless vm apply --profile work --file work.yaml --yes
-hamn --headless vm start --profile work --yes
-```
-
-The first command reports what would change and writes nothing. The second
-creates the profile when it does not exist and replaces its configuration when
-the file differs. When nothing differs it writes nothing, so it can be run
-again at any time, also while the VM runs.
-
-- `metadata.name` must equal `--profile`.
-- `spec` takes the same keys as the profile's `~/.hamn/<profile>/config.yaml`.
-  The definition file is the whole configuration: a key that `spec` leaves out
-  returns to its default. A disk cannot shrink, so keep `diskGiB` in the file:
-  a value below the current size, also the default 60, is refused.
-- `vm apply` changes the configuration only. It does not start or stop the VM,
-  and a change needs a stopped VM: `vm stop`, `vm apply`, then `vm start`.
-- `vm apply` does not check the Mac; the next `vm start` does. Replace the
-  mount `location` with a directory that exists and that you own, inside your
-  home directory for a writable mount.
-- Rosetta support was removed: `rosetta` accepts only `false`. A profile that
-  an earlier Hamn stored with `rosetta: true` does not start until
-  `hamn --headless vm configure --profile <name> --rosetta false --yes` clears
-  it.
-
-## One VM per workspace
-
-`vm up` gives a directory, such as a git worktree, a VM of its own; `vm down`
-stops it or deletes it. Name the directory by its absolute path, not by a
-profile:
-
-```sh
-hamn --headless vm up --workspace "$PWD" --yes
-hamn --headless vm down --workspace "$PWD" --yes
-hamn --headless vm down --workspace "$PWD" --purge --yes
-```
-
-- The profile is named `ws-` and 12 hexadecimal digits taken from the
-  directory's real path, so every spelling of one directory, such as
-  `.../Project` and `.../project` on a case-insensitive disk, names the same
-  VM. Another `vm up` of the same directory starts that profile again and
-  answers with the same profile and Docker socket.
-- A new profile does not share your home directory. It shares the workspace
-  writable and the worktree's common git directory read-only, each at its own
-  path in the VM. `--no-git-mount` shares the workspace only. `--cpu`,
-  `--memory` and `--disk` set a new profile's resources and change an existing
-  one as `vm start` does.
-- The git directory is shared only when it is the workspace's own: a `.git`
-  directory in the workspace, or the git directory that git made for this
-  linked worktree. A submodule, a `.git` file that names another repository
-  and a `.git` symbolic link get a warning, and the VM shares the workspace
-  only. The read-only git mount is a convenience for git in the guest, not a
-  security boundary against the guest: in a plain repository `.git` lies
-  inside the writable workspace share.
-- The answer is the profile's `vm status` with `profile`, `workspace` and
-  `dockerHost`, the `unix://` value for `DOCKER_HOST`.
-- When the host cannot take the VM (`admissionRefused`) or its first start
-  fails, `vm up` deletes the profile it made. A profile that existed before
-  stays as it was.
-- `vm down` stops the VM and keeps its disk; `--purge` deletes the profile as
-  `vm delete --purge` does. Neither touches the workspace or its repository.
-- Both act only on the profile that `vm up` made for this directory. A
-  profile of the same name without that record, or one made for an earlier
-  directory at the same path, is refused with `conflict`.
-- The workspace must exist, be a directory you own, and lie inside your home
-  directory, as every writable share must.
-
-## Use Hamn with an ADE
-
-T3 Code and Orca run a command of yours when they create a worktree and when
-they are done with it. Pass the worktree path that each tool sets for the
-command. Do not use `$PWD`: a tool that runs the command from the project root
-would give the main checkout a VM.
-
-In T3 Code, add two scripts to the project's `t3.json`:
-
-- With `"runOnWorktreeCreate": true` and `"async": false`, so that the agent
-  starts once the VM is ready:
-  `hamn --headless vm up --workspace "$T3CODE_WORKTREE_PATH" --yes`
-- With `"runOnSettle": true`:
-  `hamn --headless vm down --workspace "$T3CODE_WORKTREE_PATH" --yes`
-
-T3 Code runs the settle script each time the thread settles, and the thread can
-continue afterwards. `vm down` frees the VM's memory and keeps its disk. T3 Code
-does not run the create script again, so for a thread that continues, the agent
-or you run the same `vm up` command to start the VM again. Add `--purge` to
-delete the disk as well.
-
-In Orca, set the repository's setup and archive scripts in `orca.yaml`. When
-hooks are enabled (`--run-hooks` for the CLI), Orca runs the archive script
-before it removes the worktree. If the script fails, Orca keeps the worktree
-until you accept the failure:
-
-```yaml
-scripts:
-  setup: hamn --headless vm up --workspace "$ORCA_WORKTREE_PATH" --yes
-  archive: hamn --headless vm down --workspace "$ORCA_WORKTREE_PATH" --purge --yes
-```
-
-Deleting the worktree in the ADE also deletes its VM. While the VM runs, Hamn
-checks every 10 seconds the workspace path that `vm up` recorded. Once nothing
-is left there, Hamn stops the VM and then deletes its profile. The next
-`vm list` or `vm up` deletes the profile of a VM that was already stopped. Hamn
-deletes only profiles that `vm up` made, and never the worktree or its branch.
-
-Hamn cannot tell a moved or unmounted workspace from a deleted one. Moving the
-worktree (`git worktree move`, `mv`) or unmounting its volume while its VM runs
-makes Hamn stop that VM and delete its profile, with every container, image and
-volume inside it. For a stopped VM, the next `vm list` or `vm up` does the same.
-If the same directory is back at its path before Hamn deletes the profile, the
-profile stays. `vm up` at a new path makes a new VM, because the profile name
-comes from the path.
-
-## External tools
-
-```sh
 export DOCKER_HOST="unix://$HOME/.hamn/work/docker.sock"
 docker compose up -d
-docker buildx build --load -t example .
 ```
 
-UI selection does not change Docker's current context or kubeconfig `current-context`.
-Explicit `docker context use` and `kubectl config` commands retain their normal
-write semantics. Headless authentication remains noninteractive; native CLI
-authentication runs according to the installed CLI in the embedded terminal.
+`hamn --headless capabilities` lists every headless operation.
 
-## Data
+## Development
 
-`vm delete` stops and hides a profile while preserving its disk and Docker data.
-`vm delete --profile <name> --purge --yes` stops the VM and permanently deletes the
-profile: its settings, logs and disk with every container, image, volume and file inside
-it. Shared host directories stay. Purging a profile that does not exist succeeds and
-changes nothing.
-`vm reset --profile <name> --yes` stops the VM and permanently deletes its disk with
-every container, image, volume and file inside it; the next start creates a new disk
-from the signed guest image. The profile settings and shared host directories stay.
-`system uninstall --yes` permanently removes all Hamn profiles and managed
-installation files.
+Building Hamn from source needs Apple Silicon macOS 13+, Apple command-line
+developer tools, and the Rust toolchain in `rust-toolchain.toml`.
+[AGENTS.md](AGENTS.md) describes the repository layout, build commands, and
+test gates.
 
-Before a start changes anything in the guest, it checks the guest root filesystem.
-When ext4 has recorded errors, the guest cannot read its own disk, or the root is
-mounted read-only, the start fails with `guestFilesystemDamaged`, stops a VM it
-booted, and `vm status` reports the evidence as `guestFilesystem`. Starting again
-cannot repair such a disk; `vm reset` replaces it.
+## Security
 
-Container creation, Compose, exec, Kubernetes apply, and port-forward use the
-installed native CLIs in the TUI.
+Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
+## License
 
-## Upgrade
-
-```sh
-hamn upgrade           # install the latest release
-hamn upgrade --check   # only report whether an update is available
-```
-
-```text
-$ hamn upgrade
-Checking for updates...
-Updating Hamn 0.1.1 → 0.1.2...
-Downloading Hamn 0.1.2  100%  4.4 MiB / 4.4 MiB
-Downloading guest image  100%  1.1 GiB / 1.1 GiB  11.8 MiB/s
-Installing...
-Updated Hamn 0.1.1 → 0.1.2. Existing VMs were not restarted.
-
-$ hamn upgrade
-Checking for updates...
-Hamn 0.1.2 is up to date.
-```
-
-Running VMs are not restarted and existing VM disks are not changed; the new guest
-image is used for VMs created afterwards. An interrupted download resumes
-automatically, or on the next `hamn upgrade`. Failures print one line with the
-reason and what to do next. Automation can use `hamn upgrade --output json` or
-`hamn --headless system upgrade --yes`. After a successful TUI session Hamn may
-mention a newer release; it never installs one by itself. Set
-`HAMN_NO_UPDATE_CHECK=1` to disable that check.
+Hamn is licensed under the [MIT License](LICENSE).
