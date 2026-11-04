@@ -76,3 +76,22 @@ local change does not require unrelated fuzzing or optimization experiments.
 - Verify the signature or digest of every downloaded host or guest artifact before use. Never add an unsigned guest-image fallback.
 - Keep the guest containerd socket private to the guest. Preserve users' source kubeconfig files.
 - Workflows use only the automatic per-run token and SHA-pinned actions, and their checkouts do not persist credentials.
+
+## Pull Request Evidence
+
+Every pull request description must include an artifact that settles what the
+description claims, so a reviewer can confirm the change without reproducing
+it. An artifact is an inspectable result of running the change, not a summary
+or an agent's report that the change works.
+
+- Choose the artifact by what changed:
+  - Behavior change or bug fix: the regression's output failing on the base revision and passing on the head.
+  - CLI, headless, VM lifecycle, Docker API, or Kubernetes behavior: the commands and their actual output.
+  - TUI or other visible output: before and after screenshots, terminal snapshots, or a recording.
+  - Performance: the workload, the baseline, and the result measured in the same environment.
+  - Release or packaging: the tested artifact's hash and the validation run that used it.
+  - Documentation only: the consistency checks run and their results.
+- Bind each artifact to the head commit and the environment that produced it, such as hosted CI, a physical Apple Silicon Mac, or Linux. Replace or mark it stale when the head changes.
+- Put short output in the description itself. Link longer logs, CI runs, or uploaded files that reviewers can open, and remove credentials, tokens, and personal paths first.
+- When an artifact cannot be produced, name the claim that stays unverified and why. Do not present it as verified.
+- Also list the commands run and describe the host and guest impact.
